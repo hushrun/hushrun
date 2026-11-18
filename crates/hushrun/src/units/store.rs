@@ -845,10 +845,10 @@ pub struct Mapped {
     pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
     /// \[ADR 0070\] Directories it listed then: a plan adds every file below each.
     pub dirs: BTreeSet<String>,
-    /// \[ADR 0095\] What its build read of the environment then, as its key held it (C-31's
-    /// `env`): a Cargo test binary's, which `hushrun why` keys it by, as of its last build here.
-    /// `None` for every other adapter's.
-    pub env: Option<hushrun_core::digest::Digest>,
+    /// \[ADR 0095, 0096\] What its key held of what isn't a file of the scope then (C-31's `env`
+    /// and `scripts`): a Cargo test binary's, which `hushrun why` keys it by, as of its last build
+    /// here; either `None` in a row an older hushrun wrote. Nothing for every other adapter's.
+    pub outside: hushrun_core::units::Outside,
     /// \[C-38\] Whether it ran here, or another machine saw it read these files.
     pub origin: Origin,
     /// \[ADR 0080\] Its tests, by id, as each last ran here, for a check with `tests.unit: test`:

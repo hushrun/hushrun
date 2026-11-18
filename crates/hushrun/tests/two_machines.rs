@@ -1386,6 +1386,84 @@ fn cargo_keys_name_no_folder_of_the_machine_a_test_binary_was_built_on() {
     );
 }
 
+/// \[ADR 0096\] A workspace whose build script gives its test binaries machine folders: a link
+/// search path under its `OUT_DIR`, a cfg, and a file it writes into `OUT_DIR` that its library
+/// includes, with an integration test of that package. Each machine has its own checkout, cargo
+/// home and home.
+fn cargo_scripts_scenario() -> Scenario {
+    let mut s = cargo_folders_scenario();
+    s.files.retain(|(path, _)| {
+        !path.starts_with("crates/located/") && !path.starts_with("crates/core/tests/")
+    });
+    s.files.retain(|(path, _)| path != "Cargo.toml");
+    s.files.extend([
+        file(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/core\", \"crates/scripted\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        file(
+            "crates/scripted/Cargo.toml",
+            "[package]\nname = \"scripted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        file(
+            "crates/scripted/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::create_dir_all(format!(\"{out}/lib\")).unwrap();\n    println!(\"cargo:rustc-link-search=native={out}/lib\");\n    println!(\"cargo::rustc-check-cfg=cfg(scripted)\");\n    println!(\"cargo::rustc-cfg=scripted\");\n    std::fs::write(format!(\"{out}/made.rs\"), \"pub const MADE: &str = \\\"made\\\";\\n\").unwrap();\n}\n",
+        ),
+        file(
+            "crates/scripted/src/lib.rs",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/made.rs\"));\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn made() { assert!(cfg!(scripted) && super::MADE == \"made\"); }\n}\n",
+        ),
+        file(
+            "crates/scripted/tests/it.rs",
+            "#[test]\nfn made() { assert_eq!(scripted::MADE, \"made\"); }\n",
+        ),
+    ]);
+    s.all = set(&[
+        "crates/core/src/lib.rs",
+        "crates/scripted/src/lib.rs",
+        "crates/scripted/tests/it.rs",
+        "crates/other/src/lib.rs",
+    ]);
+    s.ran = |ran| {
+        let binaries: BTreeMap<&str, &str> = [
+            ("core-lib", "crates/core/src/lib.rs"),
+            ("scripted", "crates/scripted/src/lib.rs"),
+            ("scripted::it", "crates/scripted/tests/it.rs"),
+            ("other", "crates/other/src/lib.rs"),
+        ]
+        .into_iter()
+        .collect();
+        nextest_ran(ran, &binaries)
+    };
+    s
+}
+
+// covers: C-31, C-33
+// \[ADR 0096\] What a build script gave a test binary, a link search path under its `OUT_DIR` and
+// a file it generated there among them, is keyed with the machine's folders replaced: a checkout
+// at another path, with another cargo home and home, computes the same keys, and an integration
+// test of the package is reused too.
+#[test]
+fn cargo_build_scripts_output_and_generated_files_name_no_folder_of_the_machine() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_scripts_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+    assert_eq!(
+        m.fresh.plan.as_deref(),
+        Some(
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        ),
+        "{}",
+        m.fresh.stderr
+    );
+}
+
 // Go, with what a server keeps of hints (C-38)
 
 /// What a server says when it keeps no hints, once in a run.

@@ -1709,6 +1709,239 @@ fn a_dependency_only_another_platform_needs_leaves_each_binary_its_own_crates() 
     assert_env_changed(&before, &store::env_of(&r.cache), &["linked"]);
 }
 
+/// \[ADR 0096\] A workspace whose build scripts derive what its test binaries are built with from
+/// variables, each a way rustc's dep-info doesn't track: `cfgd`'s turns `HUSHRUN_FIXTURE_CFG`
+/// into `cargo::rustc-cfg`, `gen`'s writes `HUSHRUN_FIXTURE_GEN` into a file under `OUT_DIR` its
+/// library includes, and `linked`'s turns `HUSHRUN_FIXTURE_LINK` into a link argument. `other`
+/// has none. Each test passes whatever the value.
+fn script_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/ws\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        (".gitignore", "target/\n"),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/cfgd\", \"crates/gen\", \"crates/linked\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crates/cfgd/Cargo.toml",
+            "[package]\nname = \"cfgd\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/cfgd/build.rs",
+            "fn main() {\n    println!(\"cargo::rerun-if-env-changed=HUSHRUN_FIXTURE_CFG\");\n    println!(\"cargo::rustc-check-cfg=cfg(loud)\");\n    if std::env::var_os(\"HUSHRUN_FIXTURE_CFG\").is_some() {\n        println!(\"cargo::rustc-cfg=loud\");\n    }\n}\n",
+        ),
+        (
+            "crates/cfgd/src/lib.rs",
+            "#[cfg(loud)]\npub const MOOD: &str = \"loud\";\n#[cfg(not(loud))]\npub const MOOD: &str = \"quiet\";\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn mood() { assert!(!super::MOOD.is_empty()); }\n}\n",
+        ),
+        (
+            "crates/gen/Cargo.toml",
+            "[package]\nname = \"gen\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/gen/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-env-changed=HUSHRUN_FIXTURE_GEN\");\n    println!(\"cargo:rerun-if-changed=build.rs\");\n    let value = std::env::var(\"HUSHRUN_FIXTURE_GEN\").unwrap_or_else(|_| \"plain\".into());\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/gen.rs\"), format!(\"pub const GEN: &str = {value:?};\\n\")).unwrap();\n}\n",
+        ),
+        (
+            "crates/gen/src/lib.rs",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn generated() { assert!(!super::GEN.is_empty()); }\n}\n",
+        ),
+        (
+            "crates/linked/Cargo.toml",
+            "[package]\nname = \"linked\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/linked/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-env-changed=HUSHRUN_FIXTURE_LINK\");\n    let name = std::env::var(\"HUSHRUN_FIXTURE_LINK\").unwrap_or_else(|_| \"first\".into());\n    let dir = format!(\"{}/{name}\", std::env::var(\"OUT_DIR\").unwrap());\n    std::fs::create_dir_all(&dir).unwrap();\n    println!(\"cargo:rustc-link-search=native={dir}\");\n}\n",
+        ),
+        (
+            "crates/linked/src/lib.rs",
+            "pub fn three() -> u32 { 3 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn three() { assert_eq!(super::three(), 3); }\n}\n",
+        ),
+        (
+            "crates/other/Cargo.toml",
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/other/src/lib.rs",
+            "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+        ),
+    ]
+}
+
+/// `files`, with their lockfile committed.
+fn locked_repo(files: &[(&str, &str)]) -> Repo {
+    let r = Repo::new(files);
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "-q"])
+        .current_dir(&r.repo)
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    git::commit_all(&r.repo, "lock");
+    r
+}
+
+/// \[ADR 0096\] The run after a first one of [`script_files`], with `other` edited and `variable`
+/// set to `value`: `binary`, whose build script derived another build from it, runs with `other`,
+/// and so does one of the other two, audited. The same value again reuses it.
+fn a_build_script_derivation_reruns(variable: &str, value: &str, binary: &str) {
+    let r = locked_repo(&script_files());
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 4, "ran": 4, "reused": 0})
+    );
+    let others: Vec<&str> = ["cfgd", "gen", "linked"]
+        .into_iter()
+        .filter(|name| *name != binary)
+        .collect();
+
+    edit_other(&r, 1);
+    let set = r.run(&NEXTEST, &[(variable, value)]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    assert_eq!(
+        set.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        set.stderr
+    );
+    assert_ran(&set, &[binary, "other"], &others, 1);
+
+    // The same value: its pass on what its build script gave it counts.
+    edit_other(&r, 2);
+    let same = r.run(&NEXTEST, &[(variable, value)]);
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(
+        same.plan_line(),
+        "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        same.stderr
+    );
+    let mut reusable = others.clone();
+    reusable.push(binary);
+    assert_ran(&same, &["other"], &reusable, 1);
+    // \[C-37\] `hushrun why` keys it as the run did, by what its last build here gave it.
+    let unit = format!("crates/{binary}/src/lib.rs");
+    let why = r.run(&["why", "test", &unit], &[]);
+    assert_eq!(why.code, 0, "{}", why.stderr);
+    assert!(
+        why.stdout.starts_with(&format!(
+            "{unit} would be reused: it passed on the files it read"
+        )),
+        "{}",
+        why.stdout
+    );
+}
+
+// covers: C-31, C-34
+// A build script that turns a variable into `cargo::rustc-cfg` builds another test binary from the
+// same files: it runs again.
+#[test]
+fn a_cfg_a_build_script_derives_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    a_build_script_derivation_reruns("HUSHRUN_FIXTURE_CFG", "1", "cfgd");
+}
+
+// covers: C-31, C-34
+// A build script that writes a variable into a file under `OUT_DIR`, which the library includes,
+// builds another test binary from the same files of the repository: it runs again.
+#[test]
+fn a_file_a_build_script_generates_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    a_build_script_derivation_reruns("HUSHRUN_FIXTURE_GEN", "spicy", "gen");
+}
+
+// covers: C-31, C-34
+// A build script that turns a variable into a link argument links the test binary another way:
+// it runs again.
+#[test]
+fn a_link_argument_a_build_script_derives_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    a_build_script_derivation_reruns("HUSHRUN_FIXTURE_LINK", "second", "linked");
+}
+
+// covers: C-30, C-31, C-34
+// An integration test of a package with a build script is observed, recorded and reused: the
+// script's own dep-info is found, so its `build.rs` is a file the binaries of its package read,
+// and editing it reruns those alone.
+#[test]
+fn an_integration_test_of_a_package_with_a_build_script_is_observed_and_reused() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let mut files = script_files();
+    files.push((
+        "crates/gen/tests/it.rs",
+        "#[test]\nfn generated() { assert!(!gen::GEN.is_empty()); }\n",
+    ));
+    let r = locked_repo(&files);
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 5, "ran": 5, "reused": 0})
+    );
+    assert!(
+        store::map(&r.cache)["units"]["crates/gen/tests/it.rs"]
+            .get("notFollowed")
+            .is_none(),
+        "{:#}",
+        store::map(&r.cache)
+    );
+
+    edit_other(&r, 1);
+    let second = r.run(&NEXTEST, &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        second.plan_line(),
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        second.stderr
+    );
+    assert_ran(
+        &second,
+        &["other"],
+        &["cfgd", "gen", "gen::it", "linked"],
+        1,
+    );
+
+    // Its build script is a file the package's binaries read, and no other's.
+    r.write(
+        "crates/gen/build.rs",
+        &files
+            .iter()
+            .find(|(path, _)| *path == "crates/gen/build.rs")
+            .map(|(_, text)| format!("// edited\n{text}"))
+            .unwrap(),
+    );
+    let edited = r.run(&NEXTEST, &[]);
+    assert_eq!(edited.code, 0, "{}\n{}", edited.stdout, edited.stderr);
+    assert_eq!(
+        edited.plan_line(),
+        "hushrun: test: 3 of 5 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        edited.stderr
+    );
+    assert_ran(
+        &edited,
+        &["gen", "gen::it"],
+        &["cfgd", "linked", "other"],
+        1,
+    );
+}
+
 /// Every file under `dir` with its length and time, to tell that nothing was written.
 fn snapshot(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
     let mut out = Vec::new();

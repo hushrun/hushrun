@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. [ADR 0095] A Cargo test binary's vector also lists `envDeps`, the `# env-dep:` lines of the dep-info its reads come from and the folders a value's roots are replaced from (`root`, `targetDir`, `buildDir` (named as the target folder), `cargoHome`, `toolchain`, `rustupHome`, `home`, each optional but `root`), and `env`, the entries they give ([name, value or null], sorted); `expect` then holds `env`, their digest, which its key holds. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree.",
+  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. [ADR 0095] A Cargo test binary's vector also lists `envDeps`, the `# env-dep:` lines of the dep-info its reads come from and the folders a value's roots are replaced from (`root`, `targetDir`, `buildDir` (named as the target folder), `cargoHome`, `toolchain`, `rustupHome`, `home`, each optional but `root`), and `env`, the entries they give ([name, value or null], sorted); `expect` then holds `env`, their digest, which its key holds. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree. [ADR 0096] A Cargo test binary's vector may also list `buildScripts`, its closure's build scripts' runs (`outDir`, and `output`, the text of the `output` file beside it), the files a dep-info of its closure names (`path`, `text`) and the folders as `envDeps` has them, and `scripts`, the entries they give (sorted); `expect` then holds `scripts`, their digest.",
   "vectors": [
     {
       "name": "pytest-unit",
@@ -802,6 +802,235 @@
         "shape": "sha256:5b3f85500968b23e01cc47668cac48324cffb402449c48674d30aef769389c02",
         "env": "sha256:385e8f01192249ba6c30cb4e216b0ff1e3ad16c6b0fd4b1af77ef7b45ff40b61",
         "key": "sha256:dd1d8b859b41f601f4673a5dcfb188a2f4cc9bb7c7fecaeb9220e27bece01057"
+      }
+    },
+    {
+      "name": "cargo-binary-with-build-scripts",
+      "covers": [
+        "C-31"
+      ],
+      "description": "[ADR 0096] A Cargo test binary whose closure holds two build scripts' runs, its own package's (a cfg, a link search path under its OUT_DIR, a library to link; rerun-if, warning, metadata and rustc-env lines left out) and a crate's outside the workspace (a path under the cargo home), and a file its own script generated under OUT_DIR, which its dep-info names; a file of the repository its dep-info names too isn't one. Its build script is a file it read.",
+      "base": {
+        "check": "test",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "--workspace"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "crates/gen/src/lib.rs",
+      "files": [
+        {
+          "path": "Cargo.lock",
+          "kind": "f",
+          "text": "version = 4\n"
+        },
+        {
+          "path": "Cargo.toml",
+          "kind": "f",
+          "text": "[workspace]\nmembers = [\"crates/gen\"]\n"
+        },
+        {
+          "path": "crates/gen/Cargo.toml",
+          "kind": "f",
+          "text": "[package]\nname = \"gen\"\nversion = \"0.1.0\"\n"
+        },
+        {
+          "path": "crates/gen/build.rs",
+          "kind": "f",
+          "text": "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/gen.rs\"), \"pub const G: &str = \\\"plain\\\";\\n\").unwrap();\n}\n"
+        },
+        {
+          "path": "crates/gen/src/lib.rs",
+          "kind": "f",
+          "text": "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n"
+        }
+      ],
+      "units": [
+        "crates/gen/src/lib.rs"
+      ],
+      "sources": [
+        "crates/gen/build.rs"
+      ],
+      "rest": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/gen/Cargo.toml"
+      ],
+      "reads": [
+        "crates/gen/build.rs",
+        "crates/gen/src/lib.rs"
+      ],
+      "envDeps": {
+        "lines": [
+          "# env-dep:OUT_DIR=/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out"
+        ],
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "cargoHome": "/home/ci/.cargo",
+          "home": "/home/ci"
+        }
+      },
+      "buildScripts": {
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "cargoHome": "/home/ci/.cargo",
+          "home": "/home/ci"
+        },
+        "runs": [
+          {
+            "outDir": "/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out",
+            "output": "cargo:rerun-if-changed=build.rs\ncargo::rerun-if-env-changed=MOOD\ncargo::rustc-cfg=loud\ncargo:warning=made in /home/ci/shop\ncargo:rustc-link-search=native=/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out/lib\ncargo::rustc-check-cfg=cfg(loud)\ncargo:rustc-link-lib=static=made\ncargo::metadata=k=v\ncargo:rustc-env=X=1\nnot a directive\n"
+          },
+          {
+            "outDir": "/home/ci/shop/target/debug/build/zlib-sys-1122334455667788/out",
+            "output": "cargo:rustc-link-search=native=/home/ci/.cargo/registry/src/index-1/zlib-sys-1.0.0/lib\ncargo:rustc-link-lib=z\n"
+          }
+        ],
+        "depInfo": [
+          {
+            "path": "/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out/gen.rs",
+            "text": "pub const G: &str = \"plain\";\n"
+          },
+          {
+            "path": "/home/ci/shop/crates/gen/src/lib.rs",
+            "text": "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n"
+          }
+        ]
+      },
+      "env": [
+        [
+          "OUT_DIR",
+          "{hushrun:target-dir}/debug/build/gen-0a1b2c3d4e5f6789/out"
+        ]
+      ],
+      "scripts": [
+        "file sha256:4144382bf4ff43af29b7712d7c2d7451f974748d5fb8dd365188f8125196e79d {hushrun:target-dir}/debug/build/gen-0a1b2c3d4e5f6789/out/gen.rs",
+        "output {hushrun:target-dir}/debug/build/gen-0a1b2c3d4e5f6789/out\nrustc-cfg=loud\nrustc-link-search=native={hushrun:target-dir}/debug/build/gen-0a1b2c3d4e5f6789/out/lib\nrustc-link-lib=static=made",
+        "output {hushrun:target-dir}/debug/build/zlib-sys-1122334455667788/out\nrustc-link-search=native={hushrun:cargo-home}/registry/src/index-1/zlib-sys-1.0.0/lib\nrustc-link-lib=z"
+      ],
+      "expect": {
+        "reads": "sha256:8352544aa4e6a642c142517cbe6ba83ab1e7dff26d6251ac5e03f02678f33774",
+        "rest": "sha256:3223cfb97391770499629d5b246c1c9652e2bde701ab2da4af884a6b91a01993",
+        "shape": "sha256:475844fd25c8fb1e84e0d57e6c8c50c2efc0c2b7c015e1b20aa35eedcee8e4da",
+        "env": "sha256:ead134e2c8fa01c9c210c49e6995792440084a07ea95443c7a67389f8404bac7",
+        "scripts": "sha256:b0bf9db47b331290bac5bec0507213f87ced737e28cf0eff05b92e68d1aafbd4",
+        "key": "sha256:764af22a49dc4a1e7d6f12bc14bfaf6bf785f024f378f49b0b85a90ba426b2f6"
+      }
+    },
+    {
+      "name": "cargo-binary-with-a-build-script-in-its-build-folder",
+      "covers": [
+        "C-31"
+      ],
+      "description": "[ADR 0096] A Cargo test binary whose build script ran in Cargo's build folder of its own (named as the target folder), wrote no line that reaches the compiler, and generated a file whose text looks like a placeholder: its run is an entry all the same, and the file's path is under the target folder's name.",
+      "base": {
+        "check": "test",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "--workspace"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "crates/gen/src/lib.rs",
+      "files": [
+        {
+          "path": "Cargo.lock",
+          "kind": "f",
+          "text": "version = 4\n"
+        },
+        {
+          "path": "Cargo.toml",
+          "kind": "f",
+          "text": "[workspace]\nmembers = [\"crates/gen\"]\n"
+        },
+        {
+          "path": "crates/gen/Cargo.toml",
+          "kind": "f",
+          "text": "[package]\nname = \"gen\"\nversion = \"0.1.0\"\n"
+        },
+        {
+          "path": "crates/gen/build.rs",
+          "kind": "f",
+          "text": "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/gen.rs\"), \"pub const G: &str = \\\"plain\\\";\\n\").unwrap();\n}\n"
+        },
+        {
+          "path": "crates/gen/src/lib.rs",
+          "kind": "f",
+          "text": "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n"
+        }
+      ],
+      "units": [
+        "crates/gen/src/lib.rs"
+      ],
+      "sources": [
+        "crates/gen/build.rs"
+      ],
+      "rest": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/gen/Cargo.toml"
+      ],
+      "reads": [
+        "crates/gen/build.rs",
+        "crates/gen/src/lib.rs"
+      ],
+      "envDeps": {
+        "lines": [
+          "# env-dep:OUT_DIR=/mnt/build/debug/build/gen-0a1b2c3d4e5f6789/out"
+        ],
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "buildDir": "/mnt/build",
+          "home": "/home/ci"
+        }
+      },
+      "buildScripts": {
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "buildDir": "/mnt/build",
+          "home": "/home/ci"
+        },
+        "runs": [
+          {
+            "outDir": "/mnt/build/debug/build/gen-0a1b2c3d4e5f6789/out",
+            "output": "cargo:rerun-if-changed=build.rs\n"
+          }
+        ],
+        "depInfo": [
+          {
+            "path": "/mnt/build/debug/build/gen-0a1b2c3d4e5f6789/out/gen.rs",
+            "text": "pub const G: &str = \"{hushrun:home}\";\n"
+          }
+        ]
+      },
+      "env": [
+        [
+          "OUT_DIR",
+          "{hushrun:target-dir}/debug/build/gen-0a1b2c3d4e5f6789/out"
+        ]
+      ],
+      "scripts": [
+        "file sha256:0bb309148334dfb80dea258c36dbcfc4fc17e865d3c2efdd1444deb347628cbb {hushrun:target-dir}/debug/build/gen-0a1b2c3d4e5f6789/out/gen.rs",
+        "output {hushrun:target-dir}/debug/build/gen-0a1b2c3d4e5f6789/out"
+      ],
+      "expect": {
+        "reads": "sha256:8352544aa4e6a642c142517cbe6ba83ab1e7dff26d6251ac5e03f02678f33774",
+        "rest": "sha256:3223cfb97391770499629d5b246c1c9652e2bde701ab2da4af884a6b91a01993",
+        "shape": "sha256:475844fd25c8fb1e84e0d57e6c8c50c2efc0c2b7c015e1b20aa35eedcee8e4da",
+        "env": "sha256:ead134e2c8fa01c9c210c49e6995792440084a07ea95443c7a67389f8404bac7",
+        "scripts": "sha256:8c57d169db87136e7efd7c01f4402d7a0ccf099f67e0aef0c99e2e424251680e",
+        "key": "sha256:bb6d6a6ac319cb1ec8b8726716ab46baf9041a97c9592eee58453cea11034a2b"
       }
     }
   ]

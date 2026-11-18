@@ -10,7 +10,8 @@
 //!   own build options), which must be fresh: anything Cargo would build means it isn't COMMAND's
 //!   build, and no unit is observed. From that build's artifacts it reads each test binary's
 //!   dep-info, the dep-info of every workspace library it may link, and, for an integration test,
-//!   of every target of its package, since it may run them (the package rule).
+//!   of every target of its package, since it may run them (the package rule); \[ADR 0096\] and
+//!   of the build scripts of their packages, with what each build script's run gave the build.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -24,7 +25,9 @@ use serde::Deserialize;
 use hushrun_core::digest::Digest;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources};
 
-use super::adapter::{Adapter, Hints, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
+use super::adapter::{
+    Adapter, Hints, KeysOutside, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+};
 use super::facts::{FactsFile, Invocation};
 use super::runner;
 
@@ -369,7 +372,20 @@ pub struct BuiltUnit {
     /// \[ADR 0095\] What the same dep-info says its build read of the environment, as its key
     /// holds it (C-31's `env`).
     pub env: Digest,
+    /// \[ADR 0096\] What the build scripts of its closure gave its build, as its key holds it
+    /// (C-31's `scripts`).
+    pub scripts: Digest,
     pub not_followed: BTreeSet<NotFollowed>,
+}
+
+impl BuiltUnit {
+    /// What its key holds of what isn't a file of the scope.
+    pub fn outside(&self) -> units::Outside {
+        units::Outside {
+            env: Some(self.env),
+            scripts: Some(self.scripts),
+        }
+    }
 }
 
 /// \[ADR 0069\] The plan's build (RFC 0003 §3.9): the build COMMAND makes, made first, so that
@@ -387,10 +403,10 @@ pub fn plan_build(
 ) -> Result<Built, String> {
     // \[ADR 0095\] The build first: the graph `cargo metadata` gives is asked offline, from what
     // the build fetched.
-    let artifacts = build(recognized, cwd, true, env, assigned)?;
+    let compiled = build(recognized, cwd, true, env, assigned)?;
     let metadata = metadata(recognized, cwd, assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
-    Ok(read_build(&metadata, artifacts, root, roots.as_ref()))
+    Ok(read_build(&metadata, compiled, root, roots.as_ref()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -507,6 +523,10 @@ struct Message {
     executable: Option<PathBuf>,
     #[serde(default)]
     fresh: bool,
+    /// \[ADR 0096\] A build script's run (`build-script-executed`): its `OUT_DIR`, beside which
+    /// its `output` is.
+    #[serde(default)]
+    out_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -524,6 +544,37 @@ struct Artifact {
     test: bool,
     executable: Option<PathBuf>,
     depinfo: Option<PathBuf>,
+}
+
+impl Artifact {
+    /// A library a binary may link: a `lib`, `rlib`, `proc-macro`, ….
+    fn is_lib(&self) -> bool {
+        self.target
+            .kind
+            .iter()
+            .any(|k| k.contains("lib") || k == "proc-macro")
+    }
+
+    /// \[ADR 0096\] A build script's compile.
+    fn is_build_script(&self) -> bool {
+        self.target.kind.iter().any(|k| k == "custom-build")
+    }
+}
+
+/// \[ADR 0096\] One run of a build script, as the build named it.
+#[derive(Debug, Clone)]
+struct ScriptRun {
+    /// Its package's id, as `cargo metadata` names it.
+    package_id: String,
+    /// Its `OUT_DIR`, as Cargo gave it.
+    out_dir: PathBuf,
+}
+
+/// What a build named: its compiler artifacts and \[ADR 0096\] its build scripts' runs.
+#[derive(Debug, Default)]
+struct Compiled {
+    artifacts: Vec<Artifact>,
+    scripts: Vec<ScriptRun>,
 }
 
 /// Reads what the Rust adapter saw: `files`' invocations, and the build `recognized` made, asked
@@ -544,9 +595,9 @@ pub fn observe(
         .filter_map(|f| f.invocation.as_ref())
         .collect();
     let metadata = metadata(recognized, cwd, assigned)?;
-    let artifacts = build(recognized, cwd, false, &[], assigned)?;
+    let compiled = build(recognized, cwd, false, &[], assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
-    let built = read_build(&metadata, artifacts, root, roots.as_ref());
+    let built = read_build(&metadata, compiled, root, roots.as_ref());
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
     let mut started: BTreeMap<PathBuf, Vec<&Invocation>> = BTreeMap::new();
@@ -562,6 +613,7 @@ pub fn observe(
         let facts_of = started.get(&real(&b.executable)).map(Vec::as_slice);
         let starts = facts_of.unwrap_or(&[]);
         let (complete, failed, duration_ms) = ended(starts, recognized, command_passed);
+        let outside = b.outside();
         units.insert(
             unit.clone(),
             super::Seen {
@@ -572,8 +624,8 @@ pub fn observe(
                     deselected: deselected(starts),
                     ..Facts::default()
                 },
+                outside,
                 reads: b.reads,
-                env: Some(b.env),
                 duration_ms,
                 tests: None,
             },
@@ -597,18 +649,23 @@ fn deselected(starts: &[&Invocation]) -> bool {
 /// The test binaries of a build, what each read and what can't be told of it, from its artifacts:
 /// a test binary read what its own dep-info names, what the dep-info of every workspace library
 /// it may link names, and for an integration test, a bench or an example, what every target of
-/// its package was built from (C-31). \[ADR 0095\] The same dep-info files, and those of the
-/// libraries outside the workspace its package's dependency graph holds (every such library when
-/// `metadata` has no graph), say what it read of the environment, its `env`, with `roots`
-/// ([`checkout_roots`]) replaced. A dep-info that can't be read, or a library without one, makes
-/// it `not observed`. The plan and the reading after COMMAND both call it, so both key a binary
-/// alike.
+/// its package was built from (C-31); \[ADR 0096\] and what the build scripts of its package and
+/// of those libraries were built from, with what their output says to watch (`rerun-if-changed`).
+/// \[ADR 0095\] The same dep-info files, and those of the libraries outside the workspace its
+/// package's dependency graph holds (every such library when `metadata` has no graph), say what
+/// it read of the environment, its `env`, with `roots` ([`checkout_roots`]) replaced. \[ADR 0096\]
+/// The runs of the build scripts of the same packages, and the files of the target or build folder
+/// those dep-info files name (what the scripts generated), are what the build scripts gave it, its
+/// `scripts` ([`script_entry`], [`generated_entry`]). A dep-info, an output or a generated file
+/// that can't be read, or a library without dep-info, makes it `not observed`. The plan and the
+/// reading after COMMAND both call it, so both key a binary alike.
 fn read_build(
     metadata: &Metadata,
-    artifacts: Vec<Artifact>,
+    compiled: Compiled,
     root: &Path,
     roots: Option<&hushrun_build::roots::Roots>,
 ) -> Built {
+    let Compiled { artifacts, scripts } = compiled;
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let root = real(root);
     let relative = |path: &Path| -> Option<String> {
@@ -675,13 +732,7 @@ fn read_build(
     let (artifacts, outside): (Vec<Artifact>, Vec<Artifact>) = artifacts
         .into_iter()
         .partition(|a| packages.contains_key(&a.manifest));
-    let is_lib = |a: &Artifact| {
-        a.target
-            .kind
-            .iter()
-            .any(|k| k.contains("lib") || k == "proc-macro")
-    };
-    let outside: Vec<Artifact> = outside.into_iter().filter(|a| is_lib(a)).collect();
+    let outside: Vec<Artifact> = outside.into_iter().filter(Artifact::is_lib).collect();
     // A graph that doesn't hold every crate the build compiled (one for a platform it was filtered
     // out for, as a Cargo configuration's `build.target` names) can't say what a binary is built
     // against: then every such crate counts for every binary.
@@ -691,7 +742,20 @@ fn read_build(
             .iter()
             .all(|a| a.package_id.as_deref().is_some_and(|id| nodes.contains(id)))
     });
+    // \[ADR 0096\] The folders Cargo builds in: a file of a dep-info under one is one it made.
+    let made_in: Vec<PathBuf> = [&metadata.target_directory, &metadata.build_directory]
+        .into_iter()
+        .flatten()
+        .map(|dir| real(dir))
+        .collect();
+    let member_ids: BTreeMap<&str, &Package> =
+        packages.values().map(|p| (p.id.as_str(), *p)).collect();
     let mut cache: BTreeMap<PathBuf, Option<DepInfo>> = BTreeMap::new();
+    let mut outputs: BTreeMap<PathBuf, Option<hushrun_build::script::Script>> = BTreeMap::new();
+    // \[ADR 0096\] Each dep-info's files of the build folder with their entries (`None`: unreadable),
+    // and each build script run's watched files of the repository, read once a build.
+    let mut made: BTreeMap<PathBuf, Vec<(PathBuf, Option<String>)>> = BTreeMap::new();
+    let mut watching: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     let mut named = BTreeSet::new();
     let mut read_depinfo = |path: &Path| -> Option<DepInfo> {
         cache
@@ -731,13 +795,11 @@ fn read_build(
             .iter()
             .any(|k| matches!(k.as_str(), "test" | "bench" | "example"));
         for other in artifacts.iter().filter(|a| !a.test) {
-            let lib = other
-                .target
-                .kind
-                .iter()
-                .any(|k| k.contains("lib") || k == "proc-macro");
-            let wanted = (needed.contains(&other.manifest) && lib)
-                || (other.manifest == artifact.manifest && (lib || integration));
+            let lib = other.is_lib();
+            // \[ADR 0096\] The build scripts of its package and of the libraries it may link.
+            let script = other.is_build_script();
+            let wanted = (needed.contains(&other.manifest) && (lib || script))
+                || (other.manifest == artifact.manifest && (lib || script || integration));
             if !wanted {
                 continue;
             }
@@ -787,6 +849,7 @@ fn read_build(
         }
         let mut reads: BTreeSet<String> = BTreeSet::new();
         let mut env: BTreeSet<(String, Option<String>)> = BTreeSet::new();
+        let mut given: BTreeSet<String> = BTreeSet::new();
         for (d, files) in depinfos
             .iter()
             .map(|d| (d, true))
@@ -808,6 +871,76 @@ fn read_build(
                 reads.extend(info.files.iter().filter_map(|p| relative(p)));
             }
             env.extend(keyed_env(info.env, roots));
+            // \[ADR 0096\] What the build made that the compile read: a file a build script
+            // generated, by its content.
+            let files = made.entry(d.clone()).or_insert_with(|| {
+                info.files
+                    .iter()
+                    .filter(|f| {
+                        let f = real(f);
+                        made_in.iter().any(|dir| f.starts_with(dir))
+                    })
+                    .map(|file| (file.clone(), generated_entry(file, roots)))
+                    .collect()
+            });
+            for (file, entry) in files.iter() {
+                match entry {
+                    Some(entry) => {
+                        given.insert(entry.clone());
+                    }
+                    None => {
+                        not_followed.insert(NotFollowed {
+                            why: "unreadable-generated-file".into(),
+                            detail: placeholders(file, roots),
+                        });
+                    }
+                }
+            }
+        }
+        // \[ADR 0096\] The runs of the build scripts of its package, of the workspace libraries
+        // it may link, and of the crates outside the workspace it may be built against.
+        let mine: BTreeSet<&str> = std::iter::once(&artifact.manifest)
+            .chain(needed.iter())
+            .filter_map(|m| Some(packages.get(m)?.id.as_str()))
+            .collect();
+        for run in &scripts {
+            let member = member_ids.get(run.package_id.as_str());
+            let counts = match member {
+                Some(_) => mine.contains(run.package_id.as_str()),
+                None => graph.as_ref().is_none_or(|g| g.contains(&run.package_id)),
+            };
+            if !counts {
+                continue;
+            }
+            let output = outputs
+                .entry(run.out_dir.clone())
+                .or_insert_with(|| script_output(&run.out_dir));
+            let Some(output) = output else {
+                // Named by its run's folder, `<package>-<hash>`.
+                not_followed.insert(NotFollowed {
+                    why: "unreadable-build-output".into(),
+                    detail: run
+                        .out_dir
+                        .parent()
+                        .and_then(Path::file_name)
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                });
+                continue;
+            };
+            given.insert(script_entry(&run.out_dir, output, roots));
+            // What a build script of the workspace says to watch, from its package's folder.
+            if let Some(dir) = member.and_then(|p| p.manifest_path.parent()) {
+                let watched = watching.entry(run.out_dir.clone()).or_insert_with(|| {
+                    output
+                        .rerun_if_changed
+                        .iter()
+                        .flat_map(|watched| watched_files(&dir.join(watched)))
+                        .filter_map(|file| relative(&file))
+                        .collect()
+                });
+                reads.extend(watched.iter().cloned());
+            }
         }
         units.insert(
             unit,
@@ -815,6 +948,7 @@ fn read_build(
                 executable: executable.clone(),
                 reads,
                 env: units::env(env.iter().map(|(n, v)| (n.as_str(), v.as_deref()))),
+                scripts: units::scripts(given),
                 not_followed,
             },
         );
@@ -824,6 +958,84 @@ fn read_build(
         unit_files,
         named,
     }
+}
+
+/// \[ADR 0096\] One build script's run as C-31's `scripts` holds it: `output `, its `OUT_DIR`, and
+/// each line of its output that reaches the compile after a line feed, `roots` replaced in each.
+/// Its output is read by build blocks' one reader of it ([`hushrun_build::script`]).
+fn script_entry(
+    out_dir: &Path,
+    output: &hushrun_build::script::Script,
+    roots: Option<&hushrun_build::roots::Roots>,
+) -> String {
+    let mut entry = format!("output {}", placeholders(out_dir, roots));
+    for directive in &output.to_the_compile {
+        entry.push('\n');
+        entry.push_str(&text_placeholders(directive, roots));
+    }
+    entry
+}
+
+/// \[ADR 0096\] A file the build made that a compile read, as C-31's `scripts` holds it: `file `,
+/// the SHA-256 of its bytes, a space and its path, `roots` replaced; `None` when it can't be read.
+fn generated_entry(file: &Path, roots: Option<&hushrun_build::roots::Roots>) -> Option<String> {
+    let bytes = std::fs::read(file).ok()?;
+    Some(made_entry(&bytes, file, roots))
+}
+
+/// \[ADR 0096\] [`generated_entry`] of a file whose bytes are `bytes`.
+fn made_entry(bytes: &[u8], file: &Path, roots: Option<&hushrun_build::roots::Roots>) -> String {
+    format!("file {} {}", Digest::of(bytes), placeholders(file, roots))
+}
+
+/// \[ADR 0096\] What the build script whose `OUT_DIR` is `out_dir` printed, from the output Cargo
+/// saved beside it; `None` when it can't be read.
+fn script_output(out_dir: &Path) -> Option<hushrun_build::script::Script> {
+    let saved = hushrun_build::script::saved_output(out_dir)?;
+    Some(hushrun_build::script::parse_bytes(
+        &std::fs::read(saved).ok()?,
+    ))
+}
+
+/// `path` as text, `roots` replaced.
+fn placeholders(path: &Path, roots: Option<&hushrun_build::roots::Roots>) -> String {
+    text_placeholders(&path.to_string_lossy(), roots)
+}
+
+/// `text`, `roots` replaced: as [`keyed_env`] replaces them in a value.
+fn text_placeholders(text: &str, roots: Option<&hushrun_build::roots::Roots>) -> String {
+    match roots {
+        Some(roots) => roots.to_placeholders(text),
+        None => text.to_string(),
+    }
+}
+
+/// \[ADR 0096\] The files a `rerun-if-changed` path names: the file, or every file below the
+/// folder, as Cargo watches them; none when it is gone.
+fn watched_files(path: &Path) -> Vec<PathBuf> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Vec::new();
+    };
+    if !meta.is_dir() {
+        return vec![path.to_path_buf()];
+    }
+    let mut out = Vec::new();
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(path),
+                Ok(kind) if kind.is_file() => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Whether a test binary ran whole, whether a test of it failed, and how long its tests took,
@@ -978,7 +1190,7 @@ fn build(
     plan: bool,
     env: &[(OsString, OsString)],
     assigned: &[(String, String)],
-) -> Result<Vec<Artifact>, String> {
+) -> Result<Compiled, String> {
     let mut command = cargo(recognized, cwd, assigned);
     command.envs(env.iter().map(|(name, value)| (name, value)));
     command.args(["test", "--no-run", "--message-format=json"]);
@@ -1002,7 +1214,7 @@ fn build(
         .map_err(|err| format!("can't run cargo test --no-run: {err}"))?;
     let started = Instant::now();
     let stdout = child.stdout.take().expect("piped");
-    let mut artifacts = Vec::new();
+    let mut compiled = Compiled::default();
     let mut refused = None;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
@@ -1013,6 +1225,16 @@ fn build(
         let Ok(message) = serde_json::from_str::<Message>(&line) else {
             continue;
         };
+        // \[ADR 0096\] A build script's run, fresh or not: where its output is.
+        if message.reason == "build-script-executed" {
+            if let (Some(package_id), Some(out_dir)) = (message.package_id, message.out_dir) {
+                compiled.scripts.push(ScriptRun {
+                    package_id,
+                    out_dir,
+                });
+            }
+            continue;
+        }
         if message.reason != "compiler-artifact" {
             continue;
         }
@@ -1029,7 +1251,7 @@ fn build(
             continue;
         };
         let depinfo = depinfo_of(&message.filenames, message.executable.as_deref(), &target);
-        artifacts.push(Artifact {
+        compiled.artifacts.push(Artifact {
             manifest: std::fs::canonicalize(&manifest).unwrap_or(manifest),
             package_id: message.package_id,
             target,
@@ -1052,17 +1274,29 @@ fn build(
             "cargo test --no-run failed".into()
         });
     }
-    Ok(artifacts)
+    Ok(compiled)
 }
 
 /// The rustc dep-info file of one artifact: beside a hashed file in `deps/`; for one Cargo copied
-/// out of `deps/` (a binary, an example), the hashed build with the same bytes. `None` when there
-/// is none, and then what it read can't be told.
+/// out of `deps/` (a binary, an example), the hashed build with the same bytes; \[ADR 0096\] for a
+/// build script, `build/<package>-<hash>/build-script-build`, which Cargo copied from the compile
+/// beside it, `<crate>-<hash>.d` there (`build_script_build-<hash>.d`). `None` when there is none,
+/// and then what it read can't be told.
 fn depinfo_of(
     filenames: &[PathBuf],
     executable: Option<&Path>,
     target: &Target,
 ) -> Option<PathBuf> {
+    if target.kind.iter().any(|k| k == "custom-build") {
+        return filenames.iter().find_map(|file| {
+            let dir = file.parent()?;
+            let (_, hash) = dir.file_name()?.to_str()?.rsplit_once('-')?;
+            let name = file.file_name()?.to_str()?;
+            let name = name.strip_suffix(".exe").unwrap_or(name).replace('-', "_");
+            let candidate = dir.join(format!("{name}-{hash}.d"));
+            candidate.is_file().then_some(candidate)
+        });
+    }
     for file in filenames {
         let dir = file.parent()?;
         let name = file.file_name()?.to_str()?;
@@ -1352,8 +1586,8 @@ impl Adapter for Recognized {
         true
     }
 
-    fn keys_env(&self) -> bool {
-        true
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::Build
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
@@ -1379,7 +1613,7 @@ impl Adapter for Recognized {
             .iter()
             .map(|(unit, b)| {
                 let lists = (b.not_followed.is_empty() && at.tree.contains(unit))
-                    .then(|| vec![super::built_list(&b.reads, Some(b.env))]);
+                    .then(|| vec![super::built_list(&b.reads, b.outside())]);
                 (unit.clone(), lists)
             })
             .collect();
@@ -1417,7 +1651,12 @@ impl Adapter for Recognized {
         let planned = observed
             .units
             .iter()
-            .map(|(unit, seen)| (unit.clone(), vec![super::built_list(&seen.reads, seen.env)]))
+            .map(|(unit, seen)| {
+                (
+                    unit.clone(),
+                    vec![super::built_list(&seen.reads, seen.outside)],
+                )
+            })
             .collect();
         Ok(Some(Read {
             seen: observed.units,
@@ -1570,7 +1809,7 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/digest/unit-keys.json");
         let data: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let mut seen = 0;
+        let (mut seen, mut scripted) = (0, 0);
         for vector in data["vectors"].as_array().unwrap() {
             let Some(deps) = vector.get("envDeps") else {
                 continue;
@@ -1624,8 +1863,40 @@ mod tests {
                 "{}",
                 vector["name"]
             );
+            // \[ADR 0096\] Its build scripts' runs, and the files of its build folder its dep-info
+            // names, give the entries of `scripts` it lists.
+            let Some(build) = vector.get("buildScripts") else {
+                continue;
+            };
+            assert_eq!(build["folders"], deps["folders"], "{}", vector["name"]);
+            let mut given: BTreeSet<String> = BTreeSet::new();
+            for run in build["runs"].as_array().unwrap() {
+                let output = hushrun_build::script::parse(run["output"].as_str().unwrap());
+                let out_dir = Path::new(run["outDir"].as_str().unwrap());
+                given.insert(script_entry(out_dir, &output, Some(&roots)));
+            }
+            let made_in: Vec<String> = ["targetDir", "buildDir"]
+                .into_iter()
+                .filter_map(folder)
+                .collect();
+            for named in build["depInfo"].as_array().unwrap() {
+                let path = Path::new(named["path"].as_str().unwrap());
+                if made_in.iter().any(|dir| path.starts_with(dir)) {
+                    let text = named["text"].as_str().unwrap();
+                    given.insert(made_entry(text.as_bytes(), path, Some(&roots)));
+                }
+            }
+            let listed: BTreeSet<String> = vector["scripts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(given, listed, "{}", vector["name"]);
+            scripted += 1;
         }
-        assert_eq!(seen, 4);
+        assert_eq!(seen, 6);
+        assert_eq!(scripted, 2);
     }
 
     // covers: C-31
@@ -1752,9 +2023,13 @@ mod tests {
             |_: &str| None,
         )
         .unwrap();
+        let compiled = |artifacts: Vec<Artifact>| Compiled {
+            artifacts,
+            scripts: Vec::new(),
+        };
         let built = read_build(
             &metadata_with(graph.clone()),
-            artifacts(),
+            compiled(artifacts()),
             &root,
             Some(&roots),
         );
@@ -1793,7 +2068,7 @@ mod tests {
         // Without the graph, every crate outside the workspace counts for every binary.
         let built = read_build(
             &metadata_with(serde_json::Value::Null),
-            artifacts(),
+            compiled(artifacts()),
             &root,
             Some(&roots),
         );
@@ -1805,7 +2080,7 @@ mod tests {
         let mut broken = artifacts();
         std::fs::write(deps.join("ext.d"), [0xff, 0xfe, b'\n']).unwrap();
         broken.push(outside("far", "lib", None));
-        let built = read_build(&metadata_with(graph), broken, &root, Some(&roots));
+        let built = read_build(&metadata_with(graph), compiled(broken), &root, Some(&roots));
         let whys = |unit: &str| -> BTreeSet<String> {
             built.units[unit]
                 .not_followed
@@ -1821,6 +2096,314 @@ mod tests {
             ])
         );
         assert_eq!(whys("b/tests/it.rs"), whys("a/src/lib.rs"));
+    }
+
+    // covers: C-31
+    // \[ADR 0096\] A build script's run: its `OUT_DIR`, then the lines of its output that reach
+    // the compile, in the order written, roots replaced.
+    #[test]
+    fn a_build_scripts_run_is_its_out_dir_and_what_reaches_the_compile_in_order() {
+        let output = hushrun_build::script::parse(
+            "cargo:rustc-link-lib=static=z\ncargo::rustc-cfg=loud\ncargo:warning=hello\ncargo:rerun-if-changed=build.rs\ncargo:rustc-link-search=native=/w/target/debug/build/a-1/out\n",
+        );
+        let roots = hushrun_build::roots::Roots::of_checkout(
+            &hushrun_build::roots::CheckoutFolders {
+                checkout: "/w".into(),
+                target_dir: Some("/w/target".into()),
+                ..Default::default()
+            },
+            |_: &str| None,
+        )
+        .unwrap();
+        assert_eq!(
+            script_entry(
+                Path::new("/w/target/debug/build/a-1/out"),
+                &output,
+                Some(&roots)
+            ),
+            "output {hushrun:target-dir}/debug/build/a-1/out\nrustc-link-lib=static=z\nrustc-cfg=loud\nrustc-link-search=native={hushrun:target-dir}/debug/build/a-1/out"
+        );
+        // Lines in another order link another way: another entry.
+        let swapped = hushrun_build::script::Script {
+            to_the_compile: output.to_the_compile.iter().rev().cloned().collect(),
+            ..output.clone()
+        };
+        assert_ne!(
+            script_entry(Path::new("/o"), &swapped, None),
+            script_entry(Path::new("/o"), &output, None)
+        );
+        assert_eq!(
+            script_entry(Path::new("/o"), &output, None).lines().count(),
+            4
+        );
+    }
+
+    // covers: C-30, C-31
+    // \[ADR 0096\] A build script's dep-info is found beside the copy Cargo names, in its own
+    // folder of `build/`.
+    #[test]
+    fn a_build_scripts_dep_info_is_beside_its_compile() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = dir.path().join("target/debug/build/gen-0123456789abcdef");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("build-script-build"), "x").unwrap();
+        std::fs::write(build.join("build_script_build-0123456789abcdef"), "x").unwrap();
+        let target = |kind: &str| Target {
+            kind: vec![kind.to_string()],
+            src_path: dir.path().join("build.rs"),
+            test: false,
+        };
+        let filenames = [build.join("build-script-build")];
+        assert_eq!(depinfo_of(&filenames, None, &target("custom-build")), None);
+        std::fs::write(
+            build.join("build_script_build-0123456789abcdef.d"),
+            "x: build.rs\n",
+        )
+        .unwrap();
+        assert_eq!(
+            depinfo_of(&filenames, None, &target("custom-build")),
+            Some(build.join("build_script_build-0123456789abcdef.d"))
+        );
+        assert_eq!(depinfo_of(&filenames, None, &target("lib")), None);
+    }
+
+    // covers: C-30, C-31
+    // \[ADR 0096\] A binary's `scripts` are the runs of the build scripts of its package, of the
+    // workspace libraries it may link and of the crates outside the workspace its graph holds,
+    // and the files of the build folder its closure's dep-info names, by content; its reads hold
+    // its closure's build scripts and what they watch. What can't be read leaves it unfollowed.
+    #[test]
+    fn a_binarys_scripts_are_its_closures_build_script_runs_and_the_files_they_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("ws");
+        let ws = root.to_str().unwrap().to_string();
+        let target = format!("{ws}/target");
+        let deps = root.join("target/debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::create_dir_all(root.join("a/data/deep")).unwrap();
+        std::fs::write(root.join("a/data/deep/x.txt"), "x").unwrap();
+        // Each package's build script's run: its output, and what it made in OUT_DIR.
+        let run = |package: &str, output: &str| -> ScriptRun {
+            let out = root.join(format!("target/debug/build/{package}-1/out"));
+            std::fs::create_dir_all(&out).unwrap();
+            std::fs::write(out.parent().unwrap().join("output"), output).unwrap();
+            ScriptRun {
+                package_id: package.to_string(),
+                out_dir: out,
+            }
+        };
+        let made = root.join("target/debug/build/b-1/out/gen.rs");
+        let depinfo = |name: &str, files: &[String]| -> PathBuf {
+            let path = deps.join(format!("{name}.d"));
+            let list = files.join(" ");
+            std::fs::write(&path, format!("{}: {list}\n", path.display())).unwrap();
+            path
+        };
+        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+            "workspace_root": ws,
+            "target_directory": target,
+            "workspace_members": ["a", "b", "c"],
+            "packages": [
+                {"id": "a", "manifest_path": format!("{ws}/a/Cargo.toml"), "dependencies": [],
+                 "targets": [{"kind": ["lib"], "src_path": format!("{ws}/a/src/lib.rs"), "test": true}]},
+                {"id": "b", "manifest_path": format!("{ws}/b/Cargo.toml"),
+                 "dependencies": [{"path": format!("{ws}/a"), "kind": null}],
+                 "targets": [{"kind": ["lib"], "src_path": format!("{ws}/b/src/lib.rs"), "test": true}]},
+                {"id": "c", "manifest_path": format!("{ws}/c/Cargo.toml"), "dependencies": [],
+                 "targets": [{"kind": ["lib"], "src_path": format!("{ws}/c/src/lib.rs"), "test": true}]}
+            ],
+            "resolve": {"nodes": [
+                {"id": "a", "deps": []},
+                {"id": "b", "deps": [
+                    {"pkg": "a", "dep_kinds": [{"kind": null}]},
+                    {"pkg": "ext", "dep_kinds": [{"kind": null}]}
+                ]},
+                {"id": "c", "deps": []},
+                {"id": "ext", "deps": []}
+            ]},
+        }))
+        .unwrap();
+        let artifact = |package: &str, kind: &str, src: &str, test: bool, d: PathBuf| Artifact {
+            manifest: root.join(package).join("Cargo.toml"),
+            package_id: Some(package.to_string()),
+            target: Target {
+                kind: vec![kind.to_string()],
+                src_path: root.join(package).join(src),
+                test: true,
+            },
+            test,
+            executable: test.then(|| deps.join(format!("{package}-test"))),
+            depinfo: Some(d),
+        };
+        let compiled = || Compiled {
+            artifacts: vec![
+                artifact(
+                    "a",
+                    "lib",
+                    "src/lib.rs",
+                    false,
+                    depinfo("a", &[format!("{ws}/a/src/lib.rs")]),
+                ),
+                artifact(
+                    "a",
+                    "lib",
+                    "src/lib.rs",
+                    true,
+                    depinfo("a-test", &[format!("{ws}/a/src/lib.rs")]),
+                ),
+                artifact(
+                    "a",
+                    "custom-build",
+                    "build.rs",
+                    false,
+                    depinfo("a-build", &[format!("{ws}/a/build.rs")]),
+                ),
+                artifact(
+                    "b",
+                    "lib",
+                    "src/lib.rs",
+                    false,
+                    depinfo(
+                        "b",
+                        &[format!("{ws}/b/src/lib.rs"), made.display().to_string()],
+                    ),
+                ),
+                artifact(
+                    "b",
+                    "lib",
+                    "src/lib.rs",
+                    true,
+                    depinfo("b-test", &[format!("{ws}/b/src/lib.rs")]),
+                ),
+                artifact(
+                    "b",
+                    "custom-build",
+                    "build.rs",
+                    false,
+                    depinfo("b-build", &[format!("{ws}/b/build.rs")]),
+                ),
+                artifact(
+                    "c",
+                    "lib",
+                    "src/lib.rs",
+                    false,
+                    depinfo("c", &[format!("{ws}/c/src/lib.rs")]),
+                ),
+                artifact(
+                    "c",
+                    "lib",
+                    "src/lib.rs",
+                    true,
+                    depinfo("c-test", &[format!("{ws}/c/src/lib.rs")]),
+                ),
+                Artifact {
+                    manifest: root.join("../ext/Cargo.toml"),
+                    ..artifact("ext", "lib", "src/lib.rs", false, depinfo("ext", &[]))
+                },
+            ],
+            scripts: vec![
+                run(
+                    "a",
+                    &format!(
+                        "cargo::rustc-cfg=loud\ncargo:warning=w\ncargo:rerun-if-changed=data\ncargo:rustc-link-search=native={target}/debug/build/a-1/out\n"
+                    ),
+                ),
+                run("b", "cargo:rerun-if-changed=build.rs\n"),
+                run("ext", "cargo:rustc-cfg=ext\n"),
+            ],
+        };
+        std::fs::create_dir_all(made.parent().unwrap()).unwrap();
+        std::fs::write(&made, "pub const G: &str = \"plain\";\n").unwrap();
+        let roots = hushrun_build::roots::Roots::of_checkout(
+            &hushrun_build::roots::CheckoutFolders {
+                checkout: ws.clone(),
+                target_dir: Some(target.clone()),
+                ..Default::default()
+            },
+            |_: &str| None,
+        )
+        .unwrap();
+        let built = read_build(&metadata, compiled(), &root, Some(&roots));
+        let out =
+            |package: &str| format!("output {{hushrun:target-dir}}/debug/build/{package}-1/out");
+        let a_run = format!(
+            "{}\nrustc-cfg=loud\nrustc-link-search=native={{hushrun:target-dir}}/debug/build/a-1/out",
+            out("a")
+        );
+        let gen_entry = |text: &str| {
+            format!(
+                "file {} {{hushrun:target-dir}}/debug/build/b-1/out/gen.rs",
+                Digest::of(text.as_bytes())
+            )
+        };
+        assert_eq!(
+            built.units["a/src/lib.rs"].scripts,
+            units::scripts([a_run.clone()])
+        );
+        assert_eq!(
+            built.units["b/src/lib.rs"].scripts,
+            units::scripts([
+                a_run.clone(),
+                out("b"),
+                out("ext") + "\nrustc-cfg=ext",
+                gen_entry("pub const G: &str = \"plain\";\n"),
+            ])
+        );
+        // No build script in its closure: none, and so not the crate outside its graph.
+        assert_eq!(built.units["c/src/lib.rs"].scripts, units::scripts([]));
+        // Its closure's build scripts, and what they watch, are files it read.
+        let reads =
+            |unit: &str| -> Vec<String> { built.units[unit].reads.iter().cloned().collect() };
+        assert_eq!(
+            reads("a/src/lib.rs"),
+            ["a/build.rs", "a/data/deep/x.txt", "a/src/lib.rs"]
+        );
+        assert_eq!(
+            reads("b/src/lib.rs"),
+            [
+                "a/build.rs",
+                "a/data/deep/x.txt",
+                "a/src/lib.rs",
+                "b/build.rs",
+                "b/src/lib.rs",
+                "target/debug/build/b-1/out/gen.rs"
+            ]
+        );
+        assert_eq!(reads("c/src/lib.rs"), ["c/src/lib.rs"]);
+        assert!(built.named.contains("a/build.rs"));
+        assert!(built.units.values().all(|u| u.not_followed.is_empty()));
+
+        // Another generated file moves the binaries that read it alone.
+        std::fs::write(&made, "pub const G: &str = \"spicy\";\n").unwrap();
+        let again = read_build(&metadata, compiled(), &root, Some(&roots));
+        assert_ne!(
+            again.units["b/src/lib.rs"].scripts,
+            built.units["b/src/lib.rs"].scripts
+        );
+        assert_eq!(
+            again.units["a/src/lib.rs"].scripts,
+            built.units["a/src/lib.rs"].scripts
+        );
+
+        // An output or a generated file that can't be read: not followed.
+        let broken = compiled();
+        std::fs::remove_file(root.join("target/debug/build/b-1/output")).unwrap();
+        std::fs::remove_file(&made).unwrap();
+        let built = read_build(&metadata, broken, &root, Some(&roots));
+        let whys: BTreeSet<String> = built.units["b/src/lib.rs"]
+            .not_followed
+            .iter()
+            .map(|n| format!("{} {}", n.why, n.detail))
+            .collect();
+        assert_eq!(
+            whys,
+            BTreeSet::from([
+                "unreadable-build-output b-1".to_string(),
+                "unreadable-generated-file {hushrun:target-dir}/debug/build/b-1/out/gen.rs"
+                    .to_string(),
+            ])
+        );
+        assert!(built.units["a/src/lib.rs"].not_followed.is_empty());
     }
 
     // covers: C-31, C-32

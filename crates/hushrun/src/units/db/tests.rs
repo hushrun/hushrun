@@ -719,7 +719,7 @@ fn a_test_binarys_env_is_kept_and_a_store_made_before_its_table_gets_it_with_eve
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("units/store.v2.sqlite");
     let mut binary = mapped(&[("src/lib.rs", HASH_A)]);
-    binary.env = Some(Digest::of(b"CARGO_PKG_VERSION=0.1.0\0"));
+    binary.outside.env = Some(Digest::of(b"CARGO_PKG_VERSION=0.1.0\0"));
     let file = mapped(&[("tests/test_a.py", HASH_A), ("app/a.py", HASH_B)]);
     write_run(
         &path,
@@ -754,7 +754,7 @@ fn a_test_binarys_env_is_kept_and_a_store_made_before_its_table_gets_it_with_eve
     let read = load(&path, &id("unit"));
     assert!(read.unread.is_none(), "{:?}", read.unread);
     let without = Mapped {
-        env: None,
+        outside: Default::default(),
         ..binary.clone()
     };
     assert_eq!(read.map.units["src/lib.rs"], without);
@@ -787,6 +787,95 @@ fn a_test_binarys_env_is_kept_and_a_store_made_before_its_table_gets_it_with_eve
             .unwrap();
     }
     assert!(load(&path, &id("unit")).unread.is_some());
+}
+
+// covers: C-36, C-31
+// \[ADR 0096\] What a Cargo test binary's key held of its build scripts is kept beside its `env`;
+// a store made before its table (as ADR 0095's build made it, or 0.17 before `unit_env`) reads as
+// it is and gets it on its next write, every row kept.
+#[test]
+fn build_scripts_are_kept_and_a_store_made_before_their_table_gets_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("units/store.v2.sqlite");
+    let mut binary = mapped(&[("src/lib.rs", HASH_A)]);
+    binary.outside.env = Some(Digest::of(b"A=1\0"));
+    binary.outside.scripts = Some(Digest::of(b"output /o\0"));
+    let package = mapped(&[("pkg/pkg_test.go", HASH_B)]);
+    let runs = |check: &'static str| {
+        run(
+            check,
+            &[("src/lib.rs", binary.clone()), ("pkg", package.clone())],
+            &["src/lib.rs", "pkg/pkg_test.go"],
+        )
+    };
+    write_run(&path, &runs("unit")).unwrap();
+    let map = load(&path, &id("unit")).map;
+    assert_eq!(map.units["src/lib.rs"], binary);
+    assert_eq!(map.units["pkg"], package);
+    // A scripts row needs its env row: the impossible pair is refused.
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let unit: i64 = conn
+            .query_row(
+                "SELECT u.id FROM unit u JOIN path p ON p.id = u.path_ref WHERE p.path = 'pkg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO unit_scripts (unit_ref, scripts) VALUES (?1, ?2)",
+                rusqlite::params![unit, "0".repeat(64)],
+            )
+            .is_err()
+        );
+    }
+
+    for dropped in [&["unit_scripts"][..], &["unit_scripts", "unit_env"]] {
+        {
+            let conn = Connection::open(&path).unwrap();
+            for table in dropped {
+                conn.execute_batch(&format!("DROP TABLE {table};")).unwrap();
+            }
+        }
+        let tables = || {
+            let conn = Connection::open(&path).unwrap();
+            tables_of(&conn).unwrap()
+        };
+        let lacks = |table: &str| {
+            !tables()
+                .iter()
+                .any(|sql| sql.starts_with(&format!("CREATE TABLE {table} ")))
+        };
+        assert!(dropped.iter().all(|t| lacks(t)), "{dropped:?}");
+        // Read: what the missing tables kept reads as none, and reading adds nothing.
+        let read = load(&path, &id("unit"));
+        assert!(read.unread.is_none(), "{dropped:?}: {:?}", read.unread);
+        let mut binary_then = binary.clone();
+        binary_then.outside.scripts = None;
+        if dropped.contains(&"unit_env") {
+            binary_then.outside.env = None;
+        }
+        let package_then = package.clone();
+        assert_eq!(read.map.units["src/lib.rs"], binary_then, "{dropped:?}");
+        assert_eq!(read.map.units["pkg"], package_then, "{dropped:?}");
+        assert!(dropped.iter().all(|t| lacks(t)), "{dropped:?}");
+
+        // Written by another check: the tables are made, the first check's rows stay.
+        write_run(&path, &runs("lint")).unwrap();
+        assert!(dropped.iter().all(|t| !lacks(t)), "{dropped:?}");
+        assert!(!aside_of(&path).exists());
+        let kept = load(&path, &id("unit"));
+        assert!(kept.unread.is_none(), "{:?}", kept.unread);
+        assert_eq!(kept.map.units["src/lib.rs"], binary_then);
+        assert_eq!(kept.map.units["pkg"], package_then);
+        let lint = load(&path, &id("lint")).map;
+        assert_eq!(lint.units["src/lib.rs"], binary);
+        assert_eq!(lint.units["pkg"], package);
+        // The next round starts from a store whose `unit` check has its rows again.
+        write_run(&path, &runs("unit")).unwrap();
+    }
 }
 
 /// A store of schema 1 at `path`, as an older hushrun wrote it, with rows of every table: a check

@@ -636,7 +636,7 @@ pub fn observe(
         out.units.insert(
             unit,
             super::Seen {
-                env: None,
+                outside: Default::default(),
                 facts: Facts {
                     complete,
                     failed,

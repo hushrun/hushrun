@@ -139,6 +139,28 @@ impl StartAt<'_> {
     }
 }
 
+/// \[ADR 0095, 0096\] What an adapter's keys all hold of what isn't a file of the scope
+/// ([`hushrun_core::units::Outside`]), and where it comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeysOutside {
+    /// Nothing: every adapter's but Cargo's.
+    #[default]
+    None,
+    /// `env` and `scripts`, from the build (Cargo's): the map keeps them as the key of its last
+    /// build here held them, which `hushrun why` keys a unit by.
+    Build,
+}
+
+impl KeysOutside {
+    /// Whether `outside` holds every member these keys hold: a list that lacks one keys nothing.
+    pub fn held_by(self, outside: &hushrun_core::units::Outside) -> bool {
+        match self {
+            KeysOutside::None => true,
+            KeysOutside::Build => outside.env.is_some() && outside.scripts.is_some(),
+        }
+    }
+}
+
 /// What a plan has to go by, before COMMAND.
 pub struct PlanAt<'a> {
     /// The scope's files now.
@@ -307,11 +329,11 @@ pub trait Adapter: std::fmt::Debug {
         false
     }
 
-    /// \[ADR 0095\] Whether every key of its units holds what their build read of the environment
-    /// (C-31's `env`, Cargo's): then a list without it, from a store an older hushrun wrote or a
-    /// hint, keys nothing, and the unit runs.
-    fn keys_env(&self) -> bool {
-        false
+    /// \[ADR 0095, 0096\] What every key of its units holds of what isn't a file of the scope
+    /// (C-31's `env` and `scripts`, Cargo's): a list without one of them, from a
+    /// store an older hushrun wrote or a hint, keys nothing, and the unit runs.
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
     }
 
     /// \[C-22\] The plan from the scope's files, the map and hints alone, starting no tool, which

@@ -651,7 +651,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         out.units.insert(
             unit,
             super::Seen {
-                env: None,
+                outside: Default::default(),
                 facts: Facts {
                     complete: finished >= selected,
                     failed,

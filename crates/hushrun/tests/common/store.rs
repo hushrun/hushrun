@@ -143,6 +143,8 @@ pub fn forget_env(cache: &Path) {
     let stores = stores(cache);
     assert_eq!(stores.len(), 1, "one store in {}", cache.display());
     let conn = Connection::open(&stores[0]).expect("the store opens");
+    // \[ADR 0096\] With what its build scripts gave it, which needs it.
+    conn.execute("DELETE FROM unit_scripts", []).unwrap();
     conn.execute("DELETE FROM unit_env", []).unwrap();
 }
 

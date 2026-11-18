@@ -685,6 +685,50 @@ def env_digest(entries):
     return "sha256:" + sha256_hex(b"".join(line + b"\0" for line in lines))
 
 
+# [ADR 0096] The lines of a build script's output that reach the compiler or the linker, as C-31
+# lists them.
+SCRIPT_DIRECTIVES = {"rustc-cfg", "rustc-flags", "rustc-link-lib", "rustc-link-search",
+                     "rustc-link-arg", "rustc-link-arg-bins", "rustc-link-arg-bin",
+                     "rustc-link-arg-tests", "rustc-link-arg-examples", "rustc-link-arg-benches",
+                     "rustc-link-arg-cdylib", "rustc-cdylib-link-arg"}
+
+
+def scripts_entries(build):
+    """The entries of a vector's `buildScripts` (C-31's `scripts`): each run's `output ` and its
+    OUT_DIR, then a line feed and each of its output's directives above, in order, `KEY=VALUE`
+    without its `cargo:` or `cargo::`; and each file a dep-info names under the target or build folder,
+    `file `, the SHA-256 of its text, a space and its path. Roots replaced in each."""
+    folders = build["folders"]
+    roots = checkout_roots(folders)
+    replace = (lambda text: text) if roots is None else (lambda text: to_placeholders(roots, text))
+    entries = set()
+    for run in build["runs"]:
+        entry = "output " + replace(run["outDir"])
+        # Lines as Cargo reads them: split at line feeds, each trimmed, its value trimmed at its end.
+        for line in run["output"].split("\n"):
+            line = line.strip()
+            for prefix in ("cargo::", "cargo:"):
+                if line.startswith(prefix):
+                    name, eq, value = line[len(prefix):].partition("=")
+                    if eq and name in SCRIPT_DIRECTIVES:
+                        entry += "\n" + replace(name + "=" + value.rstrip())
+                    break
+        entries.add(entry)
+    made_in = [clean_folder(folders[k]) for k in ("targetDir", "buildDir") if folders.get(k)]
+    for named in build["depInfo"]:
+        path = named["path"]
+        if any(path == d or path.startswith(d + "/") for d in made_in):
+            entries.add("file sha256:%s %s" % (sha256_hex(named["text"].encode("utf-8")),
+                                               replace(path)))
+    return sorted(entries, key=lambda e: e.encode("utf-8"))
+
+
+def scripts_digest(entries):
+    """SHA-256 of each entry as UTF-8 and a NUL, sorted by bytes, each once."""
+    lines = sorted({e.encode("utf-8") for e in entries})
+    return "sha256:" + sha256_hex(b"".join(line + b"\0" for line in lines))
+
+
 def evaluate_unit_key(vector):
     files = {f["path"]: (f["kind"], f["text"].encode("utf-8")) for f in vector["files"]}
     keyed = [p for p in vector["reads"] if p in set(vector["units"]) | set(vector["sources"])]
@@ -710,6 +754,13 @@ def evaluate_unit_key(vector):
         if entries != listed:
             raise ValueError("env-dep lines give %r, the vector lists %r" % (entries, listed))
         key["env"] = got["env"] = env_digest(entries)
+    # [ADR 0096] A Cargo test binary's key: its build scripts' runs and the files they made must
+    # be the vector's entries, whose digest is `scripts`.
+    if "buildScripts" in vector:
+        entries = scripts_entries(vector["buildScripts"])
+        if entries != vector["scripts"]:
+            raise ValueError("build scripts give %r, the vector lists %r" % (entries, vector["scripts"]))
+        key["scripts"] = got["scripts"] = scripts_digest(entries)
     got["key"] = "sha256:" + sha256_hex(jcs(key))
     return got
 
