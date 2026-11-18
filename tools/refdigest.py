@@ -663,17 +663,69 @@ def to_placeholders(roots, text):
     return "".join(out)
 
 
-def env_entries(env_deps):
-    """The entries of a vector's `envDeps`: each `# env-dep:` line, its value's roots replaced."""
+def run_stand_in(package_id):
+    """[ADR 0096] What names a build script's run in a key: `{hushrun:run:<kind>:<name>@<version>}`
+    from its package id, `<kind>+<url>#<name>@<version>` or `<kind>+<url>#<version>`, the name
+    then being the URL's last segment."""
+    url, _, fragment = package_id.rpartition("#") if "#" in package_id else (package_id, "", "")
+    kind = url.split("+", 1)[0] if "+" in url else ""
+    if "@" in fragment:
+        name, _, version = fragment.partition("@")
+    else:
+        name, version = url.rstrip("/").rsplit("/", 1)[-1], fragment
+    return "{hushrun:run:%s:%s@%s}" % (kind, name, version)
+
+
+def replace_folder(text, folder, stand_in):
+    """`folder` in `text` by `stand_in` wherever it ends a path there."""
+    out, i = [], 0
+    while True:
+        at = text.find(folder, i)
+        if at < 0 or not folder:
+            out.append(text[i:])
+            return "".join(out)
+        end = at + len(folder)
+        ends = end == len(text) or text[end] == "/" or not name_char(text[end])
+        out.append(text[i:at])
+        out.append(stand_in if ends else folder)
+        i = end
+
+
+def keyed_text(roots, runs, text):
+    """[ADR 0096] Text as a Cargo key holds it: roots replaced, then each build script run's
+    folder (its `OUT_DIR`'s parent, roots replaced) by its run's stand-in, longest first."""
+    if roots is not None:
+        text = to_placeholders(roots, text)
+    for folder, stand_in in runs:
+        text = replace_folder(text, folder, stand_in)
+    return text
+
+
+def run_folders(roots, build):
+    """The run folders of a vector's `buildScripts`, roots replaced, longest first, with their
+    stand-ins."""
+    found = {}
+    for run in (build or {}).get("runs", []):
+        folder = run["outDir"].rsplit("/", 1)[0]
+        if roots is not None:
+            folder = to_placeholders(roots, folder)
+        found.setdefault(folder, run_stand_in(run["packageId"]))
+    return sorted(found.items(), key=lambda f: (-len(f[0]), f[0]))
+
+
+def env_entries(env_deps, build=None):
+    """The entries of a vector's `envDeps`: each `# env-dep:` line, its value as `keyed_text` has
+    it (roots replaced, and [ADR 0096] the run folders of `build`)."""
     roots = checkout_roots(env_deps["folders"])
+    runs = run_folders(roots, build)
     entries = set()
     for line in env_deps["lines"]:
         found = env_dep(line)
         if found is None:
             continue
         name, value = found
-        if value is not None and roots is not None:
-            value = to_placeholders(roots, value)
+        if value is not None:
+            value = keyed_text(roots, runs, value)
         entries.add((name, value))
     return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None, (e[1] or "").encode("utf-8")))
 
@@ -699,16 +751,19 @@ def scripts_entries(build, scope):
     without its `cargo:` or `cargo::`, then for each variable its output declares with
     `rerun-if-env-changed`, sorted, each once, a line feed, `rerun-if-env-changed=`, its name and,
     when `values` holds it (else it is unset), `=` and its value; and each file a dep-info names
-    under the target or build folder, or in the checkout but not one of the scope's files
-    (`scope`), `file `, the SHA-256 of its text, a space and its path. Roots replaced in each,
-    the file's text included (a vector's text is UTF-8)."""
+    under the target or build folder, or, for a dep-info whose files are reads (`read`, true when
+    absent), in the checkout but not one of the scope's files (`scope`) nor under the cargo home,
+    the rustup home or the toolchain, `file `, the SHA-256 of its text, a space and its path. Each
+    text as `keyed_text` has it: roots replaced, and each run's folder by its stand-in (a vector's
+    text is UTF-8)."""
     folders = build["folders"]
     values = build.get("values", {})
     roots = checkout_roots(folders)
-    replace = (lambda text: text) if roots is None else (lambda text: to_placeholders(roots, text))
+    runs = run_folders(roots, build)
+    keyed = lambda text: keyed_text(roots, runs, text)
     entries = set()
     for run in build["runs"]:
-        entry = "output " + replace(run["outDir"])
+        entry = "output " + keyed(run["outDir"])
         declared = set()
         # Lines as Cargo reads them: split at line feeds, each trimmed, its value trimmed at its end.
         for line in run["output"].split("\n"):
@@ -717,24 +772,28 @@ def scripts_entries(build, scope):
                 if line.startswith(prefix):
                     name, eq, value = line[len(prefix):].partition("=")
                     if eq and name in SCRIPT_DIRECTIVES:
-                        entry += "\n" + replace(name + "=" + value.rstrip())
+                        entry += "\n" + keyed(name + "=" + value.rstrip())
                     elif eq and name == "rerun-if-env-changed":
                         declared.add(value.rstrip())
                     break
         for name in sorted(declared, key=lambda n: n.encode("utf-8")):
             entry += "\nrerun-if-env-changed=" + name
             if name in values:
-                entry += "=" + replace(values[name])
+                entry += "=" + keyed(values[name])
         entries.add(entry)
     made_in = [clean_folder(folders[k]) for k in ("targetDir", "buildDir") if folders.get(k)]
     root = clean_folder(folders["root"])
+    bases = ("{hushrun:cargo-home}", "{hushrun:rustup-home}", "{hushrun:toolchain}")
     for named in build["depInfo"]:
         path = named["path"]
         made = any(path == d or path.startswith(d + "/") for d in made_in)
-        outside_scope = path.startswith(root + "/") and path[len(root) + 1:] not in scope
+        with_roots = path if roots is None else to_placeholders(roots, path)
+        outside_scope = (named.get("read", True)
+                         and path.startswith(root + "/") and path[len(root) + 1:] not in scope
+                         and not with_roots.startswith(bases))
         if made or outside_scope:
-            entries.add("file sha256:%s %s" % (sha256_hex(replace(named["text"]).encode("utf-8")),
-                                               replace(path)))
+            entries.add("file sha256:%s %s" % (sha256_hex(keyed(named["text"]).encode("utf-8")),
+                                               keyed(path)))
     return sorted(entries, key=lambda e: e.encode("utf-8"))
 
 
@@ -789,7 +848,7 @@ def evaluate_unit_key(vector):
     # A Cargo test binary's key: its `env-dep` lines, roots replaced, must be the vector's
     # entries, whose digest is `env`.
     if "envDeps" in vector:
-        entries = env_entries(vector["envDeps"])
+        entries = env_entries(vector["envDeps"], vector.get("buildScripts"))
         listed = [tuple(e) for e in vector["env"]]
         if entries != listed:
             raise ValueError("env-dep lines give %r, the vector lists %r" % (entries, listed))

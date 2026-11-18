@@ -407,26 +407,56 @@ pub fn plan_build(
     let compiled = build(recognized, cwd, true, env, assigned)?;
     let metadata = metadata(recognized, cwd, assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
-    let keying = Keying {
-        roots: roots.as_ref(),
-        assigned,
-        tree: Some(tree),
-    };
+    let keying = Keying::new(roots.as_ref(), assigned, Some(tree), &compiled.scripts);
     Ok(read_build(&metadata, compiled, root, &keying))
 }
 
 /// \[ADR 0095, 0096\] What a build's keys take from beyond its files: the checkout's roots
 /// ([`checkout_roots`]), COMMAND's environment (its assignments over hushrun's,
-/// [`super::command::variable`]), and the scope's files (`tree`: a file of the checkout outside it
-/// that a compile read is keyed by content; `None`, in tests alone, takes every file for the
-/// scope's). The plan and the reading after COMMAND make it alike.
+/// [`super::command::variable`]), the scope's files (`tree`: a file of the checkout outside it
+/// that a member's compile read is keyed by content; `None`, in tests alone, takes every file for
+/// the scope's), and each build script run's folder with the stand-in that names it in a key
+/// ([`run_stand_in`]). The plan and the reading after COMMAND make it alike ([`Keying::new`]).
 struct Keying<'a> {
     roots: Option<&'a hushrun_build::roots::Roots>,
     assigned: &'a [(String, String)],
     tree: Option<&'a units::Tree>,
+    /// Each run's folder as [`Keying::text`] has it with the roots replaced, longest first, and
+    /// its stand-in.
+    runs: Vec<(String, String)>,
 }
 
-impl Keying<'_> {
+impl<'a> Keying<'a> {
+    fn new(
+        roots: Option<&'a hushrun_build::roots::Roots>,
+        assigned: &'a [(String, String)],
+        tree: Option<&'a units::Tree>,
+        scripts: &[ScriptRun],
+    ) -> Keying<'a> {
+        let mut out = Keying {
+            roots,
+            assigned,
+            tree,
+            runs: Vec::new(),
+        };
+        let mut runs: BTreeMap<String, String> = BTreeMap::new();
+        for run in scripts {
+            let Some(folder) = run.out_dir.parent() else {
+                continue;
+            };
+            let real = std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+            for form in [folder, real.as_path()] {
+                let text = out.with_roots(&form.to_string_lossy());
+                runs.entry(text)
+                    .or_insert_with(|| run_stand_in(&run.package_id));
+            }
+        }
+        out.runs = runs.into_iter().collect();
+        out.runs
+            .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
+        out
+    }
+
     /// A variable as COMMAND's environment has it.
     fn var(&self, name: &str) -> Option<String> {
         super::command::variable(self.assigned, name)
@@ -436,6 +466,78 @@ impl Keying<'_> {
     fn in_scope(&self, path: &str) -> bool {
         self.tree.is_none_or(|tree| tree.contains(path))
     }
+
+    fn with_roots(&self, text: &str) -> String {
+        match self.roots {
+            Some(roots) => roots.to_placeholders(text),
+            None => text.to_string(),
+        }
+    }
+
+    /// \[ADR 0095, 0096\] `text` as a key holds it: the roots replaced (B-8's replacement), then
+    /// each build script run's folder, where it starts and ends a path, by its stand-in. The one
+    /// function every value, path and text a Cargo key holds goes through.
+    fn text(&self, text: &str) -> String {
+        let mut out = self.with_roots(text);
+        for (folder, stand_in) in &self.runs {
+            out = replace_folder(&out, folder, stand_in);
+        }
+        out
+    }
+
+    /// Whether `path` is under the cargo home, the rustup home or the toolchain, by its text
+    /// with the roots replaced.
+    fn under_a_base(&self, path: &Path) -> bool {
+        let text = self.with_roots(&path.to_string_lossy());
+        ["cargo-home", "rustup-home", "toolchain"]
+            .iter()
+            .any(|base| text.starts_with(&format!("{{hushrun:{base}}}")))
+    }
+
+    /// [`Keying::text`] of a path.
+    fn path(&self, path: &Path) -> String {
+        self.text(&path.to_string_lossy())
+    }
+}
+
+/// \[ADR 0096\] What names a build script's run in a key: its package's source kind, name and
+/// version, from Cargo's package id (`path+file:///…/gen#0.1.0`, `registry+…#libc@0.2.191`), as
+/// `{hushrun:run:<kind>:<name>@<version>}`; never Cargo's hash of the run, which holds the
+/// profile and, for a path package, its folder. Two runs of one package (the host's copy and the
+/// target's) share it.
+fn run_stand_in(package_id: &str) -> String {
+    let (url, fragment) = package_id.rsplit_once('#').unwrap_or((package_id, ""));
+    let kind = url.split_once('+').map_or("", |(kind, _)| kind);
+    let (name, version) = match fragment.split_once('@') {
+        Some((name, version)) => (name, version),
+        None => (
+            url.trim_end_matches('/').rsplit('/').next().unwrap_or(""),
+            fragment,
+        ),
+    };
+    format!("{{hushrun:run:{kind}:{name}@{version}}}")
+}
+
+/// `text` with `folder` replaced by `with` wherever it ends a path there (the end, a `/`, or a
+/// character that can't be in a name).
+fn replace_folder(text: &str, folder: &str, with: &str) -> String {
+    if folder.is_empty() || !text.contains(folder) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(folder) {
+        let after = &rest[at + folder.len()..];
+        let ends = after
+            .chars()
+            .next()
+            .is_none_or(|c| c == '/' || !(c.is_alphanumeric() || "._-+~@".contains(c)));
+        out.push_str(&rest[..at]);
+        out.push_str(if ends { with } else { folder });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -627,11 +729,7 @@ pub fn observe(
     let metadata = metadata(recognized, cwd, assigned)?;
     let compiled = build(recognized, cwd, false, &[], assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
-    let keying = Keying {
-        roots: roots.as_ref(),
-        assigned,
-        tree: Some(tree),
-    };
+    let keying = Keying::new(roots.as_ref(), assigned, Some(tree), &compiled.scripts);
     let built = read_build(&metadata, compiled, root, &keying);
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
@@ -697,7 +795,6 @@ fn deselected(starts: &[&Invocation]) -> bool {
 /// reading after COMMAND both call it, so both key a binary alike.
 fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Keying<'_>) -> Built {
     let Compiled { artifacts, scripts } = compiled;
-    let roots = keying.roots;
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let root = real(root);
     let relative = |path: &Path| -> Option<String> {
@@ -902,22 +999,28 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
             if files {
                 reads.extend(info.files.iter().filter_map(|p| relative(p)));
             }
-            env.extend(keyed_env(info.env, roots));
+            env.extend(keyed_env(info.env, keying));
             // \[ADR 0096\] What the compile read that no file of the scope is, by its content: a
             // file the build made (under the target or build folder: one a build script
-            // generated), and a file of the checkout outside the scope (a git-ignored source).
-            let files = made.entry(d.clone()).or_insert_with(|| {
+            // generated); and, for a dep-info whose files are reads (the binary's own, its
+            // linked members', their build scripts'), a file of the checkout outside the scope
+            // (a git-ignored source), but none of the cargo home, the rustup home or the
+            // toolchain, which are crates' and the compiler's, pinned by the lockfile and the
+            // toolchain, even inside the checkout.
+            let made_files = made.entry(d.clone()).or_insert_with(|| {
                 info.files
                     .iter()
                     .filter(|f| {
                         let real = real(f);
                         made_in.iter().any(|dir| real.starts_with(dir))
-                            || relative(f).is_some_and(|path| !keying.in_scope(&path))
+                            || (files
+                                && relative(f).is_some_and(|path| !keying.in_scope(&path))
+                                && !keying.under_a_base(f))
                     })
-                    .map(|file| (file.clone(), generated_entry(file, roots)))
+                    .map(|file| (file.clone(), generated_entry(file, keying)))
                     .collect()
             });
-            for (file, entry) in files.iter() {
+            for (file, entry) in made_files.iter() {
                 match entry {
                     Some(entry) => {
                         given.insert(entry.clone());
@@ -925,7 +1028,7 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
                     None => {
                         not_followed.insert(NotFollowed {
                             why: "unreadable-generated-file".into(),
-                            detail: placeholders(file, roots),
+                            detail: keying.path(file),
                         });
                     }
                 }
@@ -1006,18 +1109,17 @@ fn script_entry(
     output: &hushrun_build::script::Script,
     keying: &Keying<'_>,
 ) -> String {
-    let roots = keying.roots;
-    let mut entry = format!("output {}", placeholders(out_dir, roots));
+    let mut entry = format!("output {}", keying.path(out_dir));
     for directive in &output.to_the_compile {
         entry.push('\n');
-        entry.push_str(&text_placeholders(directive, roots));
+        entry.push_str(&keying.text(directive));
     }
     for name in &output.rerun_if_env_changed {
         entry.push_str("\nrerun-if-env-changed=");
         entry.push_str(name);
         if let Some(value) = keying.var(name) {
             entry.push('=');
-            entry.push_str(&text_placeholders(&value, roots));
+            entry.push_str(&keying.text(&value));
         }
     }
     entry
@@ -1027,18 +1129,18 @@ fn script_entry(
 /// `file `, the SHA-256 of its text with `roots` replaced when it is UTF-8 (a file generated with a
 /// folder of the machine in it then keys the same on another), else of its bytes, a space and its
 /// path, `roots` replaced; `None` when it can't be read.
-fn generated_entry(file: &Path, roots: Option<&hushrun_build::roots::Roots>) -> Option<String> {
+fn generated_entry(file: &Path, keying: &Keying<'_>) -> Option<String> {
     let bytes = std::fs::read(file).ok()?;
-    Some(made_entry(&bytes, file, roots))
+    Some(made_entry(&bytes, file, keying))
 }
 
 /// \[ADR 0096\] [`generated_entry`] of a file whose bytes are `bytes`.
-fn made_entry(bytes: &[u8], file: &Path, roots: Option<&hushrun_build::roots::Roots>) -> String {
-    let digest = match (std::str::from_utf8(bytes), roots) {
-        (Ok(text), Some(roots)) => Digest::of(roots.to_placeholders(text).as_bytes()),
-        _ => Digest::of(bytes),
+fn made_entry(bytes: &[u8], file: &Path, keying: &Keying<'_>) -> String {
+    let digest = match std::str::from_utf8(bytes) {
+        Ok(text) => Digest::of(keying.text(text).as_bytes()),
+        Err(_) => Digest::of(bytes),
     };
-    format!("file {digest} {}", placeholders(file, roots))
+    format!("file {digest} {}", keying.path(file))
 }
 
 /// \[ADR 0096\] What the build script whose `OUT_DIR` is `out_dir` printed, from the output Cargo
@@ -1048,19 +1150,6 @@ fn script_output(out_dir: &Path) -> Option<hushrun_build::script::Script> {
     Some(hushrun_build::script::parse_bytes(
         &std::fs::read(saved).ok()?,
     ))
-}
-
-/// `path` as text, `roots` replaced.
-fn placeholders(path: &Path, roots: Option<&hushrun_build::roots::Roots>) -> String {
-    text_placeholders(&path.to_string_lossy(), roots)
-}
-
-/// `text`, `roots` replaced: as [`keyed_env`] replaces them in a value.
-fn text_placeholders(text: &str, roots: Option<&hushrun_build::roots::Roots>) -> String {
-    match roots {
-        Some(roots) => roots.to_placeholders(text),
-        None => text.to_string(),
-    }
 }
 
 /// \[ADR 0096\] The files a `rerun-if-changed` path names: the file, or every file below the
@@ -1477,19 +1566,14 @@ fn sysroot(
     (output.status.success() && Path::new(line).is_absolute()).then(|| line.to_string())
 }
 
-/// \[ADR 0095\] One dep-info's variables as a key holds them (C-31's `env`): each value with
-/// `roots`' placeholders in place of the folders they name; as they are without roots.
-fn keyed_env(
+/// \[ADR 0095\] One dep-info's variables as a key holds them (C-31's `env`): each value as
+/// [`Keying::text`] has it, the roots and \[ADR 0096\] each build script run's folder replaced.
+fn keyed_env<'k>(
     env: BTreeSet<(String, Option<String>)>,
-    roots: Option<&hushrun_build::roots::Roots>,
-) -> impl Iterator<Item = (String, Option<String>)> + '_ {
-    env.into_iter().map(move |(name, value)| {
-        let value = match (value, roots) {
-            (Some(value), Some(roots)) => Some(roots.to_placeholders(&value)),
-            (value, _) => value,
-        };
-        (name, value)
-    })
+    keying: &'k Keying<'_>,
+) -> impl Iterator<Item = (String, Option<String>)> + 'k {
+    env.into_iter()
+        .map(move |(name, value)| (name, value.map(|value| keying.text(&value))))
 }
 
 /// What a dep-info file says a compile read.
@@ -1743,11 +1827,7 @@ mod tests {
     /// \[ADR 0096\] Keys of a build with `roots`, no variable assigned, and every file the
     /// scope's.
     fn keyed(roots: Option<&hushrun_build::roots::Roots>) -> Keying<'_> {
-        Keying {
-            roots,
-            assigned: &[],
-            tree: None,
-        }
+        Keying::new(roots, &[], None, &[])
     }
 
     fn words(text: &str) -> Vec<String> {
@@ -1886,11 +1966,32 @@ mod tests {
                 |_: &str| None,
             )
             .unwrap();
+            // \[ADR 0096\] Its build scripts' runs, each by its package and `OUT_DIR`, and the
+            // variables they declare, as COMMAND's environment has them: those the vector leaves
+            // out are unset here too.
+            let build = vector.get("buildScripts");
+            let runs: Vec<ScriptRun> = build
+                .and_then(|b| b["runs"].as_array())
+                .into_iter()
+                .flatten()
+                .map(|run| ScriptRun {
+                    package_id: run["packageId"].as_str().unwrap().to_string(),
+                    out_dir: PathBuf::from(run["outDir"].as_str().unwrap()),
+                })
+                .collect();
+            let assigned: Vec<(String, String)> = build
+                .and_then(|b| b.get("values"))
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flatten()
+                .map(|(n, v)| (n.clone(), v.as_str().unwrap().to_string()))
+                .collect();
+            let keying = Keying::new(Some(&roots), &assigned, None, &runs);
             let entries: Vec<(String, Option<String>)> = keyed_env(
                 env_of(&format!("/t/a.d: src/lib.rs\n\n{}\n", lines.join("\n")))
                     .into_iter()
                     .collect(),
-                Some(&roots),
+                &keying,
             )
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -1919,20 +2020,6 @@ mod tests {
                 continue;
             };
             assert_eq!(build["folders"], deps["folders"], "{}", vector["name"]);
-            // The variables its build scripts declare, as COMMAND's environment has them: those
-            // the vector leaves out are unset here too.
-            let assigned: Vec<(String, String)> = build
-                .get("values")
-                .and_then(serde_json::Value::as_object)
-                .into_iter()
-                .flatten()
-                .map(|(n, v)| (n.clone(), v.as_str().unwrap().to_string()))
-                .collect();
-            let keying = Keying {
-                roots: Some(&roots),
-                assigned: &assigned,
-                tree: None,
-            };
             let mut given: BTreeSet<String> = BTreeSet::new();
             for run in build["runs"].as_array().unwrap() {
                 let output = hushrun_build::script::parse(run["output"].as_str().unwrap());
@@ -1957,14 +2044,19 @@ mod tests {
                 .collect();
             for named in build["depInfo"].as_array().unwrap() {
                 let path = Path::new(named["path"].as_str().unwrap());
+                // A dep-info whose files are reads, unless the vector says it is a crate's
+                // outside the workspace.
+                let read = named.get("read").and_then(serde_json::Value::as_bool) != Some(false);
                 let outside_scope = path
                     .strip_prefix(&checkout)
                     .ok()
                     .and_then(Path::to_str)
                     .is_some_and(|rel| !scope.contains(rel));
-                if made_in.iter().any(|dir| path.starts_with(dir)) || outside_scope {
+                if made_in.iter().any(|dir| path.starts_with(dir))
+                    || (read && outside_scope && !keying.under_a_base(path))
+                {
                     let text = named["text"].as_str().unwrap();
-                    given.insert(made_entry(text.as_bytes(), path, Some(&roots)));
+                    given.insert(made_entry(text.as_bytes(), path, &keying));
                 }
             }
             let listed: BTreeSet<String> = vector["scripts"]
@@ -2256,11 +2348,7 @@ mod tests {
             script_entry(
                 Path::new("/o"),
                 &output,
-                &Keying {
-                    roots: Some(roots),
-                    assigned: &assigned,
-                    tree: None,
-                },
+                &Keying::new(Some(roots), &assigned, None, &[]),
             )
         };
         assert!(std::env::var_os("HUSHRUN_TEST_CC").is_none());
@@ -2291,7 +2379,7 @@ mod tests {
             made_entry(
                 bytes,
                 &Path::new(root).join("target/x/info.rs"),
-                Some(roots),
+                &Keying::new(Some(roots), &[], None, &[]),
             )
         };
         assert_eq!(
@@ -2317,6 +2405,84 @@ mod tests {
                 "file {} {{hushrun:target-dir}}/x/info.rs",
                 Digest::of(&binary)
             )
+        );
+    }
+
+    // covers: C-31
+    // \[ADR 0096\] A build script's run is named by its package, never by Cargo's hash of the run:
+    // its folder, wherever it shows (an `OUT_DIR`, a line of its output, a generated file's path
+    // or text, an `env-dep` value), is its package's stand-in, so another profile or another
+    // folder for a path crate keys alike; a folder that only starts like it is left.
+    #[test]
+    fn a_build_scripts_run_is_named_by_its_package_not_cargos_hash_of_it() {
+        assert_eq!(
+            run_stand_in("path+file:///home/dev/shop/crates/gen#0.1.0"),
+            "{hushrun:run:path:gen@0.1.0}"
+        );
+        assert_eq!(
+            run_stand_in("path+file:///home/dev/nearby#near-crate@0.2.0"),
+            "{hushrun:run:path:near-crate@0.2.0}"
+        );
+        assert_eq!(
+            run_stand_in("registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191"),
+            "{hushrun:run:registry:libc@0.2.191}"
+        );
+        let keyed_at = |root: &str, hash: &str, id: &str| {
+            let roots = hushrun_build::roots::Roots::of_checkout(
+                &hushrun_build::roots::CheckoutFolders {
+                    checkout: root.into(),
+                    target_dir: Some(format!("{root}/target")),
+                    ..Default::default()
+                },
+                |_: &str| None,
+            )
+            .unwrap();
+            let run = ScriptRun {
+                package_id: id.to_string(),
+                out_dir: PathBuf::from(format!("{root}/target/debug/build/gen-{hash}/out")),
+            };
+            let keying = Keying::new(Some(&roots), &[], None, std::slice::from_ref(&run));
+            let output = hushrun_build::script::parse(&format!(
+                "cargo:rustc-link-search=native={root}/target/debug/build/gen-{hash}/out/lib\n"
+            ));
+            let made = format!("{root}/target/debug/build/gen-{hash}/out/gen.rs");
+            (
+                script_entry(&run.out_dir, &output, &keying),
+                made_entry(
+                    format!("pub const AT: &str = {made:?};").as_bytes(),
+                    Path::new(&made),
+                    &keying,
+                ),
+                keying.text(&format!("{root}/target/debug/build/gen-{hash}x/out")),
+            )
+        };
+        let laptop = keyed_at(
+            "/home/dev/shop",
+            "5f5067efb30853ee",
+            "path+file:///home/dev/shop/crates/gen#0.1.0",
+        );
+        let ci = keyed_at(
+            "/builds/ci/shop",
+            "610a614356ecdf9c",
+            "path+file:///builds/ci/shop/crates/gen#0.1.0",
+        );
+        assert_eq!(
+            laptop.0,
+            "output {hushrun:run:path:gen@0.1.0}/out\nrustc-link-search=native={hushrun:run:path:gen@0.1.0}/out/lib"
+        );
+        assert_eq!(laptop.0, ci.0);
+        assert_eq!(laptop.1, ci.1);
+        assert!(
+            laptop
+                .1
+                .ends_with(" {hushrun:run:path:gen@0.1.0}/out/gen.rs"),
+            "{}",
+            laptop.1
+        );
+        // A folder that only starts as the run's does isn't it.
+        assert_eq!(
+            laptop.2,
+            "{hushrun:target-dir}/debug/build/gen-5f5067efb30853eex/out"
         );
     }
 
