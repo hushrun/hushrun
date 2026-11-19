@@ -60,6 +60,8 @@ const COST: &str = "cost";
 pub(crate) const ORIGIN: &str = "origin.json";
 /// The lock its rewrites take.
 const ORIGIN_LOCK: &str = "origin.lock";
+/// The lock of the store's suspensions, at its root ([`Store::suspend_until`]).
+const SUSPEND_LOCK: &str = "suspend.lock";
 /// The registry of output folders the wrapper wrote unit records in (B-23): one file each.
 const OUT_DIRS: &str = "out-dirs";
 /// The schema name of an entry of that registry.
@@ -681,8 +683,8 @@ impl Store {
     }
 
     /// The lock of the store's suspensions, held while one is read and written (they are rare:
-    /// one lock for all of them leaves no file in a first key's folder); `None` when it can't be
-    /// taken, and then the write goes ahead unguarded.
+    /// one lock at the store's root for all of them leaves no file among the first keys'
+    /// folders); `None` when it can't be taken, and then the write goes ahead unguarded.
     fn suspension_lock(&self, step: &Digest) -> Option<fs::File> {
         let dir = self.step_dir(step);
         fs::create_dir_all(&dir).ok()?;
@@ -690,7 +692,7 @@ impl Store {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(self.root.join(STEPS).join(".suspend.lock"))
+            .open(self.root.join(SUSPEND_LOCK))
             .ok()?;
         file.lock().ok()?;
         Some(file)
