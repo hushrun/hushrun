@@ -54,9 +54,10 @@ pub const HUSHRUN_CC: &str = "HUSHRUN_CC";
 pub const CMAKE_LAUNCHERS: [&str; 2] = ["CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER"];
 
 /// What `hushrun run` sets the launcher variables to (B-50): a CMake list that runs `/bin/sh`,
-/// which replaces itself with `$HUSHRUN_CC <compiler> <arguments>` when the variable is set and
-/// with `<compiler> <arguments>` when it isn't.
-pub const INDIRECTION: &str = r#"/bin/sh;-c;exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0" "$@""#;
+/// which replaces itself with `$HUSHRUN_CC <compiler> <arguments>` when the variable names a
+/// program it can run and with `<compiler> <arguments>` when it doesn't (unset, empty, or a link
+/// whose run is gone). No `;` in it: CMake would split the list there.
+pub const INDIRECTION: &str = r#"/bin/sh;-c;[ -x "$HUSHRUN_CC" ] || HUSHRUN_CC= && exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0" "$@""#;
 
 /// The kind of a C or C++ block on the wire (B-60).
 pub const KIND: &str = "cc/1";
@@ -126,9 +127,14 @@ mod tests {
         };
         assert_eq!(run(None), ("a b|c|".to_string(), Some(0)));
         assert_eq!(run(Some("")), ("a b|c|".to_string(), Some(0)));
+        // Set to a link that is gone (hushrun removed, a run's folder deleted): the compiler.
+        assert_eq!(
+            run(Some("/nonexistent/hushrun-cc")),
+            ("a b|c|".to_string(), Some(0))
+        );
         // Set: the launcher comes first and gets the compiler and its arguments.
         assert_eq!(
-            run(Some("echo")),
+            run(Some("/bin/echo")),
             ("printf %s| a b c\n".to_string(), Some(0))
         );
     }

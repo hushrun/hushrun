@@ -751,7 +751,7 @@ const PRINT_LAUNCHER: &str = r#"printf '%s|%s|%s' "$CMAKE_C_COMPILER_LAUNCHER" "
 fn run_gives_cmake_the_launcher_only_when_reuse_is_on_and_leaves_the_person_s() {
     let w = World::new("acme-api.yaml");
     let tested = std::fs::canonicalize(assert_cmd::cargo::cargo_bin("hushrun")).unwrap();
-    let indirection = r#"/bin/sh;-c;exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0" "$@""#;
+    let indirection = hushrun_build::cc::INDIRECTION;
     let split = |ran: &Ran| -> Vec<String> { ran.stdout.split('|').map(str::to_string).collect() };
 
     let off = run_sh(&mut hushrun(&w), "x", PRINT_LAUNCHER);
