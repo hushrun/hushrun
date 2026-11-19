@@ -296,6 +296,10 @@ fn refused(arg: &str) -> Option<Why> {
         ("-fcrash-diagnostics-dir", "second-output"),
         ("-foptimization-record-file", "second-output"),
         ("-fsave-optimization-record=", "second-output"),
+        ("-gsplit-dwarf=", "second-output"),
+        ("-fcallgraph-info=", "second-output"),
+        ("-fdiagnostics-add-output=", "second-output"),
+        ("-fdiagnostics-set-output=", "second-output"),
         ("-fplugin", "loads-code"),
         ("-fpass-plugin", "loads-code"),
         ("--config=", "loads-code"),
@@ -320,6 +324,18 @@ fn refused(arg: &str) -> Option<Why> {
     {
         return Some("second-output");
     }
+    // GCC's diagnostics written to a file (`json-file`, `sarif-file`).
+    if let Some(format) = arg.strip_prefix("-fdiagnostics-format=")
+        && format.ends_with("-file")
+    {
+        return Some("second-output");
+    }
+    // The assembler's listing to a file (`-Wa,-adhln=file`) or its own depfile.
+    if let Some(rest) = arg.strip_prefix("-Wa,")
+        && rest.split(',').any(assembler_writes)
+    {
+        return Some("second-output");
+    }
     // `-Wp,-MD,file` and its kin write a depfile through the preprocessor's own flags.
     if let Some(rest) = arg.strip_prefix("-Wp,")
         && rest.split(',').any(|part| part.starts_with("-M"))
@@ -334,6 +350,12 @@ fn refused(arg: &str) -> Option<Why> {
         return Some("deps-only");
     }
     None
+}
+
+/// Whether an assembler flag writes a file: a listing to a file (`-a…=file`) or a depfile
+/// (`--MD`).
+fn assembler_writes(flag: &str) -> bool {
+    (flag.starts_with("-a") && flag.contains('=')) || flag.starts_with("--MD")
 }
 
 /// Whether a flag goes into the driver's probe (B-52): what changes the target, the sysroot,
@@ -493,6 +515,9 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
                 let Some(v) = value(i) else {
                     return PassThrough("malformed");
                 };
+                if arg == "-Xassembler" && assembler_writes(&v) {
+                    return PassThrough("second-output");
+                }
                 match arg {
                     "-I" => search.push(dir(&v, false, false)),
                     "-F" => search.push(dir(&v, true, false)),
@@ -826,6 +851,34 @@ mod tests {
             ),
             (
                 &["-fopt-info-vec=f.txt", "-c", "a.c", "-o", "a.o"],
+                "second-output",
+            ),
+            (
+                &["-gsplit-dwarf=single", "-c", "a.c", "-o", "a.o"],
+                "second-output",
+            ),
+            (
+                &["-fcallgraph-info=su", "-c", "a.c", "-o", "a.o"],
+                "second-output",
+            ),
+            (
+                &["-fdiagnostics-format=sarif-file", "-c", "a.c", "-o", "a.o"],
+                "second-output",
+            ),
+            (
+                &["-fdiagnostics-add-output=sarif", "-c", "a.c", "-o", "a.o"],
+                "second-output",
+            ),
+            (
+                &["-Wa,-adhln=a.lst", "-c", "a.c", "-o", "a.o"],
+                "second-output",
+            ),
+            (
+                &["-Xassembler", "-adhln=a.lst", "-c", "a.c", "-o", "a.o"],
+                "second-output",
+            ),
+            (
+                &["-Wa,--MD,a.ad", "-c", "a.c", "-o", "a.o"],
                 "second-output",
             ),
             (&["-fplugin=p.so", "-c", "a.c", "-o", "a.o"], "loads-code"),
