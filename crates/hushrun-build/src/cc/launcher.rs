@@ -396,7 +396,7 @@ fn decide(
                 compile.lang,
                 &compile.native,
                 &var,
-                &store,
+                &current.folder,
                 &ask
             ),
             "native"

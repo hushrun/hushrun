@@ -29,7 +29,7 @@ use crate::regular;
 pub const DIR: &str = "cc-digests";
 
 /// The schema every entry carries.
-const SCHEMA: &str = "hushrun.cc-run-digests/1";
+const SCHEMA: &str = "hushrun.cc-run-digests/2";
 
 /// A read file's digest, its stat before it was read, and what it holds.
 #[derive(Debug, Clone)]
@@ -252,7 +252,8 @@ fn entry_path(session: &Path, folder: &Path) -> PathBuf {
     session.join(DIR).join(format!("{name}.json"))
 }
 
-fn write_whole(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Writes `path` in `dir` whole: a temporary file of its own, renamed into place.
+pub(crate) fn write_whole(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     for n in 0..64 {
         let temp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));

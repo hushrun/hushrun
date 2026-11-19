@@ -23,12 +23,23 @@ use crate::regular;
 /// The schema the identity is taken under.
 const SCHEMA: &str = "hushrun.cc-compiler/v1";
 /// The schema of a memo entry.
-const MEMO_SCHEMA: &str = "hushrun.cc-compiler-memo/1";
+const MEMO_SCHEMA: &str = "hushrun.cc-compiler-memo/2";
 /// Where a memo entry's name starts, in the store's compiler memos ([`crate::compiler::MEMOS`]).
 const MEMO_PREFIX: &str = "cc-";
 
-/// The variables that choose a toolchain on macOS, and `PATH`, which finds a program by name.
-const TOOLCHAIN_VARS: &[&str] = &["DEVELOPER_DIR", "SDKROOT", "TOOLCHAINS", "PATH"];
+/// The variables that choose a toolchain on macOS, `PATH`, which finds a program by name, and
+/// those that change what the driver reads or adds: clang's configuration files and override,
+/// GCC's program prefixes.
+const TOOLCHAIN_VARS: &[&str] = &[
+    "DEVELOPER_DIR",
+    "SDKROOT",
+    "TOOLCHAINS",
+    "PATH",
+    "CLANG_NO_DEFAULT_CONFIG",
+    "CCC_OVERRIDE_OPTIONS",
+    "GCC_EXEC_PREFIX",
+    "COMPILER_PATH",
+];
 
 /// Apple's trampolines in `/usr/bin`, which start the toolchain `xcrun` picks.
 const TRAMPOLINES: &[&str] = &["cc", "c++", "clang", "clang++", "gcc", "g++"];
@@ -36,11 +47,25 @@ const TRAMPOLINES: &[&str] = &["cc", "c++", "clang", "clang++", "gcc", "g++"];
 /// One system folder of the compiler's search, as its driver lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemDir {
-    /// The folder, resolved.
+    /// The folder as the driver names it, which is how a compile spells what it finds there.
     pub path: String,
     /// A framework folder.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub framework: bool,
+    /// The folder resolved, when that is another path (the SDK through `MacOSX.sdk`'s link).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
+}
+
+impl SystemDir {
+    /// Whether an absolute path lies under the folder, in either form.
+    fn holds(&self, path: &str) -> bool {
+        places::under(path, &self.path)
+            || self
+                .resolved
+                .as_deref()
+                .is_some_and(|r| places::under(path, r))
+    }
 }
 
 /// What the launcher knows of one compiler for one language and set of driver flags.
@@ -52,8 +77,12 @@ pub struct Identity {
     pub clang: bool,
     /// The target triple the driver names: a block's platform (B-60).
     pub target: String,
-    /// The SDK the driver uses, resolved, when it names one.
+    /// The SDK the driver uses, as it names it, when it names one.
     pub sdk: Option<String>,
+    /// The SDK resolved, when that is another path: a compile spells what it reads through the
+    /// form the driver names, and the store keys both as `{sdk}` (B-54).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_resolved: Option<String>,
     /// The folder above the compiler's `bin`, resolved, when it is not a system folder.
     pub toolchain: Option<String>,
     /// The folders the driver searches for system headers, in order.
@@ -63,14 +92,14 @@ pub struct Identity {
 impl Identity {
     /// The bases of this compiler's calls: the SDK and the toolchain, every form.
     pub fn places(&self, roots: &[String]) -> Places {
-        let sdk: Vec<String> = self.sdk.iter().cloned().collect();
+        let sdk: Vec<String> = self.sdk.iter().chain(&self.sdk_resolved).cloned().collect();
         let toolchain: Vec<String> = self.toolchain.iter().cloned().collect();
         Places::new(roots, &sdk, &toolchain)
     }
 
     /// Whether an absolute path lies under one of the driver's system folders, or a usual one.
     pub fn in_system(&self, path: &str) -> bool {
-        self.system.iter().any(|d| places::under(path, &d.path))
+        self.in_driver_system(path)
             || [
                 "/usr/include",
                 "/usr/local/include",
@@ -78,6 +107,11 @@ impl Identity {
             ]
             .iter()
             .any(|d| places::under(path, d))
+    }
+
+    /// Whether an absolute path lies under one of the driver's own system folders.
+    pub fn in_driver_system(&self, path: &str) -> bool {
+        self.system.iter().any(|d| d.holds(path))
     }
 }
 
@@ -282,10 +316,15 @@ fn search_list(text: &str) -> Vec<SystemDir> {
                 Some(p) => (p, true),
                 None => (line, false),
             };
-            let path = fs::canonicalize(path)
+            let resolved = fs::canonicalize(path)
+                .ok()
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| path.to_string());
-            dirs.push(SystemDir { path, framework });
+                .filter(|r| r != path);
+            dirs.push(SystemDir {
+                path: path.to_string(),
+                framework,
+                resolved,
+            });
         }
     }
     dirs
@@ -344,11 +383,12 @@ fn ask_identity(
     let sdk = quoted_after(&driver.stderr, "-isysroot")
         .or_else(|| var("SDKROOT").map(|v| v.to_string_lossy().into_owned()))
         .filter(|s| !s.is_empty())
-        .map(|s| {
-            fs::canonicalize(&s)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or(s)
-        });
+        .map(|s| s.trim_end_matches('/').to_string());
+    let sdk_resolved = sdk
+        .as_deref()
+        .and_then(|s| fs::canonicalize(s).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|r| Some(r) != sdk.as_ref());
     let toolchain = real
         .parent()
         .and_then(Path::parent)
@@ -386,6 +426,43 @@ fn ask_identity(
             }
         }
     }
+    // What the driver read besides its binary (B-52): clang's configuration files, GCC's specs,
+    // each hashed and kept to the memo by its stat.
+    let mut read = serde_json::Map::new();
+    for line in driver.stderr.lines() {
+        let named = line
+            .strip_prefix("Configuration file: ")
+            .or_else(|| line.strip_prefix("Reading specs from "));
+        if let Some(named) = named {
+            let path = fs::canonicalize(named.trim())?;
+            let (digest, _) = regular::hash_file(&path)?;
+            files.push(MemoFile::of(&path)?);
+            read.insert(path.to_string_lossy().into_owned(), digest.hex().into());
+        }
+    }
+    if clang {
+        // A distribution's clang loads its code from shared libraries an update changes without
+        // touching the binary; and a configuration file made beside the binary is read from
+        // then on: the binary's folder is kept by its stat.
+        if let Some(bin) = real.parent() {
+            files.push(MemoFile::of(bin)?);
+            for lib in llvm_libraries(&bin.join("../lib")) {
+                let (digest, _) = regular::hash_file(&lib)?;
+                files.push(MemoFile::of(&lib)?);
+                read.insert(lib.to_string_lossy().into_owned(), digest.hex().into());
+            }
+        }
+    } else if let Some(said) = ask(exe, &["-print-search-dirs".to_string()]) {
+        // A specs file made in GCC's own folder is read from then on.
+        if let Some(install) = said
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("install: "))
+            .and_then(|dir| fs::canonicalize(dir.trim()).ok())
+        {
+            files.push(MemoFile::of(&install)?);
+        }
+    }
     let mut sdk_settings = serde_json::Value::Null;
     if let Some(sdk) = &sdk {
         let settings = Path::new(sdk).join("SDKSettings.json");
@@ -396,7 +473,7 @@ fn ask_identity(
     }
     let places = Places::new(
         &[],
-        &sdk.iter().cloned().collect::<Vec<_>>(),
+        &sdk.iter().chain(&sdk_resolved).cloned().collect::<Vec<_>>(),
         &toolchain.iter().cloned().collect::<Vec<_>>(),
     );
     let hidden_flags: Vec<String> = driver_flags.iter().map(|f| places.hide(f)).collect();
@@ -405,6 +482,7 @@ fn ask_identity(
         "binary": binary.hex(),
         "driver": places.hide(&without_temp_names(&driver.stderr)),
         "programs": programs,
+        "read": read,
         "sdk_settings": sdk_settings,
         "lang": lang.word(),
         "flags": hidden_flags,
@@ -417,6 +495,7 @@ fn ask_identity(
             clang,
             target,
             sdk,
+            sdk_resolved,
             toolchain,
             system,
         },
@@ -424,15 +503,38 @@ fn ask_identity(
     ))
 }
 
+/// The shared libraries of LLVM and clang in `dir`, resolved: what a distribution's clang loads
+/// its code from.
+fn llvm_libraries(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            (name.starts_with("libLLVM") || name.starts_with("libclang-cpp"))
+                && (name.contains(".so") || name.ends_with(".dylib"))
+        })
+        .filter_map(|e| fs::canonicalize(e.path()).ok())
+        .filter(|p| p.is_file())
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
 /// What the driver resolves `-march=native` and its kin to (B-53): its `-###` text for a compile
-/// with them, the toolchain's folders hidden. Asked once per identity and flags, memoised.
+/// with them, the toolchain's folders hidden. Asked once per identity and flags in a run, and
+/// memoised in the run's folder `session`, never in the store: a store a network share gives
+/// several machines would answer with another machine's processor.
 pub fn native(
     compiler: &OsString,
     identity: &Identity,
     lang: Lang,
     flags: &[String],
     var: &dyn Fn(&str) -> Option<OsString>,
-    memos: &crate::store::Store,
+    session: &Path,
     ask: &Ask<'_>,
 ) -> Option<String> {
     let key = Digest::of(
@@ -444,10 +546,7 @@ pub fn native(
         )
         .as_bytes(),
     );
-    let path = memos
-        .root()
-        .join(crate::compiler::MEMOS)
-        .join(format!("{MEMO_PREFIX}native-{}.txt", key.hex()));
+    let path = session.join(format!("cc-native-{}.txt", key.hex()));
     if let Ok(text) = fs::read_to_string(&path) {
         return Some(text);
     }
@@ -464,7 +563,7 @@ pub fn native(
     probe.extend(flags.iter().cloned());
     let said = ask(&exe, &probe).filter(|s| s.success)?;
     let text = identity.places(&[]).hide(&without_temp_names(&said.stderr));
-    let _ = memos.write_whole(&path, text.as_bytes(), None, false);
+    let _ = super::memo::write_whole(session, &path, text.as_bytes());
     Some(text)
 }
 
@@ -558,5 +657,145 @@ mod tests {
             Some("/sdk/MacOSX.sdk")
         );
         assert!(quoted_after(driver, "-resource-dir").is_none());
+    }
+
+    /// A clang that is a plain file in `<dir>/tc/bin`, answering the identity's questions as
+    /// `driver` says, and counting them.
+    struct FakeClang {
+        exe: PathBuf,
+        asked: std::cell::Cell<u32>,
+        driver: String,
+    }
+
+    impl FakeClang {
+        fn new(dir: &Path, driver: &str) -> FakeClang {
+            let bin = dir.join("tc/bin");
+            fs::create_dir_all(&bin).unwrap();
+            let exe = bin.join("clang");
+            fs::write(&exe, b"not really clang").unwrap();
+            FakeClang {
+                exe,
+                asked: std::cell::Cell::new(0),
+                driver: driver.to_string(),
+            }
+        }
+
+        fn ask(&self, _program: &Path, args: &[String]) -> Option<Said> {
+            self.asked.set(self.asked.get() + 1);
+            let stderr = if args.iter().any(|a| a == "-###") {
+                self.driver.clone()
+            } else {
+                "#include <...> search starts here:\n /nonexistent/include\nEnd of search list.\n"
+                    .to_string()
+            };
+            Some(Said {
+                success: true,
+                stdout: String::new(),
+                stderr,
+            })
+        }
+
+        fn identity(&self, store: &crate::store::Store, vars: &[(&str, &str)]) -> Identity {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect();
+            let var = move |name: &str| {
+                vars.iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| OsString::from(v))
+            };
+            identity(
+                &self.exe.clone().into_os_string(),
+                Lang::C,
+                &[],
+                &var,
+                store,
+                &|p: &Path, a: &[String]| self.ask(p, a),
+            )
+            .unwrap()
+        }
+    }
+
+    fn touch(path: &Path, text: &str) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(path, text).unwrap();
+    }
+
+    // covers: B-52
+    #[test]
+    fn the_memo_follows_the_configuration_files_and_libraries_the_driver_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("tc/bin/clang.cfg");
+        let lib = dir.path().join("tc/lib/libclang-cpp.so.19");
+        let clang = FakeClang::new(
+            dir.path(),
+            &format!(
+                "clang version 19\nTarget: x86_64-unknown-linux-gnu\nConfiguration file: {}\n \"clang\" \"-cc1\"\n",
+                config.display()
+            ),
+        );
+        fs::write(&config, "-O2\n").unwrap();
+        fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        fs::write(&lib, "llvm 19.1.0").unwrap();
+        let store = crate::store::Store::new(&dir.path().join("store"));
+        let first = clang.identity(&store, &[]);
+        let asked = clang.asked.get();
+        assert_eq!(clang.identity(&store, &[]), first, "the memo answers");
+        assert_eq!(clang.asked.get(), asked);
+        // The configuration file changes: the memo no longer answers, and the identity moves.
+        touch(&config, "-O3\n");
+        let configured = clang.identity(&store, &[]);
+        assert!(clang.asked.get() > asked);
+        assert_ne!(configured.digest, first.digest);
+        // So does the library a distribution's update replaces under an unchanged binary.
+        touch(&lib, "llvm 19.1.1");
+        let updated = clang.identity(&store, &[]);
+        assert_ne!(updated.digest, configured.digest);
+        // A variable that turns the configuration off is part of the memo's name.
+        let asked = clang.asked.get();
+        clang.identity(&store, &[("CLANG_NO_DEFAULT_CONFIG", "1")]);
+        assert!(clang.asked.get() > asked);
+    }
+
+    // covers: B-53
+    #[test]
+    fn what_native_resolves_to_is_memoised_in_the_run_not_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let clang = FakeClang::new(
+            dir.path(),
+            "Target: x\n \"-cc1\" \"-target-cpu\" \"apple-m4\"\n",
+        );
+        let store = crate::store::Store::new(&dir.path().join("store"));
+        let id = clang.identity(&store, &[]);
+        let ask = |p: &Path, a: &[String]| clang.ask(p, a);
+        let flags = vec!["-mcpu=native".to_string()];
+        let exe = clang.exe.clone().into_os_string();
+        let none = |_: &str| None;
+        for run in ["one", "two"] {
+            let session = dir.path().join(run);
+            fs::create_dir_all(&session).unwrap();
+            let asked = clang.asked.get();
+            assert!(native(&exe, &id, Lang::C, &flags, &none, &session, &ask).is_some());
+            assert_eq!(clang.asked.get(), asked + 1, "each run asks once");
+            native(&exe, &id, Lang::C, &flags, &none, &session, &ask);
+            assert_eq!(clang.asked.get(), asked + 1);
+        }
+        let in_store = walk_names(&dir.path().join("store"));
+        assert!(
+            !in_store.iter().any(|n| n.contains("native")),
+            "{in_store:?}"
+        );
+    }
+
+    fn walk_names(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for e in entries.flatten() {
+                out.push(e.file_name().to_string_lossy().into_owned());
+                out.extend(walk_names(&e.path()));
+            }
+        }
+        out
     }
 }
