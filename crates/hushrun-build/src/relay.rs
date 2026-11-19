@@ -92,6 +92,46 @@ pub enum Request {
     GoBuilt { key: Digest, cost_ms: u64 },
     /// The Go cache program's [`Request::Report`].
     GoReport { key: Digest, problem: Problem },
+    /// The C and C++ launcher's [`Request::Hints`] (B-60): the hints of first key `step`, a
+    /// compile for the target triple `platform`. The relay asks the server only when the
+    /// check's `cc/1` manifest for that platform names the first key: most compiles of a build
+    /// are ones no server holds, and a lookup for each would make a cold build slower than
+    /// plain. `local_ms`: what this machine's own last compile of `step` took, when it knows;
+    /// the relay waits for the manifest within half of it.
+    CcHints {
+        step: Digest,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The launcher's [`Request::Fetch`]: one of `keys`, the second keys downloaded hints led
+    /// to, of a first key the check's `cc/1` manifest for `platform` names.
+    CcFetch {
+        step: Digest,
+        keys: Vec<Digest>,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The launcher's [`Request::Vouch`]: whether a server still serves the downloaded object
+    /// `key` with these `outputs`.
+    CcVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// The launcher's [`Request::Built`]: an object this run compiled and stored under `key`.
+    CcBuilt {
+        key: Digest,
+        step: Digest,
+        portable: bool,
+        /// Tied to the checkout's folder alone ([`Request::Built`]'s `bound`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        bound: bool,
+        cost_ms: u64,
+    },
+    /// The launcher's [`Request::Report`]: answered once the block's record is read, so the
+    /// launcher may then discard it.
+    CcReport { key: Digest, problem: Problem },
 }
 
 impl Request {
@@ -104,6 +144,7 @@ impl Request {
                 | Request::Report { .. }
                 | Request::GoBuilt { .. }
                 | Request::GoReport { .. }
+                | Request::CcBuilt { .. }
         )
     }
 }

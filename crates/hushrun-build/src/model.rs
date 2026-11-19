@@ -105,8 +105,8 @@ pub enum Kind {
     Rustc,
     /// The Go cache program's package archives, kind `go/1`.
     Go,
-    /// The C and C++ launcher's objects, kind `cc/1` (B-60). Nothing of this kind is shared yet:
-    /// the relay leaves its lines out of every manifest.
+    /// The C and C++ launcher's objects, kind `cc/1` (B-60), with a manifest of their own per
+    /// check and target triple.
     Cc,
 }
 

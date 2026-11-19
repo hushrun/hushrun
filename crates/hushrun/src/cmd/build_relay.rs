@@ -102,6 +102,12 @@ impl Default for Tuning {
 
 /// The most a Go fetch waits for the Go manifest's prefetch to look up what it names (B-45).
 const GO_PREFETCH_WAIT: Duration = Duration::from_secs(1);
+/// The most a C or C++ launcher's question waits for the check's `open` and its `cc/1` manifest
+/// to answer (B-60): a cold build's first compiles pay at most this once, and every later one
+/// is answered from the manifest without the network.
+const CC_MANIFEST_WAIT: Duration = Duration::from_secs(1);
+/// The most target triples a check asks `cc/1` manifests for: each is one more `open`.
+const MOST_CC_PLATFORMS: usize = 8;
 /// How many failures in a row rest the relay.
 const FAILURES_TO_REST: u32 = 3;
 /// How many of this machine's compiles, with a cost the server also knew, it takes to learn
@@ -301,6 +307,22 @@ enum GoManifest {
     Taken,
 }
 
+/// The check's `cc/1` manifest for one target triple (B-60): asked when the first launcher of a
+/// compile for that platform asks the relay (the triple is the compiler driver's, which only a
+/// compile knows), kept for the check. Until it has answered, and for a first key it doesn't
+/// name, a launcher's question is answered without the network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CcManifest {
+    Asking,
+    Got {
+        /// The first keys' addresses it names.
+        named: HashSet<Hex32>,
+        /// Its pairs, until the first question about a first key it names takes them for the
+        /// prefetch.
+        pairs: Option<Vec<Pair>>,
+    },
+}
+
 struct State {
     phase: Phase,
     policy: Option<Policy>,
@@ -310,6 +332,10 @@ struct State {
     go_manifest: GoManifest,
     /// The prefetch of the Go manifest is looking up what it names.
     go_prefetching: bool,
+    /// The check's `cc/1` manifests, by target triple (B-60).
+    cc_manifests: HashMap<String, CcManifest>,
+    /// The prefetch of a `cc/1` manifest is looking up what it names.
+    cc_prefetching: usize,
     /// Whether the run may upload, as [`what_a_run_does`] says; the policy decides the rest.
     uploads: bool,
     /// Lines for the person, each once.
@@ -605,6 +631,8 @@ impl Relay {
                 manifest: None,
                 go_manifest: GoManifest::NotAsked,
                 go_prefetching: false,
+                cc_manifests: HashMap::new(),
+                cc_prefetching: 0,
                 uploads: does.uploads,
                 lines: Vec::new(),
                 found: HashMap::new(),
@@ -683,6 +711,7 @@ impl Relay {
                 go,
             });
             state.go_manifest = GoManifest::NotAsked;
+            state.cc_manifests.clear();
             if !matches!(state.phase, Phase::Stopped(_)) {
                 state.phase = Phase::Opening;
             }
@@ -820,12 +849,28 @@ impl Relay {
                 self.report_problem_soon(Kind::Go, key, problem);
                 Answer::Ok
             }
+            Request::CcHints {
+                step,
+                platform,
+                local_ms,
+            } => self.cc_hints(step, platform, local_ms).await,
+            Request::CcFetch {
+                step,
+                keys,
+                platform,
+                local_ms,
+            } => self.cc_fetch(step, keys, platform, local_ms).await,
+            Request::CcVouch { key, outputs } => self.vouch(Kind::Cc, key, outputs).await,
+            Request::CcBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::CcReport { key, problem } => {
+                // As Go's: answered once the record is read, so the launcher may discard it.
+                self.report_problem_soon(Kind::Cc, key, problem);
+                Answer::Ok
+            }
         }
-    }
-
-    /// The address of a `rustc` block's key, or a first key's.
-    fn address(key: &Digest) -> Hex32 {
-        Relay::address_in(Kind::Rustc, key)
     }
 
     /// The address of a key of `kind` (B-27): the kind is part of it, so a Go block and a
@@ -1045,6 +1090,146 @@ impl Relay {
         self.wait_for(Kind::Go, key, key, address, local_ms).await
     }
 
+    /// B-60: `open` for the check's C and C++ compiles for the target triple `platform`, kind
+    /// `cc/1`, for its manifest alone. A failure leaves an empty manifest, and so no download.
+    async fn cc_open(&self, platform: String) {
+        let check = self.state().check.as_ref().and_then(|c| c.check);
+        let body = OpenRequest {
+            kind: Kind::Cc.word().to_string(),
+            repository: self.config.repository.clone(),
+            commit: self.config.commit.clone(),
+            check,
+            platform: platform.clone(),
+        };
+        let manifest = match self
+            .client
+            .post::<_, Policy>(blocks::OPEN_PATH, &body, self.config.tuning.open, None)
+            .await
+        {
+            Ok(answered) => answered.body.manifest,
+            Err(_) => Vec::new(),
+        };
+        let mut state = self.state();
+        if state.cc_manifests.get(&platform) == Some(&CcManifest::Asking) {
+            state.cc_manifests.insert(
+                platform,
+                CcManifest::Got {
+                    named: manifest.iter().map(Pair::hint).collect(),
+                    pairs: Some(manifest),
+                },
+            );
+        }
+    }
+
+    /// B-60: whether the check's `cc/1` manifest for `platform` names the first key `step`,
+    /// waiting at most half what this machine's own last compile of it took (`local_ms`), and
+    /// at most [`CC_MANIFEST_WAIT`], for the check's `open` and the manifest to answer; the first
+    /// question of a platform asks for its manifest. The first question about a first key it
+    /// names starts the prefetch of what it names, and waits for its lookups. `false`, at once,
+    /// for a run that doesn't share `on`, a manifest that doesn't name it, or one that hasn't
+    /// answered within the wait.
+    async fn cc_names(
+        self: &Arc<Relay>,
+        step: &Digest,
+        platform: &str,
+        local_ms: Option<u64>,
+    ) -> bool {
+        if !blocks::is_platform(platform) {
+            return false;
+        }
+        let address = Relay::address_in(Kind::Cc, step);
+        let wait = local_ms
+            .map_or(CC_MANIFEST_WAIT, |ms| Duration::from_millis(ms) / 2)
+            .min(CC_MANIFEST_WAIT);
+        let until = Instant::now() + wait;
+        let pairs = loop {
+            {
+                let mut state = self.state();
+                let now = Instant::now();
+                let opening = state.phase_now(now) == &Phase::Opening;
+                if !opening && (!state.serving(now) || state.sharing != Sharing::On) {
+                    return false;
+                }
+                if !state.cc_manifests.contains_key(platform) {
+                    // Resting, nothing new is asked (B-26).
+                    let may_ask = opening || state.answering(now);
+                    if state.cc_manifests.len() >= MOST_CC_PLATFORMS || self.saved || !may_ask {
+                        return false;
+                    }
+                    state
+                        .cc_manifests
+                        .insert(platform.to_string(), CcManifest::Asking);
+                    let relay = self.clone();
+                    let platform = platform.to_string();
+                    self.runtime
+                        .spawn(async move { relay.cc_open(platform).await });
+                }
+                if !opening
+                    && let Some(CcManifest::Got { named, pairs }) =
+                        state.cc_manifests.get_mut(platform)
+                {
+                    if !named.contains(&address) {
+                        return false;
+                    }
+                    let taken = pairs.take();
+                    if taken.is_some() {
+                        state.cc_prefetching += 1;
+                    }
+                    break taken;
+                }
+                if now >= until {
+                    return false;
+                }
+            }
+            tokio::time::sleep(self.config.tuning.tick).await;
+        };
+        match pairs {
+            Some(pairs) => {
+                // Answering: the prefetch's lookups are this question's.
+                self.clone().prefetch_in(Kind::Cc, pairs).await;
+                let mut state = self.state();
+                state.cc_prefetching = state.cc_prefetching.saturating_sub(1);
+            }
+            None => {
+                // Another question started the prefetch: what it looks up answers this one.
+                let until = Instant::now() + wait;
+                while self.state().cc_prefetching > 0 && Instant::now() < until {
+                    tokio::time::sleep(self.config.tuning.tick).await;
+                }
+            }
+        }
+        true
+    }
+
+    /// B-60: the shared store's hints of a C or C++ first key, only when the check's `cc/1`
+    /// manifest for the compile's platform names it.
+    async fn cc_hints(
+        self: Arc<Relay>,
+        step: Digest,
+        platform: String,
+        local_ms: Option<u64>,
+    ) -> Answer {
+        if !self.cc_names(&step, &platform, local_ms).await {
+            return Answer::None;
+        }
+        self.hints_in(Kind::Cc, step).await
+    }
+
+    /// B-60: one of `keys`, the second keys a launcher's downloaded hints led to, of a first key
+    /// the check's `cc/1` manifest names, as a `rustc` wrapper's fetch.
+    async fn cc_fetch(
+        self: Arc<Relay>,
+        step: Digest,
+        keys: Vec<Digest>,
+        platform: String,
+        local_ms: Option<u64>,
+    ) -> Answer {
+        if !self.cc_names(&step, &platform, local_ms).await {
+            return Answer::None;
+        }
+        self.fetch_in(Kind::Cc, step, keys, local_ms).await
+    }
+
     /// C4, B-30: the prefetch starts at the first wrapper that asks the relay, once: a run whose
     /// compiles all find their blocks here asks nothing and downloads nothing.
     async fn prefetch_at_first_miss(self: Arc<Relay>) {
@@ -1085,12 +1270,15 @@ impl Relay {
                     return (blocks, HashSet::new(), HashSet::new());
                 }
                 let steps = store.steps();
-                let hints: HashSet<Hex32> = steps.iter().map(Relay::address).collect();
+                let hints: HashSet<Hex32> = steps
+                    .iter()
+                    .map(|step| Relay::address_in(kind, step))
+                    .collect();
                 // B-34: a first key this machine keeps to itself asks the shared store nothing.
                 let kept: HashSet<Hex32> = steps
                     .iter()
                     .filter(|step| store.kept_local(step).is_some())
-                    .map(Relay::address)
+                    .map(|step| Relay::address_in(kind, step))
                     .collect();
                 (blocks, hints, kept)
             })
@@ -1115,9 +1303,9 @@ impl Relay {
                 .map(Pair::block)
                 .filter(|a| !held_blocks.contains(a)),
         );
-        if kind == Kind::Rustc {
+        if kind != Kind::Go {
             for batch in hints.chunks(limit) {
-                self.lookup_hints(batch).await;
+                self.lookup_hints(kind, batch).await;
             }
         }
         // What is fetched without being asked for, by class (B-30): proc macros and
@@ -1162,13 +1350,13 @@ impl Relay {
         self.pump();
     }
 
-    async fn lookup_hints(&self, addresses: &[Hex32]) {
+    async fn lookup_hints(&self, kind: Kind, addresses: &[Hex32]) {
         // Resting, nothing new is asked (B-26).
         if self.saved || !self.state().answering(Instant::now()) {
             return;
         }
         let body = HintsLookupRequest {
-            kind: KIND.to_string(),
+            kind: kind.word().to_string(),
             addresses: addresses.to_vec(),
             repository: self.config.repository.clone(),
             commit: self.config.commit.clone(),
@@ -1199,13 +1387,8 @@ impl Relay {
         }
     }
 
-    /// A lookup of `addresses` (B-26: "this is the use"); what it found, or `None` when it
-    /// failed.
-    async fn lookup(&self, addresses: &[Hex32], fetch: bool) -> Option<Vec<Found>> {
-        self.lookup_in(Kind::Rustc, addresses, fetch).await
-    }
-
-    /// [`Relay::lookup`] of blocks of `kind`.
+    /// A lookup of `addresses`, blocks of `kind` (B-26: "this is the use"); what it found, or
+    /// `None` when it failed.
     async fn lookup_in(&self, kind: Kind, addresses: &[Hex32], fetch: bool) -> Option<Vec<Found>> {
         // Resting, nothing new is asked (B-26).
         if self.saved || !self.state().answering(Instant::now()) {
@@ -1272,7 +1455,12 @@ impl Relay {
     /// downloaded hints live.
     async fn hints(self: Arc<Relay>, step: Digest) -> Answer {
         self.clone().prefetch_at_first_miss().await;
-        let address = Relay::address(&step);
+        self.hints_in(Kind::Rustc, step).await
+    }
+
+    /// [`Relay::hints`], of a first key of `kind`, once the caller decided it may be asked.
+    async fn hints_in(self: Arc<Relay>, kind: Kind, step: Digest) -> Answer {
+        let address = Relay::address_in(kind, &step);
         let known = {
             let mut state = self.state();
             let now = Instant::now();
@@ -1292,7 +1480,7 @@ impl Relay {
         let sealed = match known {
             Some(sealed) => sealed,
             None => {
-                self.lookup_hints(&[address]).await;
+                self.lookup_hints(kind, &[address]).await;
                 self.state()
                     .sealed_hints
                     .remove(&address)
@@ -1333,8 +1521,27 @@ impl Relay {
             }
         }
         self.clone().prefetch_at_first_miss().await;
-        let addresses: Vec<(Digest, Hex32)> =
-            keys.iter().map(|key| (*key, Relay::address(key))).collect();
+        self.fetch_in(Kind::Rustc, step, keys, local_ms).await
+    }
+
+    /// [`Relay::fetch`], of blocks of `kind`, once the caller decided they may be asked for.
+    async fn fetch_in(
+        self: Arc<Relay>,
+        kind: Kind,
+        step: Digest,
+        keys: Vec<Digest>,
+        local_ms: Option<u64>,
+    ) -> Answer {
+        {
+            let mut state = self.state();
+            if !state.serving(Instant::now()) || state.sharing != Sharing::On {
+                return Answer::None;
+            }
+        }
+        let addresses: Vec<(Digest, Hex32)> = keys
+            .iter()
+            .map(|key| (*key, Relay::address_in(kind, key)))
+            .collect();
         // What the run knows already, else one lookup for all of them.
         let unknown: Vec<Hex32> = {
             let state = self.state();
@@ -1350,7 +1557,7 @@ impl Relay {
         };
         // Resting, nothing new is asked: only what the run knows answers.
         if !unknown.is_empty() && self.state().answering(Instant::now()) {
-            self.lookup(&unknown, true).await;
+            self.lookup_in(kind, &unknown, true).await;
         }
         let chosen = {
             let state = self.state();
@@ -1363,8 +1570,7 @@ impl Relay {
         let Some((key, address)) = chosen else {
             return Answer::None;
         };
-        self.wait_for(Kind::Rustc, key, step, address, local_ms)
-            .await
+        self.wait_for(kind, key, step, address, local_ms).await
     }
 
     /// Starts or joins the download of `address`, a block of `kind`, and waits for it within
@@ -1921,7 +2127,7 @@ impl Relay {
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        for kind in [Kind::Rustc, Kind::Go] {
+        for kind in [Kind::Rustc, Kind::Go, Kind::Cc] {
             let keys: Vec<Digest> = keys
                 .iter()
                 .filter(|(k, _)| *k == kind)
@@ -2113,6 +2319,22 @@ impl Relay {
                 LocalClass::Library,
                 true,
                 false,
+                *cost_ms,
+            ),
+            // B-60: a C or C++ object is a library.
+            Request::CcBuilt {
+                key,
+                step,
+                portable,
+                bound,
+                cost_ms,
+            } => (
+                Kind::Cc,
+                *key,
+                *step,
+                LocalClass::Library,
+                *portable,
+                *bound,
                 *cost_ms,
             ),
             _ => return,
@@ -2443,6 +2665,11 @@ impl Relay {
             // B-45: the check's Go command closes apart, with its own manifest and run.
             let go = (check.go.is_some() && entries.iter().any(|e| e.kind() == Kind::Go))
                 .then(|| self.close_request(Kind::Go, check, entries));
+            // B-60: and its C and C++ compiles, once for each target triple they were for.
+            let cc: Vec<CloseRequest> = cc_platforms(entries)
+                .into_iter()
+                .map(|platform| self.close_cc(check, entries, &platform))
+                .collect();
             let relay = self.clone();
             self.runtime.block_on(async move {
                 let rust = relay.client.post::<_, serde_json::Value>(
@@ -2459,7 +2686,12 @@ impl Relay {
                             .await;
                     }
                 };
-                let _ = futures_util::future::join(rust, go).await;
+                let cc = futures_util::future::join_all(cc.iter().map(|close| {
+                    relay
+                        .client
+                        .post::<_, serde_json::Value>(blocks::CLOSE_PATH, close, left, None)
+                }));
+                let _ = futures_util::future::join3(rust, go, cc).await;
             });
         }
         if end.in_ci {
@@ -2579,6 +2811,23 @@ impl Relay {
         }
     }
 
+    /// B-60: the check's `close` for its C and C++ objects compiled for `platform`, under a run
+    /// of its own made from the check's and the platform, with a manifest of their blocks in
+    /// the order the launcher logged them.
+    fn close_cc(&self, check: &Check, entries: &[Entry], platform: &str) -> CloseRequest {
+        let entries: Vec<Entry> = entries
+            .iter()
+            .filter(|e| e.cc.as_ref().is_some_and(|cc| cc.platform == platform))
+            .cloned()
+            .collect();
+        let mut close = self.close_request(Kind::Cc, check, &entries);
+        let mut bytes = check.run.0.to_vec();
+        bytes.extend_from_slice(format!("{}\n{platform}\n", Kind::Cc.word()).as_bytes());
+        close.run = Hex32::sha256(&bytes);
+        close.platform = platform.to_string();
+        close
+    }
+
     /// The check's `close` for its blocks of `kind`: a Go command's goes under a run of its own,
     /// made from the check's, with the Go command's platform, and the relay's tallies go with the
     /// `rustc` one alone.
@@ -2586,8 +2835,13 @@ impl Relay {
         let mut manifest = Vec::new();
         let mut seen = HashSet::new();
         let mut counts = Counts::default();
-        // A Go archive kept on this machine (B-42) never goes up: no later prefetch looks it up.
-        let kept_here = |e: &Entry| e.go.as_ref().is_some_and(|go| go.local.is_some());
+        // A Go archive kept on this machine (B-42) never goes up, nor does a C or C++ object that
+        // stays here (B-56): no later prefetch looks it up. A C object reused here names why its
+        // block stays from the block's own record.
+        let kept_here = |e: &Entry| {
+            e.go.as_ref().is_some_and(|go| go.local.is_some())
+                || e.cc.as_ref().is_some_and(|cc| !cc.local.is_empty())
+        };
         for entry in entries.iter().filter(|e| e.kind() == kind) {
             if let (Some(step), Some(key), false) = (entry.step, entry.key, kept_here(entry)) {
                 let pair = Pair(
@@ -2614,6 +2868,18 @@ impl Relay {
             counts.saved_ms = counts.saved_ms.saturating_add(entry.saved_ms);
         }
         let state = self.state();
+        if kind == Kind::Cc {
+            return CloseRequest {
+                kind: kind.word().to_string(),
+                run: check.run,
+                repository: self.config.repository.clone(),
+                check: check.check,
+                platform: String::new(),
+                commit: self.config.commit.clone(),
+                manifest,
+                counts,
+            };
+        }
         if kind == Kind::Go {
             let mut bytes = [0u8; 32 + 5];
             bytes[..32].copy_from_slice(&check.run.0);
@@ -2656,6 +2922,22 @@ impl Relay {
             counts,
         }
     }
+}
+
+/// The target triples of a check's C and C++ objects (B-60), in the order first logged: one
+/// `close` each. A triple the protocol can't carry, and CMake's own configure checks, are none.
+fn cc_platforms(entries: &[Entry]) -> Vec<String> {
+    let mut platforms: Vec<String> = Vec::new();
+    for cc in entries.iter().filter_map(|e| e.cc.as_ref()) {
+        if !cc.probe
+            && blocks::is_platform(&cc.platform)
+            && !platforms.contains(&cc.platform)
+            && platforms.len() < MOST_CC_PLATFORMS
+        {
+            platforms.push(cc.platform.clone());
+        }
+    }
+    platforms
 }
 
 /// A wrapper's word for what was wrong with a block, as the protocol writes it.
