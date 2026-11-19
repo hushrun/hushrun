@@ -464,6 +464,33 @@ fn a_copy_of_revision_1_is_older_and_skill_update_rewrites_it() {
     assert_eq!(states(&guide)[1].1, "current");
 }
 
+// covers: C-24, C-29 (revision 2, as 0.12.0 to 0.17.1 wrote it, once revision 3 is out)
+#[test]
+fn a_copy_of_revision_2_is_older_and_skill_update_rewrites_it() {
+    let place = Place::new();
+    let two = std::fs::read_to_string(hushrun_testkit::testdata("skills/revisions/2.md")).unwrap();
+    place.write(COPIES[0], &two);
+    place.write(COPIES[1], &two);
+    let guide = place.guide();
+    assert!(guide["skillRevision"].as_u64().unwrap() >= 3, "{guide:#}");
+    assert_eq!(states(&guide)[0].1, "older");
+    assert_eq!(guide["skills"][0]["revision"], 2);
+    let text = place.in_repo(&["guide"]);
+    assert!(
+        text.stdout.contains(
+            "- .claude/skills/hushrun/SKILL.md: older, revision 2: `hushrun skill update` updates it"
+        ),
+        "{}",
+        text.stdout
+    );
+    let ran = place.in_repo(&["skill", "update"]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(place.read(COPIES[0]).contains("`hushrun build`"));
+    let guide = place.guide();
+    assert_eq!(states(&guide)[0].1, "current");
+    assert_eq!(states(&guide)[1].1, "current");
+}
+
 // covers: C-29
 #[test]
 fn skill_update_leaves_an_edited_copy_and_a_newer_one() {

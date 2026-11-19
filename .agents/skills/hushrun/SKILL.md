@@ -1,9 +1,9 @@
 ---
 name: hushrun
 description: Use before every git push in a repository that uses hushrun, when hushrun's pre-push hook refuses a push, when a line starts with "hushrun:", and when asked to set hushrun up. hushrun skips a check that this exact code already passed, here and, once the repository shares its results, in CI, so running checks here first means CI doesn't run them again.
-compatibility: hushrun 0.11.0 or newer for `hushrun guide`; everything else here works with any hushrun.
+compatibility: hushrun 0.11.0 or newer for `hushrun guide`, 0.14.0 or newer for `hushrun build`; everything else here works with any hushrun.
 metadata:
-  hushrun-skill: "2"
+  hushrun-skill: "3"
 ---
 
 # hushrun
@@ -46,6 +46,15 @@ they stay on this machine: a check that passed here skips here, and CI runs ever
 decide: tell them what `hushrun ready` said, and don't sign in or run `hushrun init` for it unless
 they ask.
 
+## Compiled code
+
+`hushrun build` lets the builds that `hushrun run` runs reuse compiled code, Rust crates and the C
+and C++ objects of a CMake build, between worktrees and runs on this machine, so it can save build
+time. On a person's machine it is off until the person turns it on, and the setting is theirs: it
+lives in their own settings file, for every repository on the machine. Don't turn it on or off, or
+clean its store, unless they ask. `hushrun guide` says what it does, what it does to disk space,
+and whether it is on here.
+
 ## When a push is refused
 
 hushrun's pre-push hook refuses a coding agent's push while a check that can run here hasn't
@@ -87,5 +96,7 @@ a person in several organizations, and sandboxes with no browser.
 - Edit the `"hushrun"` key in `package.json`, `hushrun.yaml`, a `HUSHRUN_*` variable, or
   `id-token: write` or a `hushrun run` in a CI file, unless the person asks.
 - Run `hushrun login`, `hushrun logout` or `hushrun token` without being asked.
+- Run `hushrun build on`, `observe`, `off`, `clean` or `share`, or set `HUSHRUN_BUILD`, without
+  being asked.
 
 More: https://hushrun.com/docs/for-agents.md

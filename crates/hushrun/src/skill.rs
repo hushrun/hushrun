@@ -17,7 +17,7 @@ pub const SKILL: &str = include_str!("../../../recipes/agents/SKILL.md");
 /// What `hushrun guide` prints, before what is true here.
 pub const GUIDE: &str = include_str!("../../../recipes/agents/GUIDE.md");
 /// This hushrun's revision of the skill: [`SKILL`] says it too.
-pub const REVISION: u32 = 2;
+pub const REVISION: u32 = 3;
 
 /// Each revision's text, by its SHA-256, with CRLF read as LF, as git may check it out on
 /// Windows. Append only: a copy of an older revision is `older` only while its hash is here. A
@@ -33,6 +33,11 @@ const REVISIONS: &[(u32, &str)] = &[
     (
         2,
         "8f423c6899f84a19638317f9904b69a578183797ea31923444e33ab63e810ac8",
+    ),
+    // It holds that `hushrun build` exists, and is the person's to turn on.
+    (
+        3,
+        "7643edd808e16c93f7bea4d40108363a90a4dae2b8729ead5fbd6ba1d05b1fc5",
     ),
 ];
 
