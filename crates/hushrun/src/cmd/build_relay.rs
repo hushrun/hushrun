@@ -2924,11 +2924,10 @@ impl Relay {
         // (`tied`) goes up from a CI job's own ID token (B-24), and that job's close names it:
         // a later job at the same paths fetches only a key the manifest pairs (B-60).
         let from_a_job = self.client.is_a_jobs_id_token();
+        let goes_up = |local: &[String]| local.is_empty() || (from_a_job && local == ["tied"]);
         let kept_here = |e: &Entry| {
             e.go.as_ref().is_some_and(|go| go.local.is_some())
-                || e.cc
-                    .as_ref()
-                    .is_some_and(|cc| !cc.local.is_empty() && !(from_a_job && cc.local == ["tied"]))
+                || e.cc.as_ref().is_some_and(|cc| !goes_up(&cc.local))
         };
         for entry in entries.iter().filter(|e| e.kind() == kind) {
             if let (Some(step), Some(key), false) = (entry.step, entry.key, kept_here(entry)) {
