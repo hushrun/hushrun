@@ -2486,7 +2486,9 @@ mod tests {
         let step = Digest::of(b"a step");
         let now = SystemTime::now();
         let day = std::time::Duration::from_secs(86_400);
-        store.suspend(&step, "a compile here differed", now).unwrap();
+        store
+            .suspend(&step, "a compile here differed", now)
+            .unwrap();
         store
             .suspend_until(&step, "a download differed", now + day, now)
             .unwrap();
@@ -2495,10 +2497,16 @@ mod tests {
             "until `hushrun build clean`"
         );
         let other = Digest::of(b"another step");
-        store.suspend_until(&other, "rejected", now + day * 15, now).unwrap();
-        store.suspend_until(&other, "differs", now + day, now).unwrap();
+        store
+            .suspend_until(&other, "rejected", now + day * 15, now)
+            .unwrap();
+        store
+            .suspend_until(&other, "differs", now + day, now)
+            .unwrap();
         assert!(store.suspended_at(&other, now + day * 10).is_some());
-        store.suspend_until(&other, "rejected", now + day * 20, now).unwrap();
+        store
+            .suspend_until(&other, "rejected", now + day * 20, now)
+            .unwrap();
         assert!(store.suspended_at(&other, now + day * 18).is_some());
     }
 }
