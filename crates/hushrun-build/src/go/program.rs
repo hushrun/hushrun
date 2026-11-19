@@ -1426,6 +1426,7 @@ fn go_entry(outcome: Outcome, key: &Digest) -> Entry {
         key: Some(*key),
         downloaded: false,
         go: Some(GoEntry::default()),
+        cc: None,
     }
 }
 

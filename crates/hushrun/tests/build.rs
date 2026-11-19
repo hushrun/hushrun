@@ -740,3 +740,91 @@ fn build_share_saves_the_share_setting_and_status_says_what_applies() {
         serde_json::from_str(&std::fs::read_to_string(settings(&w)).unwrap()).unwrap();
     assert_eq!(again["share"], "observe");
 }
+
+/// Prints the C and C++ launcher variables COMMAND gets, tab-separated (the indirection holds
+/// `|`).
+#[cfg(unix)]
+const PRINT_LAUNCHER: &str = r#"printf '%s\t%s\t%s' "$CMAKE_C_COMPILER_LAUNCHER" "$CMAKE_CXX_COMPILER_LAUNCHER" "$HUSHRUN_CC""#;
+
+// covers: B-50
+#[cfg(unix)]
+#[test]
+fn run_gives_cmake_the_launcher_only_when_reuse_is_on_and_leaves_the_person_s() {
+    let w = World::new("acme-api.yaml");
+    let tested = std::fs::canonicalize(assert_cmd::cargo::cargo_bin("hushrun")).unwrap();
+    let indirection = hushrun_build::cc::INDIRECTION;
+    let split = |ran: &Ran| -> Vec<String> { ran.stdout.split('\t').map(str::to_string).collect() };
+
+    let off = run_sh(&mut hushrun(&w), "x", PRINT_LAUNCHER);
+    assert_eq!(
+        (off.code, off.stdout.as_str()),
+        (0, "\t\t"),
+        "{}",
+        off.stderr
+    );
+
+    assert_eq!(build(&w, &["on"]).code, 0);
+    let on = run_sh(&mut hushrun(&w), "x", PRINT_LAUNCHER);
+    assert_eq!(on.code, 0, "{}", on.stderr);
+    let got = split(&on);
+    assert_eq!(got[0], indirection);
+    assert_eq!(got[1], indirection);
+    let link = PathBuf::from(&got[2]);
+    assert_eq!(
+        link.file_name().and_then(|n| n.to_str()),
+        Some("hushrun-cc")
+    );
+    assert_eq!(std::fs::canonicalize(&link).unwrap(), tested);
+
+    // A launcher the person set stays.
+    let set = run_sh(
+        hushrun(&w).env("CMAKE_CXX_COMPILER_LAUNCHER", "ccache"),
+        "x",
+        PRINT_LAUNCHER,
+    );
+    let got = split(&set);
+    assert_eq!(
+        (got[0].as_str(), got[1].as_str()),
+        (indirection, "ccache"),
+        "{}",
+        set.stderr
+    );
+
+    // Another RUSTC_WRAPPER, outside a Go module: no session in a folder that builds no C, the
+    // launcher in a CMake project's.
+    let other = w.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    hushrun_testkit::git::init(&other, "sha1");
+    let beside = || {
+        run_sh(
+            hushrun(&w)
+                .current_dir(&other)
+                .env("RUSTC_WRAPPER", "sccache"),
+            "x",
+            PRINT_LAUNCHER,
+        )
+    };
+    let none = beside();
+    assert_eq!(none.stdout, "\t\t", "{}", none.stderr);
+    std::fs::write(other.join("CMakeLists.txt"), "project(x C)\n").unwrap();
+    let got = split(&beside());
+    assert_eq!(got[0], indirection);
+
+    // A build folder COMMAND names that CMake configured before is said once.
+    let build_dir = w.repo.join("out");
+    std::fs::create_dir_all(&build_dir).unwrap();
+    std::fs::write(
+        build_dir.join("CMakeCache.txt"),
+        "CMAKE_GENERATOR:INTERNAL=Ninja\n",
+    )
+    .unwrap();
+    let ran = Ran::of(hushrun(&w).args([
+        "run", "x", "--force", "--", "true", "cmake", "--build", "out",
+    ]));
+    assert_eq!(
+        ran.lines_with("configured before hushrun's launcher"),
+        1,
+        "{}",
+        ran.stderr
+    );
+}

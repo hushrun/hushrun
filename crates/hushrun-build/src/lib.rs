@@ -49,6 +49,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod cc;
 pub mod compiler;
 pub mod decide;
 pub mod depinfo;

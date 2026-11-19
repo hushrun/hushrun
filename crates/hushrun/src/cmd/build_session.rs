@@ -37,13 +37,14 @@ pub(crate) fn begin(
     now: SystemTime,
     repository: Option<&str>,
     repository_env: &[String],
+    cc_maps: bool,
     share: Option<ShareStart>,
     place: &dyn Fn() -> Option<crate::results::BuildPlace>,
 ) -> Result<Session, Option<String>> {
     // B-2: a compiler wrapper set already passes through. That is worth its line only where the
     // run's results lookup said the org shares: there the person may expect the shared store.
     let org_shares = share.as_ref().is_some_and(|start| start.access.shares);
-    let mut session = begin_here(now, repository, repository_env, share, place)
+    let mut session = begin_here(now, repository, repository_env, cc_maps, share, place)
         .map_err(|line| line.filter(|line| line != WRAPPER_SET || org_shares))?;
     let cargo = std::env::current_dir().ok().is_some_and(|folder| {
         folder
@@ -56,15 +57,63 @@ pub(crate) fn begin(
     Ok(session)
 }
 
-/// B-2, B-39: whether the run's own `RUSTC_WRAPPER` (sccache) is set in a Go module's folder:
-/// hushrun's wrapper stays out, and the session still begins, for Go's cache program alone.
-/// Elsewhere a wrapper set begins no session, as before.
+/// B-2, B-39, B-50: whether the run's own `RUSTC_WRAPPER` (sccache) is set in a Go module's
+/// folder or a CMake project's: hushrun's wrapper stays out, and the session still begins, for
+/// Go's cache program and the C and C++ launcher. Elsewhere a wrapper set begins no session, as
+/// before.
 fn go_beside_another_wrapper(here: &Here<'_>) -> bool {
     (here.env)(session::RUSTC_WRAPPER).is_some_and(|v| !v.is_empty())
-        && here
-            .folder
-            .as_deref()
-            .is_some_and(hushrun_build::go::probe::is_module)
+        && here.folder.as_deref().is_some_and(|folder| {
+            hushrun_build::go::probe::is_module(folder) || cmake_project(folder)
+        })
+}
+
+/// Whether `folder` or a folder above it, up to its checkout, holds a `CMakeLists.txt`, or
+/// `folder` is a CMake build folder: where COMMAND may build C or C++ with CMake (B-50).
+fn cmake_project(folder: &Path) -> bool {
+    if folder.join("CMakeCache.txt").is_file() {
+        return true;
+    }
+    for dir in folder.ancestors() {
+        if dir.join("CMakeLists.txt").is_file() {
+            return true;
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    false
+}
+
+/// The checkout `folder` is in (B-50): the nearest folder at or above it holding `.git` (a
+/// worktree's is a file), in the form the shell named it (`PWD`) when that is the same folder;
+/// else `folder` itself.
+fn checkout_root(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+    let given = env("PWD")
+        .map(PathBuf::from)
+        .filter(|pwd| {
+            pwd.is_absolute()
+                && std::fs::canonicalize(pwd).ok() == std::fs::canonicalize(folder).ok()
+        })
+        .unwrap_or_else(|| folder.to_path_buf());
+    given
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map_or(given.clone(), Path::to_path_buf)
+}
+
+/// B-50: gives COMMAND the C and C++ launcher, for the checkout the run is in. A launcher that
+/// can't be set up costs a line, never the run.
+fn give_cc(session: &mut Session, here: &Here<'_>) {
+    let Some(folder) = &here.folder else {
+        return;
+    };
+    let root = checkout_root(folder, here.env);
+    if let Err(err) = session.set_cc(&root, here.cc_maps, here.env) {
+        session.add_line(format!(
+            "build: C and C++ objects aren't reused in this run: {err}"
+        ));
+    }
 }
 
 /// The line of a Go module's run whose Rust crates aren't reused because `RUSTC_WRAPPER` is set
@@ -82,6 +131,7 @@ fn begin_here(
     now: SystemTime,
     repository: Option<&str>,
     repository_env: &[String],
+    cc_maps: bool,
     share: Option<ShareStart>,
     place: &dyn Fn() -> Option<crate::results::BuildPlace>,
 ) -> Result<Session, Option<String>> {
@@ -96,6 +146,7 @@ fn begin_here(
         in_ci: crate::gitlab_job::in_ci(&Env::from_process()),
         repository,
         repository_env,
+        cc_maps,
         env: &env,
         now,
         folder: std::env::current_dir().ok(),
@@ -261,6 +312,7 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
     if beside {
         session.leave_out_rustc();
     }
+    give_cc(&mut session, here);
     if let Some(folder) = &here.folder {
         session.check(folder, Some(Instant::now() + CHECK_BUDGET));
         if let Some(sysroot) = (here.sysroot)(folder) {
@@ -1017,6 +1069,8 @@ struct Here<'a> {
     repository: Option<&'a str>,
     /// The repository's `build: env:` (B-35).
     repository_env: &'a [String],
+    /// The repository's `build: cc: maps:` (B-55).
+    cc_maps: bool,
     env: &'a dyn Fn(&str) -> Option<OsString>,
     now: SystemTime,
     /// The folder `hushrun run` runs in: the check before COMMAND looks at the target folders
@@ -1089,6 +1143,7 @@ fn begin_with(
     if beside {
         session.leave_out_rustc();
     }
+    give_cc(&mut session, here);
     // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {
@@ -1130,6 +1185,7 @@ mod tests {
             in_ci: false,
             repository: None,
             repository_env: &[],
+            cc_maps: true,
             env,
             now: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
             folder: None,

@@ -6,6 +6,64 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+C and C++ build blocks ([ADR 0097](docs/adr/0097-c-and-c++-build-blocks.md), phases 1 to 3):
+`hushrun run NAME -- COMMAND` and each check of hushrun.yaml that runs here, with build reuse on,
+reuse the objects a CMake build compiled in another worktree on this machine, and in an org that
+shares build blocks, the objects another machine with the same compiler compiled.
+
+### Added
+
+- **CMake builds get a compiler launcher** (B-50): `hushrun run` sets
+  `CMAKE_C_COMPILER_LAUNCHER` and `CMAKE_CXX_COMPILER_LAUNCHER` to
+  `/bin/sh;-c;exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0" "$@"`, each unless the person set it, and
+  `HUSHRUN_CC` to `hushrun-cc`, a link to the hushrun binary beside the wrapper's. CMake caches
+  the line in a build folder it configures inside the run; outside a run, where `HUSHRUN_CC` is
+  unset, the shell is the compiler, so a plain build compiles as before and Ninja rebuilds
+  nothing for the move. A launcher already in a folder's cache (ccache, sccache) is CMake's to
+  use. A folder COMMAND names that was configured before is said once. A run in a CMake project
+  with `RUSTC_WRAPPER` set still gets the launcher, as a Go module's gets Go's cache program.
+- **One compile of one source to one object is reused** (B-51 to B-57): keyed by the compiler's
+  identity by content (`xcrun`'s trampolines and GCC's `cc1`, `cc1plus` and `as` included), the
+  arguments with the checkout's folder as `{root}`, and each file the compile read with every
+  place a header would have been found first and every name `__has_include` asked about, so a
+  header created where the search looks first, or a file a probe asked about appearing, is a
+  compile. A restored object is dated now and its depfile names this checkout's files, so Ninja
+  and CTest's stale-program rule see it as freshly built. Precompiled headers, modules, coverage,
+  profiles, Objective-C, assembly, CUDA, MSVC, response files and calls that write a second file
+  compile exactly as asked; so does any call when anything in the launcher fails, with the
+  compiler's own output and status.
+- **Prefix maps** (B-55): compiles inside a run get `-ffile-prefix-map=<checkout>=.`, so
+  `__FILE__` and debug info name files from the repository's root and an object is the same bytes
+  in every worktree. `build: cc: maps: off` in hushrun.yaml, or `"cc_maps": false` in the build
+  settings, keeps absolute paths; then an object that holds its path is reused only in its own
+  checkout.
+- **The run's summary has a C and C++ line** (B-61): objects reused and built, the time saved,
+  and the compiles run as asked or not stored, by reason.
+- **`hushrun build status` says** when `CMAKE_C_COMPILER_LAUNCHER` or
+  `CMAKE_CXX_COMPILER_LAUNCHER` is set in the shell (JSON: `cmake_launchers_set`, `cc_maps`).
+- **C and C++ objects are shared between machines** (B-59, B-60): kind `cc/1`, through the run's
+  relay, records, vouches, outbox and withdrawals, as Rust's and Go's blocks. The relay asks the
+  check's `cc/1` manifest for the compiler's target triple when the first compile for it asks, and
+  looks up only first keys that manifest names, so a cold build asks the network nothing per
+  compile. A downloaded object is served only when its size and SHA-256 are its record's and its
+  bytes are a relocatable object of the target's machine (or LLVM bitcode for clang's `-flto`); one
+  that isn't is reported, its key suspended for the kept days, and the call compiles. The audit
+  compiles a download's first reuse one time in ten and reports a difference. A downloaded
+  object's messages keep their colour and lose every other control character, and its depfile is
+  written from the files this machine hashed. A relay that doesn't answer once is left alone for
+  the rest of the run. The summary says how many objects came from the shared store, and which
+  objects compiled here stay on this machine, and why.
+
+### Changed
+
+- **A C or C++ compiler's identity leaves out the temporary files its driver names** (B-52): GCC's
+  `-###` named a new one each time, so the same GCC had another identity in every store. Objects
+  stored before compile once more. A block's messages hold the assembler's temporary file, which
+  GNU as names when it warns, as `{temp}`, and a reuse shows it so.
+- **Headers under the SDK, the toolchain and the system folders are answered by their stat** for
+  the length of a run, so a reused object costs about 22 ms on macOS (abseil-cpp with its tests,
+  433 objects reused in a second worktree), against 69 ms when every header is hashed.
+
 ## [0.17.1] - 2026-11-18
 
 ### Changed

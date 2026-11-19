@@ -81,6 +81,11 @@ pub struct Session {
     /// Another compiler wrapper is set (B-2): COMMAND gets no `RUSTC_WRAPPER` of hushrun's, and
     /// the session serves Go alone.
     rustc_left_out: bool,
+    /// What COMMAND gets for C and C++ (B-50): the launcher variables CMake reads, those the
+    /// person hadn't set, and `HUSHRUN_CC`.
+    cc_env: Vec<(OsString, OsString)>,
+    /// The person's `cc_maps` setting as the run began (B-55).
+    cc_maps_setting: bool,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -146,6 +151,9 @@ pub struct Current {
     /// this machine and never raises it.
     #[serde(default = "share_on")]
     pub share_setting: Mode,
+    /// What the C and C++ launcher reads (B-50): absent, it passes every call through (B-62).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cc: Option<crate::cc::CcRun>,
 }
 
 fn share_on() -> Mode {
@@ -194,7 +202,8 @@ impl Shared {
     }
 
     /// Whether a block may be reused as far as who vouches for it goes (B-34): the one
-    /// definition the `rustc` wrapper and the Go cache program decide by, from the block's
+    /// definition the `rustc` wrapper, the Go cache program and the C and C++ launcher decide
+    /// by, from the block's
     /// record ([`Origin::standing`](crate::origin::Origin::standing)) and this state. A block
     /// built here, or with no record, may. One only downloaded never may once a server said it
     /// no longer serves it, and never in a run that isn't sharing by a decision. In a run whose
@@ -291,6 +300,9 @@ pub struct Entry {
     /// `rustc` wrapper's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub go: Option<GoEntry>,
+    /// A C or C++ object's line, logged by the launcher (B-61): absent for the others'.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cc: Option<crate::cc::launcher::CcEntry>,
 }
 
 /// What a Go package archive's line says beside the rest (B-46).
@@ -310,6 +322,8 @@ impl Entry {
     pub fn kind(&self) -> crate::model::Kind {
         if self.go.is_some() {
             crate::model::Kind::Go
+        } else if self.cc.is_some() {
+            crate::model::Kind::Cc
         } else {
             crate::model::Kind::Rustc
         }
@@ -445,6 +459,159 @@ pub struct Counts {
     pub unkeyed_variables: Vec<String>,
     /// What the Go cache program's lines came to (B-46), counted apart from the crates.
     pub go: GoCounts,
+    /// What the C and C++ launcher's lines came to (B-61), counted apart from the crates.
+    pub cc: CcCounts,
+}
+
+/// What a run's C and C++ objects came to (B-61).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CcCounts {
+    /// Compiles the launcher saw, but CMake's own configure checks.
+    pub objects: u64,
+    /// Objects put in place without a compile.
+    pub reused: u64,
+    /// Of those, downloaded from the shared store for it.
+    pub downloaded: u64,
+    /// Compiles that ran, stored or not, passed through or not.
+    pub built: u64,
+    /// Compiles that ran exactly as asked.
+    pub passed_through: u64,
+    /// Compiles compared with a block found for them (an audit, `observe`).
+    pub compared: u64,
+    /// Of those, the ones whose object differed: the key is suspended.
+    pub differed: u64,
+    /// Compiles that found a block: in `observe`, the ones that would have been reused.
+    pub found: u64,
+    /// Milliseconds reuse saved.
+    pub saved_ms: u64,
+    /// Passed through or not stored, by the launcher's reason, in the order first seen.
+    pub reasons: Vec<(String, u64)>,
+    /// Objects stored in a run that shares that stay on this machine (B-56, B-60), by reason,
+    /// in the order first seen; an object with two reasons counts under each.
+    pub kept: u64,
+    pub kept_reasons: Vec<(String, u64)>,
+}
+
+impl CcCounts {
+    fn add(&mut self, entry: &Entry) {
+        let Some(cc) = &entry.cc else {
+            return;
+        };
+        if cc.probe {
+            return;
+        }
+        self.objects += 1;
+        match entry.outcome {
+            Outcome::Reused => {
+                self.reused += 1;
+                self.downloaded += u64::from(entry.downloaded);
+                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
+            }
+            Outcome::PassedThrough(_) => {
+                self.built += 1;
+                self.passed_through += 1;
+            }
+            Outcome::BuiltAndStored | Outcome::BuiltNotStored(_) => self.built += 1,
+        }
+        self.found += u64::from(entry.found);
+        if entry.found && entry.outcome != Outcome::Reused {
+            self.compared += 1;
+        }
+        self.differed += u64::from(entry.differed);
+        let counted = matches!(
+            entry.outcome,
+            Outcome::PassedThrough(_) | Outcome::BuiltNotStored(_)
+        );
+        if let Some(why) = cc.why.as_deref().filter(|_| counted) {
+            match self.reasons.iter_mut().find(|(seen, _)| seen == why) {
+                Some((_, n)) => *n += 1,
+                None => self.reasons.push((why.to_string(), 1)),
+            }
+        }
+        if cc.shared && entry.outcome == Outcome::BuiltAndStored && !cc.local.is_empty() {
+            self.kept += 1;
+            for why in &cc.local {
+                match self.kept_reasons.iter_mut().find(|(seen, _)| seen == why) {
+                    Some((_, n)) => *n += 1,
+                    None => self.kept_reasons.push((why.clone(), 1)),
+                }
+            }
+        }
+    }
+
+    /// B-61's lines for C and C++, without a prefix. Empty when the launcher logged no object.
+    pub fn lines(&self, mode: Mode) -> Vec<String> {
+        if self.objects == 0 {
+            return Vec::new();
+        }
+        let objects = |n: u64| {
+            if n == 1 {
+                "1 object".to_string()
+            } else {
+                format!("{n} objects")
+            }
+        };
+        let mut first = if mode == Mode::Observe {
+            format!(
+                "build: c/c++: observing: {} of {} would have been reused",
+                self.found,
+                objects(self.objects)
+            )
+        } else {
+            let mut parts = Vec::new();
+            let mut reused = format!("{} reused", self.reused);
+            if self.downloaded > 0 {
+                reused.push_str(&format!(" ({} from the shared store)", self.downloaded));
+            }
+            parts.push(reused);
+            parts.push(format!("{} built", self.built));
+            format!(
+                "build: c/c++: {}: {}",
+                objects(self.objects),
+                parts.join(", ")
+            )
+        };
+        if mode != Mode::Observe && self.saved_ms >= 1_000 {
+            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
+        }
+        if self.compared > 0 {
+            first.push_str(&format!(
+                ", {} compared with their blocks, {} differed",
+                self.compared, self.differed
+            ));
+        }
+        let mut lines = vec![first];
+        if !self.reasons.is_empty() {
+            let mut reasons = self.reasons.clone();
+            reasons.sort_by(|a, b| b.1.cmp(&a.1));
+            let shown: Vec<String> = reasons
+                .iter()
+                .take(3)
+                .map(|(why, n)| format!("{n} {why}"))
+                .collect();
+            let all: u64 = reasons.iter().map(|(_, n)| n).sum();
+            let more = if reasons.len() > 3 { ", …" } else { "" };
+            lines.push(format!(
+                "build: c/c++: {} compiled as asked or not stored ({}{more})",
+                objects(all),
+                shown.join(", ")
+            ));
+        }
+        if self.kept > 0 {
+            let why: Vec<String> = self
+                .kept_reasons
+                .iter()
+                .map(|(why, n)| format!("{n} {why}"))
+                .collect();
+            lines.push(format!(
+                "build: c/c++: {} compiled here {} on this machine ({})",
+                objects(self.kept),
+                if self.kept == 1 { "stays" } else { "stay" },
+                why.join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 /// What a run's Go package archives came to (B-46).
@@ -593,6 +760,10 @@ impl Counts {
                 counts.go.add(entry);
                 continue;
             }
+            if entry.cc.is_some() {
+                counts.cc.add(entry);
+                continue;
+            }
             counts.compiles += 1;
             match entry.outcome {
                 Outcome::Reused => {
@@ -698,6 +869,7 @@ impl Summary {
 fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
     let mut lines = rust_lines(counts, rebuilt);
     lines.extend(counts.go.lines());
+    lines.extend(counts.cc.lines(counts.mode));
     lines
 }
 
@@ -905,6 +1077,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         folder,
         share: Shared::Off,
         share_setting: settings.share,
+        cc: None,
     };
     write_current(&current)
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", current.folder.display())))?;
@@ -915,6 +1088,8 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         more: Vec::new(),
         go: None,
         rustc_left_out: false,
+        cc_env: Vec::new(),
+        cc_maps_setting: settings.cc_maps,
     })
 }
 
@@ -1013,30 +1188,83 @@ impl Session {
         {
             env.push((crate::go::GOCACHEPROG.into(), go.value.clone().into()));
         }
+        env.extend(self.cc_env.iter().cloned());
         env
     }
 
-    /// The link Go starts as its cache program, `hushrun-gocache` beside the wrapper's link and
-    /// pointing at the same binary (B-39), made when first asked.
-    pub fn program_link(&self) -> std::io::Result<PathBuf> {
+    /// Gives COMMAND the C and C++ launcher (B-50): `checkout` is the repository's folder as the
+    /// run found it (its given form; the resolved one is added), `maps` whether the repository
+    /// lets the launcher map it (`build: cc: maps:`; the person's setting can turn it off too),
+    /// `env` the run's environment, where the person's own
+    /// launcher would be. Each of `CMAKE_C_COMPILER_LAUNCHER` and `CMAKE_CXX_COMPILER_LAUNCHER`
+    /// gets [`crate::cc::INDIRECTION`] unless the person set it; `HUSHRUN_CC` gets the link
+    /// `hushrun-cc`. Written into `session.json` before COMMAND starts. Nothing on Windows.
+    pub fn set_cc(
+        &mut self,
+        checkout: &Path,
+        maps: bool,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> std::io::Result<()> {
+        if cfg!(windows) {
+            return Ok(());
+        }
+        let link = self.launcher_link()?;
+        let given = checkout.to_string_lossy().into_owned();
+        let mut roots = vec![given.clone()];
+        if let Some(resolved) = crate::roots::resolve_on_disk(&given)
+            && resolved != given
+        {
+            roots.push(resolved);
+        }
+        let maps = maps && self.cc_maps_setting;
+        self.current.cc = Some(crate::cc::CcRun { roots, maps });
+        write_current(&self.current)?;
+        let mut cc_env: Vec<(OsString, OsString)> = crate::cc::CMAKE_LAUNCHERS
+            .iter()
+            .filter(|name| env(name).is_none_or(|v| v.is_empty()))
+            .map(|name| ((*name).into(), crate::cc::INDIRECTION.into()))
+            .collect();
+        cc_env.push((crate::cc::HUSHRUN_CC.into(), link.into_os_string()));
+        self.cc_env = cc_env;
+        Ok(())
+    }
+
+    /// Whether the run gives COMMAND the C and C++ launcher, and for which languages.
+    pub fn cc_launchers(&self) -> Vec<&str> {
+        crate::cc::CMAKE_LAUNCHERS
+            .iter()
+            .copied()
+            .filter(|name| self.cc_env.iter().any(|(n, _)| n == name))
+            .collect()
+    }
+
+    /// The link the launcher variables lead to, `hushrun-cc` beside the wrapper's link and
+    /// pointing at the same binary (B-50), made when first asked.
+    pub fn launcher_link(&self) -> std::io::Result<PathBuf> {
+        self.sibling_link(crate::cc::LAUNCHER_NAME)
+    }
+
+    fn sibling_link(&self, name: &str) -> std::io::Result<PathBuf> {
         let dir = self
             .link
             .parent()
             .ok_or_else(|| std::io::Error::other("the wrapper's link has no folder"))?;
         let exe = std::fs::read_link(&self.link)?;
-        let link = dir.join(crate::go::PROGRAM_NAME);
+        let link = dir.join(name);
         if std::fs::read_link(&link).is_ok_and(|target| target == exe) {
             return Ok(link);
         }
-        let temp = dir.join(format!(
-            ".{}.{}.tmp",
-            crate::go::PROGRAM_NAME,
-            std::process::id()
-        ));
+        let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
         let _ = std::fs::remove_file(&temp);
         symlink(&exe, &temp)?;
         std::fs::rename(&temp, &link)?;
         Ok(link)
+    }
+
+    /// The link Go starts as its cache program, `hushrun-gocache` beside the wrapper's link and
+    /// pointing at the same binary (B-39), made when first asked.
+    pub fn program_link(&self) -> std::io::Result<PathBuf> {
+        self.sibling_link(crate::go::PROGRAM_NAME)
     }
 
     /// Leaves hushrun's `RUSTC_WRAPPER` out of COMMAND's environment, for a run whose own
@@ -1184,10 +1412,12 @@ fn remove_dangling_links(store: &Path) {
         );
         if is_link && dangling {
             let _ = fs::remove_file(&link);
-            // Go's cache program's link points at the same binary.
-            let program = folder.join(crate::go::PROGRAM_NAME);
-            if fs::symlink_metadata(&program).is_ok_and(|meta| meta.file_type().is_symlink()) {
-                let _ = fs::remove_file(&program);
+            // Go's cache program's link and the C launcher's point at the same binary.
+            for name in [crate::go::PROGRAM_NAME, crate::cc::LAUNCHER_NAME] {
+                let program = folder.join(name);
+                if fs::symlink_metadata(&program).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                    let _ = fs::remove_file(&program);
+                }
             }
             let _ = fs::remove_dir(&folder);
         }
@@ -1308,6 +1538,7 @@ mod tests {
             key: None,
             downloaded: false,
             go: None,
+            cc: None,
         };
         found.log(&entry);
         found.log(&entry);
@@ -1420,6 +1651,7 @@ mod tests {
             key: None,
             downloaded: false,
             go: None,
+            cc: None,
         }
     }
 
@@ -2022,6 +2254,149 @@ mod tests {
         run.begin().finish(now());
         assert!(other.is_dir());
         assert!(live.exists());
+    }
+
+    // covers: B-61
+    #[test]
+    fn c_objects_are_counted_apart_from_crates_and_said_in_their_own_lines() {
+        use crate::cc::launcher::CcEntry;
+        let cc = |outcome: Outcome, why: Option<&str>| Entry {
+            cc: Some(CcEntry {
+                why: why.map(str::to_string),
+                ..CcEntry::default()
+            }),
+            ..entry(outcome)
+        };
+        let probe = Entry {
+            cc: Some(CcEntry {
+                why: Some("cmake-probe".into()),
+                probe: true,
+                ..CcEntry::default()
+            }),
+            ..entry(Outcome::PassedThrough(PassedThrough::UnknownArgument))
+        };
+        let entries = vec![
+            entry(Outcome::BuiltAndStored),
+            Entry {
+                saved_ms: 2_500,
+                ..cc(Outcome::Reused, None)
+            },
+            Entry {
+                saved_ms: 1_000,
+                ..cc(Outcome::Reused, None)
+            },
+            cc(Outcome::BuiltAndStored, None),
+            cc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("pch"),
+            ),
+            cc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("pch"),
+            ),
+            cc(
+                Outcome::BuiltNotStored(NotStored::Unkeyable),
+                Some("time-macro"),
+            ),
+            cc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("modules"),
+            ),
+            cc(
+                Outcome::BuiltNotStored(NotStored::RustcFailed),
+                Some("compile-failed"),
+            ),
+            Entry {
+                found: true,
+                differed: true,
+                ..cc(
+                    Outcome::BuiltNotStored(NotStored::Differed),
+                    Some("differed"),
+                )
+            },
+            probe,
+        ];
+        let summary = Summary::of(Mode::On, 10, &entries);
+        assert_eq!(summary.counts().compiles, 1, "one crate, the objects apart");
+        assert_eq!(
+            summary.counts().cc.objects,
+            9,
+            "CMake's configure check counts nowhere"
+        );
+        assert_eq!(
+            summary.lines(),
+            [
+                "build: 1 crate built, none reused",
+                "build: c/c++: 9 objects: 2 reused, 7 built, saving about 3s, 1 compared with their blocks, 1 differed",
+                "build: c/c++: 6 objects compiled as asked or not stored (2 pch, 1 time-macro, 1 modules, …)",
+            ]
+        );
+        let observed = Summary::of(Mode::Observe, 10, &entries[3..4]);
+        assert_eq!(
+            observed.lines(),
+            ["build: c/c++: observing: 0 of 1 object would have been reused"]
+        );
+        assert!(
+            Summary::of(Mode::On, 10, &entries[..1])
+                .counts()
+                .cc
+                .lines(Mode::On)
+                .is_empty()
+        );
+    }
+
+    // covers: B-60, B-61
+    #[test]
+    fn objects_a_run_that_shares_keeps_here_are_said_with_why_and_downloads_counted() {
+        use crate::cc::launcher::CcEntry;
+        let stored = |local: &[&str], shared: bool| Entry {
+            cc: Some(CcEntry {
+                local: local.iter().map(|s| s.to_string()).collect(),
+                shared,
+                ..CcEntry::default()
+            }),
+            ..entry(Outcome::BuiltAndStored)
+        };
+        let entries = vec![
+            stored(&[], true),
+            stored(&["tied"], true),
+            stored(&["tied", "home-in-output"], true),
+            stored(&["native-cpu"], true),
+            // A run without a relay keeps everything here, and says nothing of it.
+            stored(&["tied"], false),
+            Entry {
+                downloaded: true,
+                saved_ms: 4_000,
+                cc: Some(CcEntry::default()),
+                ..entry(Outcome::Reused)
+            },
+        ];
+        assert_eq!(
+            Summary::of(Mode::On, 10, &entries).lines(),
+            [
+                "build: c/c++: 6 objects: 1 reused (1 from the shared store), 5 built, saving about 4s",
+                "build: c/c++: 3 objects compiled here stay on this machine (2 tied, 1 home-in-output, 1 native-cpu)",
+            ]
+        );
+    }
+
+    // covers: B-60
+    #[test]
+    fn a_c_object_s_line_is_of_kind_cc_and_its_blocks_name_it() {
+        let line = Entry {
+            cc: Some(crate::cc::launcher::CcEntry::default()),
+            ..entry(Outcome::Reused)
+        };
+        assert_eq!(line.kind(), crate::model::Kind::Cc);
+        assert_eq!(crate::model::Kind::Cc.word(), "cc/1");
+        assert_eq!(
+            crate::model::Kind::of_description(&serde_json::json!({"kind": "cc/1"})),
+            crate::model::Kind::Cc
+        );
+        // A line read back keeps its kind; one from before the launcher has none.
+        let back: Entry = serde_json::from_slice(&serde_json::to_vec(&line).unwrap()).unwrap();
+        assert_eq!(back.kind(), crate::model::Kind::Cc);
+        assert_eq!(entry(Outcome::Reused).kind(), crate::model::Kind::Rustc);
     }
 
     // covers: B-46

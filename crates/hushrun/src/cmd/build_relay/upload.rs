@@ -520,8 +520,8 @@ impl Relay {
                     finish(&marker, step);
                 }
                 // A Go block has no hints.
-                if kind == Kind::Rustc {
-                    self.send_hints(&stored).await;
+                if kind != Kind::Go {
+                    self.send_hints(kind, &stored).await;
                 }
             }
             Some(Err(failure)) => {
@@ -556,7 +556,7 @@ impl Relay {
     /// B-30: the hints of the first keys of blocks just stored, sealed with each first key, so
     /// another machine can find the second key. The newest few of each, within the protocol's
     /// limits; a hint is never trusted, so one that fails to go costs only a reuse elsewhere.
-    async fn send_hints(&self, steps: &[hushrun_core::Digest]) {
+    async fn send_hints(&self, kind: Kind, steps: &[hushrun_core::Digest]) {
         let limits = self
             .state()
             .policy
@@ -584,7 +584,7 @@ impl Relay {
                 }
                 bytes += sealed.len();
                 hints.push(blocks::SentHint {
-                    address: Relay::address(step),
+                    address: Relay::address_in(kind, step),
                     list: blocks::Base64(sealed),
                 });
             }
@@ -593,7 +593,7 @@ impl Relay {
             return;
         }
         let request = blocks::HintsRequest {
-            kind: super::KIND.to_string(),
+            kind: kind.word().to_string(),
             hints,
             commit: self.config.commit.clone(),
         };

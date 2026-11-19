@@ -40,6 +40,9 @@ pub struct Settings {
     /// How much of the org's shared store this machine takes part in (B-33): `on`, `observe` or
     /// `off`. It lowers the org's shared mode for this machine and never raises it.
     pub share: Mode,
+    /// Whether the C and C++ launcher maps the checkout's folder to `.` (B-55): `true` unless the
+    /// person wrote `"cc_maps": false`. A repository's `build: cc: maps: off` turns it off too.
+    pub cc_maps: bool,
     /// Whether someone chose the mode (`hushrun build on|observe|off`), so that the file names
     /// it. `false` only with the default mode, `off`: nobody chose, and the file names no mode,
     /// which a sandbox reads as its own default (B-25). Kept by [`load`] and [`update`] alone.
@@ -56,6 +59,7 @@ impl Default for Settings {
             min_free_gb: MIN_FREE_GB,
             programs: ProgramsSetting::default(),
             share: Mode::On,
+            cc_maps: true,
             mode_chosen: false,
         }
     }
@@ -124,6 +128,7 @@ struct Stored {
     min_free_gb: Option<u32>,
     programs: Option<ProgramsSetting>,
     share: Option<Mode>,
+    cc_maps: Option<bool>,
 }
 
 /// The file as written: every field, but for a mode nobody chose (B-25) and for `programs`
@@ -141,6 +146,14 @@ struct Written<'a> {
     #[serde(skip_serializing_if = "ProgramsSetting::is_follow")]
     programs: ProgramsSetting,
     share: Mode,
+    /// Written only when off: a file without it reads as on here and in every released hushrun,
+    /// and one an older hushrun reads stays valid unless someone turned the maps off.
+    #[serde(skip_serializing_if = "is_true")]
+    cc_maps: bool,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Settings {
@@ -188,6 +201,7 @@ pub fn load(path: &Path) -> Result<Settings, SettingsError> {
         min_free_gb: stored.min_free_gb.unwrap_or(defaults.min_free_gb),
         programs: stored.programs.unwrap_or(defaults.programs),
         share: stored.share.unwrap_or(defaults.share),
+        cc_maps: stored.cc_maps.unwrap_or(defaults.cc_maps),
     };
     settings.check(path)?;
     Ok(settings)
@@ -294,6 +308,7 @@ fn save(path: &Path, settings: &Settings) -> io::Result<()> {
         min_free_gb: settings.min_free_gb,
         programs: settings.programs,
         share: settings.share,
+        cc_maps: settings.cc_maps,
     };
     let mut bytes = serde_json::to_vec_pretty(&written)?;
     bytes.push(b'\n');

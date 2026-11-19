@@ -261,6 +261,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         key: None,
         downloaded: false,
         go: None,
+        cc: None,
     }
 }
 

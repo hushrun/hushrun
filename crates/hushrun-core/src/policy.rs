@@ -56,6 +56,10 @@ pub struct Policy {
     /// both forms of `hushrun run`, sorted and once each (B-35). Not part of any check's
     /// definition (E-6).
     pub build_env: Vec<String>,
+    /// `build: cc: maps:`: whether the C and C++ launcher maps the checkout's folder to `.` in
+    /// what it compiles (B-55); `on` unless the file says `off`. Not part of any check's
+    /// definition (E-6).
+    pub build_cc_maps: bool,
     /// The file name used in error messages.
     pub file: String,
     /// The file's text, for `plan --explain-json`.
@@ -238,6 +242,16 @@ struct RawPolicy {
 struct RawBuild {
     #[serde(default)]
     env: Vec<Spanned<String>>,
+    #[serde(default)]
+    cc: Option<RawBuildCc>,
+}
+
+/// `build: cc:`: what the C and C++ launcher does in every machine's runs (B-55).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBuildCc {
+    #[serde(default)]
+    maps: Option<Spanned<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -612,6 +626,23 @@ impl Policy {
             }
         }
         build_env.sort();
+        // B-55
+        let mut build_cc_maps = true;
+        if let Some(maps) = raw
+            .build
+            .as_ref()
+            .and_then(|build| build.cc.as_ref())
+            .and_then(|cc| cc.maps.as_ref())
+        {
+            match maps.value.as_str() {
+                "on" => {}
+                "off" => build_cc_maps = false,
+                other => errors.push(
+                    maps.pos,
+                    format!("`build.cc.maps` is on or off, not {other:?}"),
+                ),
+            }
+        }
 
         retired.sort_by_key(|r| (r.pos.line, r.pos.column));
         errors.finish(Policy {
@@ -629,6 +660,7 @@ impl Policy {
             transparency_log,
             retired,
             build_env,
+            build_cc_maps,
             file: file.to_string(),
             text: String::from_utf8_lossy(bytes).into_owned(),
         })

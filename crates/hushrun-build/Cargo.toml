@@ -24,7 +24,8 @@ thiserror.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
-# Free space on the store's volume (B-22): rustix's safe statvfs(2). The binary builds rustix
+# Free space on the store's volume (B-22): rustix's safe statvfs(2); and the C launcher raises
+# again the signal that ended its compile (B-58). The binary builds rustix
 # already.
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "process"] }

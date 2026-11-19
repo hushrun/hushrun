@@ -3337,6 +3337,7 @@ fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_buil
         key: Some(key),
         downloaded: false,
         go: Some(hushrun_build::session::GoEntry::default()),
+        cc: None,
     }
 }
 
@@ -3513,4 +3514,442 @@ fn the_go_manifest_names_only_archives_that_may_leave() {
     );
     // It was built, and counts so.
     assert_eq!(close.counts.built, 2);
+}
+
+/// A C or C++ object's block in `store`, built here by `by`, with a hint for its first key:
+/// kind `cc/1`. Its key and first key.
+fn cc_block(store: &Store, seed: u8, by: Option<Identity>) -> (Digest, Digest) {
+    let key = Digest::of(&[seed, 8]);
+    let step = Digest::of(&[seed, 9]);
+    let dir = store.root().with_file_name(format!("cc-src-{seed}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("object");
+    let bytes: Vec<u8> = (0..20_000)
+        .map(|i| Digest::of(&[seed, (i / 32) as u8]).as_bytes()[i % 32])
+        .collect();
+    std::fs::write(&file, &bytes).unwrap();
+    let description = json!({"schema": "hushrun.cc-block/v1", "kind": "cc/1", "step": step,
+        "source": "{root}/a.c", "compile_ms": 1000, "place": "anywhere", "local": [],
+        "platform": "x86_64-linux-gnu", "repository": null});
+    store
+        .publish_with_origin(
+            &key,
+            &description,
+            &[NewFile {
+                name: "object".into(),
+                source: file,
+            }],
+            &Origin::built_here("1-1", by),
+            SystemTime::now(),
+        )
+        .unwrap();
+    store
+        .add_hint(&step, format!("hint {seed}").as_bytes(), SystemTime::now())
+        .unwrap();
+    (key, step)
+}
+
+fn cc_address(key: &Digest) -> Hex32 {
+    blocks::address("cc/1", key.as_bytes())
+}
+
+/// A C or C++ object's line in a run's log, compiled for `platform`.
+fn cc_entry(
+    key: Digest,
+    step: Digest,
+    platform: &str,
+    outcome: hushrun_build::model::Outcome,
+) -> hushrun_build::session::Entry {
+    hushrun_build::session::Entry {
+        go: None,
+        step: Some(step),
+        cc: Some(hushrun_build::cc::launcher::CcEntry {
+            platform: platform.into(),
+            ..Default::default()
+        }),
+        ..go_entry(key, outcome)
+    }
+}
+
+const LINUX: &str = "x86_64-linux-gnu";
+
+// covers: B-60
+#[test]
+fn a_cc_question_asks_the_server_only_about_what_the_checks_cc_manifest_names() {
+    let fake = FakeBuild::start();
+    let a = machine();
+    let (named, named_step) = cc_block(&a.store, 81, Some(me(&fake)));
+    let (other, other_step) = cc_block(&a.store, 82, Some(me(&fake)));
+    for (key, step) in [(named, named_step), (other, other_step)] {
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            cc_address(&key),
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Library,
+        );
+        let hint = blocks::pack::seal_hint(step.as_bytes(), &a.store.hints(&step)[0]).unwrap();
+        fake.seed_hint(cc_address(&step), &hint);
+    }
+    fake.set_manifest(vec![Pair(cc_address(&named_step), cc_address(&named))]);
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    // No `cc/1` open until a compile asks: only it knows the target.
+    assert!(fake.opens().iter().all(|o| o.kind != "cc/1"));
+    let hints = |step| Request::CcHints {
+        step,
+        platform: LINUX.into(),
+        local_ms: Some(60_000),
+    };
+    let fetch = |step, key| Request::CcFetch {
+        step,
+        keys: vec![key],
+        platform: LINUX.into(),
+        local_ms: Some(60_000),
+    };
+    let (lookups, hint_lookups) = (fake.count(route::LOOKUP), fake.count(route::HINTS_LOOKUP));
+    // A first key the manifest doesn't name asks nothing, hints or blocks.
+    assert_eq!(ask(&relay, hints(other_step)), Answer::None);
+    assert_eq!(ask(&relay, fetch(other_step, other)), Answer::None);
+    assert_eq!(fake.count(route::LOOKUP), lookups);
+    assert_eq!(fake.count(route::HINTS_LOOKUP), hint_lookups);
+    let open = fake.opens().into_iter().find(|o| o.kind == "cc/1").unwrap();
+    assert_eq!(open.platform, LINUX);
+    // Nor does a platform no compile of the check asked about, beyond its own `open`.
+    assert_eq!(
+        ask(
+            &relay,
+            Request::CcHints {
+                step: named_step,
+                platform: "Not A Triple".into(),
+                local_ms: None,
+            }
+        ),
+        Answer::None
+    );
+    // One it names: the prefetch's one lookup of hints and one of blocks.
+    assert_eq!(ask(&relay, hints(named_step)), Answer::Hints { count: 1 });
+    assert_eq!(b.store.shared_hints(&named_step), vec![b"hint 81".to_vec()]);
+    // A key a hint leads to that the manifest doesn't pair with the first key (the one a tied
+    // object would have) asks nothing either.
+    assert_eq!(
+        ask(&relay, fetch(named_step, Digest::of(b"tied"))),
+        Answer::None
+    );
+    assert_eq!(fake.count(route::LOOKUP) - lookups, 1);
+    assert_eq!(
+        ask(&relay, fetch(named_step, named)),
+        Answer::Ready { key: named }
+    );
+    assert_eq!(fake.count(route::LOOKUP) - lookups, 1);
+    assert_eq!(fake.count(route::HINTS_LOOKUP) - hint_lookups, 1);
+    let block = b.store.block(&named).unwrap().unwrap();
+    assert_eq!(
+        hushrun_build::model::Kind::of_description(&block.description),
+        hushrun_build::model::Kind::Cc
+    );
+    assert!(b.store.origin(&named).unwrap().downloaded_only());
+    assert!(b.store.block(&other).unwrap().is_none());
+    relay.end_check(&[]);
+}
+
+// covers: B-60
+#[test]
+fn a_cold_build_s_questions_wait_for_the_manifest_once_and_never_for_the_network_after() {
+    let fake = FakeBuild::start();
+    fake.delay(route::OPEN, Duration::from_millis(300));
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    let ask_cold = |seed: u8| {
+        let started = Instant::now();
+        let answer = ask(
+            &relay,
+            Request::CcHints {
+                step: Digest::of(&[seed]),
+                platform: LINUX.into(),
+                local_ms: None,
+            },
+        );
+        (answer, started.elapsed())
+    };
+    // The first waits for the two `open`s, side by side, within its bound.
+    let (answer, took) = ask_cold(1);
+    assert_eq!(answer, Answer::None);
+    assert!(took < Duration::from_millis(1_100), "{took:?}");
+    until("the cc manifest", || {
+        matches!(
+            relay.state().cc_manifests.get(LINUX),
+            Some(super::CcManifest::Got { .. })
+        )
+    });
+    let before = fake.seen().len();
+    for seed in 2..50u8 {
+        let (answer, took) = ask_cold(seed);
+        assert_eq!(answer, Answer::None);
+        assert!(took < Duration::from_millis(100), "{took:?}");
+    }
+    assert_eq!(fake.seen().len(), before, "no request per compile");
+    relay.end_check(&[]);
+}
+
+// covers: B-60, B-29, B-30
+#[test]
+fn a_cc_block_built_here_goes_up_with_its_hints_and_closes_once_per_platform() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, step) = cc_block(&m.store, 83, Some(me(&fake)));
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let built = Request::CcBuilt {
+        key,
+        step,
+        portable: true,
+        bound: false,
+        cost_ms: 1000,
+    };
+    assert!(built.is_a_notice());
+    assert_eq!(ask(&relay, built), Answer::Ok);
+    until("stored", || {
+        fake.block(cc_address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    });
+    until("done", || no_claims(&m));
+    until("its hint", || !fake.hints(cc_address(&step)).is_empty());
+    let sealed = &fake.hints(cc_address(&step))[0];
+    assert_eq!(
+        blocks::pack::open_hint(step.as_bytes(), sealed),
+        Some(b"hint 83".to_vec())
+    );
+    let arm = Digest::of(b"an arm object");
+    let kept = Digest::of(b"a tied object");
+    let mut tied = cc_entry(
+        kept,
+        kept,
+        LINUX,
+        hushrun_build::model::Outcome::BuiltAndStored,
+    );
+    tied.cc.as_mut().unwrap().local = vec!["tied".into()];
+    let mut probe = cc_entry(
+        arm,
+        arm,
+        "riscv64-linux-gnu",
+        hushrun_build::model::Outcome::Reused,
+    );
+    probe.cc.as_mut().unwrap().probe = true;
+    relay.end_check(&[
+        cc_entry(
+            key,
+            step,
+            LINUX,
+            hushrun_build::model::Outcome::BuiltAndStored,
+        ),
+        // A reuse, as the launcher logs it.
+        hushrun_build::cc::launcher::reused_entry(
+            arm,
+            arm,
+            hushrun_build::cc::launcher::CcEntry {
+                platform: "aarch64-linux-gnu".into(),
+                ..Default::default()
+            },
+            0,
+            false,
+        ),
+        tied,
+        probe,
+    ]);
+    let begun = fake.begins();
+    assert!(!begun.is_empty() && begun.iter().all(|b| b.kind == "cc/1"));
+    assert_eq!(begun[0].blocks[0].address, cc_address(&key));
+    assert_eq!(begun[0].blocks[0].hint_address, Some(cc_address(&step)));
+    let closes = fake.closes();
+    let cc: Vec<_> = closes.iter().filter(|c| c.kind == "cc/1").collect();
+    assert_eq!(cc.len(), 2, "{closes:?}");
+    let linux = cc.iter().find(|c| c.platform == LINUX).unwrap();
+    let arm_close = cc
+        .iter()
+        .find(|c| c.platform == "aarch64-linux-gnu")
+        .unwrap();
+    assert_ne!(linux.run, arm_close.run);
+    let rust = closes.iter().find(|c| c.kind == "rustc/1").unwrap();
+    assert!(rust.manifest.is_empty());
+    assert_ne!(linux.run, rust.run);
+    // What stays on the machine is no pair: no later prefetch looks it up.
+    assert_eq!(
+        linux.manifest,
+        vec![Pair(cc_address(&step), cc_address(&key))]
+    );
+    assert_eq!((linux.counts.built, linux.counts.reused_local), (2, 0));
+    assert_eq!(
+        arm_close.manifest,
+        vec![Pair(cc_address(&arm), cc_address(&arm))]
+    );
+    assert_eq!(arm_close.counts.reused_local, 1);
+}
+
+// covers: B-60, B-31, B-24
+#[test]
+fn a_cc_block_goes_up_only_from_a_caller_the_policy_lets_write_and_bound_only_from_a_job() {
+    let cc_built = |key, step, portable: bool| Request::CcBuilt {
+        key,
+        step,
+        portable,
+        bound: !portable,
+        cost_ms: 1000,
+    };
+    // A job of a branch that isn't trusted reads the repository's trusted blocks and writes
+    // none: no marker.
+    let fake = FakeBuild::start();
+    fake.set_policy(|p| {
+        p.untrusted = Some(blocks::Untrusted::Event);
+        p.writes = false;
+        p.write = None;
+    });
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let (key, step) = cc_block(&m.store, 84, Some(job_identity(&fake, &relay)));
+    assert_eq!(ask(&relay, cc_built(key, step, true)), Answer::Ok);
+    relay.end_check(&[]);
+    assert!(waiting(&m).is_empty());
+    assert_eq!(fake.count(route::BEGIN), 0);
+    // A person's tied object: no marker; their folders are in its bytes.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, step) = cc_block(&m.store, 85, Some(me(&fake)));
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    assert_eq!(ask(&relay, cc_built(key, step, false)), Answer::Ok);
+    relay.end_check(&[]);
+    assert!(waiting(&m).is_empty());
+    assert_eq!(fake.count(route::BEGIN), 0);
+    // A trusted job's tied object and portable one both go up, to its protected scope.
+    let fake = FakeBuild::start();
+    fake.set_scopes(Some("protected/acme/shop"), &["protected/acme/shop"]);
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (tied, tied_step) = cc_block(&m.store, 86, Some(by.clone()));
+    let (portable, portable_step) = cc_block(&m.store, 87, Some(by));
+    assert_eq!(ask(&relay, cc_built(tied, tied_step, false)), Answer::Ok);
+    assert_eq!(
+        ask(&relay, cc_built(portable, portable_step, true)),
+        Answer::Ok
+    );
+    let mut tied_entry = cc_entry(
+        tied,
+        tied_step,
+        LINUX,
+        hushrun_build::model::Outcome::BuiltAndStored,
+    );
+    tied_entry.cc.as_mut().unwrap().local = vec!["tied".into()];
+    let portable_entry = cc_entry(
+        portable,
+        portable_step,
+        LINUX,
+        hushrun_build::model::Outcome::BuiltAndStored,
+    );
+    relay.end_check(&[tied_entry, portable_entry]);
+    for key in [tied, portable] {
+        let block = fake.block(cc_address(&key)).expect("it went up");
+        assert_eq!(block.state, hushrun_testkit::fake_build::BlockState::Stored);
+        assert_eq!(block.scope, "protected/acme/shop");
+    }
+    // The job's close names both: a later job at the same paths fetches the tied one, which
+    // only a key the manifest pairs is (B-60).
+    let close = fake
+        .closes()
+        .into_iter()
+        .find(|c| c.kind == "cc/1")
+        .expect("a cc close");
+    for (key, step) in [(tied, tied_step), (portable, portable_step)] {
+        assert!(
+            close
+                .manifest
+                .contains(&Pair(cc_address(&step), cc_address(&key))),
+            "{close:?}"
+        );
+    }
+}
+
+// covers: B-60, B-29
+#[test]
+fn a_cc_object_whose_notice_never_came_gets_its_marker_when_the_check_ends() {
+    // A launcher that found the relay slow once marks it down for the run, and tells it nothing
+    // after: the objects it stored still go up, from the run's log.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, step) = cc_block(&m.store, 88, Some(me(&fake)));
+    let (kept, kept_step) = cc_block(&m.store, 89, Some(me(&fake)));
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let mut stays = cc_entry(
+        kept,
+        kept_step,
+        LINUX,
+        hushrun_build::model::Outcome::BuiltAndStored,
+    );
+    stays.cc.as_mut().unwrap().local = vec!["home-in-output".into()];
+    relay.end_check(&[
+        cc_entry(
+            key,
+            step,
+            LINUX,
+            hushrun_build::model::Outcome::BuiltAndStored,
+        ),
+        stays,
+    ]);
+    let marked: Vec<Digest> = waiting(&m).iter().map(|marker| marker.key).collect();
+    let uploaded = fake.block(cc_address(&key)).is_some();
+    assert!(marked.contains(&key) || uploaded, "{marked:?}");
+    assert!(!marked.contains(&kept) && fake.block(cc_address(&kept)).is_none());
+}
+
+// covers: B-60
+#[test]
+fn a_cc_open_that_answers_after_its_check_ended_is_not_taken_for_the_next_check_s() {
+    let fake = FakeBuild::start();
+    fake.set_manifest(vec![Pair(
+        cc_address(&Digest::of(b"a step")),
+        cc_address(&Digest::of(b"a block")),
+    )]);
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    fake.delay(route::OPEN, Duration::from_millis(800));
+    relay
+        .state()
+        .cc_manifests
+        .insert(LINUX.into(), super::CcManifest::Asking);
+    let late = {
+        let asking = relay.clone();
+        relay
+            .runtime
+            .spawn(async move { asking.cc_open(LINUX.into()).await })
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    relay.end_check(&[]);
+    // The next check asks about the same triple before the first check's answer comes.
+    begin(&relay, &m);
+    relay
+        .state()
+        .cc_manifests
+        .insert(LINUX.into(), super::CcManifest::Asking);
+    relay.runtime.block_on(late).unwrap();
+    assert!(
+        relay.state().cc_manifests.get(LINUX) == Some(&super::CcManifest::Asking),
+        "the first check's manifest was kept for the second"
+    );
+    relay.end_check(&[]);
 }
