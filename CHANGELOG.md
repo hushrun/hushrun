@@ -6,10 +6,10 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
-C and C++ build blocks ([ADR 0097](docs/adr/0097-c-and-c++-build-blocks.md), phases 1 and 2):
+C and C++ build blocks ([ADR 0097](docs/adr/0097-c-and-c++-build-blocks.md), phases 1 to 3):
 `hushrun run NAME -- COMMAND` and each check of hushrun.yaml that runs here, with build reuse on,
-reuse the objects a CMake build compiled in another worktree on this machine. Nothing is shared
-between machines yet.
+reuse the objects a CMake build compiled in another worktree on this machine, and in an org that
+shares build blocks, the objects another machine with the same compiler compiled.
 
 ### Added
 
@@ -41,9 +41,25 @@ between machines yet.
   and the compiles run as asked or not stored, by reason.
 - **`hushrun build status` says** when `CMAKE_C_COMPILER_LAUNCHER` or
   `CMAKE_CXX_COMPILER_LAUNCHER` is set in the shell (JSON: `cmake_launchers_set`, `cc_maps`).
+- **C and C++ objects are shared between machines** (B-59, B-60): kind `cc/1`, through the run's
+  relay, records, vouches, outbox and withdrawals, as Rust's and Go's blocks. The relay asks the
+  check's `cc/1` manifest for the compiler's target triple when the first compile for it asks, and
+  looks up only first keys that manifest names, so a cold build asks the network nothing per
+  compile. A downloaded object is served only when its size and SHA-256 are its record's and its
+  bytes are a relocatable object of the target's machine (or LLVM bitcode for clang's `-flto`); one
+  that isn't is reported, its key suspended for the kept days, and the call compiles. The audit
+  compiles a download's first reuse one time in ten and reports a difference. A downloaded
+  object's messages keep their colour and lose every other control character, and its depfile is
+  written from the files this machine hashed. A relay that doesn't answer once is left alone for
+  the rest of the run. The summary says how many objects came from the shared store, and which
+  objects compiled here stay on this machine, and why.
 
 ### Changed
 
+- **A C or C++ compiler's identity leaves out the temporary files its driver names** (B-52): GCC's
+  `-###` named a new one each time, so the same GCC had another identity in every store. Objects
+  stored before compile once more. A block's messages hold the assembler's temporary file, which
+  GNU as names when it warns, as `{temp}`, and a reuse shows it so.
 - **Headers under the SDK, the toolchain and the system folders are answered by their stat** for
   the length of a run, so a reused object costs about 22 ms on macOS (abseil-cpp with its tests,
   433 objects reused in a second worktree), against 69 ms when every header is hashed.

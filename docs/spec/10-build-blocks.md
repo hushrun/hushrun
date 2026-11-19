@@ -1843,10 +1843,9 @@ with no usable `GOCACHE` answers every `get` as a miss, keeps every body in its 
 
 ## C and C++ (draft)
 
-> Draft, from [ADR 0097](../adr/0097-c-and-c++-build-blocks.md) (proposed). Phases 1 and 2 are
-> built: local reuse between worktrees and the run memo. Sharing (B-59's checks of a download,
-> B-60) is not: no `cc/1` block leaves the machine or arrives from another. A rule a phase
-> doesn't reach yet passes the compile through.
+> Draft, from [ADR 0097](../adr/0097-c-and-c++-build-blocks.md) (proposed). Phases 1 to 3 are
+> built: local reuse between worktrees, the run memo, and sharing through the relay (B-59, B-60).
+> A rule a phase doesn't reach yet passes the compile through.
 
 CMake starts each compile through a **launcher** named by `CMAKE_C_COMPILER_LAUNCHER` and
 `CMAKE_CXX_COMPILER_LAUNCHER`: `<launcher> <compiler> <arguments>`, one process per translation
@@ -2056,36 +2055,72 @@ status, and re-raises the signal that ended it. A restore that fails part way ru
 as asked as a child, with the same passing on. A store that fails after a successful compile is
 `built, not stored`. A kill at any point leaves nothing a later build takes for a block.
 
-**B-59 Checks of a C block.** A block is served only when its key isn't suspended (B-15),
-`Shared::may_reuse` says so (B-34), its object's SHA-256 and size are its record's, and its bytes
-are an object of the compile's kind: Mach-O `MH_OBJECT` or ELF `ET_REL` of the target's machine
-and width, or for clang's `-flto` LLVM bitcode (wrapped or not). Else it is removed and compiled;
-a download that fails is first reported `rejected` to the scope its record names and its key
-suspended for `keep_days`. Then one time in fifty, one in ten on a downloaded block's first reuse
-here (`audit::sample`), every time in local `observe` and with `HUSHRUN_BUILD_AUDIT=every`, never
-with `none`, the launcher compiles anyway and compares the object byte for byte: a difference
-serves the compile, suspends the key, and reports `differs` when the block was only downloaded.
-Messages from a downloaded block lose every control character but SGR colour sequences before they
-are written. *Rests on:* a compile being deterministic at one path and, with B-55's maps, at two
-(measured on abseil: every unit at a second path gave the stored bytes). *Breaks if:* a compiler
-writes a time or random bytes into an object: every audit of it differs, which loses reuse and
-never serves wrong bytes.
+**B-59 Checks of a C block.** A block is served only when its first key isn't suspended (B-15),
+`Shared::may_reuse` says so (B-34), and its object's size and SHA-256 are its record's; a block
+only downloaded also only when the compile's target is one whose objects the launcher can check
+and its bytes are an object of the compile's kind: ELF `ET_REL` or Mach-O `MH_OBJECT` of the
+target's machine, width and byte order, or for clang's `-flto` LLVM bitcode (raw or wrapped).
+A block whose bytes fail is removed and the call compiles; one only downloaded is first reported
+`rejected` to the scope its record names, and its first key suspended for `keep_days`, so the
+compile that follows stores nothing under it. A compile here whose object isn't of the compile's
+kind (clang's bitcode without `-flto`, a target the launcher can't check) is stored with the
+reason `not-an-object` and stays on the machine (B-56). Then one time in fifty, one in ten on a
+downloaded block's first reuse here, which its record notes (`audit::sample`), every time in local
+`observe` and with `HUSHRUN_BUILD_AUDIT=every`, never with `none`, the launcher compiles anyway and
+compares the object byte for byte: a difference serves the compile and suspends the first key,
+until `hushrun build clean` for a block built here; for one only downloaded, for `keep_days`, with
+a report `differs` to the scope it came from, and the compile takes its place (B-32). A compile
+that finds a downloaded block of its own key already in the store compares it the same way, and
+where the two agree the block is from then on also built here. The depfile is written from the
+hint's reads, the files this machine hashed for the key, never from anything downloaded.
+A block's messages are stored with roots as placeholders and each temporary file the driver
+names (GNU as's `/tmp/ccwUJrhb.s: Assembler messages:`, `cc` and six random letters and digits)
+as `{temp}`, which a reuse shows as it is, so one compile's blocks are the same outputs on every
+machine. Messages from a downloaded block keep newlines, tabs, carriage returns and SGR colour
+sequences (`ESC [ <digits and ;> m`) and lose every other control character before they are
+written.
+*Rests on:* a compile being deterministic at one path and, with B-55's maps, at two (measured on
+abseil: every unit at a second path gave the stored bytes); the compiler's identity holding no
+name the driver makes up each time it is asked (GCC's `-###` temporary files, written `{temp}`).
+*Breaks if:* a compiler writes a time or random bytes into an object: every audit of it differs,
+which loses reuse and never serves wrong bytes.
 
 **B-60 Sharing C blocks.** C blocks are kind `cc/1`, class `library`, through the run's relay
-(B-26 to B-34) as Go's are (B-45): an outbox marker for a portable block built here, `begin` and
-`commit` of one kind, records, vouches, reports and withdrawals. A check whose COMMAND got the
-launcher asks `open` and sends `close` a further time, kind `cc/1`, with the platform the target
-triple the compiler's driver printed (several triples, several manifests), and a manifest of its
-blocks in the order the launcher logged them. A fetch is looked up only when that manifest names
-the first key; the first fetch of the check starts the prefetch of what it names that the store
-lacks. *Rests on:* the server taking any kind `is_kind` reads (no server change).
+(B-26 to B-34) as Go's are (B-45): records, vouches, reports and withdrawals, and hints sealed
+with the first key as `rustc` blocks' (B-30). The launcher follows the hints compiles here wrote
+first, then hints downloaded earlier (in a run that shares or would, B-34, and never for a first
+key kept on this machine), and asks the relay for a first key's hints only when it has none, in
+local mode `on`, for a target triple `is_platform` reads and B-59 can check; a downloaded hint is
+followed only within 20,000 reads, 500,000 places and 100,000 probes. A second key the hints lead
+to that the store lacks is fetched as a `rustc` wrapper's is (B-26), at most eight keys a fetch,
+and only a key the manifest pairs with the first key: any other asks the server nothing.
+The relay asks `open` a further time, kind `cc/1`, with the platform the compile's target triple,
+when the first launcher compiling for that triple asks (at most eight triples a check), and
+answers a launcher's hints and fetch only for a first key that manifest names: any other is a
+miss, without the network. A question waits for the check's `open` and that manifest at most half
+what this machine's last compile of the first key took, and at most a second. The first question
+about a first key the manifest names starts the prefetch of what it names that the store lacks
+(their hints, then their blocks) and waits for its lookups. A question to the relay waits at most
+half what the compile last took and 2 seconds, and at most 30 seconds; one that gets no answer,
+when a quick question about the run gets none either, marks the relay down in the session's folder
+(a mark the Go cache program's also stands for), and no launcher of the run asks it anything
+after. A block stored with no reason to stay (B-56) is told to the relay, which gives it an outbox
+marker (B-29) when the policy lets the run write and its record says this run's host, org and
+credential built it; one whose only reason is `tied` goes up from a CI job's own ID token alone,
+as B-24's bound blocks do; its hints go up after its commit. A check closes once per target triple
+its objects were compiled for, under a run made from the check's and the triple, with a manifest
+of its blocks in the order the launcher logged them, leaving out a block that stays on the machine
+(a reuse's reasons from the block's record) and CMake's configure checks. *Rests on:* the server
+taking any kind `is_kind` reads and keeping manifests per kind (no server change).
 
 **B-61 What a run says (C).** The launcher's lines go into the run's log beside the wrapper's,
 each with how long the call took, and the summary counts them apart: `build: c/c++: N objects: X
 reused (Y from the shared store), W built`, with the time saved and how many compared with their
 blocks differed (in `observe`, `build: c/c++: observing: X of N objects would have been reused`),
 and one line, `build: c/c++: N objects compiled as asked or not stored (…)`, by reason, the three
-most frequent. CMake's configure checks count nowhere. The compiler's own output is unchanged.
+most frequent; in a run that shares, one more, `build: c/c++: N objects compiled here stay on this
+machine (…)`, by B-56's reason (an object with two reasons counts under each). CMake's configure
+checks count nowhere. The compiler's own output is unchanged.
 
 **B-62 Without a session.** A launcher that finds no usable session (a build that outlived its
 run, `HUSHRUN_CC` set by hand) replaces itself with the compiler and the arguments as given, and

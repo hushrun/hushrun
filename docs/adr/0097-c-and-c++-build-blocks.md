@@ -1,6 +1,6 @@
 # 0097. C and C++ build blocks through CMake's compiler launcher
 
-- **Status:** proposed; phases 1 and 2 are built (local reuse and the run memo), sharing is not
+- **Status:** proposed; phases 1 to 3 are built (local reuse, the run memo, sharing through the relay)
 - **Date:** 2026-11-18
 - **Rules:** B-50 to B-62 (draft); B-13, B-14, B-15, B-22, B-25 to B-34 read for C and C++
 
@@ -322,9 +322,10 @@ is built:
 - **The run memo** (phase 2) keeps one entry per folder of files under the SDK, the toolchain and
   the system folders, in the run's session folder: each file's stat, SHA-256 and what the second
   key needs of its text. Files under the checkout are hashed every time.
-- **Seams for phase 3**: `Kind::Cc` exists and the relay leaves `cc/1` lines out of every
-  manifest; a C block has no record of where it came from and no outbox marker; a block with a
-  record is not reused; the log keeps each object's platform and why it stays on the machine.
+- **Seams for phase 3** (since filled, below): `Kind::Cc` existed and the relay left `cc/1`
+  lines out of every manifest; a C block had no record of where it came from and no outbox
+  marker; a block with a record was not reused; the log kept each object's platform and why it
+  stays on the machine.
 
 Measured on the same Mac as the spike (Apple clang 21, CMake 4.4.5, Ninja 1.13, `-j10`, load
 average 90 to 175 on 10 cores), abseil-cpp with its tests, Release, a release build of hushrun
@@ -344,6 +345,106 @@ the repository's 24 MB for the check's key), so the launcher's share of a warm b
 second or two of ccache's. A hit is the launcher's own measure (`took_ms` in the run's log), from
 its start to its line. The store held 117 MB of objects and 35 MB of hints. The same tests pass on
 Linux (GCC 12.2, CMake 3.25.1, Ninja 1.11) in Docker.
+
+## Phase 3 as built (2026-11-19)
+
+Sharing through the relay, in `cc/launcher.rs` (the launcher's side), `cc/share.rs` (its waits and
+the run's mark that the relay is down), `cc/checks.rs` (B-59's checks of bytes) and the relay
+(`build_relay.rs`). The server needs nothing new: open, lookups, hints, begin, commit, close and
+reports already took any kind `is_kind` reads, and kept manifests per kind. Where the build
+differs from decisions 6 and 8 or the draft rules, the rules now say what is built:
+
+- **The compiler's identity was not portable.** GCC's `-###` names a new temporary file each time
+  it is asked (`/tmp/ccT2YAtc.s`), so the same GCC had another identity in every store, and no
+  object could be reused on another machine (phase 1's tests reuse within one store, which
+  memoises the identity, and missed it). Those names are `{temp}` in the identity now, and in
+  what `-march=native` resolves to.
+- **Nor were a block's messages.** GNU as names the compiler's temporary output when it warns
+  (`/tmp/ccwUJrhb.s: Assembler messages:`, abseil's `symbolize_test`), so two machines' blocks of
+  one compile were other outputs, and the shared store refused the second one's upload as
+  differing (shared `observe` would have reported it). A block's messages hold such a name as
+  `{temp}`, and a reuse shows `{temp}.s` where a compile showed a name that was gone when it
+  ended.
+- **The manifest is asked when a compile asks.** The `cc/1` platform is the target triple the
+  compiler's driver names, which only a compile knows, so the relay sends `open` of kind `cc/1`
+  for a triple when the first launcher compiling for it asks (at most eight triples a check), and
+  a question waits at most half what this machine's last compile of the first key took, and at
+  most a second, for the check's own `open` and that manifest. On a cold build the first compiles
+  pay that once; every later question about a first key the manifest doesn't name is answered at
+  once, without the network.
+- **What the launcher asks.** It follows its own hints first, then hints downloaded earlier (in a
+  run that shares or would), and asks the relay for the first key's hints (`CcHints`) only when
+  it has none, in local mode `on`, for a triple the protocol carries and B-59 can check; a second
+  key they lead to that the store lacks is fetched (`CcFetch`, up to eight keys) as a `rustc`
+  wrapper's is. The first question about a first key the manifest names starts the prefetch of
+  what it names (hints, then blocks) and waits for its lookups. A downloaded hint is followed only
+  within 20,000 reads, 500,000 places and 100,000 probes, since what it names sets a lookup's cost.
+- **Checks of a block** (B-59): every block, built here or not, is served only when
+  `Shared::may_reuse` says so and its object's size and SHA-256 are its record's (the hash the
+  restore made already, so a local hit costs nothing more). The format check is a download's: a
+  block built here that isn't an object of the compile's kind (clang's bitcode without `-flto`, a
+  target this version can't check) is stored with the reason `not-an-object` and stays on the
+  machine, and a download for a target this version can't check is never served, and not
+  reported. A download that fails is reported `rejected`, its first key suspended for the kept
+  days, and removed; the compile that follows stores nothing under the suspended key.
+- **The audit** picks a reuse one time in fifty, a download's first reuse here one time in ten
+  (the record notes the first reuse), every one in local `observe` and with `every`. A
+  difference with a block built here suspends the first key until `hushrun build clean`, as in
+  phase 1; with one only downloaded it suspends it for the kept days, reports `differs`, and the
+  compile takes the downloaded block's place (B-32). A compile that finds a downloaded block of
+  its key already there compares it the same way, and where they agree the block is from then
+  on also built here.
+- **The relay is down for the run** once a question gets no answer within its wait (half the
+  compile's last time and 2 seconds, at most 30 seconds) and a quick question about the run gets
+  none either: a file in the session's folder, which the Go cache program's own mark also stands
+  for, since it is the same relay.
+- **Uploads**: a block stored with no reason to stay is told to the relay (`CcBuilt`), which
+  gives it an outbox marker when the policy lets the run write and the record says this run's
+  host, org and credential built it; one whose only reason is `tied` is bound (B-24) and goes up
+  from a CI job's own ID token only. Its hints go up after its commit, sealed with the first key,
+  as a `rustc` block's do. A check closes once per triple, under a run made from the check's and
+  the triple, with a manifest of its objects in the order the launcher logged them, leaving out
+  objects that stay on the machine (a reuse's reasons come from the block's record) and CMake's
+  configure checks.
+- **The summary** says how many objects came from the shared store, and, in a run that shares,
+  how many compiled here stay on this machine and why
+  (`build: c/c++: 3 objects compiled here stay on this machine (2 tied, 1 native-cpu)`).
+- **Only the blocks the manifest pairs with the first key are fetched.** A hint gives two keys,
+  the portable one and the one a tied object would have; asking for the second, never in a
+  portable build's manifest, cost a lookup a compile on a machine that reuses.
+- **Not built**: `hushrun build fetch` (B-36) fetches `rustc` blocks alone, as for Go; a sandbox's
+  C and C++ objects are not prefetched for later runs.
+
+Tested end to end through the fake backend (`crates/hushrun/tests/build_cc.rs`): two machines at
+different paths, the second reusing all three objects byte for byte; a download forged three
+ways (its bytes not its record's, garbage under a matching record, an object of another machine
+under a matching record), each rejected, reported, suspended and compiled; an audit that finds a
+download differing reports it and serves the compile; a frozen relay costs a build one wait;
+downloaded messages keep their colour alone. The relay's tests show a first key the manifest
+doesn't name asks the server nothing, a cold build's questions wait for the manifest once, and
+only a caller the policy lets write uploads, a bound object from a job alone.
+
+Measured on Linux (GCC 12.2, CMake 3.25.1, Ninja 1.11, `-j4`) in Docker on the same Mac, otherwise
+idle (load average about 1), abseil-cpp with its tests, Release, a release build of hushrun,
+`HUSHRUN_BUILD_AUDIT=none`, through the fake backend: A in one container, B in a second container
+that shares only A's network, at another path, with an empty store. Each figure is the whole
+`hushrun run build -- sh -c 'cmake … && ninja …'`, configure included:
+
+| run | wall | CPU (user+sys) | per object |
+|---|---|---|---|
+| plain, cold, A | 215.3 s | 854.6 s | |
+| `hushrun run`, cold, A, empty store, sharing | 218.0 s, 215.6 s | 863.2 s, 852.7 s | 432 built and 431 uploaded (one source CMake compiles twice is reused) |
+| `hushrun run`, B, empty store | 7.5 s | 21.0 s | 431 reused (430 downloaded), 2 built |
+| the same B again | 4.6 s | 15.0 s | 433 reused |
+
+A cold build that shares costs what one that doesn't does: the uploads and the one `cc/1` open
+are all it adds, and no compile asks the server anything. B's run made one lookup of hints and
+one of blocks (the prefetch), and downloaded 22.3 MB of packs for 191 MB of objects. Of the two
+B built: one is abseil's `symbolize_test`, whose 3 MB object packs to 50 KB, past C5's rule that a
+pack unpacks to at most 64 times its size, so no machine ever downloads it; the other was asked
+for before the link's rate was known, when B-26 answers a fetch not yet under way with a miss. A
+run before the last fix, with a lookup for each tied key, took 6.1 s and 17.6 s with 432
+lookups.
 
 ## Decisions for the owner
 
