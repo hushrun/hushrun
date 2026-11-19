@@ -642,13 +642,16 @@ impl Store {
     /// [`Store::clean`]. `reason` says why.
     pub fn suspend(&self, step: &Digest, reason: &str, now: SystemTime) -> Result<(), StoreError> {
         let path = self.step_dir(step).join(SUSPENDED);
+        let _lock = self.suspension_lock(step);
         self.write_whole(&path, reason.as_bytes(), Some(now), true)
             .map_err(at(&path))
     }
 
     /// Suspends the first key `step` until `until` (B-15, B-34): what a downloaded block's
     /// difference or rejection causes, which lasts the store's kept days and not until
-    /// `hushrun build clean`.
+    /// `hushrun build clean`. A longer suspension already there stays: one until `clean`, or one
+    /// ending later. The check and the write are under the step's lock, which [`Store::suspend`]
+    /// takes too.
     pub fn suspend_until(
         &self,
         step: &Digest,
@@ -657,9 +660,40 @@ impl Store {
         now: SystemTime,
     ) -> Result<(), StoreError> {
         let path = self.step_dir(step).join(SUSPENDED);
+        let _lock = self.suspension_lock(step);
+        if let Ok(bytes) = fs::read(&path) {
+            let text = String::from_utf8_lossy(&bytes);
+            let longer = match text.strip_prefix(UNTIL) {
+                None => true,
+                Some(rest) => rest
+                    .split_once('\n')
+                    .map_or(rest, |(at, _)| at)
+                    .parse::<u64>()
+                    .is_ok_and(|there| there >= epoch_ms(until)),
+            };
+            if longer {
+                return Ok(());
+            }
+        }
         let text = format!("{UNTIL}{}\n{reason}", epoch_ms(until));
         self.write_whole(&path, text.as_bytes(), Some(now), true)
             .map_err(at(&path))
+    }
+
+    /// The lock of the store's suspensions, held while one is read and written (they are rare:
+    /// one lock for all of them leaves no file in a first key's folder); `None` when it can't be
+    /// taken, and then the write goes ahead unguarded.
+    fn suspension_lock(&self, step: &Digest) -> Option<fs::File> {
+        let dir = self.step_dir(step);
+        fs::create_dir_all(&dir).ok()?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join(STEPS).join(".suspend.lock"))
+            .ok()?;
+        file.lock().ok()?;
+        Some(file)
     }
 
     /// Why the first key `step` is suspended, or `None` when it is not. A suspension that
@@ -2442,5 +2476,29 @@ mod tests {
         let free = deep.free_bytes().unwrap();
         assert!(free > 0);
         assert!(!deep.root().exists());
+    }
+
+    // covers: B-15, B-34
+    #[test]
+    fn a_suspension_for_days_never_shortens_a_longer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let step = Digest::of(b"a step");
+        let now = SystemTime::now();
+        let day = std::time::Duration::from_secs(86_400);
+        store.suspend(&step, "a compile here differed", now).unwrap();
+        store
+            .suspend_until(&step, "a download differed", now + day, now)
+            .unwrap();
+        assert!(
+            store.suspended_at(&step, now + day * 30).is_some(),
+            "until `hushrun build clean`"
+        );
+        let other = Digest::of(b"another step");
+        store.suspend_until(&other, "rejected", now + day * 15, now).unwrap();
+        store.suspend_until(&other, "differs", now + day, now).unwrap();
+        assert!(store.suspended_at(&other, now + day * 10).is_some());
+        store.suspend_until(&other, "rejected", now + day * 20, now).unwrap();
+        assert!(store.suspended_at(&other, now + day * 18).is_some());
     }
 }
