@@ -3845,10 +3845,38 @@ fn a_cc_block_goes_up_only_from_a_caller_the_policy_lets_write_and_bound_only_fr
         ask(&relay, cc_built(portable, portable_step, true)),
         Answer::Ok
     );
-    relay.end_check(&[]);
+    let mut tied_entry = cc_entry(
+        tied,
+        tied_step,
+        LINUX,
+        hushrun_build::model::Outcome::BuiltAndStored,
+    );
+    tied_entry.cc.as_mut().unwrap().local = vec!["tied".into()];
+    let portable_entry = cc_entry(
+        portable,
+        portable_step,
+        LINUX,
+        hushrun_build::model::Outcome::BuiltAndStored,
+    );
+    relay.end_check(&[tied_entry, portable_entry]);
     for key in [tied, portable] {
         let block = fake.block(cc_address(&key)).expect("it went up");
         assert_eq!(block.state, hushrun_testkit::fake_build::BlockState::Stored);
         assert_eq!(block.scope, "protected/acme/shop");
+    }
+    // The job's close names both: a later job at the same paths fetches the tied one, which
+    // only a key the manifest pairs is (B-60).
+    let close = fake
+        .closes()
+        .into_iter()
+        .find(|c| c.kind == "cc/1")
+        .expect("a cc close");
+    for (key, step) in [(tied, tied_step), (portable, portable_step)] {
+        assert!(
+            close
+                .manifest
+                .contains(&Pair(cc_address(&step), cc_address(&key))),
+            "{close:?}"
+        );
     }
 }

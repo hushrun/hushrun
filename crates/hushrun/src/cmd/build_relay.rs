@@ -2858,10 +2858,15 @@ impl Relay {
         let mut counts = Counts::default();
         // A Go archive kept on this machine (B-42) never goes up, nor does a C or C++ object that
         // stays here (B-56): no later prefetch looks it up. A C object reused here names why its
-        // block stays from the block's own record.
+        // block stays from the block's own record. One bound to the checkout's folders alone
+        // (`tied`) goes up from a CI job's own ID token (B-24), and that job's close names it:
+        // a later job at the same paths fetches only a key the manifest pairs (B-60).
+        let from_a_job = self.client.is_a_jobs_id_token();
         let kept_here = |e: &Entry| {
             e.go.as_ref().is_some_and(|go| go.local.is_some())
-                || e.cc.as_ref().is_some_and(|cc| !cc.local.is_empty())
+                || e.cc
+                    .as_ref()
+                    .is_some_and(|cc| !cc.local.is_empty() && !(from_a_job && cc.local == ["tied"]))
         };
         for entry in entries.iter().filter(|e| e.kind() == kind) {
             if let (Some(step), Some(key), false) = (entry.step, entry.key, kept_here(entry)) {
