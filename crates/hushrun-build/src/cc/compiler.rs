@@ -205,6 +205,14 @@ pub fn identity(
     if let Some(identity) = read_memo(&memo_path, &key) {
         return Ok(identity);
     }
+    // A cold build starts a compile per core at once: one asks the driver, the others wait and
+    // read what it wrote. Without a lock (it can't be taken), each asks.
+    let _lock = lock(&memo_path);
+    if _lock.is_some()
+        && let Some(identity) = read_memo(&memo_path, &key)
+    {
+        return Ok(identity);
+    }
     let (identity, files) = ask_identity(&exe, lang, driver_flags, var, ask)?;
     let memo = Memo {
         schema: MEMO_SCHEMA.to_string(),
@@ -217,6 +225,29 @@ pub fn identity(
         let _ = memos.write_whole(&memo_path, &bytes, None, false);
     }
     Ok(identity)
+}
+
+/// A lock beside a memo entry while one process asks the driver, released when dropped.
+struct Lock(fs::File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock(memo: &Path) -> Option<Lock> {
+    let dir = memo.parent()?;
+    fs::create_dir_all(dir).ok()?;
+    let name = memo.file_name()?.to_string_lossy();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(format!(".{name}.lock")))
+        .ok()?;
+    file.lock().ok()?;
+    Some(Lock(file))
 }
 
 fn read_memo(path: &Path, key: &Digest) -> Option<Identity> {

@@ -117,6 +117,14 @@ pub struct CcEntry {
     /// The target triple the driver names (B-60).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub platform: String,
+    /// How long the launcher took from its start to its line, compile included, in
+    /// milliseconds: for a reuse, what a hit costs.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub took_ms: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The block's description, as the store keeps it.
@@ -473,8 +481,9 @@ fn lookup(
         let Some(hint) = key::Hint::read(&bytes) else {
             continue;
         };
-        let mut found = Vec::with_capacity(hint.reads.len());
-        for read in &hint.reads {
+        let reads = hint.reads();
+        let mut found = Vec::with_capacity(reads.len());
+        for read in &reads {
             let path = key::read_path(read, places, cwd);
             let base = is_base(&path, places, identity);
             match digests.digest(&path, base) {
@@ -560,7 +569,7 @@ fn restore(
     if let Some(path) = compile.dep.path(&compile.output) {
         let reads: Vec<depfile::Read> = hit
             .hint
-            .reads
+            .reads()
             .iter()
             .map(|r| depfile::Read {
                 path: places.show(&r.p),
@@ -597,6 +606,7 @@ fn restore(
             key: Some(hit.key),
             cc: Some(CcEntry {
                 source: places.hide(&compile.source),
+                took_ms: took,
                 ..CcEntry::default()
             }),
             ..entry(Outcome::Reused)
@@ -822,6 +832,10 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
     };
     cc_entry.source = source;
     cc_entry.platform = plan.identity.target.clone();
+    cc_entry.took_ms = ports
+        .now()
+        .duration_since(start)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
     current.log(&Entry {
         rustc_ms: compile_ms,
         found: plan.found.is_some(),
@@ -959,7 +973,7 @@ fn store_block(
         .unwrap_or_default();
     let (found_places, probes) =
         key::places_and_probes(&key_reads, &dirs, &source_dir, &plan.places);
-    let hint = key::hint(reads, found_places, probes);
+    let hint = key::Hint::new(reads, found_places, probes);
     let block_key = key::block(&plan.step, &hint, &digests);
     // B-56: where the block may go, from what the object holds.
     let output = cwd.join(&plan.compile.output);

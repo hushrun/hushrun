@@ -128,19 +128,114 @@ pub struct HintRead {
 }
 
 /// A hint (B-54): what a compile under a first key read, where it looked, what it asked about.
+/// Every path is a folder of [`Hint::dirs`] and a name in it, so that the thousand headers of a
+/// unit and the places beside them are written with each folder once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hint {
     /// Its schema.
     pub schema: String,
-    /// Each read, in the dependency list's order, the source first.
-    pub reads: Vec<HintRead>,
-    /// Each place, absolute with placeholders: absent when it was compiled.
-    pub places: Vec<String>,
-    /// Each probe's path, absolute with placeholders, and whether it was present.
-    pub probes: Vec<(String, bool)>,
+    /// The folders, with roots and bases as placeholders; a read's may be relative, as the
+    /// compiler wrote it.
+    pub dirs: Vec<String>,
+    /// Each read, in the dependency list's order, the source first: its folder, its name, and
+    /// whether it lies in a system folder.
+    pub reads: Vec<(u32, String, bool)>,
+    /// Each place, absent when it was compiled: folders and the names absent in each. A
+    /// header's places are often the same names in several folders, written once.
+    pub places: Vec<(Vec<u32>, Vec<String>)>,
+    /// Each probe: a folder, a name, and whether it was present.
+    pub probes: Vec<(u32, String, bool)>,
+}
+
+/// Splits a path into its folder and its name: `/a/b.h` is `/a` and `b.h`, `/b.h` is `/` and
+/// `b.h`, `b.h` is `` and `b.h`.
+fn split(path: &str) -> (&str, &str) {
+    match path.rsplit_once('/') {
+        Some(("", name)) => ("/", name),
+        Some((dir, name)) => (dir, name),
+        None => ("", path),
+    }
+}
+
+/// [`split`]'s inverse.
+fn join(dir: &str, name: &str) -> String {
+    match dir {
+        "" => name.to_string(),
+        "/" => format!("/{name}"),
+        _ => format!("{dir}/{name}"),
+    }
 }
 
 impl Hint {
+    /// A hint from what a compile read, the places and the probes, each a path with
+    /// placeholders.
+    pub fn new(reads: Vec<HintRead>, places: Vec<String>, probes: Vec<(String, bool)>) -> Hint {
+        let mut dirs: Vec<String> = Vec::new();
+        let mut index: BTreeMap<String, u32> = BTreeMap::new();
+        let mut at = |dir: &str| -> u32 {
+            if let Some(i) = index.get(dir) {
+                return *i;
+            }
+            let i = u32::try_from(dirs.len()).unwrap_or(u32::MAX);
+            dirs.push(dir.to_string());
+            index.insert(dir.to_string(), i);
+            i
+        };
+        let reads = reads
+            .iter()
+            .map(|r| {
+                let (dir, name) = split(&r.p);
+                (at(dir), name.to_string(), r.s)
+            })
+            .collect();
+        let mut grouped: Vec<(u32, Vec<String>)> = Vec::new();
+        for place in &places {
+            let (dir, name) = split(place);
+            let i = at(dir);
+            match grouped.iter_mut().find(|(d, _)| *d == i) {
+                Some((_, names)) => names.push(name.to_string()),
+                None => grouped.push((i, vec![name.to_string()])),
+            }
+        }
+        // Folders absent the same names share one entry.
+        let mut merged: Vec<(Vec<u32>, Vec<String>)> = Vec::new();
+        for (dir, names) in grouped {
+            match merged.iter_mut().find(|(_, n)| *n == names) {
+                Some((dirs, _)) => dirs.push(dir),
+                None => merged.push((vec![dir], names)),
+            }
+        }
+        let probes = probes
+            .iter()
+            .map(|(p, present)| {
+                let (dir, name) = split(p);
+                (at(dir), name.to_string(), *present)
+            })
+            .collect();
+        Hint {
+            schema: HINT_SCHEMA.to_string(),
+            dirs,
+            reads,
+            places: merged,
+            probes,
+        }
+    }
+
+    /// The reads, each as a path with placeholders.
+    pub fn reads(&self) -> Vec<HintRead> {
+        self.reads
+            .iter()
+            .map(|(d, name, s)| HintRead {
+                p: join(self.dir(*d), name),
+                s: *s,
+            })
+            .collect()
+    }
+
+    fn dir(&self, i: u32) -> &str {
+        self.dirs.get(i as usize).map_or("", String::as_str)
+    }
+
     /// The hint's bytes as the store keeps them.
     pub fn bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_default()
@@ -150,22 +245,30 @@ impl Hint {
     pub fn read(bytes: &[u8]) -> Option<Hint> {
         serde_json::from_slice::<Hint>(bytes)
             .ok()
-            .filter(|h| h.schema == HINT_SCHEMA)
+            .filter(|h| h.schema == HINT_SCHEMA && h.well_formed())
+    }
+
+    /// Whether every index names a folder.
+    fn well_formed(&self) -> bool {
+        let n = self.dirs.len();
+        self.reads.iter().all(|(d, _, _)| (*d as usize) < n)
+            && self
+                .places
+                .iter()
+                .all(|(dirs, _)| dirs.iter().all(|d| (*d as usize) < n))
+            && self.probes.iter().all(|(d, _, _)| (*d as usize) < n)
     }
 }
 
-/// The second key (B-54) from a hint's paths and the digests found for its reads, in order.
+/// The second key (B-54) from a hint and the digests found for its reads, in order.
 pub fn block(step: &Digest, hint: &Hint, digests: &[Digest]) -> Digest {
-    let reads: Vec<(&str, String)> = hint
-        .reads
-        .iter()
-        .zip(digests)
-        .map(|(r, d)| (r.p.as_str(), d.hex()))
-        .collect();
+    let digests: Vec<String> = digests.iter().map(Digest::hex).collect();
     let body = serde_json::json!({
         "schema": BLOCK_SCHEMA,
         "step": step.hex(),
-        "reads": reads,
+        "dirs": hint.dirs,
+        "reads": hint.reads,
+        "digests": digests,
         "places": hint.places,
         "probes": hint.probes,
     });
@@ -362,31 +465,50 @@ pub fn places_and_probes(
     (out_places, out_probes)
 }
 
-/// Whether every place of a hint is still absent and every probe as it was, here.
+/// Whether every place of a hint is still absent and every probe as it was, here (B-54). The
+/// places are checked a folder at a time: a folder that doesn't exist holds none of them, and
+/// a folder asked about many names is listed once. A name is taken as present when one in the
+/// folder matches it ignoring case, as a file system that ignores case would find it: at worst
+/// a compile, never a wrong reuse.
 pub fn places_hold(hint: &Hint, places: &Places) -> bool {
-    hint.places
+    let folders = hint
+        .places
         .iter()
-        .all(|p| !exists(Path::new(&places.show(p))))
-        && hint
-            .probes
-            .iter()
-            .all(|(p, present)| exists(Path::new(&places.show(p))) == *present)
+        .flat_map(|(dirs, names)| dirs.iter().map(move |d| (*d, names)));
+    for (dir, names) in folders {
+        let folder = PathBuf::from(places.show(hint.dir(dir)));
+        match std::fs::symlink_metadata(&folder) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+            Ok(meta) if !meta.is_dir() && !meta.file_type().is_symlink() => continue,
+            Ok(_) => {}
+        }
+        if names.len() <= 3 {
+            if names.iter().any(|name| exists(&folder.join(name))) {
+                return false;
+            }
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            return false;
+        };
+        let here: BTreeSet<String> = entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_lowercase())
+            .collect();
+        if names.iter().any(|name| here.contains(&name.to_lowercase())) {
+            return false;
+        }
+    }
+    hint.probes.iter().all(|(dir, name, present)| {
+        exists(&Path::new(&places.show(hint.dir(*dir))).join(name)) == *present
+    })
 }
 
 /// A hint's read as a path here: shown with this call's places, made absolute from `cwd`.
 pub fn read_path(read: &HintRead, places: &Places, cwd: &Path) -> PathBuf {
     let shown = places.show(&read.p);
     places::absolute(cwd, &shown)
-}
-
-/// A new hint.
-pub fn hint(reads: Vec<HintRead>, places: Vec<String>, probes: Vec<(String, bool)>) -> Hint {
-    Hint {
-        schema: HINT_SCHEMA.to_string(),
-        reads,
-        places,
-        probes,
-    }
 }
 
 #[cfg(test)]
@@ -442,7 +564,7 @@ mod tests {
         assert!(probes.contains(&("{root}/first/opt-present.h".into(), true)));
         assert!(probes.contains(&("{root}/src/opt-present.h".into(), false)));
         assert!(probes.contains(&("{root}/fw/Kit.framework/Headers/k.h".into(), false)));
-        let h = hint(vec![], found_places, probes);
+        let h = Hint::new(vec![], found_places, probes);
         assert!(places_hold(&h, &places));
         // A header created where the search looks first breaks the hint.
         std::fs::write(tmp.path().join("first/h.h"), "").unwrap();
@@ -451,6 +573,50 @@ mod tests {
         // So does a file a probe asked about appearing.
         std::fs::write(tmp.path().join("src/opt-present.h"), "").unwrap();
         assert!(!places_hold(&h, &places));
+    }
+
+    // covers: B-54
+    #[test]
+    fn places_in_one_folder_are_checked_by_listing_it_ignoring_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(tmp.path().join("inc")).unwrap();
+        let places = Places::new(std::slice::from_ref(&root), &[], &[]);
+        let names = ["a.h", "b.h", "c.h", "d.h", "e.h"];
+        let mut list: Vec<String> = names.iter().map(|n| format!("{{root}}/inc/{n}")).collect();
+        list.push("{root}/missing/x.h".into());
+        let h = Hint::new(vec![], list, vec![]);
+        assert_eq!(h.dirs, ["{root}/inc", "{root}/missing"]);
+        assert!(places_hold(&h, &places));
+        // A file whose name differs only in case is a header a case-blind file system finds.
+        std::fs::write(tmp.path().join("inc/D.H"), "").unwrap();
+        assert!(!places_hold(&h, &places));
+        std::fs::remove_file(tmp.path().join("inc/D.H")).unwrap();
+        // A folder that appears where none was holds what it holds.
+        std::fs::create_dir_all(tmp.path().join("missing")).unwrap();
+        assert!(places_hold(&h, &places));
+        std::fs::write(tmp.path().join("missing/x.h"), "").unwrap();
+        assert!(!places_hold(&h, &places));
+        // Reads keep their spelling, relative or absolute.
+        let reads = vec![
+            HintRead {
+                p: "{root}/src/a.c".into(),
+                s: false,
+            },
+            HintRead {
+                p: "inc/x.h".into(),
+                s: false,
+            },
+            HintRead {
+                p: "x.h".into(),
+                s: false,
+            },
+            HintRead {
+                p: "/x.h".into(),
+                s: true,
+            },
+        ];
+        assert_eq!(Hint::new(reads.clone(), vec![], vec![]).reads(), reads);
     }
 
     // covers: B-54
@@ -472,7 +638,7 @@ mod tests {
     #[test]
     fn the_second_key_follows_every_read_place_and_probe() {
         let step = Digest::of(b"step");
-        let h = hint(
+        let h = Hint::new(
             vec![HintRead {
                 p: "{root}/a.c".into(),
                 s: false,
@@ -484,7 +650,7 @@ mod tests {
         assert_eq!(a, block(&step, &h, &[Digest::of(b"one")]));
         assert_ne!(a, block(&step, &h, &[Digest::of(b"two")]));
         let mut other = h.clone();
-        other.probes[0].1 = true;
+        other.probes[0].2 = true;
         assert_ne!(a, block(&step, &other, &[Digest::of(b"one")]));
         let mut other = h.clone();
         other.places.clear();
