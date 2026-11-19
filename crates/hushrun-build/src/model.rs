@@ -105,6 +105,9 @@ pub enum Kind {
     Rustc,
     /// The Go cache program's package archives, kind `go/1`.
     Go,
+    /// The C and C++ launcher's objects, kind `cc/1` (B-60). Nothing of this kind is shared yet:
+    /// the relay leaves its lines out of every manifest.
+    Cc,
 }
 
 impl Kind {
@@ -113,6 +116,7 @@ impl Kind {
         match self {
             Kind::Rustc => "rustc/1",
             Kind::Go => "go/1",
+            Kind::Cc => crate::cc::KIND,
         }
     }
 
@@ -121,6 +125,7 @@ impl Kind {
     pub fn of_description(description: &serde_json::Value) -> Kind {
         match description.get("kind").and_then(serde_json::Value::as_str) {
             Some(word) if word == Kind::Go.word() => Kind::Go,
+            Some(word) if word == Kind::Cc.word() => Kind::Cc,
             _ => Kind::Rustc,
         }
     }

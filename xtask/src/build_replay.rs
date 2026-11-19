@@ -2044,6 +2044,7 @@ mod tests {
             key: None,
             downloaded: false,
             go: None,
+            cc: None,
         }
     }
 

@@ -3337,6 +3337,7 @@ fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_buil
         key: Some(key),
         downloaded: false,
         go: Some(hushrun_build::session::GoEntry::default()),
+        cc: None,
     }
 }
 
