@@ -1097,7 +1097,13 @@ impl Relay {
     /// B-60: `open` for the check's C and C++ compiles for the target triple `platform`, kind
     /// `cc/1`, for its manifest alone. A failure leaves an empty manifest, and so no download.
     async fn cc_open(&self, platform: String) {
-        let check = self.state().check.as_ref().and_then(|c| c.check);
+        // The check this `open` is for: a relay that runs several checks keeps an answer only
+        // for the check still running when it comes.
+        let (run, check) = {
+            let state = self.state();
+            let at = state.check.as_ref();
+            (at.map(|c| c.run), at.and_then(|c| c.check))
+        };
         let body = OpenRequest {
             kind: Kind::Cc.word().to_string(),
             repository: self.config.repository.clone(),
@@ -1114,7 +1120,9 @@ impl Relay {
             Err(_) => Vec::new(),
         };
         let mut state = self.state();
-        if state.cc_manifests.get(&platform) == Some(&CcManifest::Asking) {
+        if state.check.as_ref().map(|c| c.run) == run
+            && state.cc_manifests.get(&platform) == Some(&CcManifest::Asking)
+        {
             state.cc_manifests.insert(
                 platform,
                 CcManifest::Got {

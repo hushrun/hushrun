@@ -3914,3 +3914,42 @@ fn a_cc_object_whose_notice_never_came_gets_its_marker_when_the_check_ends() {
     assert!(marked.contains(&key) || uploaded, "{marked:?}");
     assert!(!marked.contains(&kept) && fake.block(cc_address(&kept)).is_none());
 }
+
+// covers: B-60
+#[test]
+fn a_cc_open_that_answers_after_its_check_ended_is_not_taken_for_the_next_check_s() {
+    let fake = FakeBuild::start();
+    fake.set_manifest(vec![Pair(
+        cc_address(&Digest::of(b"a step")),
+        cc_address(&Digest::of(b"a block")),
+    )]);
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    fake.delay(route::OPEN, Duration::from_millis(800));
+    relay
+        .state()
+        .cc_manifests
+        .insert(LINUX.into(), super::CcManifest::Asking);
+    let late = {
+        let asking = relay.clone();
+        relay
+            .runtime
+            .spawn(async move { asking.cc_open(LINUX.into()).await })
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    relay.end_check(&[]);
+    // The next check asks about the same triple before the first check's answer comes.
+    begin(&relay, &m);
+    relay
+        .state()
+        .cc_manifests
+        .insert(LINUX.into(), super::CcManifest::Asking);
+    relay.runtime.block_on(late).unwrap();
+    assert!(
+        relay.state().cc_manifests.get(LINUX) == Some(&super::CcManifest::Asking),
+        "the first check's manifest was kept for the second"
+    );
+    relay.end_check(&[]);
+}
