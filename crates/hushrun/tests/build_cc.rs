@@ -530,6 +530,188 @@ fn a_downloaded_block_s_messages_reach_the_person_with_their_colour_alone() {
     );
 }
 
+// covers: B-60
+#[test]
+fn a_run_that_reuses_every_object_closes_a_manifest_naming_them() {
+    if !have_cc() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let after_a = fake
+        .closes()
+        .into_iter()
+        .filter(|c| c.kind == "cc/1")
+        .count();
+    let (code, stderr) = a.build(&fake, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(cc_line(&stderr).contains("3 reused"), "{stderr}");
+    let closes: Vec<_> = fake
+        .closes()
+        .into_iter()
+        .filter(|c| c.kind == "cc/1")
+        .collect();
+    assert!(
+        closes.len() > after_a,
+        "a run that reused all three closed nothing"
+    );
+    assert_eq!(closes.last().unwrap().manifest.len(), 3);
+}
+
+// covers: B-60
+#[test]
+fn an_object_changed_in_an_incremental_build_reaches_another_machine() {
+    if !have_cc() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(
+        a.repo.join("src/one.c"),
+        "#include \"p.h\"\nconst char *one_where(void) { int unused; return __FILE__; }\nint one(void) { return P_VALUE + 1; }\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "change one");
+    let (code, stderr) = a.build(&fake, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    fake.set_costs(60_000);
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let (code, stderr) = b.build(&fake, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        cc_line(&stderr).contains("3 reused (3 from the shared store)"),
+        "{stderr}"
+    );
+}
+
+// covers: B-59
+#[test]
+fn an_audit_that_finds_the_same_bytes_under_a_key_tied_here_reports_nothing() {
+    // B's root is in the object (a short path, as a container's), so B's compile is tied and
+    // its key isn't the download's: the bytes are the same, and the download is honest.
+    if !have_cc() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let b_root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .join("b")
+        .join("checkout");
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("src/one.c"),
+        format!(
+            "#include \"p.h\"\nconst char *one_where(void) {{ return \"{}\"; }}\nint one(void) {{ return P_VALUE; }}\n",
+            b_root.display()
+        ),
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "literal");
+    let (code, stderr) = a.build(&fake, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    fake.set_costs(60_000);
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    assert_eq!(b.repo, b_root);
+    let before = fake.reports().len();
+    let (code, stderr) = b.build(&fake, &[("HUSHRUN_BUILD_AUDIT", "every")]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(a.object("one"), b.object("one"));
+    let reports: Vec<_> = fake.reports().into_iter().skip(before).collect();
+    assert!(
+        reports.is_empty(),
+        "an honest block was reported: {reports:?}"
+    );
+}
+
+// covers: B-59
+#[test]
+fn a_download_s_messages_stay_filtered_after_an_audit_agrees_on_its_object() {
+    if !have_cc() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (_a, b) = two_machines(dir.path(), &fake);
+    let forged = b"\x1b]0;owned\x07warning: forged\n";
+    forge_file(&b.store(), "src/one.c", "stderr", forged, true);
+    let (code, stderr) = b.build(&fake, &[("HUSHRUN_BUILD_AUDIT", "every")]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stderr) = b.build(&fake, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("\x1b]0;owned"), "{stderr:?}");
+}
+
+// covers: B-59
+#[test]
+fn an_uploader_s_control_sequences_are_never_served_raw_after_an_audit() {
+    if !have_cc() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v cc"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    // A compiler that writes a window title into its messages when asked to.
+    let script = format!(
+        "#!/bin/sh\n{} \"$@\"; s=$?\ncase \"$*\" in *-MD*) [ -n \"$EVIL\" ] && printf '\\033]0;owned\\007forged\\n' >&2;; esac\nexit $s\n",
+        real.trim()
+    );
+    let cc = bin.join("cc");
+    std::fs::write(&cc, script).unwrap();
+    Command::new("chmod").arg("+x").arg(&cc).status().unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake, &[("PATH", &path), ("EVIL", "1")]);
+    assert_eq!(code, 0, "{stderr}");
+    fake.set_costs(60_000);
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    for audit in ["none", "every", "none"] {
+        let (code, stderr) = b.build(&fake, &[("PATH", &path), ("HUSHRUN_BUILD_AUDIT", audit)]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(!stderr.contains("\x1b]0;owned"), "{audit}: {stderr:?}");
+    }
+}
+
+// covers: B-56, B-60
+#[test]
+fn a_root_in_a_wide_string_keeps_the_object_on_the_machine() {
+    if !have_cc() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("src/one.c"),
+        "#include <stddef.h>\nconst wchar_t *one_where(void) { return DATA_DIR; }\nint one(void) { return 1; }\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "wide");
+    let script = "set -e; rm -rf build; mkdir -p build; ${HUSHRUN_CC:?} cc \"-DDATA_DIR=L\\\"$PWD/data\\\"\" -MD -MF build/one.o.d -c src/one.c -o build/one.o";
+    let (code, stderr) = a.run(&fake, script, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("stays on this machine (1 tied)"),
+        "{stderr}"
+    );
+    assert_eq!(cc_blocks(&fake), 0, "uploaded: {stderr}");
+}
+
 /// Not a check: a fake build backend for a measurement between two containers that share a
 /// network. `HUSHRUN_CC_SERVE` names a folder: the fake's address goes in `url`, a token in
 /// `token` and a machine key in `machine.pem`; what it holds and moved goes in `moved`, written
