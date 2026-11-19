@@ -36,6 +36,7 @@ const CLEARED: &[&str] = &[
     "HUSHRUN_BUILD_AUDIT",
     "HUSHRUN_CC",
     "HUSHRUN_CC_RELAY_WAIT_MS",
+    "HUSHRUN_CC_MANIFEST_WAIT_MS",
     "CMAKE_C_COMPILER_LAUNCHER",
     "CMAKE_CXX_COMPILER_LAUNCHER",
     "RUSTC_WRAPPER",
@@ -157,6 +158,9 @@ impl Machine {
             .env("HUSHRUN_TOKEN", FakeBuild::TOKEN)
             .env("HUSHRUN_BUILD", "on")
             .env("HUSHRUN_BUILD_AUDIT", "none")
+            // A compile waits for the check's cc/1 manifest at most a second; a loaded machine
+            // answering the fake's open later would make a reuse a compile.
+            .env("HUSHRUN_CC_MANIFEST_WAIT_MS", "15000")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"));
         cmd

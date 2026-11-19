@@ -106,6 +106,20 @@ const GO_PREFETCH_WAIT: Duration = Duration::from_secs(1);
 /// to answer (B-60): a cold build's first compiles pay at most this once, and every later one
 /// is answered from the manifest without the network.
 const CC_MANIFEST_WAIT: Duration = Duration::from_secs(1);
+
+/// [`CC_MANIFEST_WAIT`]; in a debug build, `HUSHRUN_CC_MANIFEST_WAIT_MS` when set, so that an
+/// end-to-end test on a loaded machine doesn't depend on how fast the fake server answers
+/// `open`. Never read in a release build.
+fn cc_manifest_wait() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("HUSHRUN_CC_MANIFEST_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    CC_MANIFEST_WAIT
+}
 /// The most target triples a check asks `cc/1` manifests for: each is one more `open`.
 const MOST_CC_PLATFORMS: usize = 8;
 /// How many failures in a row rest the relay.
@@ -1157,8 +1171,8 @@ impl Relay {
         }
         let address = Relay::address_in(Kind::Cc, step);
         let wait = local_ms
-            .map_or(CC_MANIFEST_WAIT, |ms| Duration::from_millis(ms) / 2)
-            .min(CC_MANIFEST_WAIT);
+            .map_or(cc_manifest_wait(), |ms| Duration::from_millis(ms) / 2)
+            .min(cc_manifest_wait());
         let until = Instant::now() + wait;
         let pairs = loop {
             {

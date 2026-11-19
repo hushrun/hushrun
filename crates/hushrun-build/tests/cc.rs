@@ -931,6 +931,18 @@ fn an_assembler_warning_naming_its_temporary_file_is_stored_the_same_on_every_ma
     assert!(text.contains("from the assembler"), "{text}");
     assert!(!text.contains("/tmp/cc") && !text.contains("/cc"), "{text}");
     assert_eq!(stored[0], stored[1]);
+    // What the case is about: GNU as names its input. clang's own assembler names none, and
+    // there only the unit test of the rewriting covers it.
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), source);
+    let named = String::from_utf8_lossy(&plain(&root, "cc", &args).stderr).into_owned();
+    if named.contains("Assembler messages") {
+        assert!(named.contains("/cc"), "{named}");
+        assert!(text.contains("{temp}.s: Assembler messages"), "{text}");
+    } else {
+        eprintln!("note: this compiler's assembler names no temporary file: {named}");
+    }
 }
 
 // covers: B-59
