@@ -150,12 +150,16 @@ pub enum Command {
     /// It changes nothing.
     #[command(after_long_help = WHY_HELP)]
     Why(WhyArgs),
-    /// Reuse compiled Rust crates between worktrees and runs on this machine.
+    /// Reuse compiled Rust crates and C and C++ objects between worktrees and runs on this machine.
     ///
-    /// With reuse on, `hushrun run NAME -- COMMAND` runs COMMAND with cargo's RUSTC_WRAPPER set
-    /// to hushrun, which puts a crate in place instead of compiling it when the same inputs were
-    /// compiled before, in any worktree. Nothing leaves the machine. It is off until you turn it
-    /// on; `hushrun build` alone shows the status.
+    /// With reuse on, the builds `hushrun run` runs put in place what this machine compiled before
+    /// from the same inputs, in any worktree, instead of compiling it again: Rust crates through
+    /// cargo's RUSTC_WRAPPER, and the objects of a CMake build through its compiler launcher. A
+    /// build outside `hushrun run` neither reads nor fills the store. On your machine it is off
+    /// until you turn it on; `hushrun build` alone shows the status. Nothing leaves the machine
+    /// unless your org shares compiled code through its backend and this machine takes part
+    /// (`hushrun build share`); Go packages are reused only that way, since Go's own cache already
+    /// serves one machine.
     Build(BuildArgs),
     /// Run a check's command, unless this exact code already passed it.
     ///
@@ -335,17 +339,17 @@ pub struct BuildArgs {
 /// `hushrun build`'s commands (B-1, B-21).
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum BuildCommand {
-    /// Reuse compiled crates in commands `hushrun run` runs.
+    /// Reuse compiled code in the builds `hushrun run` runs.
     On,
-    /// Compile everything as usual, keep the crates, and say what would have been reused.
+    /// Compile everything as usual, keep what compiles, and say what would have been reused.
     Observe,
-    /// Reuse and keep nothing. The crates already kept stay until `hushrun build clean`.
+    /// Reuse and keep nothing. What is kept already stays until `hushrun build clean`.
     Off,
-    /// Show the mode, the settings file, where crates are kept, and how much is kept.
+    /// Show the mode, the settings file, where compiled code is kept, and how much is kept.
     Status,
-    /// Delete every crate kept.
+    /// Delete all the compiled code kept.
     Clean,
-    /// How much this machine takes part in the org's shared store of compiled crates: on,
+    /// How much this machine takes part in the org's shared store of compiled code: on,
     /// observe or off. It can lower the org's shared mode here, never raise it.
     Share(BuildShareArgs),
     /// Fetch the crates the org's newest build of each check named used (of this repository,
