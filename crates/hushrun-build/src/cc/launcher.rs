@@ -43,6 +43,8 @@ pub struct Run<'a> {
     pub args: &'a [OsString],
     /// Variables set on top of the launcher's own.
     pub env: &'a [(OsString, OsString)],
+    /// Keep its stderr without passing it on: the caller passes on what the person hasn't seen.
+    pub quiet: bool,
 }
 
 /// How a compile ended.
@@ -894,8 +896,7 @@ fn restore(
 ) -> io::Result<Reused> {
     let output = cwd.join(&compile.output);
     let expected = hit.sha256;
-    let pid = ports.pid();
-    put_whole(&output, pid, start, |temp| {
+    put_whole(&output, start, |temp| {
         std::fs::copy(&hit.object, temp)?;
         let (copied, _) = crate::regular::hash_file(temp)?;
         if copied != expected {
@@ -915,9 +916,7 @@ fn restore(
             .collect();
         let text = depfile::render(&compile.dep, &compile.output, &reads);
         let path = cwd.join(path);
-        put_whole(&path, pid, start, |temp| {
-            std::fs::write(temp, text.as_bytes())
-        })?;
+        put_whole(&path, start, |temp| std::fs::write(temp, text.as_bytes()))?;
     }
     let downloaded = hit.downloaded();
     let read = |p: &Option<PathBuf>| -> io::Result<Vec<u8>> {
@@ -962,12 +961,13 @@ fn restore(
     })
 }
 
-/// Writes `dest` whole: `fill` writes a temporary file beside it, which is made writable, dated
-/// `when` and renamed into place. A failure removes the temporary file and leaves `dest` as it
-/// was.
+/// Writes `dest` whole: `fill` writes a temporary file beside it, which is given the mode a file
+/// the compiler made would have (`0666` less the umask), dated `when` and renamed into place. A
+/// failure removes the temporary file and leaves `dest` as it was. The temporary file's name is
+/// the same for every launcher writing `dest` (Ninja and Make never run two for one output), so
+/// one a killed launcher left is replaced by the next write, not left behind.
 fn put_whole(
     dest: &Path,
-    pid: u32,
     when: SystemTime,
     fill: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
@@ -975,13 +975,17 @@ fn put_whole(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let temp = dest.with_file_name(format!(".{name}.hushrun-{pid}.tmp"));
+    let temp = dest.with_file_name(format!(".{name}.hushrun.tmp"));
     let done = (|| {
+        match std::fs::remove_file(&temp) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => {}
+        }
         fill(&temp)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o644))?;
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o666 & !umask()))?;
         }
         std::fs::File::options()
             .write(true)
@@ -993,6 +997,25 @@ fn put_whole(
         let _ = std::fs::remove_file(&temp);
     }
     done
+}
+
+/// The process's umask. Reading it sets it, so it is set back at once; the launcher has no other
+/// thread then.
+#[cfg(unix)]
+fn umask() -> u32 {
+    use rustix::fs::Mode;
+    let old = rustix::process::umask(Mode::from_raw_mode(0o022));
+    rustix::process::umask(old);
+    old.as_raw_mode().into()
+}
+
+/// Whether the session's folder for the launcher's own files is there, made in `session` when it
+/// isn't; `false` when `session` itself is gone.
+fn work_folder(session: &Path) -> bool {
+    match std::fs::create_dir(session.join(WORK)) {
+        Ok(()) => true,
+        Err(err) => err.kind() == io::ErrorKind::AlreadyExists,
+    }
 }
 
 /// A file of the session's for this compile: its depfile or its include graph.
@@ -1046,18 +1069,77 @@ fn compile_args(compile: &Compile, depfile: &Path, added: &[String]) -> Vec<OsSt
     out
 }
 
+/// The folder of the compile's source, absolute: it stands for an including file's where the
+/// include graph names none (B-54).
+fn source_dir(cwd: &Path, source: &str) -> String {
+    places::absolute(cwd, source)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether `object` holds `text` as its bytes or as a string literal of wider characters would
+/// spell it: UTF-16 and UTF-32, each byte order (B-56). A root in `L"…"`, `u"…"` or `U"…"` is
+/// one the narrow search can't see.
+pub(crate) fn holds_text(object: &[u8], text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let found = |needle: &[u8]| memchr::memmem::find(object, needle).is_some();
+    if found(text.as_bytes()) {
+        return true;
+    }
+    let units16: Vec<u16> = text.encode_utf16().collect();
+    let le16: Vec<u8> = units16.iter().flat_map(|u| u.to_le_bytes()).collect();
+    let be16: Vec<u8> = units16.iter().flat_map(|u| u.to_be_bytes()).collect();
+    let le32: Vec<u8> = text
+        .chars()
+        .flat_map(|c| u32::from(c).to_le_bytes())
+        .collect();
+    let be32: Vec<u8> = text
+        .chars()
+        .flat_map(|c| u32::from(c).to_be_bytes())
+        .collect();
+    [le16, be16, le32, be32].iter().any(|needle| found(needle))
+}
+
+/// Whether a macro the arguments define (`-DNAME=value`, `-D NAME=value`) holds a root: the code
+/// may turn it into bytes no search finds (B-56).
+fn defines_a_root(keyed: &[String], roots: &[String]) -> bool {
+    let mut defines = Vec::new();
+    let mut next = false;
+    for arg in keyed {
+        if next {
+            defines.push(arg.as_str());
+            next = false;
+        } else if arg == "-D" {
+            next = true;
+        } else if let Some(value) = arg.strip_prefix("-D") {
+            defines.push(value);
+        }
+    }
+    defines.iter().any(|d| {
+        roots
+            .iter()
+            .any(|root| !root.is_empty() && d.contains(root.as_str()))
+    })
+}
+
 /// The second half: the launcher's own compile, the person's depfile, and the store.
 fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: SystemTime) -> i32 {
     let pid = ports.pid();
     let deps = work_file(current, pid, start, "d");
     let graph_file = work_file(current, pid, start, "json");
-    if std::fs::create_dir_all(current.folder.join(WORK)).is_err() {
+    // The session's folder is the run's: one gone (the run ended) is not made again here.
+    if !work_folder(&current.folder) {
         log_pass(current, "session", false, &[]);
         return ports.exec(&plan.compile.compiler, &os(&plan.compile.args));
     }
     let args = compile_args(&plan.compile, &deps, &plan.added);
     let mut env: Vec<(OsString, OsString)> = Vec::new();
-    if plan.identity.clang {
+    // `-H` prints the include tree to stderr, which the graph's variables would turn into the
+    // graph's JSON there: such a compile has no graph, as GCC's hasn't (B-55).
+    if plan.identity.clang && !plan.compile.prints_headers {
         env.push((graph::FORMAT.0.into(), graph::FORMAT.1.into()));
         env.push((graph::FILTERING.0.into(), graph::FILTERING.1.into()));
         env.push((graph::FILE.into(), graph_file.clone().into_os_string()));
@@ -1069,6 +1151,7 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
         compiler: &plan.compile.compiler,
         args: &args,
         env: &env,
+        quiet: false,
     });
     let ran = match ran {
         Ok(ran) => ran,
@@ -1106,20 +1189,18 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
                 DepMode::User => {
                     let dirs =
                         key::search(&plan.compile, &plan.identity, &plan.cwd, &|n| ports.var(n));
+                    let source_dir = source_dir(&plan.cwd, &plan.compile.source);
                     let system = |p: &str| {
                         let abs = places::absolute(&plan.cwd, p)
                             .to_string_lossy()
                             .into_owned();
-                        plan.identity.in_system(&abs)
-                            || dirs
-                                .iter()
-                                .any(|d| d.system && places::under(&abs, &d.path))
+                        key::system_read(&abs, &plan.identity, &dirs, &source_dir)
                     };
                     depfile::without_system(text, &plan.compile.dep, &plan.compile.output, &system)?
                 }
                 _ => text.to_string(),
             };
-            put_whole(&plan.cwd.join(&path), pid, ports.now(), |temp| {
+            put_whole(&plan.cwd.join(&path), ports.now(), |temp| {
                 std::fs::write(temp, text.as_bytes())
             })
             .ok()
@@ -1132,6 +1213,7 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
                 compiler: &plan.compile.compiler,
                 args: &os(&plan.compile.args),
                 env: &[],
+                quiet: true,
             });
             current.log(&Entry {
                 rustc_ms: compile_ms,
@@ -1144,6 +1226,9 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
             });
             return match again {
                 Ok(again) => {
+                    // The first compile's messages were passed on as they came: only what this
+                    // one says beyond them is new (the depfile's error, at the end).
+                    ports.stderr(unseen(&ran.stderr, &again.stderr));
                     ports.stdout(&again.stdout);
                     ports.end_as(&again)
                 }
@@ -1197,6 +1282,21 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
         ..entry(outcome)
     });
     0
+}
+
+/// What `again` says beyond the lines `seen` already passed on: the part after the longest run
+/// of whole lines both start with.
+fn unseen<'a>(seen: &[u8], again: &'a [u8]) -> &'a [u8] {
+    let mut common = 0;
+    for (i, (a, b)) in seen.iter().zip(again).enumerate() {
+        if a != b {
+            break;
+        }
+        if *a == b'\n' {
+            common = i + 1;
+        }
+    }
+    &again[common..]
 }
 
 fn os(args: &[String]) -> Vec<OsString> {
@@ -1264,6 +1364,12 @@ fn store_block(
         .unwrap_or_default();
     let dirs = key::search(&plan.compile, &plan.identity, &cwd, &|n| ports.var(n));
     let source_epoch = ports.var("SOURCE_DATE_EPOCH").is_some();
+    let source_dir = source_dir(&cwd, &plan.compile.source);
+    // A time macro in the arguments (`-DBUILD=__DATE__`) is one as much as in a read (B-54).
+    let asked = super::text::scan(plan.compile.keyed.join("\n").as_bytes());
+    if asked.timestamp || (asked.time && !source_epoch) {
+        return not_stored(NotStored::Unkeyable, "time-macro");
+    }
     let mut reads = Vec::with_capacity(spellings.len());
     let mut digests = Vec::with_capacity(spellings.len());
     let mut abs_paths = Vec::with_capacity(spellings.len());
@@ -1297,10 +1403,13 @@ fn store_block(
         if seen.timestamp || (seen.time && !source_epoch) {
             return not_stored(NotStored::Unkeyable, "time-macro");
         }
-        let system = plan.identity.in_system(&abs_text)
-            || dirs
-                .iter()
-                .any(|d| d.system && places::under(&abs_text, &d.path));
+        if seen.incbin {
+            return not_stored(NotStored::Unkeyable, "incbin");
+        }
+        if seen.has_embed {
+            return not_stored(NotStored::Unkeyable, "has-embed");
+        }
+        let system = key::system_read(&abs_text, &plan.identity, &dirs, &source_dir);
         reads.push(HintRead {
             p: plan.places.hide(spelling),
             s: system,
@@ -1318,24 +1427,43 @@ fn store_block(
             includers: includers.get(Path::new(abs)).cloned().unwrap_or_default(),
         })
         .collect();
-    let source_dir = places::absolute(&cwd, &plan.compile.source)
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (found_places, probes) =
-        key::places_and_probes(&key_reads, &dirs, &source_dir, &plan.places);
+    let output = cwd.join(&plan.compile.output);
+    let written: Vec<String> = [
+        Some(output.clone()),
+        plan.compile
+            .dep
+            .path(&plan.compile.output)
+            .map(|d| cwd.join(d)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|p| p.parent().map(|d| d.to_string_lossy().into_owned()))
+    .collect();
+    let searched = key::Searched {
+        dirs: &dirs,
+        source_dir: &source_dir,
+        cwd: &cwd.to_string_lossy(),
+        forced: &plan.compile.includes,
+        written: &written,
+        floor,
+    };
+    let Ok((found_places, probes)) = key::places_and_probes(&key_reads, &searched, &plan.places)
+    else {
+        return not_stored(NotStored::Changed, "changed");
+    };
     let hint = key::Hint::new(reads, found_places, probes);
     let block_key = key::block(&plan.step, &hint, &digests);
     // B-56: where the block may go, from what the object holds.
-    let output = cwd.join(&plan.compile.output);
     let Ok(object) = std::fs::read(&output) else {
         return not_stored(NotStored::Outputs, "no-object");
     };
-    let holds = |needle: &str| {
-        !needle.is_empty() && memchr::memmem::find(&object, needle.as_bytes()).is_some()
-    };
-    // B-56: a root in compressed debug sections isn't in the bytes; such a block is tied.
-    let tied = plan.compile.compressed_debug || plan.places.roots().iter().any(|root| holds(root));
+    let holds = |needle: &str| holds_text(&object, needle);
+    // B-56: a root in compressed debug sections isn't in the bytes, nor one a macro's value
+    // holds once the code has turned it into anything else (a wide string, a hash): such a
+    // block is tied.
+    let tied = plan.compile.compressed_debug
+        || defines_a_root(&plan.compile.keyed, plan.places.roots())
+        || plan.places.roots().iter().any(|root| holds(root));
     let mut local = Vec::new();
     if tied {
         local.push("tied".to_string());
@@ -1700,6 +1828,7 @@ impl Ports for Real {
             })
         });
         let mut kept = Vec::new();
+        let quiet = run.quiet;
         if let Some(stderr) = child.stderr.take() {
             let mut reader = io::BufReader::new(stderr);
             let mut buf = Vec::new();
@@ -1709,8 +1838,10 @@ impl Ports for Real {
                 match reader.read_until(b'\n', &mut buf) {
                     Ok(0) => break,
                     Ok(_) => {
-                        let _ = err.write_all(&buf);
-                        let _ = err.flush();
+                        if !quiet {
+                            let _ = err.write_all(&buf);
+                            let _ = err.flush();
+                        }
                         kept.extend_from_slice(&buf);
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,

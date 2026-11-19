@@ -10,8 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use hushrun_core::Digest;
+use hushrun_digest::cache::Stat;
 use serde::{Deserialize, Serialize};
 
 use super::args::{Compile, DepMode, Dir, Lang};
@@ -290,9 +292,13 @@ pub fn tied(block: &Digest, places: &Places) -> Digest {
     Digest::of(canonical.as_bytes())
 }
 
-/// The folders of the include search, absolute, in the order the compiler searches them: the
-/// quote folders, `-I` and `-F`, the variables' folders, `-isystem` and `-idirafter`, then the
-/// driver's system folders (B-54).
+/// The folders of the include search, absolute, in the order the compiler searches them (B-54):
+/// the quote folders, `-I` and `-F`, `CPATH`'s folders, `-isystem` and `-iframework`,
+/// `C_INCLUDE_PATH`'s (or `CPLUS_INCLUDE_PATH`'s), the driver's system folders, then
+/// `-idirafter`. As GCC and clang do, a folder that is also a system one is searched only at its
+/// system place (its `-I` is dropped), and a folder named twice only at its first; folders are
+/// the same when they resolve to one. The quote folders are kept apart: an angled include never
+/// searches them, so they never hide a later place of theirs.
 pub fn search(
     compile: &Compile,
     identity: &Identity,
@@ -306,9 +312,6 @@ pub fn search(
         framework: d.framework,
         system: d.system,
     };
-    let mut dirs: Vec<Dir> = compile.quote.iter().map(abs).collect();
-    let (user, system): (Vec<&Dir>, Vec<&Dir>) = compile.search.iter().partition(|d| !d.system);
-    dirs.extend(user.into_iter().map(abs));
     let from_var = |name: &str, system: bool| -> Vec<Dir> {
         var(name)
             .map(|value| {
@@ -325,54 +328,102 @@ pub fn search(
             })
             .unwrap_or_default()
     };
-    dirs.extend(from_var("CPATH", false));
-    dirs.extend(system.into_iter().map(abs));
     let lang_var = match compile.lang {
         Lang::C => "C_INCLUDE_PATH",
         Lang::Cxx => "CPLUS_INCLUDE_PATH",
     };
-    dirs.extend(from_var(lang_var, true));
-    dirs.extend(identity.system.iter().map(|d| Dir {
+    let (user, system): (Vec<&Dir>, Vec<&Dir>) = compile.search.iter().partition(|d| !d.system);
+    let mut rest: Vec<Dir> = user.into_iter().map(abs).collect();
+    rest.extend(from_var("CPATH", false));
+    rest.extend(system.into_iter().map(abs));
+    rest.extend(from_var(lang_var, true));
+    rest.extend(identity.system.iter().map(|d| Dir {
         path: d.path.clone(),
         framework: d.framework,
         system: true,
     }));
+    rest.extend(compile.after.iter().map(abs));
+    let same = |d: &Dir| {
+        let resolved = std::fs::canonicalize(&d.path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| d.path.clone());
+        (resolved, d.framework)
+    };
+    let systems: BTreeSet<(String, bool)> = rest.iter().filter(|d| d.system).map(same).collect();
     let mut seen = BTreeSet::new();
-    dirs.retain(|d| seen.insert((d.path.clone(), d.framework)));
+    rest.retain(|d| {
+        let id = same(d);
+        (d.system || !systems.contains(&id)) && seen.insert(id)
+    });
+    let mut seen = BTreeSet::new();
+    let mut dirs: Vec<Dir> = compile
+        .quote
+        .iter()
+        .map(abs)
+        .filter(|d| seen.insert(same(d)))
+        .collect();
+    dirs.extend(rest);
     dirs
 }
 
+/// Whether a read lies in a system folder for `-MMD` (B-55, B-57): under one of the driver's
+/// system folders, and under no folder a user include could have found it in (the source's, a
+/// quote folder, `-I`, `-F`, `CPATH`'s). Headers of `-isystem`, `-idirafter` and
+/// `C_INCLUDE_PATH` folders are kept: which folder a header was found in only the compiler
+/// knows, and a depfile naming one file more costs a stat where one naming one fewer misses a
+/// rebuild. One definition for the depfile of a compile and the hint's reads.
+pub fn system_read(abs: &str, identity: &Identity, dirs: &[Dir], source_dir: &str) -> bool {
+    identity.in_driver_system(abs)
+        && !places::under(abs, source_dir)
+        && !dirs
+            .iter()
+            .any(|d| !d.system && places::under(abs, &d.path))
+}
+
 /// The name a header found in `dir` was asked by, from its absolute path: `rest` for a plain
-/// folder, `N/rest` for `dir/N.framework/Headers/rest`.
-fn spelling(path: &str, dir: &Dir) -> Option<String> {
+/// folder, `N/rest` for `dir/N.framework/Headers/rest` and `dir/N.framework/PrivateHeaders/rest`;
+/// and whether it was a framework's private header.
+fn spelling(path: &str, dir: &Dir) -> Option<(String, bool)> {
     let rest = path
         .strip_prefix(dir.path.trim_end_matches('/'))?
         .strip_prefix('/')?;
     if !dir.framework {
-        return Some(rest.to_string());
+        return Some((rest.to_string(), false));
     }
     let (framework, inner) = rest.split_once('/')?;
     let name = framework.strip_suffix(".framework")?;
-    let inner = inner.strip_prefix("Headers/")?;
-    Some(format!("{name}/{inner}"))
+    if let Some(inner) = inner.strip_prefix("Headers/") {
+        return Some((format!("{name}/{inner}"), false));
+    }
+    let inner = inner.strip_prefix("PrivateHeaders/")?;
+    Some((format!("{name}/{inner}"), true))
 }
 
-/// Where `name` would be in `dir`.
-fn candidate(dir: &Dir, name: &str) -> Option<PathBuf> {
+/// Where `name` would be in `dir`, in the order the compiler looks: a framework's `Headers`, then
+/// its `PrivateHeaders`.
+fn candidates(dir: &Dir, name: &str) -> Vec<PathBuf> {
     if !dir.framework {
-        return Some(Path::new(&dir.path).join(name));
+        return vec![Path::new(&dir.path).join(name)];
     }
-    let (framework, inner) = name.split_once('/')?;
-    Some(
-        Path::new(&dir.path)
-            .join(format!("{framework}.framework"))
-            .join("Headers")
-            .join(inner),
-    )
+    let Some((framework, inner)) = name.split_once('/') else {
+        return Vec::new();
+    };
+    let at = Path::new(&dir.path).join(format!("{framework}.framework"));
+    vec![
+        at.join("Headers").join(inner),
+        at.join("PrivateHeaders").join(inner),
+    ]
 }
 
 fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Whether `path` is there and dated at or after `floor`: it appeared or changed while the
+/// compile ran (B-11).
+fn dated_since(path: &Path, floor: SystemTime) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| crate::inputs::dated_after(&Stat::of(&meta), floor))
 }
 
 /// One read file after a compile, for the places and probes.
@@ -385,54 +436,101 @@ pub struct Read<'a> {
     pub includers: Vec<String>,
 }
 
+/// Where a compile searched, for its places and probes (B-54).
+pub struct Searched<'a> {
+    /// The folders of the search, in order ([`search`]).
+    pub dirs: &'a [Dir],
+    /// The source's folder, which stands for an including file's where the graph names none.
+    pub source_dir: &'a str,
+    /// The compile's folder, searched first for a forced include given relative.
+    pub cwd: &'a str,
+    /// The forced includes (`-include`, `-imacros`) as given.
+    pub forced: &'a [String],
+    /// The folders the compile and the launcher wrote into (the object's, the depfile's): their
+    /// dates say nothing about a probe.
+    pub written: &'a [String],
+    /// When the compile started, by the file system's clock: a place or probe dated at or after
+    /// it changed while the compiler looked.
+    pub floor: SystemTime,
+}
+
+/// The places of a compile and its probes, each with whether it was present.
+pub type PlacesAndProbes = (Vec<String>, Vec<(String, bool)>);
+
+/// A place or probe changed while the compile ran: the object can't be keyed (B-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Changed;
+
 /// The places and probes of a compile (B-54), with roots and bases as placeholders, each once.
-/// `source_dir` stands for an including file's folder where the graph names none.
+///
+/// A place that exists now and isn't a read is left out when it is older than the compile (the
+/// folder wasn't searched for that header: an angled include doesn't search the including
+/// file's folder, which places over-count), and is [`Changed`] when it isn't: a header that
+/// appeared where the compiler had already looked. A probe there now and dated since the floor,
+/// or one absent in a folder changed since, is [`Changed`] too.
 pub fn places_and_probes(
     reads: &[Read<'_>],
-    dirs: &[Dir],
-    source_dir: &str,
+    searched: &Searched<'_>,
     places: &Places,
-) -> (Vec<String>, Vec<(String, bool)>) {
+) -> Result<PlacesAndProbes, Changed> {
     let mut out_places = Vec::new();
     let mut out_probes = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let read_paths: BTreeSet<&str> = reads.iter().map(|r| r.abs).collect();
+    let floor = searched.floor;
     for (i, read) in reads.iter().enumerate() {
         // The source itself is named by the call, not found by a search.
         if i > 0 {
             let mut folders: Vec<Dir> = Vec::new();
-            let includers: Vec<String> = if read.includers.is_empty() {
-                vec![source_dir.to_string()]
-            } else {
-                read.includers
-                    .iter()
-                    .filter_map(|f| {
-                        Path::new(f)
-                            .parent()
-                            .map(|p| p.to_string_lossy().into_owned())
-                    })
-                    .collect()
+            let user = |path: String| Dir {
+                path,
+                framework: false,
+                system: false,
             };
-            for dir in includers {
-                folders.push(Dir {
-                    path: dir,
-                    framework: false,
-                    system: false,
-                });
+            let forced = searched.forced.iter().any(|f| {
+                !f.starts_with('/')
+                    && read
+                        .abs
+                        .ends_with(&format!("/{}", f.trim_start_matches("./")))
+            });
+            if forced {
+                folders.push(user(searched.cwd.to_string()));
             }
-            folders.extend(dirs.iter().cloned());
+            if read.includers.is_empty() {
+                folders.push(user(searched.source_dir.to_string()));
+            } else {
+                folders.extend(read.includers.iter().filter_map(|f| {
+                    Path::new(f)
+                        .parent()
+                        .map(|p| user(p.to_string_lossy().into_owned()))
+                }));
+            }
+            folders.extend(searched.dirs.iter().cloned());
             for (pos, dir) in folders.iter().enumerate() {
-                let Some(name) = spelling(read.abs, dir) else {
+                let Some((name, private)) = spelling(read.abs, dir) else {
                     continue;
                 };
-                for earlier in &folders[..pos] {
-                    let Some(at) = candidate(earlier, &name) else {
-                        continue;
-                    };
-                    if at.as_os_str() == read.abs {
+                let mut earlier: Vec<PathBuf> = folders[..pos]
+                    .iter()
+                    .flat_map(|d| candidates(d, &name))
+                    .collect();
+                // A private header: the framework's public one is looked for first.
+                if private {
+                    earlier.extend(candidates(dir, &name).into_iter().take(1));
+                }
+                for at in earlier {
+                    let text = at.to_string_lossy();
+                    if text == read.abs || read_paths.contains(text.as_ref()) {
                         continue;
                     }
-                    if !exists(&at) && seen.insert(at.clone()) {
-                        out_places.push(places.hide(&at.to_string_lossy()));
+                    if exists(&at) {
+                        if dated_since(&at, floor) {
+                            return Err(Changed);
+                        }
+                        continue;
+                    }
+                    if seen.insert(at.clone()) {
+                        out_places.push(places.hide(&text));
                     }
                 }
             }
@@ -449,20 +547,32 @@ pub fn places_and_probes(
             framework: false,
             system: false,
         }];
-        folders.extend(dirs.iter().cloned());
+        folders.extend(searched.dirs.iter().cloned());
         for probe in &read.seen.probes {
             let (name, _) = text::probe_name(probe);
             for dir in &folders {
-                let Some(at) = candidate(dir, name) else {
-                    continue;
-                };
-                if seen.insert(at.clone()) {
-                    out_probes.push((places.hide(&at.to_string_lossy()), exists(&at)));
+                for at in candidates(dir, name) {
+                    if !seen.insert(at.clone()) {
+                        continue;
+                    }
+                    let present = exists(&at);
+                    let changed = if present {
+                        dated_since(&at, floor)
+                    } else {
+                        at.parent().is_some_and(|folder| {
+                            !searched.written.iter().any(|w| Path::new(w) == folder)
+                                && dated_since(folder, floor)
+                        })
+                    };
+                    if changed {
+                        return Err(Changed);
+                    }
+                    out_probes.push((places.hide(&at.to_string_lossy()), present));
                 }
             }
         }
     }
-    (out_places, out_probes)
+    Ok((out_places, out_probes))
 }
 
 /// Whether every place of a hint is still absent and every probe as it was, here (B-54). The
@@ -558,8 +668,9 @@ mod tests {
                 includers: vec![],
             },
         ];
+        let source_dir = format!("{root}/src");
         let (found_places, probes) =
-            places_and_probes(&reads, &dirs, &format!("{root}/src"), &places);
+            places_and_probes(&reads, &searched(&dirs, &source_dir), &places).unwrap();
         assert_eq!(found_places, ["{root}/src/h.h", "{root}/first/h.h"]);
         assert!(probes.contains(&("{root}/first/opt-present.h".into(), true)));
         assert!(probes.contains(&("{root}/src/opt-present.h".into(), false)));
@@ -619,19 +730,165 @@ mod tests {
         assert_eq!(Hint::new(reads.clone(), vec![], vec![]).reads(), reads);
     }
 
+    fn searched<'a>(dirs: &'a [Dir], source_dir: &'a str) -> Searched<'a> {
+        Searched {
+            dirs,
+            source_dir,
+            cwd: "/nonexistent",
+            forced: &[],
+            written: &[],
+            floor: SystemTime::now() + std::time::Duration::from_secs(3600),
+        }
+    }
+
     // covers: B-54
     #[test]
-    fn a_framework_header_is_spelled_by_its_framework() {
+    fn a_framework_header_is_spelled_by_its_framework_public_or_private() {
         let fw = dir("/F", true);
         assert_eq!(
-            spelling("/F/Kit.framework/Headers/sub/k.h", &fw).as_deref(),
-            Some("Kit/sub/k.h")
+            spelling("/F/Kit.framework/Headers/sub/k.h", &fw),
+            Some(("Kit/sub/k.h".to_string(), false))
         );
         assert_eq!(
-            candidate(&fw, "Kit/sub/k.h").unwrap(),
-            PathBuf::from("/F/Kit.framework/Headers/sub/k.h")
+            spelling("/F/Kit.framework/PrivateHeaders/k.h", &fw),
+            Some(("Kit/k.h".to_string(), true))
+        );
+        assert_eq!(
+            candidates(&fw, "Kit/sub/k.h"),
+            [
+                PathBuf::from("/F/Kit.framework/Headers/sub/k.h"),
+                PathBuf::from("/F/Kit.framework/PrivateHeaders/sub/k.h")
+            ]
         );
         assert!(spelling("/F/other/k.h", &fw).is_none());
+        // A private header's places: the public header of its own framework, and both forms in
+        // every earlier framework folder.
+        let places = Places::new(&["/F".into()], &[], &[]);
+        let none = text::Seen::default();
+        let reads = [
+            Read {
+                abs: "/F/a.c",
+                seen: &none,
+                includers: vec![],
+            },
+            Read {
+                abs: "/F/second/Kit.framework/PrivateHeaders/k.h",
+                seen: &none,
+                includers: vec!["/F/a.c".into()],
+            },
+        ];
+        let dirs = [dir("/F/first", true), dir("/F/second", true)];
+        let (found, _) = places_and_probes(&reads, &searched(&dirs, "/F"), &places).unwrap();
+        for place in [
+            "{root}/first/Kit.framework/Headers/k.h",
+            "{root}/first/Kit.framework/PrivateHeaders/k.h",
+            "{root}/second/Kit.framework/Headers/k.h",
+        ] {
+            assert!(found.contains(&place.to_string()), "{place}: {found:?}");
+        }
+    }
+
+    // covers: B-54
+    #[test]
+    fn without_a_graph_the_source_s_folder_stands_for_every_including_file_s() {
+        // Today's behaviour, pinned (owner decision 5): GCC, clang before 15 and what a system
+        // header includes have no graph, and a quoted include from a header in another folder
+        // gets no place in that folder. Only the audit finds a header added there.
+        let places = Places::new(&["/r".into()], &[], &[]);
+        let none = text::Seen::default();
+        let read = |abs: &'static str, includers: Vec<String>| Read {
+            abs,
+            seen: &none,
+            includers,
+        };
+        let dirs = [dir("/r/include", false), dir("/r/gen", false)];
+        let without = [
+            read("/r/src/a.c", vec![]),
+            read("/r/include/foo/a.h", vec![]),
+            read("/r/gen/config.h", vec![]),
+        ];
+        let (found, _) = places_and_probes(&without, &searched(&dirs, "/r/src"), &places).unwrap();
+        assert!(
+            found.contains(&"{root}/src/config.h".to_string()),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&"{root}/include/config.h".to_string()),
+            "{found:?}"
+        );
+        assert!(
+            !found.contains(&"{root}/include/foo/config.h".to_string()),
+            "{found:?}"
+        );
+        // With clang's graph, the including header's folder is a place.
+        let with = [
+            read("/r/src/a.c", vec![]),
+            read("/r/include/foo/a.h", vec!["/r/src/a.c".into()]),
+            read("/r/gen/config.h", vec!["/r/include/foo/a.h".into()]),
+        ];
+        let (found, _) = places_and_probes(&with, &searched(&dirs, "/r/src"), &places).unwrap();
+        assert!(
+            found.contains(&"{root}/include/foo/config.h".to_string()),
+            "{found:?}"
+        );
+    }
+
+    // covers: B-54
+    #[test]
+    fn a_folder_also_given_as_a_system_one_is_searched_there_and_after_comes_last() {
+        let compile = match super::super::args::classify(
+            &OsString::from("cc"),
+            &[
+                "-iquote",
+                "q",
+                "-Ia",
+                "-Ib",
+                "-isystem",
+                "a",
+                "-idirafter",
+                "late",
+                "-Iq",
+                "-c",
+                "a.c",
+                "-o",
+                "a.o",
+            ]
+            .map(OsString::from),
+            &[],
+        ) {
+            super::super::args::Classified::Compile(c) => *c,
+            other => panic!("{other:?}"),
+        };
+        let identity = Identity {
+            digest: Digest::of(b"x"),
+            clang: true,
+            target: String::new(),
+            sdk: None,
+            sdk_resolved: None,
+            toolchain: None,
+            system: vec![super::super::compiler::SystemDir {
+                path: "/nonexistent/sys".into(),
+                framework: false,
+                resolved: None,
+            }],
+        };
+        let var = |name: &str| (name == "C_INCLUDE_PATH").then(|| OsString::from("/nonexistent/c"));
+        let got: Vec<String> = search(&compile, &identity, Path::new("/w"), &var)
+            .into_iter()
+            .map(|d| d.path)
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "/w/q",
+                "/w/b",
+                "/w/q",
+                "/w/a",
+                "/nonexistent/c",
+                "/nonexistent/sys",
+                "/w/late"
+            ]
+        );
     }
 
     // covers: B-54

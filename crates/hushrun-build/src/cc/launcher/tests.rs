@@ -237,12 +237,12 @@ fn a_file_put_in_place_is_new_dated_and_writable_or_not_there_at_all() {
     let dest = dir.path().join("a.o");
     std::fs::write(&dest, b"old").unwrap();
     let when = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
-    put_whole(&dest, 7, when, |temp| std::fs::write(temp, b"new")).unwrap();
+    put_whole(&dest, when, |temp| std::fs::write(temp, b"new")).unwrap();
     assert_eq!(std::fs::read(&dest).unwrap(), b"new");
     assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), when);
     assert!(!std::fs::metadata(&dest).unwrap().permissions().readonly());
     // A failure leaves the old file and no temporary one.
-    let failed = put_whole(&dest, 7, when, |temp| {
+    let failed = put_whole(&dest, when, |temp| {
         std::fs::write(temp, b"half")?;
         Err(io::Error::other("no"))
     });
@@ -260,4 +260,29 @@ fn cmake_s_own_configure_checks_are_probes() {
     ));
     assert!(cmake_probe(Path::new("/b/CMakeFiles/CMakeTmp"), "o.o"));
     assert!(!cmake_probe(Path::new("/b"), "CMakeFiles/lib.dir/a.c.o"));
+}
+
+// covers: B-57, B-58
+#[test]
+fn what_a_killed_launcher_left_is_replaced_and_a_gone_session_is_not_made_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("a.o");
+    // A launcher killed between its copy and its rename left its temporary file.
+    std::fs::write(dir.path().join(".a.o.hushrun.tmp"), b"half").unwrap();
+    put_whole(&dest, SystemTime::now(), |temp| {
+        std::fs::write(temp, b"whole")
+    })
+    .unwrap();
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["a.o"]);
+    // The run's folder went with the run: the launcher's folder in it isn't made again.
+    let session = dir.path().join("session");
+    assert!(!work_folder(&session));
+    assert!(!session.exists());
+    std::fs::create_dir(&session).unwrap();
+    assert!(work_folder(&session) && work_folder(&session));
 }

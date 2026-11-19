@@ -107,8 +107,16 @@ pub struct Compile {
     pub keyed: Vec<String>,
     /// The quote folders (`-iquote`), searched first for `"…"` after the including file's.
     pub quote: Vec<Dir>,
-    /// `-I` and `-F`, in order, then `-isystem` and `-iframework`, then `-idirafter`.
+    /// `-I` and `-F`, in order, then `-isystem` and `-iframework`.
     pub search: Vec<Dir>,
+    /// `-idirafter`, searched after every system folder, the driver's too.
+    pub after: Vec<Dir>,
+    /// `-include` and `-imacros`, as given: a relative one is looked for in the compile's folder
+    /// first (B-54).
+    pub includes: Vec<String>,
+    /// `-H` or `--trace-includes`: the compiler prints its include tree to stderr, which the
+    /// include graph's variables would replace (B-55).
+    pub prints_headers: bool,
     /// The flags that change what the driver does with no source (the target, the sysroot, the
     /// standard library, the default folders): asked of the driver for the compiler's identity
     /// and its system folders (B-52).
@@ -440,6 +448,7 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
     let mut includes = Vec::new();
     let (mut compile, mut lto, mut random_seed) = (false, false, false);
     let mut compressed_debug = false;
+    let mut prints_headers = false;
     let mut source: Option<(String, Lang)> = None;
     let mut output: Option<String> = None;
     let mut dep = DepAsked {
@@ -572,6 +581,9 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
                     if arg.starts_with("-flto") && arg != "-fno-lto" {
                         lto = true;
                     }
+                    if matches!(arg, "-H" | "--trace-includes") {
+                        prints_headers = true;
+                    }
                     if arg.starts_with("-frandom-seed") {
                         random_seed = true;
                     }
@@ -631,7 +643,6 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
         }
     }
     search.extend(system);
-    search.extend(after);
     Classified::Compile(Box::new(Compile {
         compiler,
         args,
@@ -642,6 +653,9 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
         keyed,
         quote,
         search,
+        after,
+        includes,
+        prints_headers,
         driver_flags,
         native,
         lto,

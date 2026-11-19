@@ -1,5 +1,6 @@
 //! What a read file says about the compile beyond its bytes (B-54): the names it asks
-//! `__has_include` about, and whether it uses a macro that holds the time.
+//! `__has_include` about, whether it uses a macro that holds the time, and whether it reads a
+//! file no depfile names (an assembler's `.incbin` or `.include`, `__has_embed`).
 
 use memchr::memmem;
 
@@ -19,6 +20,14 @@ pub struct Seen {
     /// `__TIMESTAMP__` appears: a time no `SOURCE_DATE_EPOCH` fixes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timestamp: bool,
+    /// An assembler directive that reads a file (`.incbin`, `.include "…"`), which no compiler's
+    /// depfile names (`incbin`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incbin: bool,
+    /// A call of `__has_embed`, whose answer depends on whether a file is there and empty
+    /// (`has-embed`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_embed: bool,
 }
 
 fn ident(b: u8) -> bool {
@@ -39,6 +48,8 @@ pub fn scan(text: &[u8]) -> Seen {
     let mut seen = Seen {
         time: has_word(text, b"__TIME__") || has_word(text, b"__DATE__"),
         timestamp: has_word(text, b"__TIMESTAMP__"),
+        incbin: assembler_reads(text),
+        has_embed: calls(text, b"__has_embed"),
         ..Seen::default()
     };
     let pat = b"__has_include";
@@ -91,6 +102,45 @@ pub fn scan(text: &[u8]) -> Seen {
         }
     }
     seen
+}
+
+/// Whether `name` appears as a whole identifier followed by `(`, spaces allowed: a call, not a
+/// test of whether it is defined.
+fn calls(text: &[u8], name: &[u8]) -> bool {
+    memmem::find_iter(text, name).any(|at| {
+        if at > 0 && ident(text[at - 1]) {
+            return false;
+        }
+        let mut j = at + name.len();
+        if text.get(j).copied().is_some_and(ident) {
+            return false;
+        }
+        while text.get(j).is_some_and(|b| *b == b' ' || *b == b'\t') {
+            j += 1;
+        }
+        text.get(j) == Some(&b'(')
+    })
+}
+
+/// Whether the text holds an assembler directive that reads a file: `.incbin` as a word (inline
+/// assembly is a string, so the byte before it is anything), or `.include` followed by a quoted
+/// name (written `\"` inside a C string), which a member called `include` never is. ccache
+/// refuses the same.
+fn assembler_reads(text: &[u8]) -> bool {
+    let word_ends = |at: usize| !text.get(at).copied().is_some_and(ident);
+    if memmem::find_iter(text, b".incbin").any(|at| word_ends(at + 7)) {
+        return true;
+    }
+    memmem::find_iter(text, b".include").any(|at| {
+        let mut j = at + 8;
+        if !text.get(j).is_some_and(|b| *b == b' ' || *b == b'\t') {
+            return false;
+        }
+        while text.get(j).is_some_and(|b| *b == b' ' || *b == b'\t') {
+            j += 1;
+        }
+        matches!(text.get(j), Some(b'"' | b'\\'))
+    })
 }
 
 /// Whether the name at `at` is the macro a `#define` on its line defines.
@@ -148,5 +198,19 @@ mod tests {
         assert!(!scan(b"x = __DATE__").timestamp);
         assert!(scan(b"x = __TIMESTAMP__").timestamp);
         assert!(!scan(b"ABSL__TIME__X").time);
+    }
+
+    // covers: B-54
+    #[test]
+    fn a_read_no_depfile_names_is_seen() {
+        assert!(scan(b"__asm__(\".incbin \\\"data.bin\\\"\");").incbin);
+        assert!(scan(b"__asm__(\"x:\\n.incbin \\\"d\\\"\");").incbin);
+        assert!(scan(b"asm(\".include \\\"m.s\\\"\");").incbin);
+        assert!(!scan(b"config.include(path);").incbin);
+        assert!(!scan(b"int incbin_size;").incbin);
+        assert!(scan(b"#if __has_embed(\"x.bin\")\n#endif\n").has_embed);
+        assert!(scan(b"#if __has_embed (<x.bin>)\n#endif\n").has_embed);
+        assert!(!scan(b"#if defined(__has_embed)\n#endif\n").has_embed);
+        assert!(!scan(b"#ifdef __has_embed\n#endif\n").has_embed);
     }
 }

@@ -381,25 +381,30 @@ fn a_warning_and_an_error_reach_the_person_byte_for_byte_built_reused_or_not_sto
     assert_same_output(&failed, &plain_bad, "error");
     assert!(matches!(run.last().outcome, Outcome::BuiltNotStored(_)));
 
-    // A store that can't be written: built, not stored, the same bytes.
+    // A store that can't be written: built, not stored, the same bytes. A folder made
+    // read-only stays writable to root, as in a container.
     let other = world();
     let run = other.run(&root, true);
-    let blocks = other.store().join("blocks");
-    let tmp = other.store().join("tmp");
-    for dir in [&blocks, &tmp] {
-        fs::create_dir_all(dir).unwrap();
-        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+    if is_root() {
+        eprintln!("note: skipping the read-only store: root writes there anyway");
+    } else {
+        let blocks = other.store().join("blocks");
+        let tmp = other.store().join("tmp");
+        for dir in [&blocks, &tmp] {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+        }
+        let unstored = run.launch(&root, "cc", &warn);
+        for dir in [&blocks, &tmp] {
+            fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        }
+        assert!(
+            matches!(run.last().outcome, Outcome::BuiltNotStored(_)),
+            "{:?}",
+            run.last()
+        );
+        assert_same_output(&unstored, &plain_warn, "not stored");
     }
-    let unstored = run.launch(&root, "cc", &warn);
-    for dir in [&blocks, &tmp] {
-        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-    }
-    assert!(
-        matches!(run.last().outcome, Outcome::BuiltNotStored(_)),
-        "{:?}",
-        run.last()
-    );
-    assert_same_output(&unstored, &plain_warn, "not stored");
 
     // A call passed through is the compiler itself.
     let link = ["src/bad.c", "-o", "bad"];
@@ -645,7 +650,7 @@ fn a_second_worktree_reuses_every_object_byte_for_byte_and_ninja_has_no_work_aft
     // CMake cached the indirection, not hushrun's link.
     let cache = fs::read_to_string(a.join("build/CMakeCache.txt")).unwrap();
     assert!(
-        cache.contains("CMAKE_CXX_COMPILER_LAUNCHER:STRING=/bin/sh;-c;exec"),
+        cache.contains("CMAKE_CXX_COMPILER_LAUNCHER:STRING=/bin/sh;-c;"),
         "{cache}"
     );
     assert!(!cache.contains("hushrun-cc"));
@@ -793,7 +798,7 @@ fn a_build_folder_configured_in_a_run_builds_outside_one_with_hushrun_gone() {
     );
     tools.ninja(&root, None, &[]);
     let cache = fs::read_to_string(root.join("build/CMakeCache.txt")).unwrap();
-    assert!(cache.contains("CMAKE_C_COMPILER_LAUNCHER:STRING=/bin/sh;-c;exec"));
+    assert!(cache.contains("CMAKE_C_COMPILER_LAUNCHER:STRING=/bin/sh;-c;"));
 }
 
 // covers: B-50
@@ -1086,4 +1091,454 @@ fn a_compiler_is_known_by_its_content_not_its_name() {
             "{named:?}"
         );
     }
+}
+
+// --- What the reviews of phases 1 and 2 found ---------------------------------------------------
+
+/// The arguments of a compile of `src/a.c` to `a.o` with a depfile, after `flags`.
+fn compile_a(flags: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+    args.extend(
+        ["-c", "src/a.c", "-o", "a.o", "-MD", "-MF", "a.o.d"]
+            .iter()
+            .map(|a| a.to_string()),
+    );
+    args
+}
+
+fn words(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+fn assert_stored(run: &Run) {
+    let last = run.last();
+    assert_eq!(last.outcome, Outcome::BuiltAndStored, "{last:?}");
+}
+
+// covers: B-54
+#[test]
+fn a_folder_given_with_i_and_isystem_is_searched_where_the_system_folders_are() {
+    // GCC and clang drop the `-I` of a folder that is also a system one, and search it at its
+    // system place: `b` comes before `a` here.
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "#include <h.h>\nint v = H;\n");
+    write(&root.join("a/h.h"), "#define H 1\n");
+    fs::create_dir_all(root.join("b")).unwrap();
+    let args = compile_a(&["-Ia", "-Ib", "-isystem", "a"]);
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &words(&args));
+    assert_stored(&run);
+    let one = fs::read(root.join("a.o")).unwrap();
+    write(&root.join("b/h.h"), "#define H 2\n");
+    run.launch(&root, "cc", &words(&args));
+    assert_ne!(run.last().outcome, Outcome::Reused, "{:?}", run.last());
+    assert_ne!(fs::read(root.join("a.o")).unwrap(), one);
+}
+
+// covers: B-54
+#[test]
+fn a_header_found_after_the_system_folders_is_shadowed_by_one_they_gain() {
+    // `-idirafter` comes after every system folder, `C_INCLUDE_PATH`'s among them.
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "#include <h.h>\nint v = H;\n");
+    write(&root.join("compat/h.h"), "#define H 1\n");
+    let sys = root.join("sys");
+    fs::create_dir_all(&sys).unwrap();
+    let env = [("C_INCLUDE_PATH", sys.to_str().unwrap())];
+    let args = compile_a(&["-idirafter", "compat"]);
+    let run = w.run(&root, true);
+    run.launch_with(&root, "cc", &words(&args), &env);
+    assert_stored(&run);
+    let one = fs::read(root.join("a.o")).unwrap();
+    write(&sys.join("h.h"), "#define H 2\n");
+    run.launch_with(&root, "cc", &words(&args), &env);
+    assert_ne!(run.last().outcome, Outcome::Reused, "{:?}", run.last());
+    assert_ne!(fs::read(root.join("a.o")).unwrap(), one);
+}
+
+// covers: B-54
+#[test]
+fn an_assembler_s_incbin_is_never_stored() {
+    // No compiler's depfile names the file an inline `.incbin` reads.
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("data.bin"), "AB");
+    write(
+        &root.join("src/a.c"),
+        "#ifdef __APPLE__\n#define SECTION \".section __DATA,__blob\\n.globl _blob\\n_blob:\\n\"\n\
+         #else\n#define SECTION \".section .rodata\\n.globl blob\\nblob:\\n\"\n#endif\n\
+         __asm__(SECTION \".incbin \\\"data.bin\\\"\\n.text\\n\");\n\
+         extern const char blob[];\nchar first(void) { return blob[0]; }\n",
+    );
+    let args = compile_a(&[]);
+    let run = w.run(&root, true);
+    let out = run.launch(&root, "cc", &words(&args));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        why(&run.last()).as_deref(),
+        Some("incbin"),
+        "{:?}",
+        run.last()
+    );
+    write(&root.join("data.bin"), "XY");
+    run.launch(&root, "cc", &words(&args));
+    assert_ne!(run.last().outcome, Outcome::Reused);
+    let object = fs::read(root.join("a.o")).unwrap();
+    assert!(memchr::memmem::find(&object, b"XY").is_some());
+}
+
+// covers: B-54
+#[test]
+fn a_file_has_embed_asks_about_is_never_stored() {
+    let w = world();
+    let root = w.path("ck");
+    write(
+        &root.join("src/a.c"),
+        "#if defined(__has_embed)\n#if __has_embed(\"opt.bin\")\nint v(void) { return 1; }\n\
+         #else\nint v(void) { return 0; }\n#endif\n#else\nint v(void) { return 0; }\n#endif\n",
+    );
+    let args = compile_a(&[]);
+    let run = w.run(&root, true);
+    assert!(run.launch(&root, "cc", &words(&args)).status.success());
+    assert_eq!(
+        why(&run.last()).as_deref(),
+        Some("has-embed"),
+        "{:?}",
+        run.last()
+    );
+    write(&root.join("src/opt.bin"), "x");
+    run.launch(&root, "cc", &words(&args));
+    assert_ne!(run.last().outcome, Outcome::Reused);
+}
+
+/// A compiler that runs `cc` and then, for a compile of `src/a.c`, runs `after` in its folder.
+fn compiler_then(w: &World, name: &str, after: &str) -> PathBuf {
+    let script = w.path("bin").join(name);
+    write(
+        &script,
+        &format!(
+            "#!/bin/sh\ncc \"$@\"\nrc=$?\ncase \"$*\" in *src/a.c*) {after} ;; esac\nexit $rc\n"
+        ),
+    );
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    script
+}
+
+// covers: B-54, B-11
+#[test]
+fn a_header_that_appears_where_the_search_looked_while_compiling_is_not_stored() {
+    // A parallel edge generates a header in a folder the compiler already searched: the object
+    // was built without it, and stored it would be reused where the header is there from the
+    // start.
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "#include \"h.h\"\nint v = V;\n");
+    write(&root.join("second/h.h"), "#define V 2\n");
+    fs::create_dir_all(root.join("first")).unwrap();
+    let late = compiler_then(&w, "late-cc", "printf '#define V 1\\n' > first/h.h");
+    let args = compile_a(&["-Ifirst", "-Isecond"]);
+    let run = w.run(&root, true);
+    assert!(
+        run.launch(&root, late.to_str().unwrap(), &words(&args))
+            .status
+            .success()
+    );
+    let last = run.last();
+    assert_eq!(why(&last).as_deref(), Some("changed"), "{last:?}");
+}
+
+// covers: B-56, B-60
+#[test]
+fn a_root_in_a_wide_string_ties_the_block() {
+    let w = world();
+    let a = w.path("a/ck");
+    let b = w.path("b/other/ck");
+    let source = "#include <stddef.h>\nconst wchar_t *data_dir(void) { return DATA_DIR; }\n";
+    let mut objects = Vec::new();
+    for (root, reused) in [(&a, false), (&b, false)] {
+        write(&root.join("src/a.c"), source);
+        let define = format!("-DDATA_DIR=L\"{}/data\"", root.display());
+        let args = compile_a(&[&define]);
+        let run = w.run(root, true);
+        assert!(run.launch(root, "cc", &words(&args)).status.success());
+        let last = run.last();
+        assert_eq!(last.outcome == Outcome::Reused, reused, "{last:?}");
+        let local = last.cc.clone().unwrap().local;
+        assert!(local.contains(&"tied".to_string()), "{last:?}");
+        objects.push(fs::read(root.join("a.o")).unwrap());
+    }
+    assert_ne!(objects[0], objects[1]);
+}
+
+// covers: B-56
+#[test]
+fn a_root_in_a_wide_string_the_object_holds_is_found() {
+    // No `-D` names the root: `__FILE__` does, without prefix maps, in a wide string only.
+    let w = world();
+    let root = w.path("ck");
+    write(
+        &root.join("src/a.c"),
+        "#include <stddef.h>\nconst wchar_t *f(void) { return L\"\" __FILE__; }\n",
+    );
+    let source = root.join("src/a.c");
+    let args = [
+        "-c",
+        source.to_str().unwrap(),
+        "-o",
+        "a.o",
+        "-MD",
+        "-MF",
+        "a.o.d",
+    ];
+    let run = w.run(&root, false);
+    assert!(run.launch(&root, "cc", &args).status.success());
+    let last = run.last();
+    assert_eq!(last.outcome, Outcome::BuiltAndStored, "{last:?}");
+    assert!(last.cc.unwrap().local.contains(&"tied".to_string()));
+}
+
+// covers: B-55, B-57
+#[test]
+fn an_mmd_depfile_keeps_a_user_header_under_an_isystem_folder() {
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "#include \"lib.h\"\nint v = L;\n");
+    write(&root.join("tp/lib/include/lib.h"), "#define L 3\n");
+    let args = [
+        "-isystem",
+        "tp",
+        "-Itp/lib/include",
+        "-MMD",
+        "-c",
+        "src/a.c",
+        "-o",
+        "a.o",
+    ];
+    plain(&root, "cc", &args);
+    let compiler = fs::read_to_string(root.join("a.d")).unwrap();
+    assert!(compiler.contains("tp/lib/include/lib.h"), "{compiler}");
+    fs::remove_file(root.join("a.d")).unwrap();
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &args);
+    assert_stored(&run);
+    let built = fs::read_to_string(root.join("a.d")).unwrap();
+    assert!(built.contains("tp/lib/include/lib.h"), "{built}");
+    fs::remove_file(root.join("a.d")).unwrap();
+    run.launch(&root, "cc", &args);
+    assert_eq!(run.last().outcome, Outcome::Reused);
+    let reused = fs::read_to_string(root.join("a.d")).unwrap();
+    assert!(reused.contains("tp/lib/include/lib.h"), "{reused}");
+}
+
+// covers: B-55
+#[test]
+fn h_prints_the_compiler_s_include_tree_not_the_launcher_s_graph() {
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "#include \"h.h\"\nint v = H;\n");
+    write(&root.join("src/h.h"), "#define H 1\n");
+    let args = compile_a(&["-H"]);
+    let plain_out = plain(&root, "cc", &words(&args));
+    let run = w.run(&root, true);
+    let built = run.launch(&root, "cc", &words(&args));
+    assert_same_output(&built, &plain_out, "built");
+    let reused = run.launch(&root, "cc", &words(&args));
+    assert_same_output(&reused, &plain_out, "again");
+}
+
+// covers: B-52, B-54
+#[test]
+fn headers_of_a_sysroot_named_through_a_link_are_reused() {
+    let w = world();
+    let root = w.path("ck");
+    write(
+        &root.join("src/a.c"),
+        "#include <stdio.h>\nint main(void) { puts(\"x\"); return 0; }\n",
+    );
+    let link = w.path("links").join("sys");
+    let (flag, target) = if cfg!(target_os = "macos") {
+        let sdk = Command::new("xcrun")
+            .arg("--show-sdk-path")
+            .output()
+            .unwrap();
+        (
+            "-isysroot",
+            String::from_utf8(sdk.stdout).unwrap().trim().to_string(),
+        )
+    } else {
+        ("--sysroot", "/".to_string())
+    };
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let args = compile_a(&[flag, link.to_str().unwrap()]);
+    let run = w.run(&root, true);
+    assert!(run.launch(&root, "cc", &words(&args)).status.success());
+    assert_stored(&run);
+    run.launch(&root, "cc", &words(&args));
+    assert_eq!(run.last().outcome, Outcome::Reused);
+}
+
+// covers: B-54
+#[test]
+fn a_time_macro_in_the_arguments_is_never_stored_unless_the_date_is_fixed() {
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "const char *b = BUILD;\n");
+    let args = compile_a(&["-DBUILD=__DATE__"]);
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &words(&args));
+    assert_eq!(
+        why(&run.last()).as_deref(),
+        Some("time-macro"),
+        "{:?}",
+        run.last()
+    );
+    run.launch_with(
+        &root,
+        "cc",
+        &words(&args),
+        &[("SOURCE_DATE_EPOCH", "315532800")],
+    );
+    assert_stored(&run);
+}
+
+// covers: B-54
+#[test]
+fn a_relative_forced_include_is_looked_for_in_the_compile_s_folder_first() {
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "int v = V;\n");
+    write(&root.join("inc/cfg.h"), "#define V 1\n");
+    let args = compile_a(&["-Iinc", "-include", "cfg.h"]);
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &words(&args));
+    assert_stored(&run);
+    let one = fs::read(root.join("a.o")).unwrap();
+    write(&root.join("cfg.h"), "#define V 2\n");
+    run.launch(&root, "cc", &words(&args));
+    assert_ne!(run.last().outcome, Outcome::Reused, "{:?}", run.last());
+    assert_ne!(fs::read(root.join("a.o")).unwrap(), one);
+}
+
+fn is_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+// covers: B-57
+#[test]
+fn a_restored_object_s_permissions_follow_the_umask() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "int v = 1;\n");
+    let args = compile_a(&[]);
+    let run = w.run(&root, true);
+    let mut umasked = args.clone();
+    umasked.insert(0, "cc".into());
+    let launcher = run.session.launcher_link().unwrap();
+    let launch = |run: &Run| {
+        std::thread::sleep(Duration::from_millis(30));
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("umask 027; exec \"$0\" \"$@\"")
+            .arg(&launcher)
+            .args(&umasked)
+            .current_dir(&root);
+        clean(&mut command);
+        command.envs(run.env());
+        assert!(command.output().unwrap().status.success());
+    };
+    launch(&run);
+    assert_stored(&run);
+    let built = fs::metadata(root.join("a.o")).unwrap().permissions().mode() & 0o777;
+    fs::remove_file(root.join("a.o")).unwrap();
+    launch(&run);
+    assert_eq!(run.last().outcome, Outcome::Reused);
+    let reused = fs::metadata(root.join("a.o")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(built, 0o640);
+    assert_eq!(reused, 0o640);
+    let depfile = fs::metadata(root.join("a.o.d"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(depfile, 0o640);
+}
+
+// covers: B-58
+#[test]
+fn a_depfile_that_can_t_be_written_shows_the_warning_once() {
+    if is_root() {
+        eprintln!("note: skipping: a folder made read-only stays writable to root");
+        return;
+    }
+    let w = world();
+    let root = w.path("ck");
+    write(
+        &root.join("src/a.c"),
+        "int f(void) { int unused; return 0; }\n",
+    );
+    let ro = root.join("ro");
+    fs::create_dir_all(&ro).unwrap();
+    fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+    let args = [
+        "-Wall", "-c", "src/a.c", "-o", "a.o", "-MD", "-MF", "ro/a.d",
+    ];
+    let run = w.run(&root, true);
+    let out = run.launch(&root, "cc", &args);
+    fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(stderr.matches("warning: unused").count(), 1, "{stderr}");
+    assert!(!out.status.success(), "{stderr}");
+}
+
+// covers: B-50
+#[test]
+fn a_launcher_the_project_puts_before_hushrun_s_is_said_after_the_build() {
+    let Some(tools) = tools() else { return };
+    let w = world();
+    let root = w.path("ck");
+    project(&root);
+    let marker = w.path("bin").join("args");
+    let wrapper = w.path("bin").join("wrap");
+    write(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\necho \"$1\" >> '{}'\nexec \"$@\"\n",
+            marker.display()
+        ),
+    );
+    fs::set_permissions(
+        &wrapper,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let lists = fs::read_to_string(root.join("CMakeLists.txt")).unwrap();
+    write(
+        &root.join("CMakeLists.txt"),
+        &lists.replacen(
+            "enable_testing()\n",
+            &format!(
+                "enable_testing()\nset_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE {})\n",
+                wrapper.display()
+            ),
+            1,
+        ),
+    );
+    let run = w.run(&root, true);
+    tools.configure(&root, Some(&run));
+    tools.ninja(&root, Some(&run), &[]);
+    // The project's launcher gets the indirection's shell as its compiler.
+    let first = fs::read_to_string(&marker).unwrap();
+    assert!(first.lines().all(|l| l == "/bin/sh"), "{first}");
+    let words: Vec<String> = ["cmake", "--build", "build"].map(String::from).to_vec();
+    let notes = hushrun_build::cc::build_folder_notes(&words, &root);
+    assert_eq!(
+        notes,
+        [hushrun_build::cc::BuildFolderNote::LauncherBefore {
+            folder: root.join("build")
+        }]
+    );
 }
