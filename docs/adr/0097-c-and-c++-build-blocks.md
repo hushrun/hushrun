@@ -559,42 +559,47 @@ the relay's log says.
 
 ## Decisions for the owner
 
-1. **The kind's name.** Recommended `cc/1`: one kind for C and C++, clang and GCC, as `CC` and
-   the `cc` crate name them; the compiler's identity is in every key, so nothing is gained by
-   one kind per compiler, and `c++` is not a kind `is_kind` reads.
-2. **A line in the person's CMake cache.** Recommended yes: a build folder configured inside a
-   run keeps the inert launcher for good. It is the one way found to reach CMake builds with no
-   setting while a plain build stays the compiler's, byte for byte. The alternative is to set it
-   only in CI, where build folders are thrown away, and have a person opt a folder in
-   (`hushrun build cc on <folder>`, which would write the cache entry itself).
-3. **The variable's name, frozen in caches.** Recommended `HUSHRUN_CC`. Once a cache holds the
+The owner decided 2 and 4 on 2026-11-19, both as recommended. The others are still open; each is
+built as its recommendation says until decided.
+
+1. **The kind's name.** Open. Recommended `cc/1`: one kind for C and C++, clang and GCC, as `CC` and
+   the `cc` crate name them; the compiler's identity is in every key, so nothing is gained by one
+   kind per compiler, and `c++` is not a kind `is_kind` reads.
+2. **A line in the person's CMake cache.** Decided 2026-11-19: yes, as built. Recommended yes: a
+   build folder configured inside a run keeps the inert launcher for good. It is the one way found
+   to reach CMake builds with no setting while a plain build stays the compiler's, byte for byte.
+   The alternative is to set it only in CI, where build folders are thrown away, and have a person
+   opt a folder in (`hushrun build cc on <folder>`, which would write the cache entry itself).
+3. **The variable's name, frozen in caches.** Open. Recommended `HUSHRUN_CC`. Once a cache holds the
    indirection, renaming the variable leaves those folders without reuse until reconfigured.
-4. **Prefix maps by default.** Recommended on, mapping each root to `.`, as the `rustc` wrapper
-   maps the workspace: without them a third of a release build and almost none of a debug build
-   travel between two worktrees of one laptop. The cost is visible: `__FILE__` and debug info
-   name files from the repository's root. `build: cc: maps: off` in `hushrun.yaml` (or the
-   person's settings) keeps absolute paths and ties every block that holds one.
-5. **GCC's including file.** Recommended: accept the source's folder standing in for it, with the
-   audit as the net, and measure before doing more. The exact graph would need `-H`, whose lines
+4. **Prefix maps by default.** Decided 2026-11-19: on by default, as built. Recommended on, mapping
+   each root to `.`, as the `rustc` wrapper maps the workspace: without them a third of a release
+   build and almost none of a debug build travel between two worktrees of one laptop. The cost is
+   visible: `__FILE__` and debug info name files from the repository's root. `build: cc: maps: off`
+   in `hushrun.yaml` (or the person's settings) keeps absolute paths and ties every block that holds
+   one.
+5. **GCC's including file.** Open. Recommended: accept the source's folder standing in for it, with
+   the audit as the net, and measure before doing more. The exact graph would need `-H`, whose lines
    GCC writes to stderr among the diagnostics and the wrapper would have to take out. The gap is
    wider than "one case": it is every compile by GCC or a clang before 15, which is every Linux
-   distribution's GCC build, and with any clang every file a system header includes. A branch
-   that adds `include/foo/config.h`, shadowing the `gen/config.h` a quoted include in
-   `include/foo/a.h` found, gets a stale reuse that only the audit (one in fifty) finds. A unit
-   test pins today's behaviour (`without_a_graph_the_source_s_folder_stands_for_every_including_file_s`).
-6. **Meson.** Recommended: not until someone asks. Meson has no launcher variable; the same
+   distribution's GCC build, and with any clang every file a system header includes. A branch that
+   adds `include/foo/config.h`, shadowing the `gen/config.h` a quoted include in `include/foo/a.h`
+   found, gets a stale reuse that only the audit (one in fifty) finds. A unit test pins today's
+   behaviour (`without_a_graph_the_source_s_folder_stands_for_every_including_file_s`).
+6. **Meson.** Open. Recommended: not until someone asks. Meson has no launcher variable; the same
    indirection through `CC` and `CXX` at `meson setup` would work, but those variables reach every
    other tool COMMAND starts.
-7. **The Rust `cc` crate** (ring, zstd-sys, mimalloc in this repository). Recommended: a spike in
-   phase 4 before deciding. The way in that looks safe is `PATH` shims named `cc` and `c++` that
-   act only under a cargo build script (the crate leaves `PATH` out of `rerun-if-env-changed`, so
-   no build script reruns); the risk is a build script that runs CMake (the `cmake` crate), which
-   would cache the shim's path in its `OUT_DIR`.
-8. **Precompiled headers.** Recommended: pass through until phase 5, and build it only if a real
-   repository asks. Keying a PCH's users by the PCH's key, not its bytes, is new machinery.
-9. **The local store's size.** Objects are stored as compiled: 137 MB for abseil with its tests,
-   where ccache keeps 48 MB compressed. Recommended: keep B-13's layout (a reuse clones, which a
-   compressed store can't) and B-14's expiry, and revisit with numbers from real repositories.
-10. **The shell.** Recommended `/bin/sh` everywhere: on macOS it is bash (7 ms a compile) and
-    `/bin/dash` would cost 2 ms, but a cache that names `/bin/dash` breaks on Linux systems
-    without it, and CMake build folders do get copied between machines.
+7. **The Rust `cc` crate** (ring, zstd-sys, mimalloc in this repository). Open. Recommended: a spike
+   in phase 4 before deciding. The way in that looks safe is `PATH` shims named `cc` and `c++` that
+   act only under a cargo build script (the crate leaves `PATH` out of `rerun-if-env-changed`, so no
+   build script reruns); the risk is a build script that runs CMake (the `cmake` crate), which would
+   cache the shim's path in its `OUT_DIR`.
+8. **Precompiled headers.** Open. Recommended: pass through until phase 5, and build it only if a
+   real repository asks. Keying a PCH's users by the PCH's key, not its bytes, is new machinery.
+9. **The local store's size.** Open. Objects are stored as compiled: 137 MB for abseil with its
+   tests, where ccache keeps 48 MB compressed. Recommended: keep B-13's layout (a reuse clones,
+   which a compressed store can't) and B-14's expiry, and revisit with numbers from real
+   repositories.
+10. **The shell.** Open. Recommended `/bin/sh` everywhere: on macOS it is bash (7 ms a compile) and
+    `/bin/dash` would cost 2 ms, but a cache that names `/bin/dash` breaks on Linux systems without
+    it, and CMake build folders do get copied between machines.
