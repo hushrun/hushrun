@@ -90,6 +90,9 @@ fn a_block_opens_to_its_files_and_its_record_with_what_differs_per_machine_left_
     for name in ["repository", "built_ms", "rustc_ms"] {
         assert!(opened.description.get(name).is_none(), "{name}");
     }
+    // A C or C++ block's compile time is the uploader's machine's too (B-60).
+    let c = serde_json::json!({"kind": "cc/1", "compile_ms": 1200, "source": "{root}/a.c"});
+    assert_eq!(normalize(&c), serde_json::json!({"kind": "cc/1", "source": "{root}/a.c"}));
     assert_eq!(opened.description["crate_name"], "serde");
     let got: Vec<(String, Vec<u8>)> = files
         .files

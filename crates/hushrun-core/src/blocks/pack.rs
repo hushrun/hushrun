@@ -267,13 +267,13 @@ impl PackError {
 
 /// The description a pack carries: the store's, with what differs from machine to machine and
 /// would tell a reader where and when the block was first built taken out: the repository that
-/// built it, the date and the compile time. A pack must be the same bytes on every machine that
-/// builds the block, and a registry crate's pack opens for anyone who builds that crate. The
-/// reader fills these in for its own machine.
+/// built it, the date and the compile time (`rustc_ms`, and a C or C++ block's `compile_ms`). A
+/// pack must be the same bytes on every machine that builds the block, and a registry crate's
+/// pack opens for anyone who builds that crate. The reader fills these in for its own machine.
 pub fn normalize(description: &Value) -> Value {
     let mut out = description.clone();
     if let Value::Object(members) = &mut out {
-        for name in ["repository", "built_ms", "rustc_ms"] {
+        for name in ["repository", "built_ms", "rustc_ms", "compile_ms"] {
             members.remove(name);
         }
     }

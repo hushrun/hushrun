@@ -724,9 +724,9 @@ fn hit_of(
     let Some(object) = file("object") else {
         return Ok(None);
     };
-    // What the compile took: the launcher's own word, or the uploader's as a download's
-    // record keeps it.
-    let compile_ms = ["compile_ms", "rustc_ms"]
+    // What the compile took: the relay's word for a download (the uploader's, as the server
+    // states it), else the launcher's own; a download's pack carries no `compile_ms`.
+    let compile_ms = ["rustc_ms", "compile_ms"]
         .iter()
         .find_map(|name| block.description.get(*name).and_then(|v| v.as_u64()))
         .unwrap_or(0);
