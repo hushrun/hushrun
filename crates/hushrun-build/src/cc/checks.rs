@@ -159,7 +159,9 @@ fn macho(bytes: &[u8], wide: bool, machine: Machine) -> Result<(), Wrong> {
 /// sequences (`ESC [ <digits and ;> m`, colour and weight), which is all a compiler's
 /// diagnostics use: what a downloaded block's messages are written as (B-59), so that a forged
 /// block can't move the cursor, set a window's title, write a link or ring a bell on the
-/// person's terminal. Bytes of 0x80 and above, UTF-8 among them, pass as they are.
+/// person's terminal. The C1 controls (U+0080 to U+009F, 8-bit forms of `ESC` sequences that
+/// some terminals obey) go too, written as UTF-8 or as a lone byte; any other byte of 0x80 and
+/// above, UTF-8 among it, passes as it is.
 pub fn sgr_only(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -174,12 +176,42 @@ pub fn sgr_only(bytes: &[u8]) -> Vec<u8> {
             }
             continue;
         }
+        if b >= 0x80 {
+            match utf8_len(&bytes[i..]) {
+                Some(len) => {
+                    // C2 80 to C2 9F: U+0080 to U+009F.
+                    let c1 = len == 2 && b == 0xc2 && bytes[i + 1] <= 0x9f;
+                    if !c1 {
+                        out.extend_from_slice(&bytes[i..i + len]);
+                    }
+                    i += len;
+                }
+                None => {
+                    if b > 0x9f {
+                        out.push(b);
+                    }
+                    i += 1;
+                }
+            }
+            continue;
+        }
         if matches!(b, b'\n' | b'\t' | b'\r') || !(b < 0x20 || b == 0x7f) {
             out.push(b);
         }
         i += 1;
     }
     out
+}
+
+/// The length of the UTF-8 character at the start of `bytes`, when it is one.
+fn utf8_len(bytes: &[u8]) -> Option<usize> {
+    let len = match bytes.first()? {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    std::str::from_utf8(bytes.get(..len)?).ok().map(|_| len)
 }
 
 /// The length of an SGR sequence at the start of `bytes`: `ESC [`, digits and `;`, `m`.
@@ -312,5 +344,10 @@ mod tests {
             b"a]0;ownedb]8;;http://x\\c[2J[10;10Hde[1;31".to_vec()
         );
         assert_eq!(sgr_only(b"\x1b"), Vec::<u8>::new());
+        // C1 controls, raw or as UTF-8: an 8-bit OSC (U+009D … U+009C) and CSI (0x9B).
+        assert_eq!(
+            sgr_only(b"a\xc2\x9d52;c;b3duZWQ=\xc2\x9cb\x9b2Jc"),
+            b"a52;c;b3duZWQ=b2Jc".to_vec()
+        );
     }
 }
