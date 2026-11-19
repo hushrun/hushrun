@@ -151,7 +151,9 @@ pub fn under(path: &str, folder: &str) -> bool {
 }
 
 /// `path` made absolute from `cwd` and with `.` and `..` taken out by its text, as the compiler
-/// names a file it opened (symbolic links are not followed: a path is keyed as it was named).
+/// names a file it opened (symbolic links are not followed: a path is keyed as it was named). A
+/// `..` after a symbolic link stays: the kernel takes it from the link's target, which the text
+/// can't tell, and the path as it stands names the file the compiler read.
 pub fn absolute(cwd: &Path, path: &str) -> PathBuf {
     let joined = cwd.join(path);
     let mut out = PathBuf::new();
@@ -159,7 +161,13 @@ pub fn absolute(cwd: &Path, path: &str) -> PathBuf {
         match part {
             Component::CurDir => {}
             Component::ParentDir => {
-                out.pop();
+                let kept = matches!(out.components().next_back(), Some(Component::ParentDir))
+                    || std::fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink());
+                if kept {
+                    out.push("..");
+                } else {
+                    out.pop();
+                }
             }
             other => out.push(other.as_os_str()),
         }
@@ -195,6 +203,29 @@ mod tests {
         assert_eq!(
             absolute(Path::new("/home/u/ck/build"), "../inc/./a.h"),
             PathBuf::from("/home/u/ck/inc/a.h")
+        );
+    }
+
+    // covers: B-54
+    #[test]
+    fn a_parent_after_a_link_is_left_to_the_kernel() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("elsewhere/deep/inc")).unwrap();
+        std::fs::create_dir_all(root.join("ck/inc")).unwrap();
+        std::fs::write(root.join("elsewhere/deep/inc/a.h"), "theirs").unwrap();
+        std::fs::write(root.join("ck/inc/a.h"), "ours").unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere/deep/build"), root.join("ck/build"))
+            .unwrap();
+        std::fs::create_dir_all(root.join("elsewhere/deep/build")).unwrap();
+        let ck = root.join("ck");
+        let named = absolute(&ck, "build/../inc/a.h");
+        // The file the compiler opened is the one through the link.
+        assert_eq!(std::fs::read_to_string(&named).unwrap(), "theirs");
+        assert_eq!(
+            absolute(&ck, "src/../inc/a.h"),
+            ck.join("inc/a.h"),
+            "no link: by the text"
         );
     }
 }
