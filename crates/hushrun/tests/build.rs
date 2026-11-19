@@ -756,7 +756,12 @@ fn run_gives_cmake_the_launcher_only_when_reuse_is_on_and_leaves_the_person_s() 
     let split = |ran: &Ran| -> Vec<String> { ran.stdout.split('\t').map(str::to_string).collect() };
 
     let off = run_sh(&mut hushrun(&w), "x", PRINT_LAUNCHER);
-    assert_eq!((off.code, off.stdout.as_str()), (0, "\t\t"), "{}", off.stderr);
+    assert_eq!(
+        (off.code, off.stdout.as_str()),
+        (0, "\t\t"),
+        "{}",
+        off.stderr
+    );
 
     assert_eq!(build(&w, &["on"]).code, 0);
     let on = run_sh(&mut hushrun(&w), "x", PRINT_LAUNCHER);

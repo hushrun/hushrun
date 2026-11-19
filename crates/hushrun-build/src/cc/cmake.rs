@@ -132,7 +132,7 @@ pub fn notes(words: &[String], cwd: &Path) -> Vec<Note> {
         if !names_a_launcher(&cache) {
             let old_cmake = cache_version(&cache).filter(|v| *v < (3, 17));
             out.push(Note::ConfiguredBefore { folder, old_cmake });
-        } else if launcher_before(&folder) {
+        } else if cache.contains("HUSHRUN_CC") && launcher_before(&folder) {
             out.push(Note::LauncherBefore { folder });
         }
     }
@@ -151,12 +151,16 @@ pub fn configured_before(words: &[String], cwd: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether a rule line of CMake's runs something before the indirection: the text before its
-/// `/bin/sh`, less Ninja's `command =` and Make's `cd … &&`, isn't empty.
+/// `/bin/sh` (CMake 3, which writes the launcher into the rule) or its `${LAUNCHER}` (CMake 4,
+/// which writes it into a variable of each build statement), less Ninja's `command =` and
+/// Make's `cd … &&`, isn't empty.
 fn wraps_the_indirection(line: &str) -> bool {
-    if !line.contains("HUSHRUN_CC") {
-        return false;
-    }
-    let Some(at) = line.find("/bin/sh") else {
+    let at = if line.contains("HUSHRUN_CC") {
+        line.find("/bin/sh")
+    } else {
+        line.find("${LAUNCHER}").or_else(|| line.find("$LAUNCHER"))
+    };
+    let Some(at) = at else {
         return false;
     };
     let before = line[..at].trim();
@@ -285,8 +289,14 @@ mod tests {
         // The lines CMake 3.25 writes with RULE_LAUNCH_COMPILE set, for Ninja and for Make.
         let ninja = r#"  command = /usr/bin/env /bin/sh -c "[ -x \"\$$HUSHRUN_CC\" ] || HUSHRUN_CC= && exec \$${HUSHRUN_CC:+\"\$$HUSHRUN_CC\"} \"\$$0\" \"\$$@\"" /usr/bin/cc $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in"#;
         let make = "\t/usr/bin/env /bin/sh -c \"[ -x \\\"\\$$HUSHRUN_CC\\\" ] || HUSHRUN_CC= && exec \\$${HUSHRUN_CC:+...}\" /usr/bin/cc -o CMakeFiles/l.dir/a.c.o -c /p/a.c";
+        // CMake 4 writes the launcher into a variable of each build statement.
+        let ninja4 = "  command = /usr/bin/env ${LAUNCHER}${CODE_CHECK}/usr/bin/cc $DEFINES -c $in";
         assert!(wraps_the_indirection(ninja));
         assert!(wraps_the_indirection(make));
+        assert!(wraps_the_indirection(ninja4));
+        assert!(!wraps_the_indirection(
+            "  command = ${LAUNCHER}${CODE_CHECK}/usr/bin/cc $DEFINES -c $in"
+        ));
         for alone in [
             ninja.replace("/usr/bin/env ", ""),
             make.replace("/usr/bin/env ", ""),
@@ -299,7 +309,7 @@ mod tests {
         std::fs::create_dir_all(build.join("CMakeFiles")).unwrap();
         std::fs::write(
             build.join("CMakeCache.txt"),
-            "CMAKE_GENERATOR:INTERNAL=Ninja\nCMAKE_C_COMPILER_LAUNCHER:STRING=/bin/sh;-c;x\n",
+            "CMAKE_GENERATOR:INTERNAL=Ninja\nCMAKE_C_COMPILER_LAUNCHER:STRING=/bin/sh;-c;[ -x \"$HUSHRUN_CC\" ]\n",
         )
         .unwrap();
         std::fs::write(build.join("CMakeFiles/rules.ninja"), ninja).unwrap();
