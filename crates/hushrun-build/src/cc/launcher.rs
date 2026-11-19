@@ -400,7 +400,9 @@ fn decide(
     let suspended = store.suspended_at(&step, start).is_some();
     let mut found = None;
     if !suspended {
-        match lookup(&store, &step, &places, &identity, &cwd, &mut digests) {
+        let looked = lookup(&store, &step, &places, &identity, &cwd, &mut digests);
+        digests.flush();
+        match looked {
             Ok(Some(hit)) => {
                 let audited = current
                     .audit
@@ -1067,6 +1069,7 @@ fn store_block(
         Err(_) => return not_stored(NotStored::StoreRefused, "store"),
     };
     let _ = store.add_hint(&plan.step, &hint.bytes(), now);
+    plan.digests.flush();
     key_log(current, &plan.step, None, Some(&key), &plan.compile.source);
     (
         outcome.0,
