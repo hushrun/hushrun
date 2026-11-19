@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-19
+
 C and C++ build blocks ([ADR 0097](docs/adr/0097-c-and-c++-build-blocks.md), phases 1 to 3):
 `hushrun run NAME -- COMMAND` and each check of hushrun.yaml that runs here, with build reuse on,
 reuse the objects a CMake build compiled in another worktree on this machine, and in an org that
