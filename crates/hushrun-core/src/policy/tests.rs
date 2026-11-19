@@ -965,3 +965,36 @@ fn build_env_names_variables_every_compile_is_keyed_by() {
     assert_error(&format!("{HEAD}build:\n  env: [A, A]\n"), 4, "twice");
     assert_error(&format!("{HEAD}build:\n  envs: [A]\n"), 4, "envs");
 }
+
+// covers: B-55
+#[test]
+fn build_cc_maps_turns_the_launcher_s_prefix_maps_off() {
+    let plain = Policy::parse(
+        "hushrun.yaml",
+        format!("{HEAD}checks:\n  unit:\n    run: make test\n").as_bytes(),
+    )
+    .unwrap();
+    assert!(plain.build_cc_maps);
+    let off = Policy::parse(
+        "hushrun.yaml",
+        format!("{HEAD}checks:\n  unit:\n    run: make test\nbuild:\n  cc:\n    maps: off\n")
+            .as_bytes(),
+    )
+    .unwrap();
+    assert!(!off.build_cc_maps);
+    let on = Policy::parse(
+        "hushrun.yaml",
+        format!(
+            "{HEAD}checks:\n  unit:\n    run: make test\nbuild:\n  env: [A]\n  cc:\n    maps: on\n"
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    assert!(on.build_cc_maps);
+    assert_error(
+        &format!("{HEAD}build:\n  cc:\n    maps: maybe\n"),
+        5,
+        "on or off",
+    );
+    assert_error(&format!("{HEAD}build:\n  cc:\n    map: off\n"), 5, "map");
+}

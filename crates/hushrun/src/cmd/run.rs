@@ -333,6 +333,7 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
                 system_time(wrap::now(app.global)),
                 repository.as_deref(),
                 &policy.build_env,
+                policy.build_cc_maps,
                 None,
                 &place,
             ) {

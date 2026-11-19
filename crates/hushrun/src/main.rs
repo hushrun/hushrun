@@ -57,6 +57,14 @@ fn main() -> ExitCode {
     {
         return hushrun_build::go::main();
     }
+    // B-50: called by the C and C++ launcher's name, it stands in front of one compile and does
+    // nothing else. A build starts it once per translation unit: nothing is read before it.
+    if std::env::args_os()
+        .next()
+        .is_some_and(|name| hushrun_build::cc::called_as_launcher(&name))
+    {
+        return hushrun_build::cc::main();
+    }
     // \[ADR 0068\] As the target runner Cargo starts a test binary through, hushrun is no command
     // of its own: it runs the binary and passes everything through, before anything else.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();

@@ -450,6 +450,9 @@ fn skip_or_run(
     // start of COMMAND in this run, begun before the first and finished after the last. It
     // begins before the plan, whose build is COMMAND's made first, and compiles through it too.
     let mut build = BuildRun::begin(global, say, check, build_repo, backend);
+    // B-50: a build folder COMMAND names that was configured before the launcher is said when
+    // the run ends.
+    build.command = Some((command.to_vec(), dir.to_path_buf()));
     if let Some(session) = session.as_deref_mut() {
         session.compile_with(build.env());
     }
@@ -1004,6 +1007,8 @@ struct BuildRepo {
     repository: Option<String>,
     /// The repository's `build: env:` (B-35).
     build_env: Vec<String>,
+    /// The repository's `build: cc: maps:` (B-55).
+    build_cc_maps: bool,
     /// No results lookup asks the backend whether the org shares (the run can't tell which code
     /// it is): `open` does, and an org that doesn't share is as silent as ever.
     open_decides: bool,
@@ -1016,6 +1021,7 @@ impl BuildRepo {
             revision: code.revision.clone(),
             repository: code.repository.clone(),
             build_env: code.build_env.clone(),
+            build_cc_maps: code.build_cc_maps,
             open_decides: false,
         }
     }
@@ -1037,6 +1043,10 @@ impl BuildRepo {
                 .as_ref()
                 .map(|policy| policy.build_env.clone())
                 .unwrap_or_default(),
+            build_cc_maps: content
+                .policy
+                .as_ref()
+                .is_none_or(|policy| policy.build_cc_maps),
             open_decides: true,
         })
     }
@@ -1079,6 +1089,8 @@ struct BuildRun<'a> {
     session: Option<Session>,
     global: &'a GlobalOpts,
     say: &'a Say,
+    /// COMMAND's words and folder, for what the run says of its build folders at the end (B-50).
+    command: Option<(Vec<String>, PathBuf)>,
 }
 
 impl<'a> BuildRun<'a> {
@@ -1109,6 +1121,7 @@ impl<'a> BuildRun<'a> {
             system_time(now(global)),
             repo.and_then(BuildRepo::repository_here).as_deref(),
             repo.map_or(&[][..], |repo| &repo.build_env),
+            repo.is_none_or(|repo| repo.build_cc_maps),
             share,
             &|| backend.and_then(Backend::build_place),
         ) {
@@ -1133,6 +1146,7 @@ impl<'a> BuildRun<'a> {
             session,
             global,
             say,
+            command: None,
         }
     }
 
@@ -1151,8 +1165,32 @@ impl<'a> BuildRun<'a> {
         command.envs(self.env());
     }
 
+    /// B-50: after COMMAND, the build folders its words name that CMake configured before the
+    /// launcher, said once each, in a run whose mode is `on` or that shares.
+    fn note_command(&mut self) {
+        let Some((command, dir)) = self.command.take() else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if session.mode() != hushrun_build::model::Mode::On && !session.current().shares() {
+            return;
+        }
+        if session.current().cc.is_none() {
+            return;
+        }
+        for folder in hushrun_build::cc::configured_before(&command, &dir) {
+            session.add_line(format!(
+                "build: C and C++ objects aren't reused in {}: it was configured before hushrun's launcher; configure it again inside hushrun run",
+                folder.display()
+            ));
+        }
+    }
+
     /// Ends the session, once, and says what its compiles came to.
     fn finish(&mut self) {
+        self.note_command();
         if let Some(session) = self.session.take() {
             for line in build_session::finish(session, system_time(now(self.global))).lines() {
                 self.say.line(format_args!("{line}"));
@@ -1519,6 +1557,8 @@ struct Code {
     tests: Option<hushrun_core::units::Tests>,
     /// The repository's `build: env:` (B-35): variables every compile is keyed by.
     build_env: Vec<String>,
+    /// The repository's `build: cc: maps:` (B-55).
+    build_cc_maps: bool,
 }
 
 impl Code {
@@ -1559,6 +1599,10 @@ impl Code {
             .as_ref()
             .map(|policy| policy.build_env.clone())
             .unwrap_or_default();
+        let build_cc_maps = current
+            .policy
+            .as_ref()
+            .is_none_or(|policy| policy.build_cc_maps);
         Ok(Code {
             key,
             check: check.clone(),
@@ -1578,6 +1622,7 @@ impl Code {
             variant: None,
             tests,
             build_env,
+            build_cc_maps,
         })
     }
 
