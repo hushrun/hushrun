@@ -56,6 +56,18 @@ shares build blocks, the objects another machine with the same compiler compiled
 
 ### Changed
 
+- Contract: **`hushrun guide` says what `hushrun build` does, and whether it is on here; the skill
+  is revision 3.** The guide describes build reuse: its modes, that only the builds `hushrun run`
+  runs use the store, where the store is and that a block stays 15 days after its last use, what
+  it does to disk space, and its lines; and test files reused one by one, `whoami`, `doctor`,
+  `logout` and `token`. Its `## Here` says this machine's build mode and store as `hushrun build
+  status` does, and `--format json` has them as `build`. The skill says that `hushrun build`
+  exists, is off on a person's machine until they turn it on, and is theirs, so an agent doesn't
+  turn it on, off or clean without being asked; `hushrun skill update` rewrites a copy of revision
+  2 or older. `hushrun build`'s help names C and C++ objects, and says when compiled code leaves
+  the machine. A test fails when `hushrun --help` lists a command the guide doesn't name, but the
+  commands of deploys.
+
 - **A C or C++ compiler's identity leaves out the temporary files its driver names** (B-52): GCC's
   `-###` named a new one each time, so the same GCC had another identity in every store. Objects
   stored before compile once more. A block's messages hold the assembler's temporary file, which
