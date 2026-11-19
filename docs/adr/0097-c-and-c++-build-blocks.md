@@ -1,6 +1,6 @@
 # 0097. C and C++ build blocks through CMake's compiler launcher
 
-- **Status:** proposed, a design and a spike; nothing is built
+- **Status:** proposed; phases 1 and 2 are built (local reuse and the run memo), sharing is not
 - **Date:** 2026-11-18
 - **Rules:** B-50 to B-62 (draft); B-13, B-14, B-15, B-22, B-25 to B-34 read for C and C++
 
@@ -280,6 +280,70 @@ Each phase is one builder's work and ends green on macOS and Linux.
 5. **Precompiled headers and coverage**: a PCH as a block keyed by its own reads, and its users
    keyed by the PCH's key, not its bytes; `-ftest-coverage` with its `.gcno` as a second output;
    profiles read (`-fprofile-use`) keyed by content.
+
+## Phases 1 and 2 as built (2026-11-19)
+
+Built in `crates/hushrun-build/src/cc/` (`hushrun-cc`), with the recommended answers to the owner
+decisions below standing in until the owner decides: kind `cc/1`, the launcher line written to
+CMake caches, `HUSHRUN_CC`, prefix maps on, the source's folder standing in for GCC's including
+file. Where the build differs from the decision above or the draft rules, the rules now say what
+is built:
+
+- **The checkout's root** is the nearest folder at or above the one `hushrun run` runs in that
+  holds `.git`, in the form the shell named it (`PWD`) and its resolved form.
+- **More calls pass through** than B-51 first named: `-ivfsoverlay`, serialized diagnostics and
+  index stores (Xcode's second outputs), `-aux-info`, optimization records, `-dependency-file`,
+  `-iprefix` and its kin, `-I=` and `-I-`, a source on stdin, a positional the parser can't place,
+  two `-o`, `-Wp,-M…`, and preprocessed, Fortran and LLVM IR inputs. CMake's own configure checks
+  (`CMakeFiles/CMakeScratch`, `CMakeTmp`) run as asked and count nowhere: their folders have random
+  names, and storing them would only fill the store.
+- **The identity** is asked per language and per set of driver flags (the target, the sysroot,
+  `-stdlib=`, `-nostdinc` and its kin, `--gcc-toolchain=`), and its memo also holds the folder
+  `xcode-select` chose, since `/usr/bin/cc`'s stat doesn't change when it moves. One process of a
+  cold build asks the driver; the others wait for its memo. The system folders come from the
+  driver's `-E -v`. `-march=native` is keyed by the driver's whole `-###` text with it.
+- **The hint** is written as a table of folders and names, with folders absent the same names in
+  one entry: a unit of abseil's tests read about 1,100 files and recorded some 13,000 places, 570
+  KB as plain paths, about 80 KB now. A lookup checks places a folder at a time: a missing folder
+  holds none of them, a folder asked about many names is listed once, and a name that matches one
+  there ignoring case counts as present (at worst a compile on a file system that keeps case).
+  Places are over-counted, never under: every folder a read file's path matches is taken as the
+  one that held it, and every including file's folder clang names counts for both quoted and
+  angled includes.
+- **On a compile**, the person's depfile is the compiler's own text: the launcher's own `-MF`
+  carries the call's `-MT`, `-MQ` and `-MP`, and for `-MMD` the reads in system folders are left
+  out. A depfile that can't be written runs the compiler again as asked. A restore that fails
+  before any message replaces the process with the compiler.
+- **Not stored** also: a read whose name ends in `.gch`, `.pch` or `.pcm` (`pch`). `__TIME__`,
+  `__DATE__` and `__TIMESTAMP__` are looked for as words anywhere in a read file, comments
+  included. The SDK's own fallback `#define __has_include(x) 0` is not a computed probe.
+- **Compressed debug sections** (`-gz`, `--compress-debug-sections`) tie the block: a root in them
+  is not in the object's bytes.
+- **The run memo** (phase 2) keeps one entry per folder of files under the SDK, the toolchain and
+  the system folders, in the run's session folder: each file's stat, SHA-256 and what the second
+  key needs of its text. Files under the checkout are hashed every time.
+- **Seams for phase 3**: `Kind::Cc` exists and the relay leaves `cc/1` lines out of every
+  manifest; a C block has no record of where it came from and no outbox marker; a block with a
+  record is not reused; the log keeps each object's platform and why it stays on the machine.
+
+Measured on the same Mac as the spike (Apple clang 21, CMake 4.4.5, Ninja 1.13, `-j10`, load
+average 90 to 175 on 10 cores), abseil-cpp with its tests, Release, a release build of hushrun
+(without LTO), each figure the whole `hushrun run build -- sh -c 'cmake … && ninja …'`, configure
+included:
+
+| run | wall | CPU (user+sys) | per object |
+|---|---|---|---|
+| cold, checkout A, empty store | 123 s | 748 s | 432 stored, 5 configure checks as asked |
+| warm, checkout B, phase 1 (every header hashed), three runs | 12.4 to 13.0 s | 55.1 to 55.3 s | 433 reused, 68 to 70 ms a hit |
+| warm, checkout B, phase 2 (run memo), three runs | 9.9 to 10.7 s | 38.6 to 38.8 s | 433 reused, 22 to 25 ms a hit |
+| ccache 4.14.3 (`base_dir`), cold, A | 133 s | 790 s | |
+| ccache, warm, B, three runs | 9.1 to 9.5 s | 32.4 to 32.9 s | 437 direct hits |
+
+`hushrun run x -- true` in that checkout costs 6.0 s of wall and 5.6 s of CPU on its own (hashing
+the repository's 24 MB for the check's key), so the launcher's share of a warm build is within a
+second or two of ccache's. A hit is the launcher's own measure (`took_ms` in the run's log), from
+its start to its line. The store held 117 MB of objects and 35 MB of hints. The same tests pass on
+Linux (GCC 12.2, CMake 3.25.1, Ninja 1.11) in Docker.
 
 ## Decisions for the owner
 
