@@ -473,12 +473,17 @@ pub fn native(
 /// extension: those names are new each time the driver is asked, so an identity holding them
 /// would differ between two machines, and between two stores of one, with the same compiler.
 pub(crate) fn without_temp_names(text: &str) -> String {
-    let bytes = text.as_bytes();
+    String::from_utf8(without_temp_names_in(text.as_bytes())).unwrap_or_else(|_| text.to_string())
+}
+
+/// [`without_temp_names`] on bytes: a compile's messages, which name the assembler's input when
+/// it warns (`/tmp/ccwUJrhb.s: Assembler messages:`), need not be UTF-8.
+pub fn without_temp_names_in(bytes: &[u8]) -> Vec<u8> {
     let continues = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/');
-    let mut out = String::with_capacity(text.len());
+    let mut out = Vec::with_capacity(bytes.len());
     let mut last = 0;
     let mut from = 0;
-    while let Some(found) = text[from..].find("/cc") {
+    while let Some(found) = memchr::memmem::find(&bytes[from..], b"/cc") {
         let slash = from + found;
         let random = slash + 3;
         let dot = random + 6;
@@ -499,13 +504,13 @@ pub(crate) fn without_temp_names(text: &str) -> String {
         while start > last && continues(bytes[start - 1]) {
             start -= 1;
         }
-        out.push_str(&text[last..start]);
-        out.push_str("{temp}");
-        out.push_str(&text[dot..end]);
+        out.extend_from_slice(&bytes[last..start]);
+        out.extend_from_slice(b"{temp}");
+        out.extend_from_slice(&bytes[dot..end]);
         last = end;
         from = end;
     }
-    out.push_str(&text[last..]);
+    out.extend_from_slice(&bytes[last..]);
     out
 }
 

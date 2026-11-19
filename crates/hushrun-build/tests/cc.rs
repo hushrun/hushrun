@@ -898,6 +898,36 @@ fn an_audited_reuse_compiles_compares_and_a_difference_suspends_the_key() {
     assert_eq!(fs::read(root.join("a.o")).unwrap(), compiled);
 }
 
+// covers: B-59, B-60
+#[test]
+fn an_assembler_warning_naming_its_temporary_file_is_stored_the_same_on_every_machine() {
+    // GNU as names the compiler's temporary output in a warning (`/tmp/ccwUJrhb.s: Assembler
+    // messages:`), a new name in every compile: kept as it is, two machines' blocks of one
+    // compile would be other outputs, and the shared store would refuse or report one.
+    let source = "__asm__(\".warning \\\"from the assembler\\\"\");\nint f(void) { return 1; }\n";
+    let args = ["-c", "src/a.c", "-o", "a.o", "-MD", "-MF", "a.o.d"];
+    let mut stored = Vec::new();
+    for _ in 0..2 {
+        let w = world();
+        let root = w.path("ck");
+        write(&root.join("src/a.c"), source);
+        let run = w.run(&root, true);
+        let out = run.launch(&root, "cc", &args);
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("from the assembler"),
+            "{out:?}"
+        );
+        assert_eq!(run.last().outcome, Outcome::BuiltAndStored);
+        let stderr = only_object(&w.store()).with_file_name("stderr");
+        stored.push(fs::read(stderr).unwrap());
+    }
+    let text = String::from_utf8_lossy(&stored[0]).into_owned();
+    assert!(text.contains("from the assembler"), "{text}");
+    assert!(!text.contains("/tmp/cc") && !text.contains("/cc"), "{text}");
+    assert_eq!(stored[0], stored[1]);
+}
+
 // covers: B-59
 #[test]
 fn a_stored_object_whose_bytes_are_not_its_record_s_is_compiled_not_served() {

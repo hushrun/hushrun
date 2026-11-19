@@ -1404,7 +1404,10 @@ fn store_block(
             continue;
         }
         let temp = work.join(format!("{pid}-{name}"));
-        if std::fs::write(&temp, plan.places.hide_bytes(bytes)).is_err() {
+        // The assembler's temporary input, named in its warnings, is another name in every
+        // compile: as `{temp}`, two machines' blocks of one compile are the same outputs.
+        let kept = super::compiler::without_temp_names_in(&plan.places.hide_bytes(bytes));
+        if std::fs::write(&temp, kept).is_err() {
             return not_stored(NotStored::Messages, "messages");
         }
         files.push(NewFile {
