@@ -332,3 +332,41 @@ fn a_downloaded_hint_naming_a_folder_outside_the_roots_and_bases_is_passed_over(
         assert!(!names_only_known_folders(&bad, &seen), "{bad:?}");
     }
 }
+
+// covers: B-56
+#[test]
+fn a_root_is_found_in_an_object_in_every_width_and_byte_order() {
+    let root = "/home/u/ck";
+    let wide = |units: Vec<u8>| {
+        let mut object = b"\x7fELF....".to_vec();
+        object.extend(units);
+        object
+    };
+    let le16: Vec<u8> = root.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let be16: Vec<u8> = root.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let le32: Vec<u8> = root
+        .chars()
+        .flat_map(|c| u32::from(c).to_le_bytes())
+        .collect();
+    let be32: Vec<u8> = root
+        .chars()
+        .flat_map(|c| u32::from(c).to_be_bytes())
+        .collect();
+    for units in [root.as_bytes().to_vec(), le16, be16, le32, be32] {
+        assert!(holds_text(&wide(units.clone()), root), "{units:?}");
+    }
+    assert!(!holds_text(&wide(b"/home/u/other".to_vec()), root));
+    assert!(!holds_text(b"anything", ""));
+    // A macro whose value holds a root ties whatever the object holds.
+    let roots = [root.to_string()];
+    let keyed = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    assert!(defines_a_root(
+        &keyed(&["-DDIR=\"/home/u/ck/data\""]),
+        &roots
+    ));
+    assert!(defines_a_root(&keyed(&["-D", "DIR=/home/u/ck"]), &roots));
+    assert!(!defines_a_root(
+        &keyed(&["-I/home/u/ck/inc", "-DX=1"]),
+        &roots
+    ));
+}
