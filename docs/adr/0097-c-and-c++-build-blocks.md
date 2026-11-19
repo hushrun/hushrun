@@ -96,8 +96,9 @@ times are indicative. What it found decides most of what follows:
 
 1. **Entry: CMake's compiler launcher, as an indirection that is inert outside a run** (B-50).
    Wherever `hushrun run` sets `RUSTC_WRAPPER` (B-2), it also sets `CMAKE_C_COMPILER_LAUNCHER` and
-   `CMAKE_CXX_COMPILER_LAUNCHER` for COMMAND to `/bin/sh;-c;exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0"
-   "$@"`, each only when the
+   `CMAKE_CXX_COMPILER_LAUNCHER` for COMMAND to `/bin/sh;-c;[ -x "$HUSHRUN_CC" ] || HUSHRUN_CC= &&
+   exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0" "$@"` (as built after review: first `exec …` alone), each
+   only when the
    person's environment has none, and `HUSHRUN_CC` to a link `hushrun-cc` beside `hushrun-rustc`
    that points at the hushrun binary. What CMake caches is the indirection: no session path, no
    file of hushrun's, nothing that breaks if hushrun is removed. A launcher already in a build
@@ -153,8 +154,12 @@ times are indicative. What it found decides most of what follows:
      or absent. The including file is known from clang's own record of the include graph, which
      it writes to a file when asked (`CC_PRINT_HEADERS_FORMAT=json`,
      `CC_PRINT_HEADERS_FILTERING=direct-per-file`, `CC_PRINT_HEADERS_FILE`; Apple clang 21 writes
-     it, Debian's clang 14 doesn't); for GCC and an older clang the source's own folder stands for
-     every including file's, which leaves one case to the audit.
+     it, Debian's clang 14 doesn't); for GCC, a clang before 15, and every file a system header
+     includes (which the graph leaves out), the source's own folder stands for every including
+     file's. That gap is wide, not one case: every GCC build (every Linux distribution's) and
+     every header a system header includes. A quoted include from a header in another folder
+     gets no place in that header's folder, and a header added there is a stale reuse only the
+     audit finds (owner decision 5).
    - **Not stored**: a read file holding `__TIME__`, `__DATE__` or `__TIMESTAMP__` (unless
      `SOURCE_DATE_EPOCH`, keyed, gives the first two a value); a probe whose argument isn't a
      literal; a read outside every root, base and system folder; a read file changed while
@@ -307,9 +312,11 @@ is built:
   KB as plain paths, about 80 KB now. A lookup checks places a folder at a time: a missing folder
   holds none of them, a folder asked about many names is listed once, and a name that matches one
   there ignoring case counts as present (at worst a compile on a file system that keeps case).
-  Places are over-counted, never under: every folder a read file's path matches is taken as the
-  one that held it, and every including file's folder clang names counts for both quoted and
-  angled includes.
+  Places are over-counted, never under, where the includer is known: every folder a read file's
+  path matches is taken as the one that held it, and every including file's folder clang names
+  counts for both quoted and angled includes. Where it isn't (GCC, clang before 15, what a system
+  header includes) the source's folder stands in, and places are under-counted there (decision
+  5).
 - **On a compile**, the person's depfile is the compiler's own text: the launcher's own `-MF`
   carries the call's `-MT`, `-MQ` and `-MP`, and for `-MMD` the reads in system folders are left
   out. A depfile that can't be written runs the compiler again as asked. A restore that fails
@@ -446,6 +453,110 @@ for before the link's rate was known, when B-26 answers a fetch not yet under wa
 run before the last fix, with a lookup for each tied key, took 6.1 s and 17.6 s with 432
 lookups.
 
+## Review fixes as built (2026-11-19)
+
+Two independent reviews read phases 1 and 2 and phase 3. Each finding below has a test that
+failed on the code before its fix. Where the build differs from the decision above or the draft
+rules, the rules now say what is built.
+
+**Stale reuses.**
+- **The include search** keeps the compiler's order. A folder given both with `-I` and as a system
+  folder (`-isystem`, or a driver folder such as GCC's `/usr/local/include`) is searched only at
+  its system place, since GCC and clang drop that `-I`. `-idirafter` comes after the driver's
+  system folders and `C_INCLUDE_PATH`'s. Two forms of one folder count as one. A relative
+  `-include` is looked for in the compile's folder first, and a framework's `PrivateHeaders` have
+  places.
+- **Reads no depfile names.** A read file with an assembler `.incbin` or `.include "…"` is not
+  stored (`incbin`), as ccache refuses it. Nor is one calling `__has_embed` (`has-embed`), whose
+  answer depends on whether a file is there and whether it is empty. Probing it with that
+  three-way state is the next step if a repository needs it.
+- **A place that appeared during the compile.** One that exists when the block is stored, isn't
+  a read, and is dated since the compile's start is `changed`. So is a probe there now, or one
+  absent from a folder changed since. An older one is still left out: it is the over-count
+  naming a folder the compiler didn't search for that header.
+- **A root in a wide string** (`L"…"`, `u"…"`, `U"…"`) is searched for in UTF-16 and UTF-32,
+  each byte order. A block whose `-D` values hold a root is tied whatever the object holds, since
+  code can turn a macro's value into bytes no search finds (a hash, an array). This was the most
+  serious finding: phase 3 would upload such a block as portable. `portable`, which the launcher
+  tells the relay and the outbox follows, comes from the same reasons. The cost is that a
+  project defining its source folder for every unit (`-DSRC_DIR="${CMAKE_SOURCE_DIR}"`) reuses
+  those objects only at the same path, and from CI.
+- **A time macro in the arguments** (`-DBUILD=__DATE__`) is `time-macro`.
+- **A `..` after a symbolic link** in a read's path stays in the path, so the key hashes the file
+  the compiler opened.
+
+**What the compiler would have done.**
+- `-MMD` leaves out only reads under the driver's own system folders that lie under no user
+  folder. Headers of `-isystem`, `-idirafter` and `C_INCLUDE_PATH` folders stay listed, since
+  which folder found a header only the compiler knows: one extra file costs a stat, one missing
+  file misses a rebuild. One function serves the compile's depfile and the hint's.
+- With `-H` or `--trace-includes`, the include graph's variables aren't set: clang would write
+  the tree to stderr as the graph's JSON.
+- A rerun after a depfile that couldn't be written keeps its stderr, and passes on only what the
+  first compile hadn't said.
+- A restored object and depfile take `0666` less the umask. The temporary file has one name per
+  output, so the next write replaces what a killed launcher left. A session folder that is gone
+  isn't made again.
+- **Colour**: decided, documented, not changed. A compile of the launcher's own pipes stderr, so
+  a compiler that colours only on a terminal writes no colour under Make on a terminal, as under
+  Ninja. Giving the compiler a terminal would store coloured messages that a later reuse under
+  Ninja would replay. `-fdiagnostics-color=always` is keyed and keeps colour.
+
+**The compiler's identity.** Its memo now follows clang's configuration files, GCC's specs, and
+a distribution's `libLLVM` or `libclang-cpp`. Each is hashed into the identity and kept by its
+stat. So are clang's binary folder (a configuration file made beside it) and GCC's install
+folder (a specs file made there). `CLANG_NO_DEFAULT_CONFIG`, `CCC_OVERRIDE_OPTIONS`,
+`GCC_EXEC_PREFIX` and `COMPILER_PATH` are in the memo's name. The SDK and the system folders are
+kept both as the driver names them and resolved: on a Mac whose SDK is the link `MacOSX.sdk`,
+nothing was stored before. `-march=native` is memoised per run, never in a store a network share
+could give another processor.
+
+**More passed through**: `-gsplit-dwarf=`, `-fcallgraph-info=`, GCC's `json-file` and
+`sarif-file` diagnostics, `-fdiagnostics-add-output=` and `-set-output=`, and an assembler
+listing or depfile.
+
+**CMake.**
+- The indirection now checks that `HUSHRUN_CC` names a program it can run. A build folder
+  configured in a run no longer fails every compile with 127 once the run's link is gone.
+- The run names a CMake older than 3.17 (which reads no launcher from the environment) instead
+  of advising a reconfigure.
+- The run says when a project's `RULE_LAUNCH_COMPILE` runs before the indirection, where a
+  ccache takes `/bin/sh` for the compiler. hushrun's launcher still runs behind it. Not setting
+  the launcher there would need the generated rules, which exist only after the configure that
+  caches it.
+
+**Sharing.**
+- **A reuse is in the manifest.** A reuse's line carries its first key and its triple. Before,
+  a run that reused everything closed no `cc/1` manifest, and after an incremental build the
+  server kept the older one, so the changed object was never fetchable.
+- **Audits compare bytes, not keys.** Two keys can differ for an honest block, because a compile
+  here is tied by this checkout's root.
+- **Downloaded messages stay filtered.** A downloaded block becomes built here only when all its
+  files are this compile's. Otherwise the compile's messages replace the downloaded ones, which
+  were being served raw after an audit agreed on the object.
+- **C1 controls** are taken out of downloaded messages, both as UTF-8 and as single bytes.
+- **Tied objects (decision on finding 5).** A CI job's close names its `tied` objects. A job
+  uploads them (B-24), and a fetch asks only for keys a manifest pairs, so before they went up
+  and could never come down. We chose this over not uploading them: CI jobs of one repository
+  share paths (containers, GitLab's `/builds`, self-hosted runners), which is where a bound
+  block is useful, as it is for `rustc`. On GitHub's hosted runners the checkout is under
+  `$HOME`, so such objects also carry `home-in-output` and stay on the machine anyway.
+- **Missed notices are recovered.** At the check's end, the relay reads the run's log for objects
+  that should have gone up but that no launcher told it about. That happens after a launcher
+  marks the relay down. Each gets the outbox marker its launcher would have given it.
+- **Smaller fixes.**
+  - A pack no longer carries the uploader's `compile_ms`.
+  - A downloaded hint is followed only when every path it names is under the roots, bases or
+    system folders.
+  - A suspension for the kept days never shortens a longer one; the check and the write are
+    under one lock.
+  - A late `cc/1` open is kept only for the check that asked.
+  - `{temp}` replaces only names in a temporary folder.
+
+**Not changed**: the summary's "stay on this machine" line still counts in a run with a relay,
+not only in an org that shares. The finding was reasoned, not reproduced, and the line is what
+the relay's log says.
+
 ## Decisions for the owner
 
 1. **The kind's name.** Recommended `cc/1`: one kind for C and C++, clang and GCC, as `CC` and
@@ -465,7 +576,12 @@ lookups.
    person's settings) keeps absolute paths and ties every block that holds one.
 5. **GCC's including file.** Recommended: accept the source's folder standing in for it, with the
    audit as the net, and measure before doing more. The exact graph would need `-H`, whose lines
-   GCC writes to stderr among the diagnostics and the wrapper would have to take out.
+   GCC writes to stderr among the diagnostics and the wrapper would have to take out. The gap is
+   wider than "one case": it is every compile by GCC or a clang before 15, which is every Linux
+   distribution's GCC build, and with any clang every file a system header includes. A branch
+   that adds `include/foo/config.h`, shadowing the `gen/config.h` a quoted include in
+   `include/foo/a.h` found, gets a stale reuse that only the audit (one in fifty) finds. A unit
+   test pins today's behaviour (`without_a_graph_the_source_s_folder_stands_for_every_including_file_s`).
 6. **Meson.** Recommended: not until someone asks. Meson has no launcher variable; the same
    indirection through `CC` and `CXX` at `meson setup` would work, but those variables reach every
    other tool COMMAND starts.

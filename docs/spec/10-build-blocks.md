@@ -1863,15 +1863,16 @@ above the compiler's `bin`), and the folders the driver searches for system head
 wherever B-2 sets `RUSTC_WRAPPER` (with the session B-2 describes),
 `CMAKE_C_COMPILER_LAUNCHER` and `CMAKE_CXX_COMPILER_LAUNCHER` for COMMAND, each only when
 COMMAND's environment has no value for it, to the CMake list
-`/bin/sh;-c;exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0" "$@"`, and `HUSHRUN_CC` to a link named
+`/bin/sh;-c;[ -x "$HUSHRUN_CC" ] || HUSHRUN_CC= && exec ${HUSHRUN_CC:+"$HUSHRUN_CC"} "$0" "$@"`
+(no `;` in the script, where CMake would split the list), and `HUSHRUN_CC` to a link named
 `hushrun-cc` beside the wrapper's (B-2), pointing at the hushrun binary. Unlike `RUSTC_WRAPPER`,
 a `RUSTC_WRAPPER` the person set doesn't stop it: the session begins as for Go (B-39), in a folder
 at or under a `CMakeLists.txt` of its checkout, or a CMake build folder. It sets
 nothing for an isolated check, on Windows, or for a language whose launcher the person set. CMake reads the variable when
 it configures a build folder whose cache holds no launcher for that language, the first configure
 and any later one, CMake's own re-run included, and caches the text: that text names no file of
-hushrun's and no session, so outside a run, where `HUSHRUN_CC` is unset, the shell replaces itself
-with the compiler, with the same arguments, file descriptors, environment and exit status, and
+hushrun's and no session, so outside a run, where `HUSHRUN_CC` is unset, or names a link that is
+gone (hushrun removed, the run's folder deleted), the shell replaces itself with the compiler, with the same arguments, file descriptors, environment and exit status, and
 Ninja and Make see the same command in and out of a run and rebuild nothing for the move. A
 launcher already in the cache (ccache, sccache) is CMake's to use, and hushrun's never runs in
 that folder. A binary called `hushrun-cc` is the launcher and does nothing else; it decides that
@@ -1880,7 +1881,15 @@ with the mode `on`, `build: C and C++ objects aren't reused in <folder>: it was 
 hushrun's launcher; configure it again inside hushrun run` for a build folder COMMAND's words
 name (`cmake --build <dir>`, `cmake -B <dir>`, `ninja -C <dir>`, `make -C <dir>`) whose
 `CMakeCache.txt`, read after COMMAND, names neither launcher and whose generator is Ninja or
-Makefiles.
+Makefiles; when that cache was written by CMake older than 3.17, which reads no launcher from the
+environment, it says `build: C and C++ objects aren't reused in <folder>: CMake <version> reads no
+launcher from the environment (3.17 and later do)` instead. For such a folder whose cache names a
+launcher and whose generated rules (`CMakeFiles/rules.ninja`, `build.make`) run something before
+the indirection (a project's `RULE_LAUNCH_COMPILE`, which CMake puts before
+`<LANG>_COMPILER_LAUNCHER`), it says `build: <folder> starts a launcher of its own before
+hushrun's (RULE_LAUNCH_COMPILE), which sees /bin/sh as the compiler: …`: a ccache there takes
+`/bin/sh` for the compiler and compiles every time, in and out of a run, while hushrun's launcher
+still runs behind it.
 *Rests on:* CMake 3.17 and later reading the variables from the environment when the cache has
 none, at a later configure too (run on 3.25.1 and 4.4.5) and leaving launchers out of `compile_commands.json` (run on
 4.4.5); POSIX `sh` expanding `${HUSHRUN_CC:+"$HUSHRUN_CC"}` to nothing when the variable is unset
@@ -1900,9 +1909,12 @@ Objective-C, Objective-C++, assembly or CUDA; a precompiled header made or used 
 `.pch` exists, a read file whose name ends in either); modules (`-fmodules`, any `-fmodule-` flag,
 `-fcxx-modules`, `-fmodule-file=`, a `.cppm`, `.ixx` or `.mpp` source, a `@` map); profiles and
 coverage (any `-fprofile-` flag, `-fauto-profile`, `--coverage`, `-ftest-coverage`,
-`-fprofile-arcs`, `-fcoverage-mapping`, `-fprofile-instr-`); a second output (`-gsplit-dwarf`,
-`-save-temps`, `-ftime-trace`, `-fstack-usage`, `-fcallgraph-info`, any `-fdump-` flag, `-MJ`,
-`-fcrash-diagnostics-dir`, `-fopt-info` naming a file); flags that load code or read files the
+`-fprofile-arcs`, `-fcoverage-mapping`, `-fprofile-instr-`); a second output (`-gsplit-dwarf` and
+`-gsplit-dwarf=`, `-save-temps`, `-ftime-trace`, `-fstack-usage`, `-fcallgraph-info` and
+`-fcallgraph-info=`, any `-fdump-` flag, `-MJ`, `-fcrash-diagnostics-dir`, `-fopt-info` naming a
+file, GCC's `-fdiagnostics-format=` ending in `-file`, `-fdiagnostics-add-output=`,
+`-fdiagnostics-set-output=`, and an assembler listing or depfile: `-Wa,` or `-Xassembler` with
+`-a…=file` or `--MD`); flags that load code or read files the
 depfile need not list (`-fplugin`, `-fpass-plugin`, `-Xclang`, `-mllvm`, `--config`, `-B`,
 `-specs`, `-wrapper`, `-ivfsoverlay`); Xcode's second outputs (`--serialize-diagnostics`,
 `-index-store-path`), `-aux-info`, `-fsave-optimization-record`, `-dependency-file`; include
@@ -1927,14 +1939,23 @@ and `as`, found on the call's `PATH`, and of each plugin the next item names; wh
 prints for `-### -c -x <language> /dev/null -o /dev/null` with the call's target flags (`-target`,
 `--target=`, `-arch`, `-m32`, `-m64`, `-isysroot`, `--sysroot`, `-march`, `-mcpu`), with roots and
 bases replaced: the target, the resource folder, the sysroot, the implicit flags and the
-configuration files it read; and on macOS the SHA-256 of the SDK's `SDKSettings.json`. The probe
+configuration files it read; the SHA-256 of each file the driver says it read (clang's
+`Configuration file:`, GCC's `Reading specs from`), and for clang of each shared library of LLVM
+or clang (`libLLVM*`, `libclang-cpp*`) in the folder beside its `bin`, which a distribution's
+update changes under an unchanged binary; and on macOS the SHA-256 of the SDK's
+`SDKSettings.json`. The probe
 also takes the call's `-stdlib=`, `-nostdinc`, `-nostdinc++`, `-nostdlibinc`, `-nobuiltininc`,
 `--gcc-toolchain=` and `--gcc-install-dir=`, and the system folders of the search are what the
 driver's `-E -v` lists with the same flags. It is kept in a memo named by the compiler's path,
 size, dates and inode, the language, the flags of the probe, the values of `DEVELOPER_DIR`,
-`SDKROOT`, `TOOLCHAINS` and `PATH`, and on macOS the folder `xcode-select` chose
+`SDKROOT`, `TOOLCHAINS`, `PATH`, `CLANG_NO_DEFAULT_CONFIG`, `CCC_OVERRIDE_OPTIONS`,
+`GCC_EXEC_PREFIX` and `COMPILER_PATH`, and on macOS the folder `xcode-select` chose
 (`/var/db/xcode_select_link`), which a trampoline's stat doesn't follow; the memo answers only
-while each program and file it names has the stat it holds. One process asks the driver under a
+while each program, file and library it names has the stat it holds, and so do clang's binary's
+folder (a configuration file made beside it) and GCC's install folder (`-print-search-dirs`'s
+`install:`, where a specs file made is read). The SDK and each system folder are kept as the
+driver names them, which is how a compile spells what it finds there, and resolved, both `{sdk}`
+for the SDK (a Mac whose SDK is the link `MacOSX.sdk`). One process asks the driver under a
 lock beside the memo; the others of a cold build read what it wrote. The target triple the driver prints is the
 block's platform (B-60). Headers under the bases are not in the identity: they are read files,
 hashed like any other (B-54). *Rests on:* a compile's output following from the binaries named,
@@ -1949,7 +1970,9 @@ and bases replaced (B-8's replacement, reversible up to a root's two forms) and 
 `-MT`, `-MQ` and their values; whether a depfile was asked and which (`-MD` or `-MMD`, and `-MP`);
 for `-march=native`, `-mcpu=native` and `-mtune=native`, what the driver resolves them to (`-###`'s
 `-target-cpu` and `-target-feature` for clang, `cc1`'s expanded `-march=`, `-mtune=` and feature
-flags for GCC) in place of their text, asked once per identity and memoised; the variables a
+flags for GCC) in place of their text, asked once per identity and flags in a run and memoised
+in the run's session folder, never in the store, which a network share can give machines with
+other processors; the variables a
 compile reads without an argument saying so: `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`,
 `OBJC_INCLUDE_PATH`, `SDKROOT`, `DEVELOPER_DIR`, `MACOSX_DEPLOYMENT_TARGET`,
 `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
@@ -1968,19 +1991,35 @@ it, as ADR 0095 found Cargo's.
   its root or base with its SHA-256, in the list's order. A read outside every root, base and
   system folder (`/usr/include`, `/usr/local/include`, `/opt/homebrew/include` and the folders
   the driver searches) is not stored (`outside-roots`);
-- `places`: for each read file found in a folder of the search (the including file's folder, then
-  `-iquote`, `-I`, `-isystem`, `-idirafter`, the system folders, `-F` and `-iframework` with their
-  `<name>.framework/Headers/` form), each path where it would have been found first had it
-  existed, every earlier folder of the search joined with the rest of its path, recorded as
-  absent; the including file is the one clang's include graph names (B-55), and for GCC the
-  source, whose folder then stands for every including file's;
+- `places`: for each read file found in a folder of the search, each path where it would have
+  been found first had it existed, every earlier folder of the search joined with the rest of its
+  path, recorded as absent. The search is in the compiler's order: the including file's folder
+  (for a forced include given relative, the compile's folder first), `-iquote`, `-I` and `-F`,
+  `CPATH`'s, `-isystem` and `-iframework`, `C_INCLUDE_PATH`'s (or `CPLUS_INCLUDE_PATH`'s), the
+  driver's system folders, then `-idirafter`; a folder also given as a system one is searched only
+  at its system place, as GCC and clang drop its `-I`, and two forms of one folder are one; a
+  framework folder's places are its `<name>.framework/Headers/` and `PrivateHeaders/` forms, the
+  first before the second. The including file is the one clang's include graph names (B-55); for
+  GCC, clang before 15, and every file a system header includes (which the graph leaves out) the
+  source's folder stands for every including file's;
 - `probes`: each literal name a read file passes to `__has_include` or `__has_include_next`, in
   every folder of the search, recorded as present or absent. A probe whose argument is not a
   string literal or `<…>` is not stored (`computed-probe`).
 
+A place that exists when the compile is stored and isn't a read is left out when it is older than
+the compile (the over-count above named a folder the compiler didn't search for that header), and
+is not stored (`changed`) when it is dated at or after the compile's start: a header a parallel
+build step made where the compiler had already looked. A probe there and dated since, or absent
+from a folder changed since (other than the folders the compile writes into), is `changed` too.
+A read file holding an assembler directive that reads a file (`.incbin`, `.include "…"`), which no
+depfile names, is not stored (`incbin`), nor one calling `__has_embed`, whose answer depends on
+whether a file is there and empty (`has-embed`). A `..` after a symbolic link in a read's path is
+left to the kernel, which takes it from the link's target.
+
 A read file holding `__TIME__`, `__DATE__` or `__TIMESTAMP__` as a word anywhere (comments
-included), looked for in the read that hashes it, is not stored (`time-macro`), unless `SOURCE_DATE_EPOCH` is set (keyed, B-53) and the file
-holds no `__TIMESTAMP__`. A read whose name ends in `.gch`, `.pch` or `.pcm` is not stored
+included), looked for in the read that hashes it, or arguments holding one (`-DBUILD=__DATE__`),
+is not stored (`time-macro`), unless `SOURCE_DATE_EPOCH` is set (keyed, B-53) and neither holds
+`__TIMESTAMP__`. A read whose name ends in `.gch`, `.pch` or `.pcm` is not stored
 (`pch`). The definition `#define __has_include(…) …`, an SDK's fallback for a compiler without the
 operator, is not a probe. The lists are a hint (B-7) under the first key, written as a table of
 folders and the names in each, folders absent the same names in one entry; a lookup hashes the files
@@ -1998,9 +2037,14 @@ and probe. *Rests on:* a compile's output following from the files it read and t
 search looked, and a `__has_include` being decided by the folders of the search (measured: a
 header created where the search looks first, and a file `__has_include` asked about appearing,
 each gave a new key and a compile, where ccache 4.14.3's direct mode served the old object).
-*Breaks if:* GCC's including file isn't the source and a file appears beside it under a name
-another folder answered (only the audit finds it), or a compile reads a file through something
-other than an include, an embed or a probe (`#embed` files are in the depfile).
+*Breaks if:* the including file isn't the source and a file appears beside it under a name a later
+folder answered: a header added in `include/foo/` shadowing the `gen/config.h` that a quoted
+include in `include/foo/a.h` found gets a stale reuse that only the audit finds. That is every
+compile by GCC or a clang before 15 (every Linux distribution's GCC build), and with any clang,
+every file a system header includes (owner decision 5; the unit test
+`without_a_graph_the_source_s_folder_stands_for_every_including_file_s` pins it). Also if a compile
+reads a file through something other than an include, an embed, a probe or an assembler directive
+it looks for (`#embed` files are in the depfile).
 
 **B-55 What the launcher changes in a compile.** For a compile it doesn't pass through it adds
 `-ffile-prefix-map=<root>=.` for each root, in its given and resolved forms, ordered by length so
@@ -2009,11 +2053,19 @@ and the block is tied to its paths, B-56). It always takes the compiler's full d
 a file of its own (`-MD -MF <the session's folder>/…`, with `-MT` set to the output), replacing
 the call's `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`, and writes the person's depfile itself:
 after a compile, the compiler's own text, its file having been asked with the call's `-MT`, `-MQ`
-and `-MP`, less for `-MMD` the reads in system folders (the driver's and `-isystem`'s,
-`-idirafter`'s); after a reuse, as B-57 says. A depfile that can't be written runs the compiler
-again as asked. For clang it sets `CC_PRINT_HEADERS_FORMAT=json`, `CC_PRINT_HEADERS_FILTERING=direct-per-file`
+and `-MP`, less for `-MMD` the reads under the driver's own system folders and under no folder a
+user include could have found them in (the source's, `-iquote`, `-I`, `-F`, `CPATH`'s): headers
+of `-isystem`, `-idirafter` and `C_INCLUDE_PATH` folders stay, since which folder found a header
+only the compiler knows, and a depfile naming one file more costs a stat where one naming one
+fewer misses a rebuild; after a reuse, as B-57 says, from the same rule. A depfile that can't be
+written runs the compiler again as asked, keeping its stderr, and passes on only what it says
+beyond the first compile's lines. For clang it sets `CC_PRINT_HEADERS_FORMAT=json`, `CC_PRINT_HEADERS_FILTERING=direct-per-file`
 and `CC_PRINT_HEADERS_FILE=<the session's folder>/…` in the compile's environment, which makes
-clang write its include graph there and nothing to stderr. A compile it runs as asked (B-51,
+clang write its include graph there and nothing to stderr; not for a compile with `-H` or
+`--trace-includes`, whose include tree clang would then write to stderr as the graph's JSON:
+that compile has no graph, as GCC's hasn't. A compile of the launcher's own pipes the compiler's
+stderr, so a compiler that colours its messages only on a terminal writes none, under Make on a
+terminal as under Ninja (which always pipes); `-fdiagnostics-color=always`, keyed, keeps colour. A compile it runs as asked (B-51,
 B-58) gets none of this. A clang that writes no graph there (Debian's clang 14 writes none) is
 treated as GCC is (B-54). *Rests on:* clang writing the graph to that file (run on Apple clang
 21) and GCC's and clang's `-MD` listing every file a compile reads but probes' folders.
@@ -2021,8 +2073,10 @@ treated as GCC is (B-54). *Rests on:* clang writing the graph to that file (run 
 folder stands in.
 
 **B-56 Place and portable (C).** After a compile, the object is searched as raw bytes for each
-root in its given and resolved forms, for the home folder and for each base's value. None found:
-`anywhere`. A root found: the block is tied to its roots (its key holds their text) and is reused
+root in its given and resolved forms, as UTF-8 and as UTF-16 and UTF-32 in each byte order (a root
+in `L"…"`, `u"…"` or `U"…"`), for the home folder and for each base's value. None found:
+`anywhere`. A block whose `-D` values hold a root is tied whatever the object holds: the code may
+turn the value into bytes no search finds. A root found: the block is tied to its roots (its key holds their text) and is reused
 only where they are the same. The home folder or a base found: B-24's `…-in-output` reasons, kept
 on the machine. A tied block, one passed `-march=native` or its kin (`native-cpu`), one with a
 read outside roots and bases, and one whose compile's folder is under no root are never portable.
@@ -2032,7 +2086,9 @@ a compile with `-gz` (other than `-gz=none`) or `--compress-debug-sections` give
 its sections not searched).
 
 **B-57 Reuse (C).** The object is cloned (copied where the file system can't clone) under a
-temporary name in its folder, renamed into place and dated by the rename. Then the person's
+temporary name in its folder, one name per output so that the next write replaces what a killed
+launcher left, given the mode a file the compiler made would have (`0666` less the umask),
+renamed into place and dated by the rename. Then the person's
 depfile is written whole, a temporary file renamed into place, from the reads that made the key,
 with this checkout's roots and bases, in the syntax the compiler writes: at the path `-MF` named, else where the compiler would have
 written it (the output with its suffix replaced by `.d`); the target the call's `-MT` or `-MQ`
@@ -2067,18 +2123,24 @@ kind (clang's bitcode without `-flto`, a target the launcher can't check) is sto
 reason `not-an-object` and stays on the machine (B-56). Then one time in fifty, one in ten on a
 downloaded block's first reuse here, which its record notes (`audit::sample`), every time in local
 `observe` and with `HUSHRUN_BUILD_AUDIT=every`, never with `none`, the launcher compiles anyway and
-compares the object byte for byte: a difference serves the compile and suspends the first key,
+compares the object byte for byte, whatever the two keys (a compile tied by this checkout's root
+has another key than an honest block it matches): a difference serves the compile and suspends
+the first key,
 until `hushrun build clean` for a block built here; for one only downloaded, for `keep_days`, with
 a report `differs` to the scope it came from, and the compile takes its place (B-32). A compile
 that finds a downloaded block of its own key already in the store compares it the same way, and
-where the two agree the block is from then on also built here. The depfile is written from the
+where the two agree the block is from then on also built here when every file of it is this
+compile's; where only the object is, this compile's messages take the downloaded ones' place,
+so that no downloaded message is ever served unfiltered. A suspension for `keep_days` never
+shortens a longer one already there (one until `hushrun build clean`, or one ending later): the
+check and the write are under one lock of the store's. The depfile is written from the
 hint's reads, the files this machine hashed for the key, never from anything downloaded.
 A block's messages are stored with roots as placeholders and each temporary file the driver
-names (GNU as's `/tmp/ccwUJrhb.s: Assembler messages:`, `cc` and six random letters and digits)
-as `{temp}`, which a reuse shows as it is, so one compile's blocks are the same outputs on every
+names (GNU as's `/tmp/ccwUJrhb.s: Assembler messages:`, `cc` and six random letters and digits,
+in `/tmp` and its kin, macOS's per-user temporary folders or `TMPDIR`) as `{temp}`, which a reuse shows as it is, so one compile's blocks are the same outputs on every
 machine. Messages from a downloaded block keep newlines, tabs, carriage returns and SGR colour
 sequences (`ESC [ <digits and ;> m`) and lose every other control character before they are
-written.
+written, the C1 controls (U+0080 to U+009F, as UTF-8 or as a lone byte) among them.
 *Rests on:* a compile being deterministic at one path and, with B-55's maps, at two (measured on
 abseil: every unit at a second path gave the stored bytes); the compiler's identity holding no
 name the driver makes up each time it is asked (GCC's `-###` temporary files, written `{temp}`).
@@ -2091,11 +2153,14 @@ with the first key as `rustc` blocks' (B-30). The launcher follows the hints com
 first, then hints downloaded earlier (in a run that shares or would, B-34, and never for a first
 key kept on this machine), and asks the relay for a first key's hints only when it has none, in
 local mode `on`, for a target triple `is_platform` reads and B-59 can check; a downloaded hint is
-followed only within 20,000 reads, 500,000 places and 100,000 probes. A second key the hints lead
+followed only within 20,000 reads, 500,000 places and 100,000 probes, and only when every read,
+place and probe it names lies under this call's roots, bases or system folders once made
+absolute. A second key the hints lead
 to that the store lacks is fetched as a `rustc` wrapper's is (B-26), at most eight keys a fetch,
 and only a key the manifest pairs with the first key: any other asks the server nothing.
 The relay asks `open` a further time, kind `cc/1`, with the platform the compile's target triple,
-when the first launcher compiling for that triple asks (at most eight triples a check), and
+when the first launcher compiling for that triple asks (at most eight triples a check), and keeps
+the answer only while the check that asked is still the relay's, and
 answers a launcher's hints and fetch only for a first key that manifest names: any other is a
 miss, without the network. A question waits for the check's `open` and that manifest at most half
 what this machine's last compile of the first key took, and at most a second. The first question
@@ -2107,10 +2172,17 @@ when a quick question about the run gets none either, marks the relay down in th
 after. A block stored with no reason to stay (B-56) is told to the relay, which gives it an outbox
 marker (B-29) when the policy lets the run write and its record says this run's host, org and
 credential built it; one whose only reason is `tied` goes up from a CI job's own ID token alone,
-as B-24's bound blocks do; its hints go up after its commit. A check closes once per target triple
+as B-24's bound blocks do; its hints go up after its commit. A block's pack carries neither the
+uploader's `rustc_ms` nor its `compile_ms`: a download's compile time is the one the server
+states. At the check's end the relay reads the run's log for objects stored with no reason to
+stay (or `tied` alone) that no launcher told it of (a launcher that marked the relay down tells
+it nothing after), and gives each the marker its launcher would have. A check closes once per target triple
 its objects were compiled for, under a run made from the check's and the triple, with a manifest
-of its blocks in the order the launcher logged them, leaving out a block that stays on the machine
-(a reuse's reasons from the block's record) and CMake's configure checks. *Rests on:* the server
+of its blocks in the order the launcher logged them, a reuse's as a compile's (each line holds
+its first key and its triple), leaving out a block that stays on the machine (a reuse's reasons
+from the block's record) and CMake's configure checks; a CI job's close, whose credential is its
+own ID token, names its `tied` blocks too, since a later job at the same paths fetches only a key
+a manifest pairs. *Rests on:* the server
 taking any kind `is_kind` reads and keeping manifests per kind (no server change).
 
 **B-61 What a run says (C).** The launcher's lines go into the run's log beside the wrapper's,
