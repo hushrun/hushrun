@@ -1166,7 +1166,7 @@ impl<'a> BuildRun<'a> {
     }
 
     /// B-50: after COMMAND, the build folders its words name that CMake configured before the
-    /// launcher, said once each, in a run whose mode is `on` or that shares.
+    /// launcher, or whose rules put a launcher of their own before it, said once each, in a run whose mode is `on` or that shares.
     fn note_command(&mut self) {
         let Some((command, dir)) = self.command.take() else {
             return;
@@ -1180,11 +1180,8 @@ impl<'a> BuildRun<'a> {
         if session.current().cc.is_none() {
             return;
         }
-        for folder in hushrun_build::cc::configured_before(&command, &dir) {
-            session.add_line(format!(
-                "build: C and C++ objects aren't reused in {}: it was configured before hushrun's launcher; configure it again inside hushrun run",
-                folder.display()
-            ));
+        for note in hushrun_build::cc::build_folder_notes(&command, &dir) {
+            session.add_line(note.line());
         }
     }
 

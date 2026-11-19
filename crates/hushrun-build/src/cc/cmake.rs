@@ -56,23 +56,141 @@ fn names_a_launcher(cache: &str) -> bool {
     })
 }
 
-/// The build folders `words` name whose `CMakeCache.txt` names neither launcher and whose
-/// generator is Ninja or Makefiles: configured before the launcher (B-50).
+/// What a run says about a build folder COMMAND named, after COMMAND (B-50).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Note {
+    /// Its `CMakeCache.txt` names neither launcher and its generator is Ninja or Makefiles:
+    /// CMake configured it before the launcher.
+    ConfiguredBefore {
+        /// The build folder.
+        folder: PathBuf,
+        /// CMake's version from the cache, when older than 3.17, which reads no launcher from
+        /// the environment at all.
+        old_cmake: Option<(u32, u32)>,
+    },
+    /// Its generated rules start a launcher of their own (`RULE_LAUNCH_COMPILE`) in front of
+    /// hushrun's indirection, which that launcher then takes for the compiler.
+    LauncherBefore {
+        /// The build folder.
+        folder: PathBuf,
+    },
+}
+
+impl Note {
+    /// The line the run says.
+    pub fn line(&self) -> String {
+        match self {
+            Note::ConfiguredBefore {
+                folder,
+                old_cmake: Some((major, minor)),
+            } => format!(
+                "build: C and C++ objects aren't reused in {}: CMake {major}.{minor} reads no launcher from the environment (3.17 and later do)",
+                folder.display()
+            ),
+            Note::ConfiguredBefore { folder, .. } => format!(
+                "build: C and C++ objects aren't reused in {}: it was configured before hushrun's launcher; configure it again inside hushrun run",
+                folder.display()
+            ),
+            Note::LauncherBefore { folder } => format!(
+                "build: {} starts a launcher of its own before hushrun's (RULE_LAUNCH_COMPILE), which sees /bin/sh as the compiler: a ccache there compiles every time, in and out of a run; name it in CMAKE_C_COMPILER_LAUNCHER and CMAKE_CXX_COMPILER_LAUNCHER instead",
+                folder.display()
+            ),
+        }
+    }
+}
+
+/// CMake's version from a cache's text.
+fn cache_version(cache: &str) -> Option<(u32, u32)> {
+    let field = |name: &str| {
+        cache
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    };
+    Some((
+        field("CMAKE_CACHE_MAJOR_VERSION:INTERNAL=")?,
+        field("CMAKE_CACHE_MINOR_VERSION:INTERNAL=")?,
+    ))
+}
+
+/// What the run says about the build folders `words` name (B-50): each configured before the
+/// launcher, and each whose rules put a launcher of their own in front of it.
+pub fn notes(words: &[String], cwd: &Path) -> Vec<Note> {
+    let mut out = Vec::new();
+    for folder in named_folders(words, cwd) {
+        let Ok(cache) = std::fs::read_to_string(folder.join("CMakeCache.txt")) else {
+            continue;
+        };
+        let generator = cache
+            .lines()
+            .find_map(|l| l.strip_prefix("CMAKE_GENERATOR:INTERNAL="))
+            .unwrap_or_default();
+        let known = generator.starts_with("Ninja") || generator.ends_with("Makefiles");
+        if !known {
+            continue;
+        }
+        if !names_a_launcher(&cache) {
+            let old_cmake = cache_version(&cache).filter(|v| *v < (3, 17));
+            out.push(Note::ConfiguredBefore { folder, old_cmake });
+        } else if launcher_before(&folder) {
+            out.push(Note::LauncherBefore { folder });
+        }
+    }
+    out
+}
+
+/// The build folders `words` name that CMake configured before the launcher (B-50).
 pub fn configured_before(words: &[String], cwd: &Path) -> Vec<PathBuf> {
-    named_folders(words, cwd)
+    notes(words, cwd)
         .into_iter()
-        .filter(|dir| {
-            let Ok(cache) = std::fs::read_to_string(dir.join("CMakeCache.txt")) else {
-                return false;
-            };
-            let generator = cache
-                .lines()
-                .find_map(|l| l.strip_prefix("CMAKE_GENERATOR:INTERNAL="))
-                .unwrap_or_default();
-            let known = generator.starts_with("Ninja") || generator.ends_with("Makefiles");
-            known && !names_a_launcher(&cache)
+        .filter_map(|n| match n {
+            Note::ConfiguredBefore { folder, .. } => Some(folder),
+            Note::LauncherBefore { .. } => None,
         })
         .collect()
+}
+
+/// Whether a rule line of CMake's runs something before the indirection: the text before its
+/// `/bin/sh`, less Ninja's `command =` and Make's `cd … &&`, isn't empty.
+fn wraps_the_indirection(line: &str) -> bool {
+    if !line.contains("HUSHRUN_CC") {
+        return false;
+    }
+    let Some(at) = line.find("/bin/sh") else {
+        return false;
+    };
+    let before = line[..at].trim();
+    let before = before.strip_prefix("command =").unwrap_or(before);
+    let before = before.rsplit("&&").next().unwrap_or(before);
+    !before.trim().is_empty()
+}
+
+/// Whether a build folder's generated rules (Ninja's `CMakeFiles/rules.ninja`, Make's
+/// `build.make` files) put a launcher before the indirection.
+fn launcher_before(folder: &Path) -> bool {
+    let mut files = vec![folder.join("CMakeFiles").join("rules.ninja")];
+    let mut stack = vec![(folder.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                if depth < 6 {
+                    stack.push((path, depth + 1));
+                }
+            } else if path.file_name().is_some_and(|n| n == "build.make") {
+                files.push(path);
+            }
+        }
+        if files.len() > 64 {
+            break;
+        }
+    }
+    files.iter().any(|file| {
+        std::fs::read_to_string(file).is_ok_and(|text| text.lines().any(wraps_the_indirection))
+    })
 }
 
 #[cfg(test)]
@@ -133,6 +251,63 @@ mod tests {
         assert!(
             configured_before(&cmd, dir.path()).is_empty(),
             "another generator"
+        );
+    }
+
+    // covers: B-50
+    #[test]
+    fn a_cmake_older_than_3_17_is_named_not_told_to_configure_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = dir.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            build.join("CMakeCache.txt"),
+            "CMAKE_GENERATOR:INTERNAL=Ninja\nCMAKE_CACHE_MAJOR_VERSION:INTERNAL=3\nCMAKE_CACHE_MINOR_VERSION:INTERNAL=16\n",
+        )
+        .unwrap();
+        let found = notes(&words("cmake --build build"), dir.path());
+        assert_eq!(found.len(), 1);
+        let line = found[0].line();
+        assert!(line.contains("CMake 3.16 reads no launcher"), "{line}");
+        assert!(!line.contains("configure it again"), "{line}");
+        std::fs::write(
+            build.join("CMakeCache.txt"),
+            "CMAKE_GENERATOR:INTERNAL=Ninja\nCMAKE_CACHE_MAJOR_VERSION:INTERNAL=3\nCMAKE_CACHE_MINOR_VERSION:INTERNAL=25\n",
+        )
+        .unwrap();
+        let line = notes(&words("cmake --build build"), dir.path())[0].line();
+        assert!(line.contains("configure it again"), "{line}");
+    }
+
+    // covers: B-50
+    #[test]
+    fn a_launcher_of_the_project_s_own_before_the_indirection_is_said() {
+        // The lines CMake 3.25 writes with RULE_LAUNCH_COMPILE set, for Ninja and for Make.
+        let ninja = r#"  command = /usr/bin/env /bin/sh -c "[ -x \"\$$HUSHRUN_CC\" ] || HUSHRUN_CC= && exec \$${HUSHRUN_CC:+\"\$$HUSHRUN_CC\"} \"\$$0\" \"\$$@\"" /usr/bin/cc $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in"#;
+        let make = "\t/usr/bin/env /bin/sh -c \"[ -x \\\"\\$$HUSHRUN_CC\\\" ] || HUSHRUN_CC= && exec \\$${HUSHRUN_CC:+...}\" /usr/bin/cc -o CMakeFiles/l.dir/a.c.o -c /p/a.c";
+        assert!(wraps_the_indirection(ninja));
+        assert!(wraps_the_indirection(make));
+        for alone in [
+            ninja.replace("/usr/bin/env ", ""),
+            make.replace("/usr/bin/env ", ""),
+            make.replace("\t/usr/bin/env ", "\tcd /p/build/sub && "),
+        ] {
+            assert!(!wraps_the_indirection(&alone), "{alone}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let build = dir.path().join("build");
+        std::fs::create_dir_all(build.join("CMakeFiles")).unwrap();
+        std::fs::write(
+            build.join("CMakeCache.txt"),
+            "CMAKE_GENERATOR:INTERNAL=Ninja\nCMAKE_C_COMPILER_LAUNCHER:STRING=/bin/sh;-c;x\n",
+        )
+        .unwrap();
+        std::fs::write(build.join("CMakeFiles/rules.ninja"), ninja).unwrap();
+        assert_eq!(
+            notes(&words("cmake --build build"), dir.path()),
+            [Note::LauncherBefore {
+                folder: build.clone()
+            }]
         );
     }
 }

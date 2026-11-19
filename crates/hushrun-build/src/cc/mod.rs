@@ -72,7 +72,7 @@ pub struct CcRun {
     pub maps: bool,
 }
 
-pub use cmake::configured_before;
+pub use cmake::{Note as BuildFolderNote, configured_before, notes as build_folder_notes};
 
 /// Whether the binary was called by the launcher's name (`argv[0]`, through any folder).
 pub fn called_as_launcher(argv0: &OsStr) -> bool {
