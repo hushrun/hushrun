@@ -476,8 +476,9 @@ pub(crate) fn without_temp_names(text: &str) -> String {
     String::from_utf8(without_temp_names_in(text.as_bytes())).unwrap_or_else(|_| text.to_string())
 }
 
-/// [`without_temp_names`] on bytes: a compile's messages, which name the assembler's input when
-/// it warns (`/tmp/ccwUJrhb.s: Assembler messages:`), need not be UTF-8.
+/// Each temporary file the driver names in `bytes` as `{temp}` and its extension, as in the
+/// identity: a compile's messages, which name the assembler's input when it warns
+/// (`/tmp/ccwUJrhb.s: Assembler messages:`) and need not be UTF-8.
 pub fn without_temp_names_in(bytes: &[u8]) -> Vec<u8> {
     let continues = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/');
     let mut out = Vec::with_capacity(bytes.len());
