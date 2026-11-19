@@ -24,6 +24,7 @@
 //! 4. **Nothing reads the clock but the launcher's entry point**, which passes a time in.
 
 pub mod args;
+pub mod checks;
 pub mod cmake;
 pub mod compiler;
 pub mod depfile;
