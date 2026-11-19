@@ -403,7 +403,7 @@ fn ask_identity(
     let value = serde_json::json!({
         "schema": SCHEMA,
         "binary": binary.hex(),
-        "driver": places.hide(&driver.stderr),
+        "driver": places.hide(&without_temp_names(&driver.stderr)),
         "programs": programs,
         "sdk_settings": sdk_settings,
         "lang": lang.word(),
@@ -463,14 +463,80 @@ pub fn native(
     ];
     probe.extend(flags.iter().cloned());
     let said = ask(&exe, &probe).filter(|s| s.success)?;
-    let text = identity.places(&[]).hide(&said.stderr);
+    let text = identity.places(&[]).hide(&without_temp_names(&said.stderr));
     let _ = memos.write_whole(&path, text.as_bytes(), None, false);
     Some(text)
+}
+
+/// `text` with each temporary file the driver names (`/tmp/ccT2YAtc.s`, GCC's `-###` between
+/// `cc1` and `as`: `cc`, six random letters and digits, an extension) as `{temp}` and its
+/// extension: those names are new each time the driver is asked, so an identity holding them
+/// would differ between two machines, and between two stores of one, with the same compiler.
+pub(crate) fn without_temp_names(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let continues = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/');
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut from = 0;
+    while let Some(found) = text[from..].find("/cc") {
+        let slash = from + found;
+        let random = slash + 3;
+        let dot = random + 6;
+        let mut end = dot + 1;
+        while end < bytes.len() && bytes[end].is_ascii_lowercase() {
+            end += 1;
+        }
+        let temp = bytes.len() > dot
+            && bytes[random..dot].iter().all(u8::is_ascii_alphanumeric)
+            && bytes[dot] == b'.'
+            && end > dot + 1
+            && !bytes.get(end).copied().is_some_and(continues);
+        if !temp {
+            from = slash + 3;
+            continue;
+        }
+        let mut start = slash;
+        while start > last && continues(bytes[start - 1]) {
+            start -= 1;
+        }
+        out.push_str(&text[last..start]);
+        out.push_str("{temp}");
+        out.push_str(&text[dot..end]);
+        last = end;
+        from = end;
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: B-52
+    #[test]
+    fn the_driver_s_temporary_files_are_no_part_of_the_identity() {
+        let one = " /usr/lib/gcc/aarch64-linux-gnu/12/cc1 -quiet /dev/null -o /tmp/ccT2YAtc.s\n as -EL -o /dev/null /tmp/ccT2YAtc.s\n";
+        let two = " /usr/lib/gcc/aarch64-linux-gnu/12/cc1 -quiet /dev/null -o /var/folders/x/ccQ9z0aB.s\n as -EL -o /dev/null /var/folders/x/ccQ9z0aB.s\n";
+        assert_eq!(without_temp_names(one), without_temp_names(two));
+        assert_eq!(
+            without_temp_names(one),
+            " /usr/lib/gcc/aarch64-linux-gnu/12/cc1 -quiet /dev/null -o {temp}.s\n as -EL -o /dev/null {temp}.s\n"
+        );
+        // A quoted one, as clang quotes its words; and what only looks like one stays.
+        assert_eq!(
+            without_temp_names("\"-o\" \"/tmp/ccAbCdEf.o\""),
+            "\"-o\" \"{temp}.o\""
+        );
+        for kept in [
+            "/usr/bin/cc1plus",
+            "/opt/cc123456.sh2",
+            "/a/ccshort.s",
+            "/x/cc",
+        ] {
+            assert_eq!(without_temp_names(kept), kept);
+        }
+    }
 
     // covers: B-52
     #[test]
