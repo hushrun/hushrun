@@ -1542,7 +1542,9 @@ fn store_block(
     let mut replace_downloaded = false;
     let mut differed = false;
     if let Some(found) = &plan.found {
-        let same = found.key == key && std::fs::read(&found.object).is_ok_and(|b| b == object);
+        // The bytes alone: a compile here may be tied by this checkout's root where the block
+        // found wasn't (B-56), and its key then differs from an honest block's.
+        let same = std::fs::read(&found.object).is_ok_and(|b| b == object);
         if !same && !found.downloaded {
             let _ = store.suspend(&plan.step, "a fresh compile differed from the block", now);
             let mut result = not_stored(NotStored::Differed, "differed");
