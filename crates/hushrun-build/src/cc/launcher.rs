@@ -1741,12 +1741,36 @@ fn already_there(
         .iter()
         .find(|f| f.name == "object")
         .is_some_and(|f| f.size == object.len() as u64 && f.sha256 == Digest::of(object));
+    let only_downloaded = |there: Option<&Origin>, _: Option<&crate::store::Block>| {
+        there.is_some_and(Origin::downloaded_only)
+    };
     if !same {
         differs(ports, current, store, step, key, now, waits);
-        let _ = store.replace(key, description, files, origin, now, |there, _| {
-            there.is_some_and(Origin::downloaded_only)
-        });
+        let _ = store.replace(key, description, files, origin, now, only_downloaded);
         return true;
+    }
+    // The same object: the block becomes built here, which serves its messages as they are
+    // (B-59). Only when they are this compile's too; else this compile's take their place, so
+    // that no downloaded message is ever shown unfiltered.
+    let ours: Vec<(String, Option<Digest>)> = files
+        .iter()
+        .map(|f| {
+            let digest = std::fs::read(&f.source).ok().map(|b| Digest::of(&b));
+            (f.name.clone(), digest)
+        })
+        .collect();
+    let theirs: Vec<(String, Option<Digest>)> = block
+        .files
+        .iter()
+        .map(|f| (f.name.clone(), Some(f.sha256)))
+        .collect();
+    let mut ours_sorted = ours.clone();
+    ours_sorted.sort();
+    let mut theirs_sorted = theirs;
+    theirs_sorted.sort();
+    if ours_sorted != theirs_sorted {
+        let _ = store.replace(key, description, files, origin, now, only_downloaded);
+        return false;
     }
     let built = origin.built.clone();
     let _ = store.update_origin(key, |o| {
