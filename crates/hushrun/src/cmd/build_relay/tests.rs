@@ -3749,11 +3749,16 @@ fn a_cc_block_built_here_goes_up_with_its_hints_and_closes_once_per_platform() {
             LINUX,
             hushrun_build::model::Outcome::BuiltAndStored,
         ),
-        cc_entry(
+        // A reuse, as the launcher logs it.
+        hushrun_build::cc::launcher::reused_entry(
             arm,
             arm,
-            "aarch64-linux-gnu",
-            hushrun_build::model::Outcome::Reused,
+            hushrun_build::cc::launcher::CcEntry {
+                platform: "aarch64-linux-gnu".into(),
+                ..Default::default()
+            },
+            0,
+            false,
         ),
         tied,
         probe,

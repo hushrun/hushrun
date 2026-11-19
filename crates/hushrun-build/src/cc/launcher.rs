@@ -447,7 +447,14 @@ fn decide(
                         .picks(|| ports.audited(&hit.key, current.started_ms, first_download));
                     if current.mode == Mode::On && !audited {
                         // A restore that fails before any message compiles as asked (B-57).
-                        return match restore(ports, current, &compile, &places, &cwd, &hit, start) {
+                        let at = Restore {
+                            compile: &compile,
+                            places: &places,
+                            cwd: &cwd,
+                            step: &step,
+                            platform: &identity.target,
+                        };
+                        return match restore(ports, current, &at, &hit, start) {
                             Ok(reused) => {
                                 if first_download {
                                     first_reuse(&store, &hit.key);
@@ -880,6 +887,18 @@ fn is_base(path: &Path, places: &Places, identity: &Identity) -> bool {
     (places.under_any(&text) && !places.under_root(&text)) || identity.in_system(&text)
 }
 
+/// What a reuse puts in place, and for which compile.
+#[derive(Clone, Copy)]
+struct Restore<'a> {
+    compile: &'a Compile,
+    places: &'a Places,
+    cwd: &'a Path,
+    /// The first key, for the run's log and the check's manifest (B-60).
+    step: &'a Digest,
+    /// The target triple: the manifest the reuse goes in.
+    platform: &'a str,
+}
+
 /// Puts a block in place (B-57): the object under a temporary name in its folder, checked
 /// against the digest its record holds, made writable, dated now and renamed into place; then
 /// the depfile from the hint with this checkout's paths, written whole: the files this machine
@@ -888,12 +907,17 @@ fn is_base(path: &Path, places: &Places, identity: &Identity) -> bool {
 fn restore(
     ports: &mut dyn Ports,
     current: &Current,
-    compile: &Compile,
-    places: &Places,
-    cwd: &Path,
+    at: &Restore<'_>,
     hit: &Hit,
     start: SystemTime,
 ) -> io::Result<Reused> {
+    let Restore {
+        compile,
+        places,
+        cwd,
+        step,
+        platform,
+    } = *at;
     let output = cwd.join(&compile.output);
     let expected = hit.sha256;
     put_whole(&output, start, |temp| {
@@ -943,22 +967,42 @@ fn restore(
     Ok(Reused {
         stdout,
         stderr,
-        entry: Entry {
-            saved_ms: hit.compile_ms.saturating_sub(took),
-            found: true,
-            downloaded: hit.downloaded_now,
-            step: None,
-            key: Some(hit.key),
-            cc: Some(CcEntry {
+        entry: reused_entry(
+            *step,
+            hit.key,
+            CcEntry {
                 source: places.hide(&compile.source),
+                platform: platform.to_string(),
                 took_ms: took,
                 local: hit.local.clone(),
                 shared: current.share.relay().is_some(),
                 ..CcEntry::default()
-            }),
-            ..entry(Outcome::Reused)
-        },
+            },
+            hit.compile_ms.saturating_sub(took),
+            hit.downloaded_now,
+        ),
     })
+}
+
+/// The run's log line of a reuse (B-61), as the relay's close reads it (B-60): with its first
+/// key and its block's key, so that the check's manifest pairs them, and its `cc` part naming
+/// the target triple, whose manifest it goes in.
+pub fn reused_entry(
+    step: Digest,
+    key: Digest,
+    cc: CcEntry,
+    saved_ms: u64,
+    downloaded: bool,
+) -> Entry {
+    Entry {
+        saved_ms,
+        found: true,
+        downloaded,
+        step: Some(step),
+        key: Some(key),
+        cc: Some(cc),
+        ..entry(Outcome::Reused)
+    }
 }
 
 /// Writes `dest` whole: `fill` writes a temporary file beside it, which is given the mode a file
