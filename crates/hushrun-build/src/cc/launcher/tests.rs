@@ -286,3 +286,49 @@ fn what_a_killed_launcher_left_is_replaced_and_a_gone_session_is_not_made_again(
     std::fs::create_dir(&session).unwrap();
     assert!(work_folder(&session) && work_folder(&session));
 }
+
+// covers: B-60
+#[test]
+fn a_downloaded_hint_naming_a_folder_outside_the_roots_and_bases_is_passed_over() {
+    let places = Places::new(&["/home/u/ck".into()], &["/sdk".into()], &[]);
+    let identity = Identity {
+        digest: Digest::of(b"x"),
+        clang: true,
+        target: String::new(),
+        sdk: Some("/sdk".into()),
+        sdk_resolved: None,
+        toolchain: None,
+        system: vec![],
+    };
+    let cwd = PathBuf::from("/home/u/ck/build");
+    let seen = Seen {
+        places: &places,
+        identity: &identity,
+        cwd: &cwd,
+    };
+    let read = |p: &str| key::HintRead {
+        p: p.into(),
+        s: false,
+    };
+    let hint = |reads: &[&str], places: &[&str], probes: &[&str]| {
+        key::Hint::new(
+            reads.iter().map(|r| read(r)).collect(),
+            places.iter().map(|p| p.to_string()).collect(),
+            probes.iter().map(|p| (p.to_string(), false)).collect(),
+        )
+    };
+    let fine = hint(
+        &["{root}/a.c", "../inc/a.h", "{sdk}/usr/include/stdio.h"],
+        &["{root}/src/a.h"],
+        &["{sdk}/usr/include/x.h"],
+    );
+    assert!(names_only_known_folders(&fine, &seen));
+    for bad in [
+        hint(&["{root}/a.c", "/etc/passwd"], &[], &[]),
+        hint(&["{root}/../../etc/passwd"], &[], &[]),
+        hint(&["{root}/a.c"], &["/home/u/secret/x.h"], &[]),
+        hint(&["{root}/a.c"], &[], &["/home/u/.ssh/id_rsa"]),
+    ] {
+        assert!(!names_only_known_folders(&bad, &seen), "{bad:?}");
+    }
+}

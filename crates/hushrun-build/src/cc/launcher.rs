@@ -569,6 +569,37 @@ fn within_budget(hint: &key::Hint) -> bool {
         && hint.probes.len() <= MOST_DOWNLOADED_PROBES
 }
 
+/// Whether every path a downloaded hint names lies under this call's roots, bases or system
+/// folders once made absolute (a `..` taken out by its text): a hint is a member's bytes, and one naming `/etc/…` or
+/// `{root}/../..` would make this machine hash a file it never reads, or say by a lookup's
+/// outcome whether a file exists there.
+fn names_only_known_folders(hint: &key::Hint, seen: &Seen<'_>) -> bool {
+    let known = |text: &str, folder: bool| {
+        let shown = seen.places.show(text);
+        let path = if folder {
+            places::absolute(seen.cwd, &shown)
+        } else {
+            key::read_path(
+                &key::HintRead {
+                    p: text.to_string(),
+                    s: false,
+                },
+                seen.places,
+                seen.cwd,
+            )
+        };
+        let text = path.to_string_lossy();
+        seen.places.under_root(&text) || is_base(&path, seen.places, seen.identity)
+    };
+    hint.reads().iter().all(|r| known(&r.p, false))
+        && hint
+            .places
+            .iter()
+            .flat_map(|(dirs, _)| dirs)
+            .chain(hint.probes.iter().map(|(d, _, _)| d))
+            .all(|d| known(hint.dirs.get(*d as usize).map_or("", String::as_str), true))
+}
+
 /// The block for this compile, by its first key's hints (B-54, B-60): this machine's own first,
 /// then those downloaded from the shared store, asked of the run's relay when the store has
 /// none; and when one leads to a second key the store lacks, a fetch of it. The relay looks a
@@ -676,7 +707,7 @@ fn follow(
         let Some(hint) = key::Hint::read(bytes) else {
             continue;
         };
-        if downloaded && !within_budget(&hint) {
+        if downloaded && !(within_budget(&hint) && names_only_known_folders(&hint, seen)) {
             continue;
         }
         let reads = hint.reads();
