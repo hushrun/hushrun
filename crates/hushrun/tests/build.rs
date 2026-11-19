@@ -741,9 +741,10 @@ fn build_share_saves_the_share_setting_and_status_says_what_applies() {
     assert_eq!(again["share"], "observe");
 }
 
-/// Prints the C and C++ launcher variables COMMAND gets, `|`-separated.
+/// Prints the C and C++ launcher variables COMMAND gets, tab-separated (the indirection holds
+/// `|`).
 #[cfg(unix)]
-const PRINT_LAUNCHER: &str = r#"printf '%s|%s|%s' "$CMAKE_C_COMPILER_LAUNCHER" "$CMAKE_CXX_COMPILER_LAUNCHER" "$HUSHRUN_CC""#;
+const PRINT_LAUNCHER: &str = r#"printf '%s\t%s\t%s' "$CMAKE_C_COMPILER_LAUNCHER" "$CMAKE_CXX_COMPILER_LAUNCHER" "$HUSHRUN_CC""#;
 
 // covers: B-50
 #[cfg(unix)]
@@ -752,10 +753,10 @@ fn run_gives_cmake_the_launcher_only_when_reuse_is_on_and_leaves_the_person_s() 
     let w = World::new("acme-api.yaml");
     let tested = std::fs::canonicalize(assert_cmd::cargo::cargo_bin("hushrun")).unwrap();
     let indirection = hushrun_build::cc::INDIRECTION;
-    let split = |ran: &Ran| -> Vec<String> { ran.stdout.split('|').map(str::to_string).collect() };
+    let split = |ran: &Ran| -> Vec<String> { ran.stdout.split('\t').map(str::to_string).collect() };
 
     let off = run_sh(&mut hushrun(&w), "x", PRINT_LAUNCHER);
-    assert_eq!((off.code, off.stdout.as_str()), (0, "||"), "{}", off.stderr);
+    assert_eq!((off.code, off.stdout.as_str()), (0, "\t\t"), "{}", off.stderr);
 
     assert_eq!(build(&w, &["on"]).code, 0);
     let on = run_sh(&mut hushrun(&w), "x", PRINT_LAUNCHER);
@@ -799,7 +800,7 @@ fn run_gives_cmake_the_launcher_only_when_reuse_is_on_and_leaves_the_person_s() 
         )
     };
     let none = beside();
-    assert_eq!(none.stdout, "||", "{}", none.stderr);
+    assert_eq!(none.stdout, "\t\t", "{}", none.stderr);
     std::fs::write(other.join("CMakeLists.txt"), "project(x C)\n").unwrap();
     let got = split(&beside());
     assert_eq!(got[0], indirection);
