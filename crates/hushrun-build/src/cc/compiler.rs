@@ -596,13 +596,14 @@ pub fn without_temp_names_in(bytes: &[u8]) -> Vec<u8> {
             && bytes[dot] == b'.'
             && end > dot + 1
             && !bytes.get(end).copied().is_some_and(continues);
-        if !temp {
-            from = slash + 3;
-            continue;
-        }
         let mut start = slash;
         while start > last && continues(bytes[start - 1]) {
             start -= 1;
+        }
+        // Only in a folder of temporary files: `include/ccconfig.h` is a header.
+        if !temp || !temp_folder(&bytes[start..slash]) {
+            from = slash + 3;
+            continue;
         }
         out.extend_from_slice(&bytes[last..start]);
         out.extend_from_slice(b"{temp}");
@@ -612,6 +613,24 @@ pub fn without_temp_names_in(bytes: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(&bytes[last..]);
     out
+}
+
+/// Whether `folder` is one the driver makes its temporary files in: `/tmp` and its kin, macOS's
+/// per-user `/var/folders/…`, or `TMPDIR`.
+fn temp_folder(folder: &[u8]) -> bool {
+    let Ok(folder) = std::str::from_utf8(folder) else {
+        return false;
+    };
+    let folder = folder.trim_end_matches('/');
+    if matches!(
+        folder,
+        "/tmp" | "/var/tmp" | "/private/tmp" | "/private/var/tmp" | "/usr/tmp"
+    ) || folder.starts_with("/var/folders/")
+        || folder.starts_with("/private/var/folders/")
+    {
+        return true;
+    }
+    std::env::var("TMPDIR").is_ok_and(|t| !t.is_empty() && t.trim_end_matches('/') == folder)
 }
 
 #[cfg(test)]
@@ -638,6 +657,10 @@ mod tests {
             "/opt/cc123456.sh2",
             "/a/ccshort.s",
             "/x/cc",
+            // A header of a project's own whose name looks like one.
+            "/home/u/ck/include/ccconfig.h: warning: x",
+            "include/ccconfig.h:3:1",
+            "\"-I/home/u/ck\" \"/home/u/ck/src/ccabcdef.c\"",
         ] {
             assert_eq!(without_temp_names(kept), kept);
         }
