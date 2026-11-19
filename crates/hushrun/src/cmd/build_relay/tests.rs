@@ -3880,3 +3880,37 @@ fn a_cc_block_goes_up_only_from_a_caller_the_policy_lets_write_and_bound_only_fr
         );
     }
 }
+
+// covers: B-60, B-29
+#[test]
+fn a_cc_object_whose_notice_never_came_gets_its_marker_when_the_check_ends() {
+    // A launcher that found the relay slow once marks it down for the run, and tells it nothing
+    // after: the objects it stored still go up, from the run's log.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, step) = cc_block(&m.store, 88, Some(me(&fake)));
+    let (kept, kept_step) = cc_block(&m.store, 89, Some(me(&fake)));
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let mut stays = cc_entry(
+        kept,
+        kept_step,
+        LINUX,
+        hushrun_build::model::Outcome::BuiltAndStored,
+    );
+    stays.cc.as_mut().unwrap().local = vec!["home-in-output".into()];
+    relay.end_check(&[
+        cc_entry(
+            key,
+            step,
+            LINUX,
+            hushrun_build::model::Outcome::BuiltAndStored,
+        ),
+        stays,
+    ]);
+    let marked: Vec<Digest> = waiting(&m).iter().map(|marker| marker.key).collect();
+    let uploaded = fake.block(cc_address(&key)).is_some();
+    assert!(marked.contains(&key) || uploaded, "{marked:?}");
+    assert!(!marked.contains(&kept) && fake.block(cc_address(&kept)).is_none());
+}

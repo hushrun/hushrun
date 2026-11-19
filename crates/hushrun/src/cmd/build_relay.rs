@@ -336,6 +336,9 @@ struct State {
     cc_manifests: HashMap<String, CcManifest>,
     /// The prefetch of a `cc/1` manifest is looking up what it names.
     cc_prefetching: usize,
+    /// The C and C++ objects a launcher told of (B-60): the run's log names the others at the
+    /// check's end.
+    cc_told: HashSet<Digest>,
     /// Whether the run may upload, as [`what_a_run_does`] says; the policy decides the rest.
     uploads: bool,
     /// Lines for the person, each once.
@@ -633,6 +636,7 @@ impl Relay {
                 go_prefetching: false,
                 cc_manifests: HashMap::new(),
                 cc_prefetching: 0,
+                cc_told: HashSet::new(),
                 uploads: does.uploads,
                 lines: Vec::new(),
                 found: HashMap::new(),
@@ -2309,6 +2313,38 @@ impl Relay {
 
     // --- what was built ------------------------------------------------------------------
 
+    /// B-60: the C and C++ objects the run's log says were stored with nothing keeping them on
+    /// the machine (or tied alone), whose notice never reached the relay: a launcher that found
+    /// it slow once marks it down for the run and tells it nothing after. Each is told now, as
+    /// its launcher would have, before the uploads end.
+    fn sweep_cc_built(self: &Arc<Relay>, entries: &[Entry]) {
+        let told = self.state().cc_told.clone();
+        for entry in entries {
+            let (Some(cc), Some(key), Some(step)) = (entry.cc.as_ref(), entry.key, entry.step)
+            else {
+                continue;
+            };
+            if entry.outcome != hushrun_build::model::Outcome::BuiltAndStored
+                || entry.differed
+                || cc.probe
+                || told.contains(&key)
+            {
+                continue;
+            }
+            let portable = cc.local.is_empty();
+            let bound = cc.local == ["tied"];
+            if portable || bound {
+                self.built(Request::CcBuilt {
+                    key,
+                    step,
+                    portable,
+                    bound,
+                    cost_ms: entry.rustc_ms,
+                });
+            }
+        }
+    }
+
     /// B-29: a block this run built. It gets a marker when it may leave the machine, the policy
     /// says this caller writes, the run shares, and the store's record says this run's host,
     /// org and credential built it. In shared `observe` it is also compared with the shared
@@ -2349,15 +2385,18 @@ impl Relay {
                 portable,
                 bound,
                 cost_ms,
-            } => (
-                Kind::Cc,
-                *key,
-                *step,
-                LocalClass::Library,
-                *portable,
-                *bound,
-                *cost_ms,
-            ),
+            } => {
+                self.state().cc_told.insert(*key);
+                (
+                    Kind::Cc,
+                    *key,
+                    *step,
+                    LocalClass::Library,
+                    *portable,
+                    *bound,
+                    *cost_ms,
+                )
+            }
             _ => return,
         };
         let address = Relay::address_in(kind, &key);
@@ -2629,6 +2668,7 @@ impl Relay {
     /// rest stays in the outbox; `close` goes once with the manifest and the counts; the socket
     /// goes. The lines for the person.
     pub(crate) fn end_check(self: &Arc<Relay>, entries: &[Entry]) -> Vec<String> {
+        self.sweep_cc_built(entries);
         // B-31: no ID token is minted once the end has begun.
         self.client.ending(true);
         let end = self.end();
