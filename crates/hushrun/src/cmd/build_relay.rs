@@ -315,8 +315,8 @@ enum GoManifest {
 enum CcManifest {
     Asking,
     Got {
-        /// The first keys' addresses it names.
-        named: HashSet<Hex32>,
+        /// The first keys' addresses it names, each with the blocks' it pairs it with.
+        named: HashMap<Hex32, HashSet<Hex32>>,
         /// Its pairs, until the first question about a first key it names takes them for the
         /// prefetch.
         pairs: Option<Vec<Pair>>,
@@ -1114,7 +1114,13 @@ impl Relay {
             state.cc_manifests.insert(
                 platform,
                 CcManifest::Got {
-                    named: manifest.iter().map(Pair::hint).collect(),
+                    named: manifest.iter().fold(HashMap::new(), |mut named, pair| {
+                        named
+                            .entry(pair.hint())
+                            .or_insert_with(HashSet::new)
+                            .insert(pair.block());
+                        named
+                    }),
                     pairs: Some(manifest),
                 },
             );
@@ -1168,7 +1174,7 @@ impl Relay {
                     && let Some(CcManifest::Got { named, pairs }) =
                         state.cc_manifests.get_mut(platform)
                 {
-                    if !named.contains(&address) {
+                    if !named.contains_key(&address) {
                         return false;
                     }
                     let taken = pairs.take();
@@ -1215,8 +1221,10 @@ impl Relay {
         self.hints_in(Kind::Cc, step).await
     }
 
-    /// B-60: one of `keys`, the second keys a launcher's downloaded hints led to, of a first key
-    /// the check's `cc/1` manifest names, as a `rustc` wrapper's fetch.
+    /// B-60: one of `keys`, the second keys a launcher's downloaded hints led to, as a `rustc`
+    /// wrapper's fetch, of those the check's `cc/1` manifest names with the first key: a key a
+    /// hint leads to that no compile of the check stored (the key an object tied to its folder
+    /// would have, beside every portable one's) asks the server nothing.
     async fn cc_fetch(
         self: Arc<Relay>,
         step: Digest,
@@ -1225,6 +1233,19 @@ impl Relay {
         local_ms: Option<u64>,
     ) -> Answer {
         if !self.cc_names(&step, &platform, local_ms).await {
+            return Answer::None;
+        }
+        let keys: Vec<Digest> = {
+            let state = self.state();
+            let Some(CcManifest::Got { named, .. }) = state.cc_manifests.get(&platform) else {
+                return Answer::None;
+            };
+            let blocks = named.get(&Relay::address_in(Kind::Cc, &step));
+            keys.into_iter()
+                .filter(|key| blocks.is_some_and(|b| b.contains(&Relay::address_in(Kind::Cc, key))))
+                .collect()
+        };
+        if keys.is_empty() {
             return Answer::None;
         }
         self.fetch_in(Kind::Cc, step, keys, local_ms).await

@@ -3634,6 +3634,13 @@ fn a_cc_question_asks_the_server_only_about_what_the_checks_cc_manifest_names() 
     // One it names: the prefetch's one lookup of hints and one of blocks.
     assert_eq!(ask(&relay, hints(named_step)), Answer::Hints { count: 1 });
     assert_eq!(b.store.shared_hints(&named_step), vec![b"hint 81".to_vec()]);
+    // A key a hint leads to that the manifest doesn't pair with the first key (the one a tied
+    // object would have) asks nothing either.
+    assert_eq!(
+        ask(&relay, fetch(named_step, Digest::of(b"tied"))),
+        Answer::None
+    );
+    assert_eq!(fake.count(route::LOOKUP) - lookups, 1);
     assert_eq!(
         ask(&relay, fetch(named_step, named)),
         Answer::Ready { key: named }
