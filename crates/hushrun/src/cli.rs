@@ -165,7 +165,9 @@ pub enum Command {
     ///
     /// `hushrun run [NAME] -- COMMAND` runs COMMAND unless the repository's files, as they are
     /// now, already passed it, and remembers the result. `hushrun run CHECK…`, with no command,
-    /// runs hushrun.yaml's checks instead, and records their evidence with the repository.
+    /// runs hushrun.yaml's checks instead, and records their evidence with the repository. With
+    /// build reuse on (`hushrun build`), the builds either form runs reuse the compiled code this
+    /// machine kept.
     #[command(after_long_help = RUN_HELP)]
     Run(RunArgs),
     /// \[ADR 0062\] Gone with stages: it stops and says so (until 0.10).
