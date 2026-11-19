@@ -120,6 +120,9 @@ pub struct Compile {
     pub lto: bool,
     /// `-frandom-seed` in any form.
     pub random_seed: bool,
+    /// Compressed debug sections (`-gz`, `--compress-debug-sections`): a root in them can't be
+    /// found in the object's bytes, so the block is tied to its paths (B-56).
+    pub compressed_debug: bool,
 }
 
 /// Why a call runs exactly as asked (B-51). The word is the run's log's; stable.
@@ -414,6 +417,7 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
     let mut native = Vec::new();
     let mut includes = Vec::new();
     let (mut compile, mut lto, mut random_seed) = (false, false, false);
+    let mut compressed_debug = false;
     let mut source: Option<(String, Lang)> = None;
     let mut output: Option<String> = None;
     let mut dep = DepAsked {
@@ -546,6 +550,11 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
                     if arg.starts_with("-frandom-seed") {
                         random_seed = true;
                     }
+                    if (arg.starts_with("-gz") && arg != "-gz=none")
+                        || arg.contains("compress-debug-sections")
+                    {
+                        compressed_debug = true;
+                    }
                     if matches!(arg, "-march=native" | "-mcpu=native" | "-mtune=native") {
                         native.push(arg.to_string());
                     } else if driver_flag(arg) {
@@ -612,6 +621,7 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
         native,
         lto,
         random_seed,
+        compressed_debug,
     }))
 }
 
@@ -964,5 +974,8 @@ mod tests {
         assert_eq!(c.native, ["-march=native"]);
         assert!(c.lto && !c.random_seed);
         assert!(compile(&with(&["-flto", "-frandom-seed=x"])).random_seed);
+        assert!(compile(&with(&["-g", "-gz=zlib"])).compressed_debug);
+        assert!(compile(&with(&["-Wa,--compress-debug-sections"])).compressed_debug);
+        assert!(!compile(&with(&["-g", "-gz=none"])).compressed_debug);
     }
 }

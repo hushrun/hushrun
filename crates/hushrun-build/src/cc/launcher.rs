@@ -985,7 +985,8 @@ fn store_block(
     let holds = |needle: &str| {
         !needle.is_empty() && memchr::memmem::find(&object, needle.as_bytes()).is_some()
     };
-    let tied = plan.places.roots().iter().any(|root| holds(root));
+    // B-56: a root in compressed debug sections isn't in the bytes; such a block is tied.
+    let tied = plan.compile.compressed_debug || plan.places.roots().iter().any(|root| holds(root));
     let mut local = Vec::new();
     if tied {
         local.push("tied".to_string());
