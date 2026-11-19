@@ -202,7 +202,8 @@ impl Shared {
     }
 
     /// Whether a block may be reused as far as who vouches for it goes (B-34): the one
-    /// definition the `rustc` wrapper and the Go cache program decide by, from the block's
+    /// definition the `rustc` wrapper, the Go cache program and the C and C++ launcher decide
+    /// by, from the block's
     /// record ([`Origin::standing`](crate::origin::Origin::standing)) and this state. A block
     /// built here, or with no record, may. One only downloaded never may once a server said it
     /// no longer serves it, and never in a run that isn't sharing by a decision. In a run whose
@@ -485,6 +486,10 @@ pub struct CcCounts {
     pub saved_ms: u64,
     /// Passed through or not stored, by the launcher's reason, in the order first seen.
     pub reasons: Vec<(String, u64)>,
+    /// Objects stored in a run that shares that stay on this machine (B-56, B-60), by reason,
+    /// in the order first seen; an object with two reasons counts under each.
+    pub kept: u64,
+    pub kept_reasons: Vec<(String, u64)>,
 }
 
 impl CcCounts {
@@ -521,6 +526,15 @@ impl CcCounts {
             match self.reasons.iter_mut().find(|(seen, _)| seen == why) {
                 Some((_, n)) => *n += 1,
                 None => self.reasons.push((why.to_string(), 1)),
+            }
+        }
+        if cc.shared && entry.outcome == Outcome::BuiltAndStored && !cc.local.is_empty() {
+            self.kept += 1;
+            for why in &cc.local {
+                match self.kept_reasons.iter_mut().find(|(seen, _)| seen == why) {
+                    Some((_, n)) => *n += 1,
+                    None => self.kept_reasons.push((why.clone(), 1)),
+                }
             }
         }
     }
@@ -581,6 +595,19 @@ impl CcCounts {
                 "build: c/c++: {} compiled as asked or not stored ({}{more})",
                 objects(all),
                 shown.join(", ")
+            ));
+        }
+        if self.kept > 0 {
+            let why: Vec<String> = self
+                .kept_reasons
+                .iter()
+                .map(|(why, n)| format!("{n} {why}"))
+                .collect();
+            lines.push(format!(
+                "build: c/c++: {} compiled here {} on this machine ({})",
+                objects(self.kept),
+                if self.kept == 1 { "stays" } else { "stay" },
+                why.join(", ")
             ));
         }
         lines
@@ -2315,6 +2342,41 @@ mod tests {
                 .cc
                 .lines(Mode::On)
                 .is_empty()
+        );
+    }
+
+    // covers: B-60, B-61
+    #[test]
+    fn objects_a_run_that_shares_keeps_here_are_said_with_why_and_downloads_counted() {
+        use crate::cc::launcher::CcEntry;
+        let stored = |local: &[&str], shared: bool| Entry {
+            cc: Some(CcEntry {
+                local: local.iter().map(|s| s.to_string()).collect(),
+                shared,
+                ..CcEntry::default()
+            }),
+            ..entry(Outcome::BuiltAndStored)
+        };
+        let entries = vec![
+            stored(&[], true),
+            stored(&["tied"], true),
+            stored(&["tied", "home-in-output"], true),
+            stored(&["native-cpu"], true),
+            // A run without a relay keeps everything here, and says nothing of it.
+            stored(&["tied"], false),
+            Entry {
+                downloaded: true,
+                saved_ms: 4_000,
+                cc: Some(CcEntry::default()),
+                ..entry(Outcome::Reused)
+            },
+        ];
+        assert_eq!(
+            Summary::of(Mode::On, 10, &entries).lines(),
+            [
+                "build: c/c++: 6 objects: 1 reused (1 from the shared store), 5 built, saving about 4s",
+                "build: c/c++: 3 objects compiled here stay on this machine (2 tied, 1 home-in-output, 1 native-cpu)",
+            ]
         );
     }
 

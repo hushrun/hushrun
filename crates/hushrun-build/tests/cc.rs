@@ -862,13 +862,26 @@ fn an_audited_reuse_compiles_compares_and_a_difference_suspends_the_key() {
     let last = run.last();
     assert!(last.found && !last.differed, "{last:?}");
     assert_ne!(last.outcome, Outcome::Reused);
-    // A block whose object was altered, its size kept: nothing in the build would notice.
+    // A block whose object was altered, its size kept and its record made to match: nothing in
+    // the build would notice, and the checks of its bytes pass (B-59).
     let object = only_object(&w.store());
     fs::set_permissions(&object, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
-    let mut forged = fs::read(&object).unwrap();
+    let honest = fs::read(&object).unwrap();
+    let mut forged = honest.clone();
     let at = forged.len() / 2;
     forged[at] ^= 0xff;
     fs::write(&object, &forged).unwrap();
+    let record = object
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("block.json");
+    fs::set_permissions(&record, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    let sha = |b: &[u8]| hushrun_core::Digest::of(b).hex();
+    let text = fs::read_to_string(&record).unwrap();
+    assert!(text.contains(&sha(&honest)), "{text}");
+    fs::write(&record, text.replace(&sha(&honest), &sha(&forged))).unwrap();
     run.launch(&root, "cc", &args);
     let last = run.last();
     assert!(last.found && last.differed, "{last:?}");
@@ -882,6 +895,40 @@ fn an_audited_reuse_compiles_compares_and_a_difference_suspends_the_key() {
     let run = w.run(&root, true);
     run.launch(&root, "cc", &args);
     assert_ne!(run.last().outcome, Outcome::Reused, "{:?}", run.last());
+    assert_eq!(fs::read(root.join("a.o")).unwrap(), compiled);
+}
+
+// covers: B-59
+#[test]
+fn a_stored_object_whose_bytes_are_not_its_record_s_is_compiled_not_served() {
+    let w = world();
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "int f(int x) { return x * 5; }\n");
+    let args = ["-c", "src/a.c", "-o", "a.o", "-MD", "-MF", "a.o.d"];
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &args);
+    assert_eq!(run.last().outcome, Outcome::BuiltAndStored);
+    let compiled = fs::read(root.join("a.o")).unwrap();
+    let object = only_object(&w.store());
+    fs::set_permissions(&object, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    let mut forged = compiled.clone();
+    let at = forged.len() / 2;
+    forged[at] ^= 0xff;
+    fs::write(&object, &forged).unwrap();
+    fs::remove_file(root.join("a.o")).unwrap();
+    run.launch(&root, "cc", &args);
+    let last = run.last();
+    assert_eq!(last.outcome, Outcome::BuiltAndStored, "{last:?}");
+    assert!(
+        last.note
+            .as_deref()
+            .is_some_and(|n| n.contains("wrong-sha256")),
+        "{last:?}"
+    );
+    assert_eq!(fs::read(root.join("a.o")).unwrap(), compiled);
+    // The compile took its place: the next call reuses it.
+    run.launch(&root, "cc", &args);
+    assert_eq!(run.last().outcome, Outcome::Reused);
     assert_eq!(fs::read(root.join("a.o")).unwrap(), compiled);
 }
 

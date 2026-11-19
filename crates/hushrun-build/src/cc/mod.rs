@@ -33,6 +33,7 @@ pub mod key;
 pub mod launcher;
 pub mod memo;
 pub mod places;
+pub mod share;
 pub mod text;
 
 use std::ffi::OsStr;

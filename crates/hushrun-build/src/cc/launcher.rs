@@ -22,8 +22,11 @@ use super::compiler::{self, Identity, Said};
 use super::key::{self, HintRead};
 use super::memo::Digests;
 use super::places::{self, Places};
-use super::{CcRun, KIND, depfile, graph};
+use super::share::{self as relay_side, Waits};
+use super::{CcRun, KIND, checks, depfile, graph};
 use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough};
+use crate::origin::Origin;
+use crate::relay::{Answer, Problem, Request};
 use crate::session::{self, Current, Entry};
 use crate::store::{NewFile, Published, Store};
 
@@ -88,9 +91,18 @@ pub trait Ports {
     /// Writes to the launcher's stderr.
     fn stderr(&mut self, bytes: &[u8]);
     /// Whether the audit picks the reuse of block `key` in the run started at `started_ms`
-    /// (B-59). Tests choose.
-    fn audited(&self, key: &Digest, started_ms: u64) -> bool {
-        crate::audit::sample(key, started_ms, false)
+    /// (B-59): one in ten on a downloaded block's first reuse here (`first_download`), else one
+    /// in fifty. Tests choose.
+    fn audited(&self, key: &Digest, started_ms: u64, first_download: bool) -> bool {
+        crate::audit::sample(key, started_ms, first_download)
+    }
+    /// Asks the run's relay at `socket` within `wait` (B-60); `None` is a miss.
+    fn relay(&self, socket: &Path, request: &Request, wait: Duration) -> Option<Answer> {
+        crate::relay::ask(socket, request, wait)
+    }
+    /// Hands the run's relay a notice; whether it was written.
+    fn tell(&self, socket: &Path, request: &Request, wait: Duration) -> bool {
+        crate::relay::tell(socket, request, wait)
     }
     /// Ends the process as a compile ended: its code, or its signal raised again.
     fn end_as(&mut self, ran: &Ran) -> i32 {
@@ -121,6 +133,10 @@ pub struct CcEntry {
     /// milliseconds: for a reuse, what a hit costs.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub took_ms: u64,
+    /// The run had a relay (B-60): a block stored with reasons in `local` stays on this machine
+    /// though the run shares, which the summary says.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -286,11 +302,15 @@ struct Plan {
     suspended: bool,
     native: bool,
     digests: Digests,
+    /// Why a block found was refused before this compile (B-59), for the run's log.
+    note: Option<String>,
 }
 
 struct Found {
     key: Digest,
     object: PathBuf,
+    /// The block was only downloaded: a difference is reported to the scope it came from.
+    downloaded: bool,
 }
 
 macro_rules! pass {
@@ -399,29 +419,53 @@ fn decide(
     let mut digests = Digests::new(Some(&current.folder));
     let suspended = store.suspended_at(&step, start).is_some();
     let mut found = None;
+    let mut note = None;
     if !suspended {
-        let looked = lookup(&store, &step, &places, &identity, &cwd, &mut digests);
+        let looked = find(
+            ports,
+            current,
+            &store,
+            &step,
+            &Seen {
+                places: &places,
+                identity: &identity,
+                cwd: &cwd,
+            },
+            &mut digests,
+            start,
+        );
         digests.flush();
         match looked {
-            Ok(Some(hit)) => {
-                let audited = current
-                    .audit
-                    .picks(|| ports.audited(&hit.key, current.started_ms));
-                if current.mode == Mode::On && !audited {
-                    // A restore that fails before any message compiles as asked (B-57).
-                    return match restore(ports, current, &compile, &places, &cwd, &hit, start) {
-                        Ok(reused) => Decided::Reused(Box::new(reused)),
-                        Err(_) => Decided::Pass {
-                            why: "restore",
-                            probe: false,
-                        },
-                    };
+            Ok(Some(hit)) => match vet(
+                ports, current, &store, &step, &hit, &compile, &identity, start,
+            ) {
+                Vetted::Serve { first_download } => {
+                    let audited = current
+                        .audit
+                        .picks(|| ports.audited(&hit.key, current.started_ms, first_download));
+                    if current.mode == Mode::On && !audited {
+                        // A restore that fails before any message compiles as asked (B-57).
+                        return match restore(ports, current, &compile, &places, &cwd, &hit, start) {
+                            Ok(reused) => {
+                                if first_download {
+                                    first_reuse(&store, &hit.key);
+                                }
+                                Decided::Reused(Box::new(reused))
+                            }
+                            Err(_) => Decided::Pass {
+                                why: "restore",
+                                probe: false,
+                            },
+                        };
+                    }
+                    found = Some(Found {
+                        key: hit.key,
+                        object: hit.object.clone(),
+                        downloaded: hit.downloaded(),
+                    });
                 }
-                found = Some(Found {
-                    key: hit.key,
-                    object: hit.object,
-                });
-            }
+                Vetted::Refused(why) => note = why,
+            },
             Ok(None) => {}
             Err(_) => {
                 return Decided::Pass {
@@ -442,6 +486,7 @@ fn decide(
         found,
         suspended,
         digests,
+        note,
     }))
 }
 
@@ -459,82 +504,371 @@ fn added_flags(cc: &CcRun, places: &Places) -> Vec<String> {
         .collect()
 }
 
-/// A block a hint led to.
+/// A block a hint led to, before its checks (B-59).
 struct Hit {
     key: Digest,
     object: PathBuf,
+    /// The object's size and SHA-256, as the block's record says.
+    size: u64,
+    sha256: Digest,
     stdout: Option<PathBuf>,
     stderr: Option<PathBuf>,
     hint: key::Hint,
     compile_ms: u64,
+    /// Why the block stays on the machine it was built on, as its description says (B-56).
+    local: Vec<String>,
+    /// Where it came from (B-32).
+    origin: Option<Origin>,
+    /// The digest of its outputs, as the shared store's rows hold it (B-28).
+    outputs: hushrun_core::blocks::Hex32,
+    /// The relay downloaded it for this compile.
+    downloaded_now: bool,
 }
 
-/// Follows the first key's hints, the newest first (B-54): each read hashed as it is now, each
-/// place and probe checked. The first that names a stored block of this kind wins.
-fn lookup(
+impl Hit {
+    /// Whether the block was only downloaded: no compile here made it.
+    fn downloaded(&self) -> bool {
+        self.origin.as_ref().is_some_and(Origin::downloaded_only)
+    }
+}
+
+/// What a lookup reads its hints against: this call's places, compiler and folder.
+struct Seen<'a> {
+    places: &'a Places,
+    identity: &'a Identity,
+    cwd: &'a Path,
+}
+
+/// The most second keys one fetch names (the `rustc` wrapper's limit).
+const MOST_FETCH_KEYS: usize = 8;
+/// The most reads, places and probes a downloaded hint may make a lookup hash or look at: a hint
+/// is untrusted bytes, and what it names sets a lookup's cost. A unit of abseil's tests names
+/// about 1,100 reads and 13,000 places.
+const MOST_DOWNLOADED_READS: usize = 20_000;
+const MOST_DOWNLOADED_PLACES: usize = 500_000;
+const MOST_DOWNLOADED_PROBES: usize = 100_000;
+
+/// Whether a downloaded hint is within what a lookup follows.
+fn within_budget(hint: &key::Hint) -> bool {
+    let places: usize = hint
+        .places
+        .iter()
+        .map(|(dirs, names)| dirs.len().saturating_mul(names.len()))
+        .fold(0, usize::saturating_add);
+    hint.reads.len() <= MOST_DOWNLOADED_READS
+        && places <= MOST_DOWNLOADED_PLACES
+        && hint.probes.len() <= MOST_DOWNLOADED_PROBES
+}
+
+/// The block for this compile, by its first key's hints (B-54, B-60): this machine's own first,
+/// then those downloaded from the shared store, asked of the run's relay when the store has
+/// none; and when one leads to a second key the store lacks, a fetch of it. The relay looks a
+/// first key up only when the check's `cc/1` manifest names it, so a cold build asks the
+/// network nothing per compile.
+fn find(
+    ports: &mut dyn Ports,
+    current: &Current,
     store: &Store,
     step: &Digest,
-    places: &Places,
-    identity: &Identity,
-    cwd: &Path,
+    seen: &Seen<'_>,
     digests: &mut Digests,
+    at: SystemTime,
 ) -> Result<Option<Hit>, crate::store::StoreError> {
-    'hints: for bytes in store.hints(step) {
-        let Some(hint) = key::Hint::read(&bytes) else {
+    let mut candidates: Vec<(Digest, key::Hint)> = Vec::new();
+    let own = store.hints(step);
+    if let Some(hit) = follow(store, step, &own, false, seen, digests, &mut candidates)? {
+        return Ok(Some(hit));
+    }
+    // A first key kept on this machine asks the shared store nothing (B-34).
+    if !current.shares() || store.kept_local_at(step, at).is_some() {
+        return Ok(None);
+    }
+    let target = &seen.identity.target;
+    // Sharing is never above the local mode, and only `on` reuses a download (B-33); a target
+    // whose objects can't be checked is never served one (B-59).
+    let asks = current.mode == Mode::On
+        && current.share.relay().is_some()
+        && checks::knows(target)
+        && hushrun_core::blocks::is_platform(target);
+    let waits = Waits::of(&|name| ports.var(name));
+    let local_ms = store.step_cost(step);
+    let mut downloaded = store.shared_hints(step);
+    if downloaded.is_empty() && asks {
+        let asked = Request::CcHints {
+            step: *step,
+            platform: target.clone(),
+            local_ms,
+        };
+        let answer = relay_side::ask(
+            current,
+            &asked,
+            waits.within(local_ms),
+            &waits,
+            &mut |socket, request, wait| ports.relay(socket, request, wait),
+        );
+        if matches!(answer, Some(Answer::Hints { count }) if count > 0) {
+            downloaded = store.shared_hints(step);
+        }
+    }
+    if let Some(hit) = follow(
+        store,
+        step,
+        &downloaded,
+        true,
+        seen,
+        digests,
+        &mut candidates,
+    )? {
+        return Ok(Some(hit));
+    }
+    if !asks || candidates.is_empty() {
+        return Ok(None);
+    }
+    candidates.truncate(MOST_FETCH_KEYS);
+    let asked = Request::CcFetch {
+        step: *step,
+        keys: candidates.iter().map(|(key, _)| *key).collect(),
+        platform: target.clone(),
+        local_ms,
+    };
+    let answer = relay_side::ask(
+        current,
+        &asked,
+        waits.within(local_ms),
+        &waits,
+        &mut |socket, request, wait| ports.relay(socket, request, wait),
+    );
+    let Some(Answer::Ready { key }) = answer else {
+        return Ok(None);
+    };
+    let Some((_, hint)) = candidates.into_iter().find(|(k, _)| *k == key) else {
+        return Ok(None);
+    };
+    Ok(hit_of(store, key, &hint)?.map(|hit| Hit {
+        downloaded_now: true,
+        ..hit
+    }))
+}
+
+/// Follows `hints`, the newest first (B-54): each read hashed as it is now, each place and probe
+/// checked. The first that names a stored block of this kind wins; a second key the store lacks
+/// is kept in `candidates`, for the relay to fetch. `downloaded`: the hints came from the shared
+/// store, and one past [`within_budget`] is passed over.
+fn follow(
+    store: &Store,
+    step: &Digest,
+    hints: &[Vec<u8>],
+    downloaded: bool,
+    seen: &Seen<'_>,
+    digests: &mut Digests,
+    candidates: &mut Vec<(Digest, key::Hint)>,
+) -> Result<Option<Hit>, crate::store::StoreError> {
+    'hints: for bytes in hints {
+        let Some(hint) = key::Hint::read(bytes) else {
             continue;
         };
+        if downloaded && !within_budget(&hint) {
+            continue;
+        }
         let reads = hint.reads();
         let mut found = Vec::with_capacity(reads.len());
         for read in &reads {
-            let path = key::read_path(read, places, cwd);
-            let base = is_base(&path, places, identity);
+            let path = key::read_path(read, seen.places, seen.cwd);
+            let base = is_base(&path, seen.places, seen.identity);
             match digests.digest(&path, base) {
                 Ok(digest) => found.push(digest),
                 Err(_) => continue 'hints,
             }
         }
-        if !key::places_hold(&hint, places) {
+        if !key::places_hold(&hint, seen.places) {
             continue;
         }
         let block_key = key::block(step, &hint, &found);
-        for key in [block_key, key::tied(&block_key, places)] {
-            let Some(block) = store.block(&key)? else {
-                continue;
-            };
-            if block.description.get("kind").and_then(|k| k.as_str()) != Some(KIND) {
-                continue;
+        let keys = [block_key, key::tied(&block_key, seen.places)];
+        for key in keys {
+            if let Some(hit) = hit_of(store, key, &hint)? {
+                return Ok(Some(hit));
             }
-            // B-34's seam: a block with a record of where it came from is a download, which this
-            // phase never reuses (sharing is a later phase).
-            if store.origin(&key).is_some() {
-                continue;
+        }
+        for key in keys {
+            if !candidates.iter().any(|(k, _)| *k == key) {
+                candidates.push((key, hint.clone()));
             }
-            let file = |name: &str| {
-                block
-                    .files
-                    .iter()
-                    .find(|f| f.name == name)
-                    .map(|f| f.path.clone())
-            };
-            let Some(object) = file("object") else {
-                continue;
-            };
-            let compile_ms = block
-                .description
-                .get("compile_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            return Ok(Some(Hit {
-                key,
-                object,
-                stdout: file("stdout"),
-                stderr: file("stderr"),
-                hint,
-                compile_ms,
-            }));
         }
     }
     Ok(None)
+}
+
+/// The stored block under `key` as a hit for `hint`, when it is a C or C++ block with an object.
+fn hit_of(
+    store: &Store,
+    key: Digest,
+    hint: &key::Hint,
+) -> Result<Option<Hit>, crate::store::StoreError> {
+    let Some(block) = store.block(&key)? else {
+        return Ok(None);
+    };
+    if block.description.get("kind").and_then(|k| k.as_str()) != Some(KIND) {
+        return Ok(None);
+    }
+    let file = |name: &str| block.files.iter().find(|f| f.name == name);
+    let Some(object) = file("object") else {
+        return Ok(None);
+    };
+    // What the compile took: the launcher's own word, or the uploader's as a download's
+    // record keeps it.
+    let compile_ms = ["compile_ms", "rustc_ms"]
+        .iter()
+        .find_map(|name| block.description.get(*name).and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let local = block
+        .description
+        .get("local")
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        .unwrap_or_default();
+    let outputs = hushrun_core::blocks::outputs_digest(
+        &block
+            .files
+            .iter()
+            .map(|f| hushrun_core::blocks::OutputFile {
+                name: &f.name,
+                size: f.size,
+                sha256: hushrun_core::blocks::Hex32(*f.sha256.as_bytes()),
+            })
+            .collect::<Vec<_>>(),
+    );
+    Ok(Some(Hit {
+        key,
+        object: object.path.clone(),
+        size: object.size,
+        sha256: object.sha256,
+        stdout: file("stdout").map(|f| f.path.clone()),
+        stderr: file("stderr").map(|f| f.path.clone()),
+        hint: hint.clone(),
+        compile_ms,
+        local,
+        origin: store.origin(&key),
+        outputs,
+        downloaded_now: false,
+    }))
+}
+
+/// What the checks of a block found (B-59).
+enum Vetted {
+    /// It may be served; `first_download`: a downloaded block's first reuse here.
+    Serve { first_download: bool },
+    /// It was not: compile, with the reason for the log when there is one to say.
+    Refused(Option<String>),
+}
+
+/// The checks of a block before it is served (B-59): who vouches for it ([`Shared::may_reuse`]),
+/// its object's size and SHA-256 against its record, and for a block only downloaded, its bytes
+/// an object of the compile's kind. A block whose bytes fail is removed; one only downloaded is
+/// first reported `rejected` to the scope its record names, and its first key suspended for the
+/// store's kept days.
+///
+/// [`Shared::may_reuse`]: crate::session::Shared::may_reuse
+#[allow(clippy::too_many_arguments)]
+fn vet(
+    ports: &mut dyn Ports,
+    current: &Current,
+    store: &Store,
+    step: &Digest,
+    hit: &Hit,
+    compile: &Compile,
+    identity: &Identity,
+    at: SystemTime,
+) -> Vetted {
+    let downloaded = hit.downloaded();
+    let waits = Waits::of(&|name| ports.var(name));
+    let vouch_wait = waits.within(Some(hit.compile_ms));
+    let vouch = Request::CcVouch {
+        key: hit.key,
+        outputs: hit.outputs,
+    };
+    let reusable = current.share.may_reuse(
+        hit.origin.as_ref(),
+        epoch_ms(at),
+        vouch,
+        &mut |_, request| {
+            let wait = if matches!(request, Request::Sharing) {
+                waits.quick
+            } else {
+                vouch_wait
+            };
+            relay_side::ask(
+                current,
+                request,
+                wait,
+                &waits,
+                &mut |socket, request, wait| ports.relay(socket, request, wait),
+            )
+        },
+    );
+    // A download for a target whose objects can't be checked is never served, and is no
+    // sign of anything wrong.
+    if !reusable || (downloaded && !checks::knows(&identity.target)) {
+        return Vetted::Refused(None);
+    }
+    let bytes = match std::fs::read(&hit.object) {
+        Ok(bytes) => bytes,
+        Err(_) => return Vetted::Refused(None),
+    };
+    let wrong = if bytes.len() as u64 != hit.size || Digest::of(&bytes) != hit.sha256 {
+        Some("wrong-sha256")
+    } else if downloaded {
+        checks::object(&bytes, &identity.target, compile.lto && identity.clang)
+            .err()
+            .map(checks::Wrong::word)
+    } else {
+        None
+    };
+    let Some(wrong) = wrong else {
+        let first_download = downloaded && hit.origin.as_ref().is_some_and(|o| !o.reused);
+        return Vetted::Serve { first_download };
+    };
+    if downloaded {
+        // Reported before the block goes: the relay reads the scope from its record.
+        let _ = relay_side::ask(
+            current,
+            &Request::CcReport {
+                key: hit.key,
+                problem: Problem::Rejected,
+            },
+            waits.quick,
+            &waits,
+            &mut |socket, request, wait| ports.relay(socket, request, wait),
+        );
+        let until = at + Duration::from_secs(u64::from(current.keep_days) * 86_400);
+        let _ = store.suspend_until(
+            step,
+            "a downloaded C or C++ object failed its checks",
+            until,
+            at,
+        );
+    }
+    let _ = store.discard(&hit.key);
+    Vetted::Refused(Some(format!(
+        "a {} C or C++ object in the store was refused: {wrong}",
+        if downloaded { "downloaded" } else { "stored" }
+    )))
+}
+
+/// Notes a downloaded block's first reuse here in its record (B-34): the audit picks it one time
+/// in ten until then.
+fn first_reuse(store: &Store, key: &Digest) {
+    let _ = store.update_origin(key, |origin| {
+        let mut origin = origin?;
+        (!origin.reused).then(|| {
+            origin.reused = true;
+            origin
+        })
+    });
+}
+
+fn epoch_ms(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Whether a read lies under the SDK, the toolchain or a system folder: a file the run memo may
@@ -545,9 +879,10 @@ fn is_base(path: &Path, places: &Places, identity: &Identity) -> bool {
 }
 
 /// Puts a block in place (B-57): the object under a temporary name in its folder, checked
-/// against its digest, made writable, dated now and renamed into place; then the depfile from
-/// the hint with this checkout's paths, written whole. The messages are read now and written by
-/// the caller.
+/// against the digest its record holds, made writable, dated now and renamed into place; then
+/// the depfile from the hint with this checkout's paths, written whole: the files this machine
+/// hashed for the key, never anything of a download's. The messages are read now and written by
+/// the caller; a downloaded block's keep only their colour (B-59).
 fn restore(
     ports: &mut dyn Ports,
     current: &Current,
@@ -558,7 +893,7 @@ fn restore(
     start: SystemTime,
 ) -> io::Result<Reused> {
     let output = cwd.join(&compile.output);
-    let expected = crate::regular::hash_file(&hit.object)?.0;
+    let expected = hit.sha256;
     let pid = ports.pid();
     put_whole(&output, pid, start, |temp| {
         std::fs::copy(&hit.object, temp)?;
@@ -584,9 +919,17 @@ fn restore(
             std::fs::write(temp, text.as_bytes())
         })?;
     }
+    let downloaded = hit.downloaded();
     let read = |p: &Option<PathBuf>| -> io::Result<Vec<u8>> {
         match p {
-            Some(p) => Ok(places.show_bytes(&std::fs::read(p)?)),
+            Some(p) => {
+                let shown = places.show_bytes(&std::fs::read(p)?);
+                Ok(if downloaded {
+                    checks::sgr_only(&shown)
+                } else {
+                    shown
+                })
+            }
             None => Ok(Vec::new()),
         }
     };
@@ -604,11 +947,14 @@ fn restore(
         entry: Entry {
             saved_ms: hit.compile_ms.saturating_sub(took),
             found: true,
+            downloaded: hit.downloaded_now,
             step: None,
             key: Some(hit.key),
             cc: Some(CcEntry {
                 source: places.hide(&compile.source),
                 took_ms: took,
+                local: hit.local.clone(),
+                shared: current.share.relay().is_some(),
                 ..CcEntry::default()
             }),
             ..entry(Outcome::Reused)
@@ -834,6 +1180,7 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
     };
     cc_entry.source = source;
     cc_entry.platform = plan.identity.target.clone();
+    cc_entry.shared = current.share.relay().is_some();
     cc_entry.took_ms = ports
         .now()
         .duration_since(start)
@@ -845,6 +1192,7 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
         step: Some(plan.step),
         key,
         stored_bytes,
+        note: plan.note.take(),
         cc: Some(cc_entry),
         ..entry(outcome)
     });
@@ -890,7 +1238,8 @@ fn store_block(
     compile_ms: u64,
 ) -> StoredResult {
     let store = Store::new(&current.store);
-    if plan.suspended {
+    // Suspended before the compile, or by a refused download's checks since (B-59).
+    if plan.suspended || store.suspended_at(&plan.step, ports.now()).is_some() {
         return not_stored(NotStored::Suspended, "suspended");
     }
     let Some(spellings) = dep_text.and_then(depfile::reads) else {
@@ -1003,20 +1352,37 @@ fn store_block(
     if !plan.places.under_root(&cwd.to_string_lossy()) {
         local.push("cwd-outside-roots".to_string());
     }
+    // B-59: what leaves the machine is an object of the compile's kind, as another machine
+    // checks it; anything else (bitcode without `-flto`, a target this version can't check)
+    // is reused here only.
+    let target = &plan.identity.target;
+    if checks::object(&object, target, plan.compile.lto && plan.identity.clang).is_err() {
+        local.push("not-an-object".to_string());
+    }
     let key = if tied {
         key::tied(&block_key, &plan.places)
     } else {
         block_key
     };
     let now = ports.now();
+    let waits = Waits::of(&|name| ports.var(name));
     // An audit or observe: the fresh object against the block found (B-59).
+    let mut replace_downloaded = false;
+    let mut differed = false;
     if let Some(found) = &plan.found {
         let same = found.key == key && std::fs::read(&found.object).is_ok_and(|b| b == object);
-        if !same {
+        if !same && !found.downloaded {
             let _ = store.suspend(&plan.step, "a fresh compile differed from the block", now);
             let mut result = not_stored(NotStored::Differed, "differed");
             result.4 = true;
             return result;
+        }
+        if !same {
+            // A downloaded block: its key is suspended for the kept days and the scope it came
+            // from told; this compile takes its place (B-32).
+            differs(ports, current, &store, &plan.step, &found.key, now, &waits);
+            replace_downloaded = found.key == key;
+            differed = true;
         }
     }
     if let Some(min) = u64::from(current.min_free_gb).checked_mul(1 << 30)
@@ -1059,29 +1425,161 @@ fn store_block(
         repository: current.repository.clone(),
     };
     let value = serde_json::to_value(&description).unwrap_or_default();
-    let published = store.publish(&key, &value, &files, now);
+    // B-32: built here, by this run, and by whom when the run shares.
+    let relay = current.share.relay();
+    let run = relay
+        .map(|share| share.run.clone())
+        .or_else(|| {
+            current
+                .folder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    let origin = Origin::built_here(&run, relay.map(|share| share.by.clone()));
+    let only_downloaded = |there: Option<&Origin>, _: Option<&crate::store::Block>| {
+        there.is_some_and(Origin::downloaded_only)
+    };
+    let published = if replace_downloaded {
+        store
+            .replace(&key, &value, &files, &origin, now, only_downloaded)
+            .map(|replaced| match replaced {
+                crate::store::Replaced::Stored => Published::Stored,
+                crate::store::Replaced::Kept => Published::AlreadyThere,
+            })
+    } else {
+        store.publish_with_origin(&key, &value, &files, &origin, now)
+    };
+    let size = object.len() as u64;
+    let stored = match published {
+        Ok(Published::Stored) => size,
+        Ok(Published::AlreadyThere) => {
+            if already_there(
+                ports, current, &store, &plan.step, &key, &object, &value, &files, &origin, now,
+                &waits,
+            ) {
+                differed = true;
+            }
+            0
+        }
+        Err(_) => {
+            for temp in &temps {
+                let _ = std::fs::remove_file(temp);
+            }
+            return not_stored(NotStored::StoreRefused, "store");
+        }
+    };
     for temp in &temps {
         let _ = std::fs::remove_file(temp);
     }
-    let size = object.len() as u64;
-    let outcome = match published {
-        Ok(Published::Stored) => (Outcome::BuiltAndStored, size),
-        Ok(Published::AlreadyThere) => (Outcome::BuiltAndStored, 0),
-        Err(_) => return not_stored(NotStored::StoreRefused, "store"),
-    };
     let _ = store.add_hint(&plan.step, &hint.bytes(), now);
+    let _ = store.set_step_cost(&plan.step, compile_ms, now);
     plan.digests.flush();
     key_log(current, &plan.step, None, Some(&key), &plan.compile.source);
+    // B-29, B-60: the relay decides whether it goes up, from its record and the policy; a block
+    // tied to the checkout's folder alone goes up only from a CI job (B-24).
+    let portable = local.is_empty();
+    let bound = local == ["tied"];
+    if !differed && (portable || bound) {
+        relay_side::tell(
+            current,
+            &Request::CcBuilt {
+                key,
+                step: plan.step,
+                portable,
+                bound,
+                cost_ms: compile_ms,
+            },
+            &waits,
+            &mut |socket, request, wait| ports.tell(socket, request, wait),
+        );
+    }
     (
-        outcome.0,
+        Outcome::BuiltAndStored,
         CcEntry {
             local,
             ..CcEntry::default()
         },
         Some(key),
-        outcome.1,
-        false,
+        stored,
+        differed,
     )
+}
+
+/// A block of first key `step` disagrees with a compile here (B-59): the key is suspended for
+/// the store's kept days, and a block only downloaded (`key`) is reported to the scope it came
+/// from.
+#[allow(clippy::too_many_arguments)]
+fn differs(
+    ports: &mut dyn Ports,
+    current: &Current,
+    store: &Store,
+    step: &Digest,
+    key: &Digest,
+    now: SystemTime,
+    waits: &Waits,
+) {
+    let until = now + Duration::from_secs(u64::from(current.keep_days) * 86_400);
+    let _ = store.suspend_until(step, "a C or C++ compile here made other bytes", until, now);
+    if store.origin(key).is_some_and(|o| o.downloaded_only()) {
+        let _ = relay_side::ask(
+            current,
+            &Request::CcReport {
+                key: *key,
+                problem: Problem::Differs,
+            },
+            waits.quick,
+            waits,
+            &mut |socket, request, wait| ports.relay(socket, request, wait),
+        );
+    }
+}
+
+/// B-32: a compile whose own publish found a block already there. Built here, nothing changes
+/// (a reuse may be copying from it). Only downloaded, the compile's object takes its place where
+/// the two differ, which suspends the key and is reported; where they are the same, the block is
+/// from then on also built here. Whether they differed.
+#[allow(clippy::too_many_arguments)]
+fn already_there(
+    ports: &mut dyn Ports,
+    current: &Current,
+    store: &Store,
+    step: &Digest,
+    key: &Digest,
+    object: &[u8],
+    description: &serde_json::Value,
+    files: &[NewFile],
+    origin: &Origin,
+    now: SystemTime,
+    waits: &Waits,
+) -> bool {
+    if !store.origin(key).is_some_and(|o| o.downloaded_only()) {
+        return false;
+    }
+    let Ok(Some(block)) = store.block(key) else {
+        return false;
+    };
+    let same = block
+        .files
+        .iter()
+        .find(|f| f.name == "object")
+        .is_some_and(|f| f.size == object.len() as u64 && f.sha256 == Digest::of(object));
+    if !same {
+        differs(ports, current, store, step, key, now, waits);
+        let _ = store.replace(key, description, files, origin, now, |there, _| {
+            there.is_some_and(Origin::downloaded_only)
+        });
+        return true;
+    }
+    let built = origin.built.clone();
+    let _ = store.update_origin(key, |o| {
+        let mut o = o?;
+        o.built.is_none().then(|| {
+            o.built = built;
+            o
+        })
+    });
+    false
 }
 
 /// Appends the compile's keys to the run's key log, when one was asked for.
