@@ -1077,6 +1077,10 @@ fn put_whole(
 /// The process's umask. Reading it sets it, so it is set back at once; the launcher has no other
 /// thread then.
 #[cfg(unix)]
+#[allow(
+    clippy::useless_conversion,
+    reason = "a mode is a u16 on macOS and a u32 on Linux"
+)]
 fn umask() -> u32 {
     use rustix::fs::Mode;
     let old = rustix::process::umask(Mode::from_raw_mode(0o022));
