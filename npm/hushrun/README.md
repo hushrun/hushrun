@@ -40,6 +40,13 @@ hushrun: test skipped: this exact code passed just now (saves 41s)
 
 A coding agent runs `npx hushrun init --yes`, which applies the changes without asking.
 
+## Compiled code
+
+`npx hushrun build on` lets the builds `hushrun run` runs reuse what this machine compiled before
+from the same inputs, in any worktree or clone: Rust crates, and the C and C++ objects of a CMake
+build. It is off until you turn it on, and `npx hushrun build` shows the mode, the store and its
+size.
+
 ## How the package works
 
 `hushrun` is a small Node script that runs the hushrun binary from the package for your

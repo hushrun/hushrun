@@ -779,6 +779,44 @@ hushrun says why in one line, and runs the check anyway:
 | ``not recorded: set `HUSHRUN_MACHINE_KEY` to the key `hushrun token create --agent` printed`` | The sandbox has no key, or one that isn't its token's: set `HUSHRUN_MACHINE_KEY` to the key shown with the token, or make a new token if nobody kept it |
 | `HUSHRUN_TOKEN isn't sent to …` | The backend isn't on hushrun's host: use `HUSHRUN_AGENT`, or set `HUSHRUN_BACKEND` or `HUSHRUN_HOST` (above) |
 
+## Compiled code
+
+A check that runs can still skip compiling what this machine already compiled from the same
+inputs, in any worktree or clone: `hushrun build on` turns that on for the builds `hushrun run`
+runs. Rust crates go through cargo's `RUSTC_WRAPPER`, and the C and C++ objects of a CMake build
+through CMake's compiler launcher. Go's own build cache already does this on one machine, so hushrun
+adds Go only where an org shares compiled code through its backend. On your machine it is off until
+you turn it on, once, for every repository; `hushrun build` shows the mode, the store and its size,
+and `hushrun build observe` compiles everything as usual and says what would have been reused.
+
+```text
+$ hushrun build on
+$ hushrun run build -- cargo build      # in a second worktree
+hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
+```
+
+- **Only inside `hushrun run`.** A plain `cargo build` or `cmake --build` neither reads nor fills
+  the store, and turning reuse on doesn't make cargo rebuild what it built already. A
+  `RUSTC_WRAPPER` you set, such as sccache's, stays, and then no Rust crate is reused. A CMake build
+  folder gets the launcher when it is configured inside `hushrun run`.
+- **When it saves time.** Each new worktree or clone, with its own target folder, reuses what the
+  others compiled, and so does a build after `cargo clean`, or of a file whose date changed but
+  whose bytes didn't, which cargo would compile again. A program, a binary or a test binary, is
+  reused only in the target folder that built it.
+- **When it saves little.** One checkout whose target folder stays already compiles only what
+  changed. Worktrees that share one `CARGO_TARGET_DIR` already reuse most crates through cargo
+  itself, but cargo judges freshness by file dates, so one worktree can be handed another's build.
+- **Disk.** The store, `build` under hushrun's cache folder, is a second place compiled code
+  lives. Files go in and out by cloning where the file system can clone, as APFS does, and then the
+  store and the target folders share their bytes: on a Mac, a second worktree that reused 32 of 35
+  crates took 10 MB more disk, where plain cargo took 147 MB. Where files are copied instead, the
+  store saves disk only when you delete target folders you would otherwise keep. `du` and
+  `hushrun build status` count a cloned file in full in each place. A block not used for 15 days is
+  deleted, and nothing is stored while the disk has less than 10 GB free.
+
+`hushrun guide` says the rest, such as how to read each line, and the rules are
+[spec §10](../spec/10-build-blocks.md).
+
 ## When hushrun runs anyway
 
 Whenever hushrun can't tell whether this code passed, it runs the command and says why:

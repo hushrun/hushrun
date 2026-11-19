@@ -50,6 +50,14 @@ At a terminal, and to a coding agent, hushrun asks GitHub at most once a day whe
 release is out, and says so in one line: an agent is told to tell you. It never asks in CI. Set
 `HUSHRUN_NO_UPDATE_CHECK=1` to turn it off.
 
+## Compiled code
+
+`hushrun build on` lets the builds `hushrun run` runs reuse what this machine compiled before
+from the same inputs, in any worktree or clone: Rust crates, and the C and C++ objects of a CMake
+build. It is off until you turn it on, and `hushrun build` shows the mode, the store and its size.
+[Skipping checks this code already passed](docs/guides/run.md#compiled-code) says when it saves
+time, and what it does to disk space.
+
 ## Coding agents
 
 `hushrun init` writes hushrun's skill into the repository, where Claude Code, Codex, Cursor,
