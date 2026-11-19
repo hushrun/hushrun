@@ -198,6 +198,114 @@ fn guide_prints_the_rules_of_this_hushrun() {
     );
 }
 
+/// The commands `hushrun guide` leaves out on purpose, each with why. Every other command
+/// `hushrun --help` lists is named in the guide, as `hushrun <command>`: a command added to the CLI
+/// goes into what agents read, or here, with its reason.
+const LEFT_OUT_OF_THE_GUIDE: &[(&str, &str)] = &[
+    (
+        "digest",
+        "deploys: CI prints a scope's digest for its pipeline",
+    ),
+    ("plan", "deploys: CI decides what a deploy does"),
+    (
+        "guard",
+        "deploys: CI refuses to deploy a revision that isn't its branch's head",
+    ),
+    (
+        "status",
+        "deploys: the evidence hushrun.yaml's required checks have, for CI's plan",
+    ),
+    ("attest", "deploys: CI records what other tools produced"),
+    ("mark", "deploys: CI records a deploy's lifecycle"),
+    (
+        "verify",
+        "deploys: checks the signatures of recorded events",
+    ),
+    ("keys", "deploys: signing keys are a person's to make"),
+    (
+        "policy",
+        "deploys: whose evidence counts for hushrun.yaml's checks",
+    ),
+    (
+        "repository",
+        "the backend's event log, which a person administers",
+    ),
+    ("sigstore", "deploys: the trust root of keyless signatures"),
+    ("artifact", "deploys: images CI promotes by digest"),
+    (
+        "adopt",
+        "deploys: writes deploy workflows; `init` is what sets up `hushrun run`",
+    ),
+];
+
+/// The commands `hushrun --help` lists, but `help`.
+fn commands(help: &str) -> Vec<String> {
+    let listed = help
+        .split("\nCommands:\n")
+        .nth(1)
+        .expect("`hushrun --help` lists its commands");
+    listed
+        .lines()
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `text` names `hushrun <command>`, as a whole word.
+fn names(text: &str, command: &str) -> bool {
+    let named = format!("hushrun {command}");
+    text.match_indices(&named).any(|(at, _)| {
+        !text[at + named.len()..]
+            .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    })
+}
+
+// covers: C-28
+#[test]
+fn guide_names_every_command_but_those_left_out_with_a_reason() {
+    // An agent that followed the skill and the guide told a person that hushrun saves no build
+    // time or disk: `hushrun build` was in `--help` and in neither. This keeps the two together.
+    let place = Place::new();
+    let help = place.in_repo(&["--help"]);
+    assert_eq!(help.code, 0, "{}", help.stderr);
+    let commands = commands(&help.stdout);
+    assert!(
+        ["run", "ready", "build", "guide"]
+            .iter()
+            .all(|c| commands.iter().any(|listed| listed == c)),
+        "{commands:?}"
+    );
+    let guide = place.guide();
+    let text = guide["guide"].as_str().unwrap();
+    for (left_out, why) in LEFT_OUT_OF_THE_GUIDE {
+        assert!(
+            commands.iter().any(|c| c == left_out),
+            "`hushrun {left_out}` is no longer a command: take it out of LEFT_OUT_OF_THE_GUIDE"
+        );
+        assert!(
+            !names(text, left_out),
+            "the guide names `hushrun {left_out}`: take it out of LEFT_OUT_OF_THE_GUIDE ({why})"
+        );
+    }
+    let missing: Vec<&String> = commands
+        .iter()
+        .filter(|c| {
+            !LEFT_OUT_OF_THE_GUIDE
+                .iter()
+                .any(|(left_out, _)| left_out == c)
+        })
+        .filter(|c| !names(text, c))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "recipes/agents/GUIDE.md names no `hushrun <command>` for {missing:?}: say what each does there, or add it to LEFT_OUT_OF_THE_GUIDE with a reason"
+    );
+}
+
 // covers: C-28
 #[test]
 fn guide_tells_of_a_newer_release_it_already_learned_of() {

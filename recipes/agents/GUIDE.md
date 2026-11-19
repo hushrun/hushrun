@@ -83,6 +83,99 @@ check: `npx hushrun run --force test -- vitest run`.
 `bun test` is Bun's own runner. It never reads package.json, so it never goes through hushrun and
 can't skip. Where the `test` script wraps it, run `bun run test`, the way `hushrun ready` names it.
 
+## Compiled code: `hushrun build`
+
+A check that runs can still skip compiling what this machine already compiled from the same
+inputs, in any worktree or clone: Rust crates, through cargo's `RUSTC_WRAPPER`, and the C and C++
+objects of a CMake build, through CMake's compiler launcher. A compile counts as the same when the
+compiler, its flags, the variables it reads and every file it read are the same; the folder, the
+branch and the commit don't count. Go needs none of this on one machine, since Go's own build cache already reuses its
+packages: hushrun adds Go only where the org shares compiled code (below).
+
+**It is the person's.** On a person's machine reuse is off until they turn it on, and the mode
+lives in their own settings file, `build.json` beside hushrun's credentials, for every repository
+on the machine. Don't run `hushrun build on`, `observe`, `off`, `clean` or `share`, or set
+`HUSHRUN_BUILD`, unless the person asks. In CI and in an agent's sandbox nobody chooses: reuse is
+on there when the org shares compiled code through its backend, and in a sandbox `hushrun build
+off` or `HUSHRUN_BUILD=off` wins. The last section of this guide says the mode here.
+
+- `hushrun build status`, or `hushrun build` alone: the mode, the settings file, the store, how
+  long blocks stay and how much the store holds. It changes nothing.
+- `hushrun build on`: a compile whose inputs were compiled before is put in place from the store
+  instead of compiled.
+- `hushrun build observe`: everything compiles as usual, what compiles is kept, and each run says
+  what would have been reused.
+- `hushrun build off`: nothing is reused or kept. The store stays as it is.
+- `hushrun build clean`: deletes everything the store holds.
+- `HUSHRUN_BUILD=on`, `observe` or `off` sets the mode for one shell or command, and changes no
+  file.
+
+**Only commands run through `hushrun run`.** `hushrun run NAME -- COMMAND` and the checks of
+`hushrun.yaml` that run here use the store. A plain `cargo build` or `cmake --build` outside
+`hushrun run` neither reads nor fills it, so run builds the way the repository's scripts do. Turning
+reuse on doesn't make cargo rebuild what it built already. Nothing is reused on Windows, or for a
+check `hushrun run --isolated` runs in a container.
+
+- **Rust.** A library crate is reused in any worktree. A program, a binary or a test binary, is
+  reused only in the target folder that built it, unless the run shares. A `RUSTC_WRAPPER` that is
+  set already, as sccache sets it, is left as it is, and then no Rust crate is reused.
+- **C and C++.** CMake caches the launcher when it configures a build folder, so a folder
+  configured outside `hushrun run` gets none, and the run says `build: C and C++ objects aren't
+  reused in <folder>: it was configured before hushrun's launcher; configure it again inside
+  hushrun run`. A launcher already in a folder's cache, such as ccache, is CMake's to use. Inside a
+  run, compiles get `-ffile-prefix-map=<checkout>=.`, so `__FILE__` and debug info name files from
+  the repository's root, and an object is the same in every worktree. `build: cc: maps: off` in
+  `hushrun.yaml` keeps absolute paths; then an object that holds its path is reused only in its own
+  checkout.
+
+**Where it is kept, and for how long.** The store is `build` under hushrun's cache folder, one per
+machine for every repository; `HUSHRUN_BUILD_DIR` moves it. A block, one compiled crate or object,
+is deleted 15 days after its last use, by a sweep after a run, at most once a day
+(`HUSHRUN_BUILD_KEEP_DAYS` changes the days). There is no size limit, but nothing is stored while
+the store's disk has less than 10 GB free.
+
+**Disk.** The store is a second place compiled code lives. Its files go in and out by cloning
+where the file system can clone, as APFS on macOS does, and by copying where it can't. Where they
+are cloned, the store and the target folders share their bytes, so a worktree that reuses its
+crates takes little more disk than what it compiled itself. Where they are copied, the store is a
+second copy: it saves disk only when target folders that would otherwise stay are deleted, since
+they then rebuild quickly. `du`, and the size `hushrun build status` shows, count a cloned file in
+full in each place, so they overstate what the disk holds.
+
+**Reading its lines.** After COMMAND, the run says what its compiles came to. None of these lines
+fails a check: report the check's own result.
+
+- `hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s`: reuse is on.
+- `hushrun: build: 35 crates built, none reused`: nothing in the store matched, as on a first
+  build.
+- `hushrun: build: observing: 1 of 2 crates would have been reused`: reuse is in observe, and
+  everything compiled.
+- `hushrun: build: c/c++: 2 objects: 2 reused, 0 built`, and in observe `hushrun: build: c/c++:
+  observing: 2 of 2 objects would have been reused, 2 compared with their blocks, 0 differed`.
+- `hushrun: build: go: 29 packages: 27 reused (27 from the shared store), 2 built`: where the org
+  shares, `(… from the shared store)` counts what other machines compiled.
+- `hushrun: build: nothing was stored because the disk has less than 10 GB free`: tell the person.
+- `build: C and C++ objects aren't reused in <folder>: …`: configure that folder again inside
+  `hushrun run`, the way the repository's script does, or tell the person.
+- `build reuse is off for this run: …`, `build: sharing is off for this run: …`: the build ran as
+  usual. Tell the person what the line says.
+
+**Across machines.** Where the org shares compiled code through its backend, `hushrun run NAME --
+COMMAND` also reuses what the org's other machines compiled, Go packages among them, through Go's
+`GOCACHEPROG`. `hushrun build share on|observe|off` sets how much this machine takes part, and is
+the person's too. `hushrun build fetch` saves, in a sandbox's setup, what its later phases reuse
+without the network.
+
+## Test files one by one
+
+With `tests: reuse` for a check in `hushrun.yaml`, a run of `hushrun run NAME -- COMMAND` that
+can't skip the whole check leaves out the test files that already passed on the files they read.
+`tests: observe` runs every test file and says what reuse would have done. `hushrun why CHECK
+TEST_FILE` says whether a test file would run or be reused, and why, and changes nothing. When a
+test file fails twice though it passed on the same files it read, reuse of that check's test files
+is suspended, and only a person turns it on again, with `hushrun tests resume CHECK`, which refuses
+a coding agent. Tell the person what the line said.
+
 ## Setting hushrun up
 
 `npx hushrun init --yes` applies init's changes without asking. Without `--yes`, and without a
@@ -100,6 +193,16 @@ init lists them, changes nothing and exits with status 2. Ask which one, then ru
 In a sandbox with no browser, a person gives you one variable, `HUSHRUN_AGENT`. Some sandboxes have
 `HUSHRUN_TOKEN` and `HUSHRUN_MACHINE_KEY` instead. Without any, checks still run but share nothing:
 say so instead of trying to sign in, which `HUSHRUN_AGENT` refuses anyway.
+
+## Other commands
+
+- `hushrun whoami` says where `hushrun run` records results, with which credential, and who the
+  backend says you are. `hushrun doctor` checks the setup and says what to fix. Both change
+  nothing, and are worth running when results aren't shared and nobody knows why.
+- `hushrun login`, `hushrun logout` and `hushrun token` sign in, sign out and make agent tokens:
+  they are the person's. Don't run them unless the person asks.
+- The commands for deploys, such as `plan`, `attest` and `artifact`, are CI's: `hushrun --help`
+  lists them.
 
 ## Keeping hushrun and its skill current
 
