@@ -437,6 +437,12 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
     // B-48: a GitLab job is CI here too, whatever else says so.
     let in_ci = crate::gitlab_job::in_ci(&env);
     let wrapper = std::env::var_os(session::RUSTC_WRAPPER).filter(|v| !v.is_empty());
+    // B-50: a C or C++ launcher of the person's, which `hushrun run` leaves as it is.
+    let launchers: Vec<&str> = hushrun_build::cc::CMAKE_LAUNCHERS
+        .iter()
+        .copied()
+        .filter(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+        .collect();
     // Settings `hushrun run` can't read turn reuse off there: a configuration error.
     let exit = if saved.is_err() {
         Exit::Usage
@@ -465,6 +471,8 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             }),
             "in_ci": in_ci,
             "rustc_wrapper_set": wrapper.is_some(),
+            "cmake_launchers_set": launchers,
+            "cc_maps": effective.as_ref().map(|s| s.cc_maps),
             "held": held.as_ref().map(held_json),
         }))?;
         return Ok(exit);
@@ -520,6 +528,25 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
                 "RUSTC_WRAPPER is {} in this shell, so `hushrun run` leaves it and reuses nothing",
                 value.to_string_lossy()
             ),
+        );
+    }
+    if !launchers.is_empty() {
+        line(
+            "launcher",
+            format!(
+                "{} {} set in this shell, so `hushrun run` leaves {} and reuses no C or C++ object of a build folder CMake configures from {}",
+                launchers.join(" and "),
+                if launchers.len() == 1 { "is" } else { "are" },
+                if launchers.len() == 1 { "it" } else { "them" },
+                if launchers.len() == 1 { "it" } else { "them" },
+            ),
+        );
+    }
+    if effective.as_ref().is_some_and(|s| !s.cc_maps) {
+        line(
+            "c/c++",
+            "objects keep absolute paths (cc_maps: false), so each is reused only in its own checkout"
+                .to_string(),
         );
     }
     line("settings", place.settings.display().to_string());
