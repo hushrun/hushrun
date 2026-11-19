@@ -2229,6 +2229,114 @@ mod tests {
         assert!(live.exists());
     }
 
+    // covers: B-61
+    #[test]
+    fn c_objects_are_counted_apart_from_crates_and_said_in_their_own_lines() {
+        use crate::cc::launcher::CcEntry;
+        let cc = |outcome: Outcome, why: Option<&str>| Entry {
+            cc: Some(CcEntry {
+                why: why.map(str::to_string),
+                ..CcEntry::default()
+            }),
+            ..entry(outcome)
+        };
+        let probe = Entry {
+            cc: Some(CcEntry {
+                why: Some("cmake-probe".into()),
+                probe: true,
+                ..CcEntry::default()
+            }),
+            ..entry(Outcome::PassedThrough(PassedThrough::UnknownArgument))
+        };
+        let entries = vec![
+            entry(Outcome::BuiltAndStored),
+            Entry {
+                saved_ms: 2_500,
+                ..cc(Outcome::Reused, None)
+            },
+            Entry {
+                saved_ms: 1_000,
+                ..cc(Outcome::Reused, None)
+            },
+            cc(Outcome::BuiltAndStored, None),
+            cc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("pch"),
+            ),
+            cc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("pch"),
+            ),
+            cc(
+                Outcome::BuiltNotStored(NotStored::Unkeyable),
+                Some("time-macro"),
+            ),
+            cc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("modules"),
+            ),
+            cc(
+                Outcome::BuiltNotStored(NotStored::RustcFailed),
+                Some("compile-failed"),
+            ),
+            Entry {
+                found: true,
+                differed: true,
+                ..cc(
+                    Outcome::BuiltNotStored(NotStored::Differed),
+                    Some("differed"),
+                )
+            },
+            probe,
+        ];
+        let summary = Summary::of(Mode::On, 10, &entries);
+        assert_eq!(summary.counts().compiles, 1, "one crate, the objects apart");
+        assert_eq!(
+            summary.counts().cc.objects,
+            9,
+            "CMake's configure check counts nowhere"
+        );
+        assert_eq!(
+            summary.lines(),
+            [
+                "build: 1 crate built, none reused",
+                "build: c/c++: 9 objects: 2 reused, 7 built, saving about 3s, 1 compared with their blocks, 1 differed",
+                "build: c/c++: 6 objects compiled as asked or not stored (2 pch, 1 time-macro, 1 modules, …)",
+            ]
+        );
+        let observed = Summary::of(Mode::Observe, 10, &entries[3..4]);
+        assert_eq!(
+            observed.lines(),
+            ["build: c/c++: observing: 0 of 1 object would have been reused"]
+        );
+        assert!(
+            Summary::of(Mode::On, 10, &entries[..1])
+                .counts()
+                .cc
+                .lines(Mode::On)
+                .is_empty()
+        );
+    }
+
+    // covers: B-60
+    #[test]
+    fn a_c_object_s_line_is_of_kind_cc_and_its_blocks_name_it() {
+        let line = Entry {
+            cc: Some(crate::cc::launcher::CcEntry::default()),
+            ..entry(Outcome::Reused)
+        };
+        assert_eq!(line.kind(), crate::model::Kind::Cc);
+        assert_eq!(crate::model::Kind::Cc.word(), "cc/1");
+        assert_eq!(
+            crate::model::Kind::of_description(&serde_json::json!({"kind": "cc/1"})),
+            crate::model::Kind::Cc
+        );
+        // A line read back keeps its kind; one from before the launcher has none.
+        let back: Entry = serde_json::from_slice(&serde_json::to_vec(&line).unwrap()).unwrap();
+        assert_eq!(back.kind(), crate::model::Kind::Cc);
+        assert_eq!(entry(Outcome::Reused).kind(), crate::model::Kind::Rustc);
+    }
+
     // covers: B-46
     #[test]
     fn go_archives_are_counted_apart_from_crates_and_said_in_their_own_lines() {

@@ -833,3 +833,180 @@ fn a_launcher_the_person_set_wins_in_the_variables_and_in_the_cache() {
     assert!(run.entries().is_empty(), "{:?}", run.entries());
     assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 3);
 }
+
+/// The one block's object in a store.
+fn only_object(store: &Path) -> PathBuf {
+    let mut found = Vec::new();
+    for shard in fs::read_dir(store.join("blocks")).unwrap().flatten() {
+        for block in fs::read_dir(shard.path()).unwrap().flatten() {
+            found.push(block.path().join("files").join("object"));
+        }
+    }
+    assert_eq!(found.len(), 1, "{found:?}");
+    found.pop().unwrap()
+}
+
+// covers: B-59
+#[test]
+fn an_audited_reuse_compiles_compares_and_a_difference_suspends_the_key() {
+    let mut w = world_in(Mode::On, "every");
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "int f(int x) { return x * 3; }\n");
+    let args = ["-c", "src/a.c", "-o", "a.o", "-MD", "-MF", "a.o.d"];
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &args);
+    assert_eq!(run.last().outcome, Outcome::BuiltAndStored);
+    let compiled = fs::read(root.join("a.o")).unwrap();
+    // Audited: compiled anyway and compared, the same bytes.
+    run.launch(&root, "cc", &args);
+    let last = run.last();
+    assert!(last.found && !last.differed, "{last:?}");
+    assert_ne!(last.outcome, Outcome::Reused);
+    // A block whose object was altered, its size kept: nothing in the build would notice.
+    let object = only_object(&w.store());
+    fs::set_permissions(&object, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    let mut forged = fs::read(&object).unwrap();
+    let at = forged.len() / 2;
+    forged[at] ^= 0xff;
+    fs::write(&object, &forged).unwrap();
+    run.launch(&root, "cc", &args);
+    let last = run.last();
+    assert!(last.found && last.differed, "{last:?}");
+    assert_eq!(
+        fs::read(root.join("a.o")).unwrap(),
+        compiled,
+        "the compile is served"
+    );
+    // The key is suspended: with the audit off, it compiles.
+    w.audit = "none";
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &args);
+    assert_ne!(run.last().outcome, Outcome::Reused, "{:?}", run.last());
+    assert_eq!(fs::read(root.join("a.o")).unwrap(), compiled);
+}
+
+// covers: B-59
+#[test]
+fn observing_compiles_everything_and_says_what_would_have_been_reused() {
+    let w = world_in(Mode::Observe, "none");
+    let root = w.path("ck");
+    write(&root.join("src/a.c"), "int f(int x) { return x * 3; }\n");
+    let args = ["-c", "src/a.c", "-o", "a.o", "-MD", "-MF", "a.o.d"];
+    let run = w.run(&root, true);
+    run.launch(&root, "cc", &args);
+    assert!(!run.last().found);
+    run.launch(&root, "cc", &args);
+    let last = run.last();
+    assert!(last.found && !last.differed, "{last:?}");
+    assert_ne!(last.outcome, Outcome::Reused);
+    // What the launcher stores is a C block.
+    let block = only_object(&w.store());
+    let record: serde_json::Value = serde_json::from_slice(
+        &fs::read(block.parent().unwrap().parent().unwrap().join("block.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["description"]["kind"], "cc/1");
+}
+
+/// Asks a program what the identity asks, as the launcher does.
+fn ask(program: &Path, args: &[String]) -> Option<hushrun_build::cc::compiler::Said> {
+    let out = Command::new(program)
+        .args(args)
+        .env("LC_ALL", "C")
+        .current_dir("/")
+        .output()
+        .ok()?;
+    Some(hushrun_build::cc::compiler::Said {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
+fn identity_of(compiler: &str, store: &Path) -> hushrun_build::cc::compiler::Identity {
+    let path = std::env::var_os("PATH");
+    let var = move |name: &str| (name == "PATH").then(|| path.clone()).flatten();
+    hushrun_build::cc::compiler::identity(
+        &OsString::from(compiler),
+        hushrun_build::cc::args::Lang::Cxx,
+        &[],
+        &var,
+        &hushrun_build::store::Store::new(store),
+        &ask,
+    )
+    .unwrap()
+}
+
+// covers: B-52
+#[test]
+fn a_compiler_is_known_by_its_content_not_its_name() {
+    let w = world();
+    let root = w.path("ck");
+    let bin = w.path("bin");
+    // A compiler that is another's under a new name, then changed in place.
+    let real = which("c++").unwrap();
+    let fake = bin.join("my-c++");
+    write(
+        &fake,
+        &format!("#!/bin/sh\nexec '{}' \"$@\"\n", real.display()),
+    );
+    fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let store = w.path("memos");
+    let first = identity_of(fake.to_str().unwrap(), &store);
+    // The memo answers while the file's stat holds.
+    assert_eq!(identity_of(fake.to_str().unwrap(), &store), first);
+    std::thread::sleep(Duration::from_millis(20));
+    write(
+        &fake,
+        &format!("#!/bin/sh\n# patched\nexec '{}' \"$@\"\n", real.display()),
+    );
+    let patched = identity_of(fake.to_str().unwrap(), &store);
+    assert_ne!(patched.digest, first.digest);
+    assert_eq!(patched.target, first.target);
+
+    // A block built by one isn't reused by the other.
+    write(&root.join("src/a.cc"), "int f() { return 1; }\n");
+    let args = ["-c", "src/a.cc", "-o", "a.o", "-MD", "-MF", "a.o.d"];
+    let run = w.run(&root, true);
+    run.launch(&root, real.to_str().unwrap(), &args);
+    assert_eq!(run.last().outcome, Outcome::BuiltAndStored);
+    run.launch(&root, fake.to_str().unwrap(), &args);
+    assert_ne!(run.last().outcome, Outcome::Reused);
+
+    // On macOS, /usr/bin's trampoline is the toolchain's clang that xcrun names.
+    if cfg!(target_os = "macos") {
+        let named = Command::new("/usr/bin/xcrun")
+            .args(["-f", "clang++"])
+            .output()
+            .unwrap();
+        let clang = String::from_utf8(named.stdout).unwrap();
+        let through = identity_of("/usr/bin/c++", &store);
+        assert!(through.clang && through.sdk.is_some());
+        let direct = identity_of(clang.trim(), &store);
+        assert_eq!(through.toolchain, direct.toolchain);
+    } else if !identity_of("c++", &store).clang {
+        // GCC: its cc1plus and as are in the identity, as the driver names them, and the memo
+        // answers only while they keep their stat.
+        let named: Vec<String> = fs::read_dir(store.join("compilers"))
+            .unwrap()
+            .flatten()
+            .filter_map(|e| fs::read(e.path()).ok())
+            .filter_map(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .flat_map(|memo| {
+                memo["files"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|f| f["path"].as_str().map(str::to_string))
+            })
+            .collect();
+        assert!(named.iter().any(|p| p.ends_with("/cc1plus")), "{named:?}");
+        assert!(
+            named
+                .iter()
+                .any(|p| p.ends_with("/as") || p.contains("-as")),
+            "{named:?}"
+        );
+    }
+}
