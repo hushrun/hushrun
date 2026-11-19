@@ -338,6 +338,73 @@ impl Place {
     }
 }
 
+/// What `hushrun build status` says first, and `hushrun guide` says under `## Here` (C-28): the
+/// mode a `hushrun run` from this shell takes on a person's machine, and what the store holds.
+pub(crate) struct Here {
+    /// The mode, `HUSHRUN_BUILD` applied; or why the settings file can't be read, which turns
+    /// reuse off in `hushrun run`.
+    pub mode: Result<Mode, String>,
+    /// The mode the settings file names, when `HUSHRUN_BUILD` overrides it.
+    pub saved: Option<Mode>,
+    /// `build.json`.
+    pub settings: PathBuf,
+    /// The store's folder; `None` when hushrun has no cache directory.
+    pub store: Option<PathBuf>,
+    /// What the store holds.
+    pub held: Option<Status>,
+    /// Whether this is CI, where no person's settings are read.
+    pub in_ci: bool,
+}
+
+impl Here {
+    /// This machine's, as `hushrun build status` reads it; `None` with no configuration
+    /// directory to keep the settings in.
+    pub(crate) fn read(global: &GlobalOpts) -> Option<Here> {
+        let place = Place::read().ok()?;
+        Some(Here::of(global, &place, &settings::load(&place.settings)))
+    }
+
+    fn of(
+        global: &GlobalOpts,
+        place: &Place,
+        saved: &Result<settings::Settings, SettingsError>,
+    ) -> Here {
+        let (mode, overridden) = match saved {
+            Ok(saved) => match place.mode_override(saved.mode) {
+                Some(mode) => (Ok(mode), Some(saved.mode)),
+                None => (Ok(saved.mode), None),
+            },
+            Err(err) => (Err(err.to_string()), None),
+        };
+        Here {
+            mode,
+            saved: overridden,
+            settings: place.settings.clone(),
+            store: place.store.clone(),
+            held: place
+                .store
+                .as_deref()
+                .map(|store| Store::new(store).status(now(global))),
+            // B-48: a GitLab job is CI here too, whatever else says so.
+            in_ci: crate::gitlab_job::in_ci(&hushrun_ci::Env::from_process()),
+        }
+    }
+
+    /// The store and its size, in words: `<folder>, empty`, `<folder>, 118 MB in 36 blocks`.
+    pub(crate) fn store_words(&self) -> String {
+        match (&self.store, &self.held) {
+            (None, _) => "none: HUSHRUN_CACHE_DIR is empty, so nothing is kept".to_string(),
+            (Some(store), Some(held)) if held.blocks > 0 => format!(
+                "{}, {} in {}",
+                store.display(),
+                size(held.bytes),
+                blocks(held.blocks)
+            ),
+            (Some(store), _) => format!("{}, empty", store.display()),
+        }
+    }
+}
+
 /// `hushrun build on|observe|off`: saves the mode, under the settings file's lock.
 fn set(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
     let mut before = None;
@@ -431,11 +498,9 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             .overrides()
             .map_or_else(|| saved.clone(), |o| saved.with(o))
     });
-    let store = place.store.as_deref().map(Store::new);
-    let held = store.as_ref().map(|store| store.status(now(global)));
-    let env = hushrun_ci::Env::from_process();
-    // B-48: a GitLab job is CI here too, whatever else says so.
-    let in_ci = crate::gitlab_job::in_ci(&env);
+    let here = Here::of(global, place, &saved);
+    let held = &here.held;
+    let in_ci = here.in_ci;
     let wrapper = std::env::var_os(session::RUSTC_WRAPPER).filter(|v| !v.is_empty());
     // B-50: a C or C++ launcher of the person's, which `hushrun run` leaves as it is.
     let launchers: Vec<&str> = hushrun_build::cc::CMAKE_LAUNCHERS
@@ -481,17 +546,16 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
     let mut line = |label: &str, value: String| {
         let _ = writeln!(out, "{label:<10}{value}");
     };
-    match &saved {
-        Ok(saved) => {
-            let mode = place.mode_override(saved.mode).unwrap_or(saved.mode);
+    match &here.mode {
+        Ok(mode) => {
             line("mode", mode.as_str().to_string());
-            if mode != saved.mode {
+            if let Some(saved) = here.saved {
                 line(
                     "",
                     format!(
                         "HUSHRUN_BUILD={} overrides the saved mode, {}, in this shell",
                         mode.as_str(),
-                        saved.mode.as_str()
+                        saved.as_str()
                     ),
                 );
             }
@@ -608,7 +672,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             .to_string(),
         );
     }
-    if let Some(held) = &held {
+    if let Some(held) = held {
         if held.blocks == 0 {
             line("size", "empty".to_string());
         } else {

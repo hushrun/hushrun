@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/hushrun/hushrun/spec/schemas/guide.v1.schema.json",
   "title": "hushrun.guide/v1",
-  "description": "Output of `hushrun guide --format json` (spec C-28, ADR 0065): what a coding agent needs to know about this hushrun beyond its skill, and what is true here: a newer release the notice learned of, and each copy of the skill. It asks nobody, changes nothing, and exits 0. Fields are only ever added.",
+  "description": "Output of `hushrun guide --format json` (spec C-28, ADR 0065): what a coding agent needs to know about this hushrun beyond its skill, and what is true here: a newer release the notice learned of, build reuse's mode and store, and each copy of the skill. It asks nobody, changes nothing, and exits 0. Fields are only ever added.",
   "type": "object",
   "required": ["schema", "version", "skillRevision", "guide", "update", "skills"],
   "additionalProperties": false,
@@ -19,6 +19,22 @@
       "properties": {
         "latest": {"type": "string"},
         "command": {"description": "What updates this hushrun: `hushrun update`, or the package manager's install where one installed it, such as `npm install hushrun@latest`.", "type": "string"}
+      }
+    },
+    "build": {
+      "description": "Build reuse on this machine, as `hushrun build status` reads it (B-21): the mode a `hushrun run` from this shell takes on a person's machine, and the store. Null when there is no configuration directory to keep build settings in. An older hushrun leaves it out.",
+      "type": ["object", "null"],
+      "required": ["mode", "savedMode", "error", "settings", "store", "blocks", "bytes", "inCi"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"description": "off, observe or on, HUSHRUN_BUILD applied; null when the settings file can't be read, which turns reuse off.", "enum": ["off", "observe", "on", null]},
+        "savedMode": {"description": "The mode the settings file names, when HUSHRUN_BUILD sets another in this shell; else null.", "enum": ["off", "observe", "on", null]},
+        "error": {"description": "Why the settings file can't be read; else null.", "type": ["string", "null"]},
+        "settings": {"description": "The person's build settings file, build.json beside hushrun's credentials.", "type": "string"},
+        "store": {"description": "The store's folder; null when HUSHRUN_CACHE_DIR is empty, so nothing is kept.", "type": ["string", "null"]},
+        "blocks": {"description": "How many blocks the store holds; null with no store.", "type": ["integer", "null"], "minimum": 0},
+        "bytes": {"description": "Their files' apparent size; a file cloned into a target folder is counted here too. Null with no store.", "type": ["integer", "null"], "minimum": 0},
+        "inCi": {"description": "Whether this is CI, where `hushrun run` reads no person's settings.", "type": "boolean"}
       }
     },
     "skills": {

@@ -306,6 +306,72 @@ fn guide_names_every_command_but_those_left_out_with_a_reason() {
     );
 }
 
+// covers: C-28, B-21
+#[test]
+fn guide_says_build_reuse_s_mode_and_store_here() {
+    // The agent that said hushrun saves no build time couldn't see that reuse was on here.
+    let place = Place::new();
+    let store = place.home.join("cache").join("build");
+    let here = |text: &str| -> Vec<String> {
+        text.lines()
+            .skip_while(|line| *line != "## Here")
+            .filter(|line| line.starts_with("Build reuse") || line.starts_with("Its store"))
+            .map(str::to_string)
+            .collect()
+    };
+    let text = place.in_repo(&["guide"]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    let lines = here(&text.stdout);
+    assert_eq!(lines.len(), 2, "{}", text.stdout);
+    assert!(
+        lines[0].starts_with("Build reuse here is off. The person's build settings: "),
+        "{lines:?}"
+    );
+    assert!(lines[0].ends_with("build.json."), "{lines:?}");
+    assert_eq!(lines[1], format!("Its store: {}, empty.", store.display()));
+    let guide = place.guide();
+    assert_eq!(guide["build"]["mode"], "off", "{guide:#}");
+    assert_eq!(guide["build"]["savedMode"], Value::Null, "{guide:#}");
+    assert_eq!(
+        guide["build"]["store"],
+        store.to_str().unwrap(),
+        "{guide:#}"
+    );
+    assert_eq!(guide["build"]["blocks"], 0, "{guide:#}");
+    assert_eq!(guide["build"]["inCi"], false, "{guide:#}");
+
+    // The person turns it on; then a shell's HUSHRUN_BUILD sets another mode over it.
+    assert_eq!(place.in_repo(&["build", "on"]).code, 0);
+    let lines = here(&place.in_repo(&["guide"]).stdout);
+    assert!(
+        lines[0].starts_with("Build reuse here is on. "),
+        "{lines:?}"
+    );
+    assert_eq!(place.guide()["build"]["mode"], "on");
+    let observed = ran(place
+        .command(&place.repo)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_BUILD", "observe")
+        .arg("guide"));
+    let lines = here(&observed.stdout);
+    assert!(
+        lines[0].starts_with("Build reuse here is in observe: HUSHRUN_BUILD sets it in this shell"),
+        "{lines:?}"
+    );
+    assert!(lines[0].ends_with("which say on."), "{lines:?}");
+
+    // No cache directory: nothing is kept.
+    let none = ran(place
+        .command(&place.repo)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_CACHE_DIR", "")
+        .args(["guide", "--format", "json"]));
+    let none: Value = serde_json::from_str(&none.stdout).unwrap();
+    schema::assert_valid(&schema::load("guide.v1.schema.json"), &none);
+    assert_eq!(none["build"]["store"], Value::Null, "{none:#}");
+    assert_eq!(none["build"]["blocks"], Value::Null, "{none:#}");
+}
+
 // covers: C-28
 #[test]
 fn guide_tells_of_a_newer_release_it_already_learned_of() {
