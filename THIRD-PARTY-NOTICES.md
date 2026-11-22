@@ -98,7 +98,7 @@ This file is generated from Cargo.lock and the crates' own license files; don't 
 | [flagset](https://crates.io/crates/flagset/0.4.7) | 0.4.7 | Apache-2.0 | [31](#text-31) |
 | [fnv](https://crates.io/crates/fnv/1.0.7) | 1.0.7 | Apache-2.0 / MIT | [10](#text-10), [67](#text-67) |
 | [foldhash](https://crates.io/crates/foldhash/0.2.0) | 0.2.0 | Zlib | [68](#text-68) |
-| [form_urlencoded](https://crates.io/crates/form_urlencoded/1.2.2) | 1.2.2 | MIT OR Apache-2.0 | [10](#text-10), [69](#text-69) |
+| [form_urlencoded](https://crates.io/crates/form_urlencoded/1.2.3) | 1.2.3 | MIT OR Apache-2.0 | [10](#text-10), [69](#text-69) |
 | [futures-channel](https://crates.io/crates/futures-channel/0.3.34) | 0.3.34 | MIT OR Apache-2.0 | [70](#text-70), [71](#text-71) |
 | [futures-core](https://crates.io/crates/futures-core/0.3.34) | 0.3.34 | MIT OR Apache-2.0 | [70](#text-70), [71](#text-71) |
 | [futures-macro](https://crates.io/crates/futures-macro/0.3.34) | 0.3.34 | MIT OR Apache-2.0 | [70](#text-70), [71](#text-71) |
@@ -311,7 +311,7 @@ This file is generated from Cargo.lock and the crates' own license files; don't 
 | [unicode-xid](https://crates.io/crates/unicode-xid/0.2.6) | 0.2.6 | MIT OR Apache-2.0 | [10](#text-10), [86](#text-86), [187](#text-187) |
 | [universal-hash](https://crates.io/crates/universal-hash/0.6.1) | 0.6.1 | MIT OR Apache-2.0 | [1](#text-1), [188](#text-188) |
 | [untrusted](https://crates.io/crates/untrusted/0.9.0) | 0.9.0 | ISC | [189](#text-189) |
-| [url](https://crates.io/crates/url/2.5.8) | 2.5.8 | MIT OR Apache-2.0 | [10](#text-10), [102](#text-102) |
+| [url](https://crates.io/crates/url/2.5.9) | 2.5.9 | MIT OR Apache-2.0 | [10](#text-10), [102](#text-102) |
 | [utf8_iter](https://crates.io/crates/utf8_iter/1.0.4) | 1.0.4 | Apache-2.0 OR MIT | [31](#text-31), [59](#text-59), [190](#text-190) |
 | [utf8parse](https://crates.io/crates/utf8parse/0.2.2) | 0.2.2 | Apache-2.0 OR MIT | [6](#text-6), [191](#text-191) |
 | [vcpkg](https://crates.io/crates/vcpkg/0.2.15) | 0.2.15 | MIT/Apache-2.0 | [10](#text-10), [192](#text-192) |
@@ -1101,7 +1101,7 @@ SOFTWARE.
 
 ### Text 10
 
-arc-swap 1.9.2 (`LICENSE-APACHE`), arrayvec 0.7.8 (`LICENSE-APACHE`), atomic-waker 1.1.2 (`LICENSE-APACHE`), autocfg 1.5.1 (`LICENSE-APACHE`), base64 0.22.1 (`LICENSE-APACHE`), base64 0.23.1 (`LICENSE-APACHE`), bitflags 2.13.2 (`LICENSE-APACHE`), bstr 1.13.1 (`LICENSE-APACHE`), cc 1.8.0 (`LICENSE-APACHE`), cfg-if 1.0.5 (`LICENSE-APACHE`), core-foundation 0.10.1 (`LICENSE-APACHE`), core-foundation-sys 0.8.7 (`LICENSE-APACHE`), core_detect 1.0.0 (`LICENSE-APACHE`), crossbeam-channel 0.5.17 (`LICENSE-APACHE`), crossbeam-deque 0.8.8 (`LICENSE-APACHE`), crossbeam-epoch 0.9.21 (`LICENSE-APACHE`), crossbeam-utils 0.8.23 (`LICENSE-APACHE`), curve25519-dalek-derive 0.1.1 (`LICENSE-APACHE`), displaydoc 0.2.7 (`LICENSE-APACHE`), either 1.19.0 (`LICENSE-APACHE`), encoding_rs_io 0.1.8 (`LICENSE-APACHE`), equivalent 1.0.3 (`LICENSE-APACHE`), errno 0.3.14 (`LICENSE-APACHE`), fastrand 2.5.0 (`LICENSE-APACHE`), filetime 0.2.29 (`LICENSE-APACHE`), find-msvc-tools 0.1.14 (`LICENSE-APACHE`), fnv 1.0.7 (`LICENSE-APACHE`), form_urlencoded 1.2.2 (`LICENSE-APACHE`), hash32 0.3.1 (`LICENSE-APACHE`), hashbrown 0.16.1 (`LICENSE-APACHE`), hashbrown 0.17.1 (`LICENSE-APACHE`), heapless 0.8.0 (`LICENSE-APACHE`), heck 0.5.0 (`LICENSE-APACHE`), httparse 1.10.1 (`LICENSE-APACHE`), hyper-rustls 0.27.10 (`LICENSE-APACHE`), idna 1.1.0 (`LICENSE-APACHE`), idna_adapter 1.2.2 (`LICENSE-APACHE`), indexmap 2.14.2 (`LICENSE-APACHE`), jobserver 0.1.35 (`LICENSE-APACHE`), lazy_static 1.5.1 (`LICENSE-APACHE`), linux-raw-sys 0.12.1 (`LICENSE-APACHE`), lock_api 0.4.14 (`LICENSE-APACHE`), log 0.4.34 (`LICENSE-APACHE`), num-traits 0.2.19 (`LICENSE-APACHE`), once_cell 1.21.4 (`LICENSE-APACHE`), openssl-probe 0.2.1 (`LICENSE-APACHE`), parking_lot 0.12.5 (`LICENSE-APACHE`), parking_lot_core 0.9.12 (`LICENSE-APACHE`), percent-encoding 2.3.2 (`LICENSE-APACHE`), pkg-config 0.3.34 (`LICENSE-APACHE`), rayon 1.12.0 (`LICENSE-APACHE`), rayon-core 1.13.0 (`LICENSE-APACHE`), regex 1.13.1 (`LICENSE-APACHE`), regex-automata 0.4.18 (`LICENSE-APACHE`), regex-syntax 0.8.11 (`LICENSE-APACHE`), ring 0.17.14 (`src/polyfill/once_cell/LICENSE-APACHE`), rustc_version 0.4.1 (`LICENSE-APACHE`), rustix 1.1.6 (`LICENSE-APACHE`), rustls 0.23.46 (`LICENSE-APACHE`), rustls-native-certs 0.8.5 (`LICENSE-APACHE`), scopeguard 1.2.0 (`LICENSE-APACHE`), security-framework 3.7.0 (`LICENSE-APACHE`), security-framework-sys 2.17.0 (`LICENSE-APACHE`), signal-hook 0.3.18 (`LICENSE-APACHE`), signal-hook-registry 1.4.8 (`LICENSE-APACHE`), smallvec 1.16.3 (`LICENSE-APACHE`), socket2 0.6.5 (`LICENSE-APACHE`), stable_deref_trait 1.2.1 (`LICENSE-APACHE`), tempfile 3.27.0 (`LICENSE-APACHE`), thread_local 1.1.10 (`LICENSE-APACHE`), unicase 2.10.0 (`LICENSE-APACHE`), unicode-normalization 0.1.25 (`LICENSE-APACHE`), unicode-width 0.2.2 (`LICENSE-APACHE`), unicode-xid 0.2.6 (`LICENSE-APACHE`), url 2.5.8 (`LICENSE-APACHE`), vcpkg 0.2.15 (`LICENSE-APACHE`), version_check 0.9.5 (`LICENSE-APACHE`).
+arc-swap 1.9.2 (`LICENSE-APACHE`), arrayvec 0.7.8 (`LICENSE-APACHE`), atomic-waker 1.1.2 (`LICENSE-APACHE`), autocfg 1.5.1 (`LICENSE-APACHE`), base64 0.22.1 (`LICENSE-APACHE`), base64 0.23.1 (`LICENSE-APACHE`), bitflags 2.13.2 (`LICENSE-APACHE`), bstr 1.13.1 (`LICENSE-APACHE`), cc 1.8.0 (`LICENSE-APACHE`), cfg-if 1.0.5 (`LICENSE-APACHE`), core-foundation 0.10.1 (`LICENSE-APACHE`), core-foundation-sys 0.8.7 (`LICENSE-APACHE`), core_detect 1.0.0 (`LICENSE-APACHE`), crossbeam-channel 0.5.17 (`LICENSE-APACHE`), crossbeam-deque 0.8.8 (`LICENSE-APACHE`), crossbeam-epoch 0.9.21 (`LICENSE-APACHE`), crossbeam-utils 0.8.23 (`LICENSE-APACHE`), curve25519-dalek-derive 0.1.1 (`LICENSE-APACHE`), displaydoc 0.2.7 (`LICENSE-APACHE`), either 1.19.0 (`LICENSE-APACHE`), encoding_rs_io 0.1.8 (`LICENSE-APACHE`), equivalent 1.0.3 (`LICENSE-APACHE`), errno 0.3.14 (`LICENSE-APACHE`), fastrand 2.5.0 (`LICENSE-APACHE`), filetime 0.2.29 (`LICENSE-APACHE`), find-msvc-tools 0.1.14 (`LICENSE-APACHE`), fnv 1.0.7 (`LICENSE-APACHE`), form_urlencoded 1.2.3 (`LICENSE-APACHE`), hash32 0.3.1 (`LICENSE-APACHE`), hashbrown 0.16.1 (`LICENSE-APACHE`), hashbrown 0.17.1 (`LICENSE-APACHE`), heapless 0.8.0 (`LICENSE-APACHE`), heck 0.5.0 (`LICENSE-APACHE`), httparse 1.10.1 (`LICENSE-APACHE`), hyper-rustls 0.27.10 (`LICENSE-APACHE`), idna 1.1.0 (`LICENSE-APACHE`), idna_adapter 1.2.2 (`LICENSE-APACHE`), indexmap 2.14.2 (`LICENSE-APACHE`), jobserver 0.1.35 (`LICENSE-APACHE`), lazy_static 1.5.1 (`LICENSE-APACHE`), linux-raw-sys 0.12.1 (`LICENSE-APACHE`), lock_api 0.4.14 (`LICENSE-APACHE`), log 0.4.34 (`LICENSE-APACHE`), num-traits 0.2.19 (`LICENSE-APACHE`), once_cell 1.21.4 (`LICENSE-APACHE`), openssl-probe 0.2.1 (`LICENSE-APACHE`), parking_lot 0.12.5 (`LICENSE-APACHE`), parking_lot_core 0.9.12 (`LICENSE-APACHE`), percent-encoding 2.3.2 (`LICENSE-APACHE`), pkg-config 0.3.34 (`LICENSE-APACHE`), rayon 1.12.0 (`LICENSE-APACHE`), rayon-core 1.13.0 (`LICENSE-APACHE`), regex 1.13.1 (`LICENSE-APACHE`), regex-automata 0.4.18 (`LICENSE-APACHE`), regex-syntax 0.8.11 (`LICENSE-APACHE`), ring 0.17.14 (`src/polyfill/once_cell/LICENSE-APACHE`), rustc_version 0.4.1 (`LICENSE-APACHE`), rustix 1.1.6 (`LICENSE-APACHE`), rustls 0.23.46 (`LICENSE-APACHE`), rustls-native-certs 0.8.5 (`LICENSE-APACHE`), scopeguard 1.2.0 (`LICENSE-APACHE`), security-framework 3.7.0 (`LICENSE-APACHE`), security-framework-sys 2.17.0 (`LICENSE-APACHE`), signal-hook 0.3.18 (`LICENSE-APACHE`), signal-hook-registry 1.4.8 (`LICENSE-APACHE`), smallvec 1.16.3 (`LICENSE-APACHE`), socket2 0.6.5 (`LICENSE-APACHE`), stable_deref_trait 1.2.1 (`LICENSE-APACHE`), tempfile 3.27.0 (`LICENSE-APACHE`), thread_local 1.1.10 (`LICENSE-APACHE`), unicase 2.10.0 (`LICENSE-APACHE`), unicode-normalization 0.1.25 (`LICENSE-APACHE`), unicode-width 0.2.2 (`LICENSE-APACHE`), unicode-xid 0.2.6 (`LICENSE-APACHE`), url 2.5.9 (`LICENSE-APACHE`), vcpkg 0.2.15 (`LICENSE-APACHE`), version_check 0.9.5 (`LICENSE-APACHE`).
 
 ```text
                               Apache License
@@ -4677,7 +4677,7 @@ the following restrictions:
 
 ### Text 69
 
-form_urlencoded 1.2.2 (`LICENSE-MIT`).
+form_urlencoded 1.2.3 (`LICENSE-MIT`).
 
 ```text
 Copyright (c) 2013-2016 The rust-url developers
@@ -6720,7 +6720,7 @@ SOFTWARE.
 
 ### Text 102
 
-idna 1.1.0 (`LICENSE-MIT`), percent-encoding 2.3.2 (`LICENSE-MIT`), url 2.5.8 (`LICENSE-MIT`).
+idna 1.1.0 (`LICENSE-MIT`), percent-encoding 2.3.2 (`LICENSE-MIT`), url 2.5.9 (`LICENSE-MIT`).
 
 ```text
 Copyright (c) 2013-2025 The rust-url developers
