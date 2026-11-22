@@ -14,6 +14,21 @@ use memchr::memmem::Finder;
 /// How much of a file is read at a time.
 const CHUNK: usize = 1 << 20;
 
+/// How far back a path that runs on from a stand-in is followed ([`Needles::not_continuing`]):
+/// longer than any path a compiler writes in one piece.
+const PATH_SPAN: usize = 4096;
+
+/// A byte a path's text holds: what a run of a path is made of when it is followed back.
+fn path_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b'@' | b'~')
+}
+
+/// A byte of a file or folder name: after a root's text, it means the text goes on into a
+/// longer name (`/app` in `/approx-0.5.1`), not into the root's own contents.
+fn name_byte(b: u8) -> bool {
+    b != b'/' && path_byte(b)
+}
+
 /// Where a needle was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Found {
@@ -21,6 +36,25 @@ pub struct Found {
     pub needle: usize,
     /// The byte offset of the hit from the start of the bytes or the file.
     pub offset: u64,
+}
+
+/// Whether `needle` occurs in `hay` other than inside an occurrence of one of `outers` that
+/// holds it as text (B-9: a folder's text inside a stand-in is the stand-in's). An outer that is
+/// the needle itself covers nothing.
+pub fn occurs_outside(hay: &[u8], needle: &[u8], outers: &[&[u8]]) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut kept: Vec<Vec<u8>> = vec![needle.to_vec()];
+    kept.extend(outers.iter().map(|o| o.to_vec()));
+    let mut needles = Needles::new(kept);
+    // `Needles::new` drops an outer equal to the needle, or a repeated one.
+    let count = needles.finders.len();
+    for outer in 1..count {
+        needles.not_within(0, outer);
+        needles.not_continuing(0, outer);
+    }
+    needles.all_in_bytes(hay)[0]
 }
 
 /// The byte strings an output must not hold: the roots, each in its given and resolved form.
@@ -32,6 +66,9 @@ pub struct Needles {
     /// For each needle, every other needle it is part of and where it sits in it:
     /// [`Needles::not_within`].
     within: Vec<Vec<Within>>,
+    /// For each needle, the needles a path it ends inside of may run on from:
+    /// [`Needles::not_continuing`].
+    continuing: Vec<Vec<usize>>,
     /// The length of the longest needle, so a chunk keeps enough of the one before it.
     longest: usize,
     chunk: usize,
@@ -61,6 +98,7 @@ impl Needles {
             .collect();
         Needles {
             within: vec![Vec::new(); finders.len()],
+            continuing: vec![Vec::new(); finders.len()],
             finders,
             longest,
             chunk: CHUNK,
@@ -87,15 +125,58 @@ impl Needles {
         }
     }
 
+    /// Counts needle `inner` in [`Needles::all_in_file_hashed`] and [`Needles::all_in_bytes`]
+    /// only where it isn't the start of a longer name inside a path that runs on from an
+    /// occurrence of needle `outer` (B-9, B-10): a checkout of `/app` found in
+    /// `/hushrun/cargo/registry/src/…/approx-0.5.1/…`, which rustc wrote for a crate of the cargo
+    /// home. Such an occurrence ends in the middle of a name (the byte after it is a name's, not
+    /// `/` or the end of the text), and every byte from the outer's occurrence to it is a path's,
+    /// within 4096 bytes. A root's own contents start with `/`, and the root alone ends the
+    /// text there, so neither is ever passed over; nor is an occurrence in binary data that a
+    /// length or a terminator precedes (rmeta's length-prefixed strings, NUL-terminated
+    /// strings), which breaks the run. The first-hit searches count every occurrence.
+    pub fn not_continuing(&mut self, inner: usize, outer: usize) {
+        if inner != outer && !self.continuing[inner].contains(&outer) {
+            self.continuing[inner].push(outer);
+        }
+    }
+
+    /// Whether needle `index` is judged with the bytes around each occurrence.
+    fn judged(&self, index: usize) -> bool {
+        !self.within[index].is_empty() || !self.continuing[index].is_empty()
+    }
+
     /// Whether the occurrence of needle `index` that starts at `start` in `bytes` lies inside
-    /// an occurrence of a needle it is part of, all of which is in `bytes`.
+    /// an occurrence of a needle it is part of, all of which is in `bytes`, or ends inside a
+    /// name of a path that runs on from one it was marked against ([`Needles::not_continuing`]).
     fn covered(&self, index: usize, bytes: &[u8], start: usize) -> bool {
-        self.within[index].iter().any(|w| {
+        let within = self.within[index].iter().any(|w| {
             let outer = self.finders[w.outer].needle();
             start >= w.at
                 && start - w.at + outer.len() <= bytes.len()
                 && &bytes[start - w.at..start - w.at + outer.len()] == outer
-        })
+        });
+        within || self.continues(index, bytes, start)
+    }
+
+    /// [`Needles::not_continuing`]'s rule for the occurrence of needle `index` at `start`.
+    fn continues(&self, index: usize, bytes: &[u8], start: usize) -> bool {
+        if self.continuing[index].is_empty() {
+            return false;
+        }
+        let end = start + self.finders[index].needle().len();
+        if !bytes.get(end).is_some_and(|b| name_byte(*b)) {
+            return false;
+        }
+        let floor = start.saturating_sub(PATH_SPAN);
+        let mut run = start;
+        while run > floor && path_byte(bytes[run - 1]) {
+            run -= 1;
+        }
+        let before = &bytes[run..start];
+        self.continuing[index]
+            .iter()
+            .any(|outer| self.finders[*outer].find(before).is_some())
     }
 
     /// Whether needle `index` occurs in `bytes`, starting in `from..to`, other than inside an
@@ -151,12 +232,17 @@ impl Needles {
     pub fn all_in_file_hashed(&self, path: &Path) -> io::Result<(Vec<bool>, Digest, u64)> {
         let mut file = crate::regular::open(path)?;
         let mut hasher = Hasher::new();
-        let keep = self.longest.saturating_sub(1);
+        let continuing = self.continuing.iter().any(|c| !c.is_empty());
+        // One byte more after a start for a needle judged by the byte after it.
+        let keep = self.longest.saturating_sub(1) + usize::from(continuing);
         // A needle that is part of another is judged at a start only with the bytes around it
-        // that an occurrence of the other could take: up to `keep` before and after. So a chunk
-        // keeps `keep` more bytes, and a start is judged once: in the first chunk that holds
-        // `keep` bytes after it, or at the end of the file.
-        let context = if self.within.iter().any(|w| !w.is_empty()) {
+        // that an occurrence of the other could take: up to `keep` before and after, and up to
+        // [`PATH_SPAN`] before for a path that runs on from another. So a chunk keeps that many
+        // more bytes, and a start is judged once: in the first chunk that holds `keep` bytes
+        // after it, or at the end of the file.
+        let context = if continuing {
+            keep.max(PATH_SPAN)
+        } else if self.within.iter().any(|w| !w.is_empty()) {
             keep
         } else {
             0
@@ -181,7 +267,7 @@ impl Needles {
                 if found[index] {
                     continue;
                 }
-                found[index] = if self.within[index].is_empty() {
+                found[index] = if !self.judged(index) {
                     finder.find(buf).is_some()
                 } else {
                     let (from, to) = ((*judged - base) as usize, (limit - base) as usize);
@@ -217,7 +303,7 @@ impl Needles {
             .iter()
             .enumerate()
             .map(|(index, finder)| {
-                if self.within[index].is_empty() {
+                if !self.judged(index) {
                     finder.find(bytes).is_some()
                 } else {
                     self.uncovered(index, bytes, 0, bytes.len())
@@ -310,6 +396,7 @@ impl Needles {
     fn clone_with(&self, chunk: usize) -> Needles {
         let mut copy = Needles::new(self.needles().map(<[u8]>::to_vec).collect()).with_chunk(chunk);
         copy.within = self.within.clone();
+        copy.continuing = self.continuing.clone();
         copy
     }
 }
@@ -477,6 +564,72 @@ mod tests {
         n.not_within(1, 0);
         n.not_within(0, 0);
         assert_eq!(n.all_in_bytes(b"/a/b/c"), [true, true]);
+    }
+
+    // covers: B-9, B-10
+    #[test]
+    fn a_short_root_starting_a_longer_name_in_a_path_under_a_stand_in_is_that_path_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let stand_in: &[u8] = b"/hushrun/cargo";
+        let root: &[u8] = b"/app";
+        let mut n = needles(&[stand_in, root]);
+        n.not_continuing(1, 0);
+        let crate_path: &[u8] =
+            b"/hushrun/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/approx-0.5.1/src/lib.rs";
+        // What still counts: the root's own contents, the root alone at the end of the text or
+        // before a terminator, a length-prefixed string of it (rmeta), and a path that doesn't
+        // run on from a stand-in.
+        let counted: [&[u8]; 6] = [
+            b"/app/src/main.rs",
+            b"/app",
+            b"/app\0more",
+            b"\x04/app\x41\x42",
+            b"/hushrun/cargo/registry/src/i/app/lib.rs",
+            b"/elsewhere/approx-0.5.1/src/lib.rs",
+        ];
+        for chunk in [1usize, 2, 3, 5, 8, 17, 64, 4096, CHUNK] {
+            let n = n.clone_with(chunk);
+            for at in [0usize, 1, 7, 30] {
+                let mut bytes = filler(at);
+                bytes.extend_from_slice(crate_path);
+                bytes.extend(filler(5));
+                let path = write(dir.path(), "crate", &bytes);
+                assert_eq!(
+                    n.all_in_file_hashed(&path).unwrap().0,
+                    [true, false],
+                    "chunk {chunk}, at {at}"
+                );
+                assert_eq!(n.all_in_bytes(&bytes), [true, false]);
+                for text in counted {
+                    let mut bytes = filler(at);
+                    bytes.extend_from_slice(crate_path);
+                    bytes.push(0);
+                    bytes.extend_from_slice(text);
+                    bytes.extend(filler(3));
+                    let path = write(dir.path(), "counted", &bytes);
+                    assert_eq!(
+                        n.all_in_file_hashed(&path).unwrap().0,
+                        [true, true],
+                        "chunk {chunk}, at {at}, {}",
+                        String::from_utf8_lossy(text)
+                    );
+                    assert_eq!(n.all_in_bytes(&bytes), [true, true]);
+                }
+            }
+        }
+        // As the search of records reads it.
+        assert!(!occurs_outside(crate_path, root, &[stand_in]));
+        assert!(occurs_outside(b"src /app/src/lib.rs", root, &[stand_in]));
+        // A run longer than the span is followed no further: counted.
+        let mut long = stand_in.to_vec();
+        long.extend(std::iter::repeat_n(b'a', PATH_SPAN));
+        long.extend_from_slice(b"/approx");
+        assert!(occurs_outside(&long, root, &[stand_in]));
+        // Unmarked, it counts as before.
+        assert_eq!(
+            needles(&[stand_in, root]).all_in_bytes(crate_path),
+            [true, true]
+        );
     }
 
     // covers: B-10

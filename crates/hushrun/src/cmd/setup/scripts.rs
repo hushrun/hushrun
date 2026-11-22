@@ -262,6 +262,9 @@ pub struct LineRun {
     /// Below the directory the lines start in, `/`-separated; `None` when a `cd` moved
     /// somewhere hushrun can't follow.
     pub moved: Option<String>,
+    /// B-75: the run's COMMAND as the lines write it, quotes, `$NAME`s and `${{ … }}`s as they
+    /// are, for a shell to run again; `None` when it isn't a run hushrun can read.
+    pub written: Option<String>,
 }
 
 /// The `hushrun run`s of `commands`, a CI step's shell lines, in order. Anything else a shell does
@@ -286,13 +289,24 @@ pub fn line_runs(commands: &str) -> Vec<LineRun> {
                 }
                 match run_of(&command) {
                     Reading::NotARun => {}
-                    Reading::Sure(run) => runs.push(LineRun {
-                        run: Ok(run),
-                        moved: here.clone(),
-                    }),
+                    Reading::Sure(run) => {
+                        let first = command.len().saturating_sub(run.command.len());
+                        let written = match (command.get(first), command.last()) {
+                            (Some(start), Some(end)) => commands
+                                .get(start.span.start..end.span.end)
+                                .map(str::to_string),
+                            _ => None,
+                        };
+                        runs.push(LineRun {
+                            run: Ok(run),
+                            moved: here.clone(),
+                            written,
+                        });
+                    }
                     Reading::Unsure(why) => runs.push(LineRun {
                         run: Err(why),
                         moved: here.clone(),
+                        written: None,
                     }),
                 }
                 // A subshell's `cd` ends with it, which a line-by-line read can't follow.

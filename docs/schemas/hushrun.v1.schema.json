@@ -132,7 +132,26 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "env": {"description": "Variables every compile of the repository is keyed by, in both forms of `hushrun run` (B-35). Part of no check's definition.", "type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}
+        "env": {"description": "Variables every compile of the repository is keyed by, in both forms of `hushrun run` (B-35). Part of no check's definition.", "type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},
+        "cc": {
+          "description": "What the C and C++ launcher does in every machine's runs (B-55).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"maps": {"enum": ["on", "off"]}}
+        },
+        "baked": {
+          "description": "How a run trusts a baked store with no backend (B-67), and how images of it are published (B-65, B-69, B-73).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "signers": {"type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"issuer": {"type": "string"}, "subject": {"type": "string"}, "key": {"type": "string"}}}},
+            "not_before": {"type": "string", "description": "A signed store baked earlier is no evidence."},
+            "compact_every": {"type": "string", "description": "The image's workspace layer is written again once this old (7d by default; 0s: never by age).", "pattern": "^([0-9]+(ms|s|m|h|d|w))+$"},
+            "rebake_every": {"type": "string", "description": "No new image while the one its tag names is younger than this (1h by default; 0s: off) and fewer than rebake_blocks blocks changed.", "pattern": "^([0-9]+(ms|s|m|h|d|w))+$"},
+            "rebake_blocks": {"type": "integer", "minimum": 0, "description": "That many changed blocks publish whatever the image's age (50 by default)."},
+            "branches": {"type": "array", "uniqueItems": true, "items": {"type": "string"}, "description": "Long-lived branches the bake job bakes into hushrun-<platform>-branch-<name>-latest."}
+          }
+        }
       }
     },
     "scopes": {

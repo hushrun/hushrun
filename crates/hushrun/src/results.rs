@@ -216,7 +216,7 @@ pub fn ledger_check_key(
     scope: &ScopeName,
     digest: &Digest,
 ) -> anyhow::Result<Digest> {
-    key(check, &[], "", scope, digest, &[], None)
+    key(check, &[], "", scope, digest, &[], None, None, None)
 }
 
 /// \[ADR 0037\] What a scope declares outside the repository, digested: a key's and a result's
@@ -253,8 +253,39 @@ pub fn run_key(
     let rule = policy
         .and_then(|policy| policy.counts_from.resolve(check, scope))
         .cloned();
-    let key = key(check, command, cwd, scope, digest, external, rule.as_ref())?;
+    // B-67: what the run trusts of a baked store is part of what its result rests on.
+    let baked = policy.and_then(|policy| policy.build_baked.key());
+    // B-63: and a store the person accepts unverified, by the very bytes of its baked.json.
+    let accepted = baked_say_so(&|name| hushrun_ci::var_os(name));
+    let key = key(
+        check,
+        command,
+        cwd,
+        scope,
+        digest,
+        external,
+        rule.as_ref(),
+        baked.as_ref(),
+        accepted.as_deref(),
+    )?;
     Ok((key, rule))
+}
+
+/// B-63: what a run's key holds of a baked store the person accepts unverified
+/// (`HUSHRUN_BUILD_LOWER_UNTRUSTED=1` with a store named, or at `/hushrun`): the SHA-256 of its
+/// `baked.json`, or `unreadable`. A run that may reuse blocks nothing verified rests on them, so
+/// its result has a key of its own, which no run without that say-so (CI's among them) finds,
+/// whatever the run then decides of the store. `None` without the say-so: every key stays as it was.
+pub fn baked_say_so(env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<String> {
+    use hushrun_build::baked;
+    if env(baked::LOWER_UNTRUSTED).is_none_or(|v| v != "1") {
+        return None;
+    }
+    let folder = baked::named(env)?;
+    Some(
+        baked::baked_json_digest(&folder)
+            .map_or_else(|| "unreadable".to_string(), |digest| digest.to_string()),
+    )
 }
 
 /// The key of a run of `command` for `check`, started in `cwd`, on `scope` at `digest`, with what
@@ -262,6 +293,10 @@ pub fn run_key(
 /// declares nothing and a check with no rule have the key they always had: `external` and the rule
 /// are only in the key when there is one. The key holds the rule and never what a machine
 /// measured, so every machine that meets the rule computes it, and `ready` needs no server for it.
+/// `baked` is hushrun.yaml's `build: baked:` (B-67), in the key only when it names anything: a
+/// pull request that adds a signer gets results of its own, which its base never reuses.
+/// `accepted` is [`baked_say_so`]'s, in the key only when there is one.
+#[allow(clippy::too_many_arguments)]
 fn key(
     check: &CheckName,
     command: &[String],
@@ -270,6 +305,8 @@ fn key(
     digest: &Digest,
     external: &[ExternalInput],
     rule: Option<&Rule>,
+    baked: Option<&serde_json::Value>,
+    accepted: Option<&str>,
 ) -> anyhow::Result<Digest> {
     let mut input = json!({
         "schema": KEY_SCHEMA,
@@ -284,6 +321,12 @@ fn key(
     }
     if let Some(rule) = rule {
         input["counts_from"] = rule.normal();
+    }
+    if let Some(baked) = baked {
+        input["baked"] = baked.clone();
+    }
+    if let Some(accepted) = accepted {
+        input["baked_accepted"] = json!(accepted);
     }
     let canonical = hushrun_core::jcs::canonicalize(&input)?;
     Ok(Digest::of(canonical.as_bytes()))
@@ -2285,7 +2328,7 @@ mod tests {
         let command = ["vitest".to_string(), "run".to_string()];
         let scope = ScopeName::default_scope();
         let digest = format!("sha256:{}", "1".repeat(64)).parse().unwrap();
-        let without = key(&check, &command, "", &scope, &digest, &[], None).unwrap();
+        let without = key(&check, &command, "", &scope, &digest, &[], None, None, None).unwrap();
         assert_eq!(
             without.hex(),
             "1abcbeed3a0264f77f5da8fad0aa13880079d906e0708bc931cbca454b345425"
@@ -2294,7 +2337,18 @@ mod tests {
             path: "../cli".into(),
             digest: format!("sha256:{}", "2".repeat(64)).parse().unwrap(),
         };
-        let with = key(&check, &command, "", &scope, &digest, &[cli], None).unwrap();
+        let with = key(
+            &check,
+            &command,
+            "",
+            &scope,
+            &digest,
+            &[cli],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             with.hex(),
             "853ae97a48a239d2f64a5079d77204544acd3aa5350167385dac1dbd557539ee"
@@ -2314,6 +2368,26 @@ mod tests {
             ruled.hex(),
             "7a6794efe55fb3b588d8677119e52de0a035ed3f6e772da188f7136839d8d40b"
         );
+        // B-67: a hushrun.yaml that names a baked store's signer is another key: a pull request
+        // that adds one gets results its base never reuses. One that names none adds nothing.
+        let signed = Policy::parse(
+            "hushrun.yaml",
+            b"version: 1\nrepository: github.com/acme/app\nbuild:\n  baked:\n    signers:\n      - issuer: https://token.actions.githubusercontent.com\n        subject: https://github.com/acme/app/.github/workflows/bake.yml@refs/heads/main\n",
+        )
+        .unwrap();
+        let (with_signer, _) =
+            run_key(Some(&signed), &check, &command, "", &scope, &digest, &[]).unwrap();
+        assert_ne!(with_signer, without);
+        let dated = Policy::parse(
+            "hushrun.yaml",
+            b"version: 1\nrepository: github.com/acme/app\nbuild:\n  baked:\n    not_before: 2026-11-21T00:00:00Z\n",
+        )
+        .unwrap();
+        assert_eq!(dated.build_baked.not_before, Some(1_795_219_200_000));
+        let (with_date, _) =
+            run_key(Some(&dated), &check, &command, "", &scope, &digest, &[]).unwrap();
+        assert_ne!(with_date, without);
+        assert_ne!(with_date, with_signer);
         // `anywhere`, and no hushrun.yaml, add nothing.
         let anywhere = Policy::parse(
             "hushrun.yaml",
@@ -2325,6 +2399,60 @@ mod tests {
             assert_eq!(same, without);
             assert_eq!(rule, None);
         }
+    }
+
+    // covers: B-63, C-9
+    #[test]
+    fn a_run_that_accepts_an_unverified_baked_store_has_a_key_of_its_own() {
+        use std::ffi::OsString;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("baked.json"), b"{\"one\": 1}").unwrap();
+        let folder = dir.path().as_os_str().to_os_string();
+        let env = |untrusted: Option<&'static str>, lower: Option<OsString>| {
+            move |name: &str| match name {
+                "HUSHRUN_BUILD_LOWER_UNTRUSTED" => untrusted.map(OsString::from),
+                "HUSHRUN_BUILD_LOWER" => lower.clone().or_else(|| Some(OsString::new())),
+                _ => None,
+            }
+        };
+        // No say-so, or nothing named: nothing in the key.
+        assert_eq!(baked_say_so(&env(None, Some(folder.clone()))), None);
+        assert_eq!(baked_say_so(&env(Some("1"), None)), None);
+        assert_eq!(baked_say_so(&env(Some("0"), Some(folder.clone()))), None);
+        let said = baked_say_so(&env(Some("1"), Some(folder.clone()))).unwrap();
+        assert_eq!(
+            said,
+            hushrun_core::blocks::Hex32::sha256(b"{\"one\": 1}").to_string()
+        );
+        // Another store is another key; so is the say-so against the key CI looks for.
+        let check = CheckName::new("unit").unwrap();
+        let scope = ScopeName::default_scope();
+        let digest = format!("sha256:{}", "1".repeat(64)).parse().unwrap();
+        let ci = key(&check, &[], "", &scope, &digest, &[], None, None, None).unwrap();
+        let accepted = key(
+            &check,
+            &[],
+            "",
+            &scope,
+            &digest,
+            &[],
+            None,
+            None,
+            Some(&said),
+        )
+        .unwrap();
+        let other = key(&check, &[], "", &scope, &digest, &[], None, None, Some("x")).unwrap();
+        assert_ne!(ci, accepted);
+        assert_ne!(other, accepted);
+        let gone = tempfile::tempdir().unwrap();
+        assert_eq!(
+            baked_say_so(&env(
+                Some("1"),
+                Some(gone.path().join("none").into_os_string())
+            ))
+            .as_deref(),
+            Some("unreadable")
+        );
     }
 
     // covers: C-12

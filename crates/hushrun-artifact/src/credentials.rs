@@ -3,7 +3,10 @@
 //! 1. `$DOCKER_CONFIG/config.json`, or `~/.docker/config.json`: `credHelpers[host]`, then
 //!    `credsStore`, then `auths[host].auth`. Helpers run as `docker-credential-<helper> get`
 //!    with the host on stdin.
-//! 2. Anonymous access.
+//! 2. \[B-65\] In CI, the job's own registry credential: in GitHub Actions, `GITHUB_TOKEN` (which
+//!    the workflow passes in) for `ghcr.io`, as `GITHUB_ACTOR`; in GitLab CI, `CI_REGISTRY_USER`
+//!    and `CI_REGISTRY_PASSWORD` for `CI_REGISTRY`.
+//! 3. Anonymous access.
 //!
 //! This covers `gcloud auth configure-docker`, ECR, ACR, GHCR and Docker Hub. Secrets are never
 //! logged or put in errors.
@@ -129,8 +132,49 @@ impl DockerConfig {
                 });
             }
         }
-        Ok(Credential::Anonymous)
+        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        Ok(ci_credential(&host, &env).unwrap_or(Credential::Anonymous))
     }
+}
+
+/// \[B-65, ADR 0102\] The credential for `host`, settled now, before a bake runs anything it
+/// builds: in CI the job's own ([`ci_credential`]) first; else the Docker configuration's
+/// (`config`, read before too), its helper run now. Given to the registry client
+/// (`Options::credentials`), it is the one used for `host` from then on, so nothing the build
+/// could write later (a Docker config, a credential helper on `PATH`) is ever consulted.
+pub fn settled(
+    host: &str,
+    config: &DockerConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Credential, ArtifactError> {
+    match ci_credential(&normalize(host), env) {
+        Some(credential) => Ok(credential),
+        None => config.credential(host),
+    }
+}
+
+/// B-65: a CI job's own credential for `host`, from its variables: GitHub Actions' `GITHUB_TOKEN`
+/// for `ghcr.io` (as `GITHUB_ACTOR`, else `x-access-token`), GitLab CI's `CI_REGISTRY_USER` and
+/// `CI_REGISTRY_PASSWORD` for the host `CI_REGISTRY` names.
+pub fn ci_credential(host: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Credential> {
+    if host == "ghcr.io"
+        && env("GITHUB_ACTIONS").as_deref() == Some("true")
+        && let Some(token) = env("GITHUB_TOKEN")
+    {
+        return Some(Credential::Basic {
+            username: env("GITHUB_ACTOR").unwrap_or_else(|| "x-access-token".into()),
+            password: token,
+        });
+    }
+    if let (Some(registry), Some(username), Some(password)) = (
+        env("CI_REGISTRY"),
+        env("CI_REGISTRY_USER"),
+        env("CI_REGISTRY_PASSWORD"),
+    ) && normalize(&registry) == host
+    {
+        return Some(Credential::Basic { username, password });
+    }
+    None
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -358,6 +402,52 @@ mod tests {
         assert_eq!(c.credential("quay.io").unwrap(), Credential::Anonymous);
     }
 
+    // covers: B-65
+    // A bake settles its registry's credential before it builds anything: in CI the job's own
+    // token wins over the Docker configuration, whose helper (one a build could have planted on
+    // PATH) never runs; elsewhere the configuration answers, its helper run then.
+    #[cfg(unix)]
+    #[test]
+    fn a_bake_s_credential_is_the_ci_job_s_own_settled_before_the_build() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let helper = dir.path().join("docker-credential-planted");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf '{{\"Username\":\"u\",\"Secret\":\"s\"}}'\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut c = config(r#"{"credHelpers": {"ghcr.io": "planted"}}"#);
+        c.helper_path = Some(format!("{}:/usr/bin:/bin", dir.path().display()).into());
+        let github = |name: &str| match name {
+            "GITHUB_ACTIONS" => Some("true".to_string()),
+            "GITHUB_TOKEN" => Some("ghs_x".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            settled("ghcr.io", &c, &github).unwrap(),
+            Credential::Basic {
+                username: "x-access-token".into(),
+                password: "ghs_x".into()
+            }
+        );
+        assert!(!ran.exists(), "the Docker configuration's helper ran in CI");
+        let nothing = |_: &str| None;
+        assert_eq!(
+            settled("ghcr.io", &c, &nothing).unwrap(),
+            Credential::Basic {
+                username: "u".into(),
+                password: "s".into()
+            }
+        );
+        assert!(ran.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_hanging_helper_times_out() {
@@ -372,5 +462,37 @@ mod tests {
         let started = Instant::now();
         assert_eq!(c.credential("ghcr.io").unwrap(), Credential::Anonymous);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    // covers: B-65
+    #[test]
+    fn a_ci_job_pushes_to_its_own_registry_with_its_own_token() {
+        let github = |name: &str| match name {
+            "GITHUB_ACTIONS" => Some("true".to_string()),
+            "GITHUB_TOKEN" => Some("ghs_x".to_string()),
+            "GITHUB_ACTOR" => Some("octo".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            ci_credential("ghcr.io", &github),
+            Some(Credential::Basic {
+                username: "octo".into(),
+                password: "ghs_x".into()
+            })
+        );
+        assert_eq!(ci_credential("registry.example", &github), None);
+        let outside = |name: &str| (name == "GITHUB_TOKEN").then(|| "ghs_x".to_string());
+        assert_eq!(ci_credential("ghcr.io", &outside), None);
+        let gitlab = |name: &str| match name {
+            "CI_REGISTRY" => Some("registry.gitlab.com".to_string()),
+            "CI_REGISTRY_USER" => Some("gitlab-ci-token".to_string()),
+            "CI_REGISTRY_PASSWORD" => Some("glcbt".to_string()),
+            _ => None,
+        };
+        assert!(matches!(
+            ci_credential("registry.gitlab.com", &gitlab),
+            Some(Credential::Basic { .. })
+        ));
+        assert_eq!(ci_credential("ghcr.io", &gitlab), None);
     }
 }

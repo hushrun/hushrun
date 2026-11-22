@@ -58,14 +58,33 @@ pub fn picked(key: &Digest, started_ms: u64) -> bool {
     picked_one_in(key, started_ms, ONE_IN)
 }
 
-/// The pick for a reuse (B-16, B-34): one time in [`FIRST_DOWNLOAD_ONE_IN`] for a downloaded
-/// block's first reuse here, else one in [`ONE_IN`]. The one rule the `rustc` wrapper's ports
-/// and the Go cache program pick by.
-pub fn sample(key: &Digest, started_ms: u64, first_download: bool) -> bool {
-    if first_download {
-        picked_one_in(key, started_ms, FIRST_DOWNLOAD_ONE_IN)
-    } else {
-        picked(key, started_ms)
+/// How the audit samples one reuse (B-16, B-34, B-63): the one answer
+/// `session::Current::reuse_pick` gives the `rustc` wrapper, Go's cache program and the C and C++
+/// launcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reuse {
+    /// Any reuse: one in [`ONE_IN`].
+    Any,
+    /// A downloaded block's first reuse here, or that of a block opened from a baked store
+    /// nothing verified: one in [`FIRST_DOWNLOAD_ONE_IN`].
+    FirstDownload,
+    /// The first reuse here of a block opened from the run's baked store under evidence that
+    /// verifies where it came from (the server's word for its whole row in the repository's
+    /// trusted scope, or a signature by a signer the repository names): never. Its later reuses
+    /// are [`Reuse::Any`].
+    FirstVerified,
+}
+
+/// The pick for a reuse (B-16, B-34, B-63) as `reuse` says: one time in
+/// [`FIRST_DOWNLOAD_ONE_IN`] for a downloaded block's first reuse here, never for a verified baked
+/// block's first reuse, else one in [`ONE_IN`]. The one rule the `rustc` wrapper's ports, the Go
+/// cache program and the launcher pick by, when the run leaves the audit to chance
+/// ([`Audit::picks`]).
+pub fn sample(key: &Digest, started_ms: u64, reuse: Reuse) -> bool {
+    match reuse {
+        Reuse::Any => picked(key, started_ms),
+        Reuse::FirstDownload => picked_one_in(key, started_ms, FIRST_DOWNLOAD_ONE_IN),
+        Reuse::FirstVerified => false,
     }
 }
 
@@ -83,6 +102,26 @@ pub fn picked_one_in(key: &Digest, started_ms: u64, one_in: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: B-16, B-34, B-63
+    #[test]
+    fn a_verified_baked_block_s_first_reuse_is_never_sampled_and_a_download_s_one_in_ten() {
+        let keys: Vec<Digest> = (0u32..20_000)
+            .map(|n| Digest::of(&n.to_be_bytes()))
+            .collect();
+        let count = |reuse: Reuse| {
+            keys.iter()
+                .filter(|key| sample(key, 1_800_000_000_000, reuse))
+                .count()
+        };
+        assert_eq!(count(Reuse::FirstVerified), 0);
+        // 2,000 and 400 expected.
+        assert!((1_800..2_200).contains(&count(Reuse::FirstDownload)));
+        assert!((300..500).contains(&count(Reuse::Any)));
+        // `every` still audits it: a replay that compares two machines asks for every one.
+        assert!(Audit::Every.picks(|| sample(&keys[0], 7, Reuse::FirstVerified)));
+        assert!(!Audit::OneIn.picks(|| sample(&keys[0], 7, Reuse::FirstVerified)));
+    }
 
     // covers: B-16
     #[test]

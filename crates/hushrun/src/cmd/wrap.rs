@@ -1009,6 +1009,8 @@ struct BuildRepo {
     build_env: Vec<String>,
     /// The repository's `build: cc: maps:` (B-55).
     build_cc_maps: bool,
+    /// The repository's `build: baked: signers:` (B-67).
+    build_baked: hushrun_core::policy::BakedTrust,
     /// No results lookup asks the backend whether the org shares (the run can't tell which code
     /// it is): `open` does, and an org that doesn't share is as silent as ever.
     open_decides: bool,
@@ -1022,6 +1024,7 @@ impl BuildRepo {
             repository: code.repository.clone(),
             build_env: code.build_env.clone(),
             build_cc_maps: code.build_cc_maps,
+            build_baked: code.build_baked.clone(),
             open_decides: false,
         }
     }
@@ -1047,6 +1050,11 @@ impl BuildRepo {
                 .policy
                 .as_ref()
                 .is_none_or(|policy| policy.build_cc_maps),
+            build_baked: content
+                .policy
+                .as_ref()
+                .map(|policy| policy.build_baked.clone())
+                .unwrap_or_default(),
             open_decides: true,
         })
     }
@@ -1122,6 +1130,10 @@ impl<'a> BuildRun<'a> {
             repo.and_then(BuildRepo::repository_here).as_deref(),
             repo.map_or(&[][..], |repo| &repo.build_env),
             repo.is_none_or(|repo| repo.build_cc_maps),
+            &repo
+                .map(|repo| repo.build_baked.clone())
+                .unwrap_or_default(),
+            Some(check.as_str()),
             share,
             &|| backend.and_then(Backend::build_place),
         ) {
@@ -1556,6 +1568,8 @@ struct Code {
     build_env: Vec<String>,
     /// The repository's `build: cc: maps:` (B-55).
     build_cc_maps: bool,
+    /// The repository's `build: baked: signers:` (B-67).
+    build_baked: hushrun_core::policy::BakedTrust,
 }
 
 impl Code {
@@ -1600,6 +1614,11 @@ impl Code {
             .policy
             .as_ref()
             .is_none_or(|policy| policy.build_cc_maps);
+        let build_baked = current
+            .policy
+            .as_ref()
+            .map(|policy| policy.build_baked.clone())
+            .unwrap_or_default();
         Ok(Code {
             key,
             check: check.clone(),
@@ -1620,6 +1639,7 @@ impl Code {
             tests,
             build_env,
             build_cc_maps,
+            build_baked,
         })
     }
 

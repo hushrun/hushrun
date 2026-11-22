@@ -93,15 +93,39 @@ pub(crate) struct Fetched {
     pub(crate) hints: usize,
 }
 
+/// What a fetch downloaded, before it is saved anywhere: the policy `open` answered (its
+/// manifest among it), the sealed packs that arrived in the run's `incoming/` with their rows, and
+/// the sealed hints.
+pub(crate) struct Pieces {
+    pub(crate) policy: Policy,
+    pub(crate) arrived: Vec<(Found, PathBuf)>,
+    pub(crate) hints: Vec<FoundHints>,
+}
+
+/// What a bake's fetch downloaded: each check's manifest of each kind for its platform, the
+/// sealed packs that arrived with their kinds and rows, the sealed hints, and the repository's
+/// trusted scope as `open` named it (the `protected/…` scope among those the bake reads).
+pub(crate) struct Parts {
+    pub(crate) manifests: Vec<(
+        Option<Hex32>,
+        hushrun_build::model::Kind,
+        String,
+        Vec<blocks::Pair>,
+    )>,
+    pub(crate) arrived: Vec<(hushrun_build::model::Kind, Found, PathBuf)>,
+    pub(crate) hints: Vec<FoundHints>,
+    pub(crate) trusted_scope: Option<String>,
+}
+
 impl Relay {
-    /// B-36, `hushrun build fetch`: for each of `checks` (`None`: no check, the repository's
-    /// newest manifest), `open` naming it, then the prefetch of its manifest to the end; then
-    /// the sealed packs, hints, policy and rows saved whole into the store's `prefetched/`. No
-    /// `close`, no upload. The error is the line to say.
-    pub(crate) fn fetch_for_later(
+    /// B-36, B-63: for each of `checks` (`None`: no check, the repository's newest manifest),
+    /// `open` naming it, then the prefetch of its manifest to the end. No `close`, no upload.
+    /// The packs stay in the run's `incoming/` until [`Relay::drop_incoming`]. The error is the
+    /// line to say.
+    pub(crate) fn fetch_pieces(
         self: &Arc<Relay>,
         checks: &[Option<Hex32>],
-    ) -> Result<Fetched, String> {
+    ) -> Result<Pieces, String> {
         let relay = self.clone();
         let checks = checks.to_vec();
         self.runtime.block_on(async move {
@@ -149,6 +173,173 @@ impl Relay {
             .collect();
         state.fetches.clear();
         drop(state);
+        Ok(Pieces {
+            policy,
+            arrived,
+            hints,
+        })
+    }
+
+    /// B-63, `hushrun build bake --from backend`: for each of `checks`, the check's `open` and
+    /// the prefetch of its `rustc/1` manifest, then for each other kind and platform of
+    /// `wanted`, an `open` for its manifest alone and the prefetch of it; then every download to
+    /// its end, within the fetch's wait. No `close`, no upload. The packs stay in the run's
+    /// `incoming/` until [`Relay::drop_incoming`]. The error is the line to say.
+    pub(crate) fn fetch_parts(
+        self: &Arc<Relay>,
+        checks: &[Option<Hex32>],
+        wanted: &[(hushrun_build::model::Kind, String)],
+    ) -> Result<Parts, String> {
+        use hushrun_build::model::Kind;
+        // B-63: a bake downloads every block the manifests name, programs too.
+        self.whole.store(true, std::sync::atomic::Ordering::SeqCst);
+        let relay = self.clone();
+        let wanted = wanted.to_vec();
+        let checks = checks.to_vec();
+        let manifests = self.runtime.block_on(async move {
+            let deadline = Instant::now() + FETCH_FOR;
+            let mut manifests = Vec::new();
+            for check in checks {
+                relay.clone().open(check).await;
+                if let Phase::Stopped(stop) = relay.state().phase.clone() {
+                    return Err(match stop {
+                        Stop::Off(why) | Stop::Offline(why) | Stop::Refused(why) => why,
+                    });
+                }
+                let rustc = relay
+                    .state()
+                    .policy
+                    .as_ref()
+                    .map(|p| p.manifest.clone())
+                    .unwrap_or_default();
+                let platform = relay.platform().await;
+                manifests.push((check, Kind::Rustc, platform, rustc));
+                relay.clone().prefetch_at_first_miss().await;
+                for (kind, platform) in wanted.iter().filter(|(k, _)| *k != Kind::Rustc) {
+                    let body = blocks::OpenRequest {
+                        kind: kind.word().to_string(),
+                        repository: relay.config.repository.clone(),
+                        commit: relay.config.commit.clone(),
+                        check,
+                        platform: platform.clone(),
+                    };
+                    let manifest = match relay
+                        .client
+                        .post::<_, Policy>(blocks::OPEN_PATH, &body, relay.config.tuning.open, None)
+                        .await
+                    {
+                        Ok(answered) => answered.body.manifest,
+                        Err(_) => continue,
+                    };
+                    relay.clone().prefetch_in(*kind, manifest.clone()).await;
+                    manifests.push((check, *kind, platform.clone(), manifest));
+                }
+            }
+            loop {
+                let busy = relay
+                    .state()
+                    .fetches
+                    .values()
+                    .any(|f| matches!(f.state, Download::Queued | Download::Downloading));
+                if !busy || Instant::now() >= deadline {
+                    break;
+                }
+                relay.pump();
+                tokio::time::sleep(relay.config.tuning.tick).await;
+            }
+            Ok(manifests)
+        })?;
+        let mut state = self.state();
+        let arrived = state
+            .fetches
+            .values()
+            .filter_map(|f| match &f.state {
+                Download::Arrived(path) => Some((f.kind, f.found.clone(), path.clone())),
+                _ => None,
+            })
+            .collect();
+        let hints = state
+            .sealed_hints
+            .iter()
+            .map(|(address, lists)| FoundHints {
+                address: *address,
+                lists: lists.iter().map(|l| Base64(l.clone())).collect(),
+            })
+            .collect();
+        let trusted_scope = state.policy.as_ref().and_then(|policy| {
+            policy
+                .read
+                .iter()
+                .find(|scope| blocks::is_trusted_scope(scope))
+                .cloned()
+        });
+        state.fetches.clear();
+        drop(state);
+        Ok(Parts {
+            manifests,
+            arrived,
+            trusted_scope,
+            hints,
+        })
+    }
+
+    /// B-75: for each check of `checks`, the newest `rustc/1` manifest `open` answers and the
+    /// commit its run named, downloading nothing. `Err` when the backend stops the relay.
+    pub(crate) fn newest_manifests(
+        self: &Arc<Relay>,
+        checks: &[Option<Hex32>],
+    ) -> Result<Vec<Newest>, String> {
+        let relay = self.clone();
+        let checks = checks.to_vec();
+        self.runtime.block_on(async move {
+            let mut out = Vec::new();
+            for check in checks {
+                relay.clone().open(check).await;
+                let state = relay.state();
+                if let Phase::Stopped(stop) = state.phase.clone() {
+                    return Err(match stop {
+                        Stop::Off(why) | Stop::Offline(why) | Stop::Refused(why) => why,
+                    });
+                }
+                let (pairs, commit) = state
+                    .policy
+                    .as_ref()
+                    .map(|p| (p.manifest.clone(), p.manifest_commit.clone()))
+                    .unwrap_or_default();
+                out.push((check, pairs, commit));
+            }
+            Ok(out)
+        })
+    }
+
+    /// Removes this relay's `incoming/` folder, with any pack a fetch left there.
+    pub(crate) fn drop_incoming(&self) {
+        let _ = std::fs::remove_dir_all(outbox::run_folder(
+            &self.config.store,
+            outbox::INCOMING,
+            &self.run,
+        ));
+    }
+
+    /// B-36, `hushrun build fetch`: [`Relay::fetch_pieces`], then the sealed packs, hints,
+    /// policy and rows saved whole into the store's `prefetched/`. The error is the line to say.
+    pub(crate) fn fetch_for_later(
+        self: &Arc<Relay>,
+        checks: &[Option<Hex32>],
+    ) -> Result<Fetched, String> {
+        let pieces = self.fetch_pieces(checks);
+        let Pieces {
+            policy,
+            arrived,
+            hints,
+            ..
+        } = match pieces {
+            Ok(pieces) => pieces,
+            Err(why) => {
+                self.drop_incoming();
+                return Err(why);
+            }
+        };
         let fetched_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
@@ -180,11 +371,7 @@ impl Relay {
             let bytes = serde_json::to_vec(&saved).map_err(std::io::Error::other)?;
             std::fs::write(folder.join(prefetched::SAVED), bytes)
         });
-        let _ = std::fs::remove_dir_all(outbox::run_folder(
-            &self.config.store,
-            outbox::INCOMING,
-            &self.run,
-        ));
+        self.drop_incoming();
         written.map_err(|err| format!("{}: {err}", self.config.store.root().display()))?;
         Ok(report)
     }
@@ -245,6 +432,9 @@ impl Relay {
         };
     }
 }
+
+/// B-75: a check's newest manifest as `open` answers it, and the commit its run named.
+pub(crate) type Newest = (Option<Hex32>, Vec<blocks::Pair>, Option<String>);
 
 #[cfg(test)]
 mod tests {

@@ -12,6 +12,7 @@
 //! `hushrun init --pipeline`, the promotion pipeline's starter files, is `cmd::init`.
 
 mod agents;
+mod bake;
 mod binary;
 mod caches;
 mod cargo;
@@ -28,6 +29,8 @@ mod projects;
 pub(crate) mod readers;
 mod recipes;
 mod repeats;
+pub(crate) mod replay;
+pub(crate) use bake::default_branch;
 mod report;
 mod scripts;
 mod started;
@@ -109,7 +112,7 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
         if json {
             let mut notes = vec![already];
             notes.extend(signs_in_and(&look, moves_to.as_deref(), backend));
-            return print_plan(&look, set_up_writes(&look, notes));
+            return print_plan(&look, set_up_writes(&look, notes, args.bake));
         }
         println!("\n{already}");
         if args.dry_run {
@@ -117,7 +120,10 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
                 println!("{line}");
             }
             let tools = AgentTools::of(&look);
-            let ci = CiEdits::of(&look);
+            let mut ci = CiEdits::of(&look);
+            if args.bake {
+                ci.add_bake(&look);
+            }
             if tools.writes() || ci.writes() {
                 println!("It would also write:");
                 ci.print();
@@ -158,6 +164,9 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
         register_machine(&session.backend);
         let tools = AgentTools::of(&look);
         let mut ci = CiEdits::of(&look);
+        if args.bake {
+            ci.add_bake(&look);
+        }
         // \[C-38\] CI's cache step for what test files read, for a backend that keeps none.
         ci.manual.extend(unit_cache::notes(
             look.tests_on,
@@ -229,6 +238,9 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
             &look,
             Backing::Org(backend.as_deref().unwrap_or(UNKNOWN_BACKEND)),
         )?;
+        if args.bake {
+            plan.add_bake(&look, Some(backend.as_deref().unwrap_or(UNKNOWN_BACKEND)));
+        }
         // Nothing asks gh without a sign-in: the plan says what init would derive. For a move,
         // the line above says what hushrun.yaml gets.
         if moves_to.is_none() {
@@ -263,6 +275,9 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
     };
     let is_moved = moved.is_some();
     let mut plan = Plan::new(&look, Backing::Org(&session.backend))?;
+    if args.bake {
+        plan.add_bake(&look, Some(&session.backend));
+    }
     let promotion = Promotion::new(&look, github.clone());
     // ADR 0026 item 19: the plan shows the ledger before it exists.
     if let Some(repository) = look.repository.as_ref().filter(|_| session.member) {
@@ -369,6 +384,9 @@ struct Look {
     proposal: Proposal,
     /// hushrun.yaml is there, and doesn't parse: init leaves it, and what depends on it, alone.
     unreadable_policy: bool,
+    /// B-69: the long-lived branches hushrun.yaml's `build: baked: branches:` names, which the
+    /// bake job bakes into their own tags.
+    bake_branches: Vec<String>,
     /// The backend package.json or hushrun.yaml names.
     backend: Option<String>,
     /// \[ADR 0047\] The checks hushrun.yaml lets CI skip when a later step reads their reports
@@ -561,6 +579,10 @@ impl Look {
             workflows,
             proposal,
             unreadable_policy,
+            bake_branches: policy
+                .as_ref()
+                .map(|p| p.build_bake.branches.clone())
+                .unwrap_or_default(),
             backend: hosted::repository_backend(root),
             reports_skip,
             vitest_line,
@@ -1121,6 +1143,8 @@ struct Plan {
     /// \[ADR 0047\] The checks CI runs every time, since a later step reads their reports, and
     /// what Codecov's file means for them.
     every_time: Vec<String>,
+    /// \[B-69\] What `--bake` says besides its files: the Dockerfile line.
+    bake_notes: Vec<String>,
 }
 
 /// What init adds for coding agents (C-24): files and the hook, and, in a repository already set
@@ -1437,6 +1461,7 @@ impl Plan {
                 local: matches!(backing, Backing::ThisMachine),
             },
             every_time: Vec::new(),
+            bake_notes: Vec::new(),
         };
         // hushrun.yaml holds the scopes and the backend: without an id it can't be written, and
         // one that doesn't parse is the person's to fix.
@@ -1616,6 +1641,27 @@ impl Plan {
             plan.every_time = report::every_time(look, &plan.writes(Vec::new()));
         }
         Ok(plan)
+    }
+
+    /// B-69: `--bake`'s job, beside the plan's other CI edits; what it says goes with the plan's
+    /// manual lines.
+    fn add_bake(&mut self, look: &Look, backend: Option<&str>) {
+        let bake = bake::plan(
+            &look.root,
+            look.repository.as_deref(),
+            &look.workflows,
+            &self.workflows,
+            &self.wrapped,
+            backend,
+            &npm_package(),
+            &look.bake_branches,
+        );
+        if bake.installs && !look.root.join(GITLAB_INSTALL.0).exists() {
+            self.vendored = Some(GITLAB_INSTALL);
+        }
+        merge_files(&mut self.workflows, bake.files);
+        self.manual.extend(bake.manual);
+        self.bake_notes.extend(bake.notes);
     }
 
     /// \[ADR 0045\] Adds `counts_from: {os: macos}` where it fits, once the scopes are known. A
@@ -1865,6 +1911,7 @@ impl Plan {
             }
         }
         notes.extend(self.every_time.iter().cloned());
+        notes.extend(self.bake_notes.iter().cloned());
         notes.extend(self.fans.iter().cloned());
         notes.extend(self.one_scope.as_ref().map(|why| one_scope_line(why)));
         notes.extend(
@@ -1974,6 +2021,9 @@ impl Plan {
             for line in &self.every_time {
                 println!("{line}");
             }
+        }
+        for line in &self.bake_notes {
+            println!("\n{line}");
         }
         if let Some(why) = &self.one_scope {
             println!("\n{}", one_scope_line(why));
@@ -2278,9 +2328,12 @@ fn one_scope_line(why: &str) -> String {
 }
 
 /// What init would write in a repository set up already, for the plan as JSON: as its dry run says.
-fn set_up_writes(look: &Look, mut notes: Vec<String>) -> report::Writes {
+fn set_up_writes(look: &Look, mut notes: Vec<String>, bake: bool) -> report::Writes {
     let tools = AgentTools::of(look);
-    let ci = CiEdits::of(look);
+    let mut ci = CiEdits::of(look);
+    if bake {
+        ci.add_bake(look);
+    }
     let mut files: Vec<(String, String)> = ci
         .files
         .iter()
@@ -2292,6 +2345,7 @@ fn set_up_writes(look: &Look, mut notes: Vec<String>) -> report::Writes {
             .iter()
             .map(|(text, _)| ("package.json".to_string(), text.clone())),
     );
+    notes.extend(ci.notes.iter().cloned());
     notes.extend(
         ci.manual
             .iter()
@@ -2899,6 +2953,8 @@ struct CiEdits {
     files: Vec<(String, String, Vec<String>)>,
     /// What a person has to change.
     manual: Vec<String>,
+    /// \[B-69\] What the plan says besides, such as the Dockerfile line of the baked image.
+    notes: Vec<String>,
 }
 
 impl CiEdits {
@@ -2935,6 +2991,29 @@ impl CiEdits {
         !self.files.is_empty()
     }
 
+    /// B-69: `--bake`'s job, beside the edits already made.
+    fn add_bake(&mut self, look: &Look) {
+        let bake = bake::plan(
+            &look.root,
+            look.repository.as_deref(),
+            &look.workflows,
+            &self.files,
+            &look.wrapped(),
+            look.backend.as_deref(),
+            &npm_package(),
+            &look.bake_branches,
+        );
+        merge_files(&mut self.files, bake.files);
+        self.manual.extend(bake.manual);
+        if bake.installs && !look.root.join(GITLAB_INSTALL.0).exists() {
+            self.manual.push(format!(
+                "the hushrun-bake job installs hushrun with {}: take it from a release",
+                GITLAB_INSTALL.0
+            ));
+        }
+        self.notes.extend(bake.notes);
+    }
+
     fn print(&self) {
         for (path, _, changes) in &self.files {
             println!("  {path}");
@@ -2945,6 +3024,9 @@ impl CiEdits {
     }
 
     fn print_manual(&self) {
+        for note in &self.notes {
+            println!("\n{note}");
+        }
         if !self.manual.is_empty() {
             println!("\nChange by hand:");
             for manual in &self.manual {
@@ -2964,6 +3046,19 @@ impl CiEdits {
             println!("Wrote {}.", paths.join(" and "));
         }
         Ok(())
+    }
+}
+
+/// `new` files into `files`: one with the same path replaced, the others added.
+fn merge_files(
+    files: &mut Vec<(String, String, Vec<String>)>,
+    new: Vec<(String, String, Vec<String>)>,
+) {
+    for file in new {
+        match files.iter_mut().find(|(path, ..)| *path == file.0) {
+            Some(there) => *there = file,
+            None => files.push(file),
+        }
     }
 }
 
@@ -3789,6 +3884,7 @@ mod tests {
             run: false,
             org: None,
             local: false,
+            bake: false,
             pipeline: false,
             force: false,
             repository: None,

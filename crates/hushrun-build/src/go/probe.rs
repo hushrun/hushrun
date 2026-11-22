@@ -112,6 +112,21 @@ pub fn probe(
     })
 }
 
+/// What `hushrun build bake` records of Go in `folder` (B-63): `GOOS_GOARCH`, when the folder is
+/// a Go module's and `go env` answers. `None` otherwise.
+pub fn env_of(folder: &Path) -> Option<String> {
+    let root = module_root(folder)?;
+    let asked = go_env(root, &["GOOS", "GOARCH"]).ok()?;
+    let field = |name: &str| {
+        asked
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let platform = format!("{}_{}", field("GOOS"), field("GOARCH"));
+    hushrun_core::blocks::is_platform(&platform).then_some(platform)
+}
+
 /// `go env -json NAMES...` in `folder`, within [`PROBE_WAIT`]: its stdout read through a pipe,
 /// stdin closed, stderr dropped.
 fn go_env(folder: &Path, names: &[&str]) -> Result<serde_json::Value, NotSet> {

@@ -25,6 +25,26 @@ use crate::results::{NamedBy, error_message, plain, refusal};
 /// hushrun cloud's backend, when nothing names another.
 pub const HOSTED_ORIGIN: &str = "https://api.hushrun.com";
 
+/// \[B-70\] The registry hushrun cloud's backend serves, built from the blocks it holds.
+pub const HOSTED_REGISTRY: &str = "registry.hushrun.com";
+
+/// \[B-70\] The host of the registry the backend at `origin` serves: hushrun cloud's at
+/// [`HOSTED_REGISTRY`], any other's at its own origin's host (a backend serves its registry's
+/// pull API on its own origin). The one definition `build bake --oci` and `init --bake` read.
+pub fn registry_host(origin: &str) -> String {
+    let origin = origin.trim().trim_end_matches('/');
+    if origin.eq_ignore_ascii_case(HOSTED_ORIGIN) {
+        return HOSTED_REGISTRY.to_string();
+    }
+    origin
+        .split_once("://")
+        .map_or(origin, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 /// The hosted backend's origin: `HUSHRUN_HOST`, else [`HOSTED_ORIGIN`], without a trailing slash.
 pub fn origin() -> String {
     let given = hushrun_ci::var("HUSHRUN_HOST")
@@ -879,6 +899,18 @@ pub(crate) fn open_browser(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: B-70
+    #[test]
+    fn a_backend_s_registry_is_hushrun_s_for_the_hosted_backend_and_its_own_origin_otherwise() {
+        assert_eq!(registry_host("https://api.hushrun.com"), HOSTED_REGISTRY);
+        assert_eq!(registry_host("https://API.hushrun.com/"), HOSTED_REGISTRY);
+        assert_eq!(
+            registry_host("https://hushrun.acme.dev"),
+            "hushrun.acme.dev"
+        );
+        assert_eq!(registry_host("http://127.0.0.1:8080"), "127.0.0.1:8080");
+    }
 
     // covers: C-13
     #[test]

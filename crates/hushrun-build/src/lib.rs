@@ -49,6 +49,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod baked;
 pub mod cc;
 pub mod compiler;
 pub mod decide;
@@ -62,6 +63,7 @@ pub mod known;
 pub mod link;
 pub mod linkenv;
 pub mod loader;
+pub mod manifests;
 pub mod memo;
 pub mod messages;
 pub mod metadata;

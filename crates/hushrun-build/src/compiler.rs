@@ -769,10 +769,9 @@ fn make_view(
     fs::create_dir_all(dir)?;
     let pid = std::process::id();
     if fs::symlink_metadata(view).is_ok() {
-        let aside = (0..64)
-            .map(|n| dir.join(format!(".{name}.{pid}.{n}.broken")))
-            .find(|aside| fs::symlink_metadata(aside).is_err())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free name"))?;
+        // A name no other process uses, on this machine or another sharing the store: two
+        // containers are both process 1, and a rename over an empty folder replaces it.
+        let aside = dir.join(crate::baked::unique(&format!(".{name}.broken")));
         match fs::rename(view, &aside) {
             Ok(()) => {
                 let _ = fs::remove_dir_all(&aside);

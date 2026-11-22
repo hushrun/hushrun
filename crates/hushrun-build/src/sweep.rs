@@ -84,6 +84,12 @@ pub fn force(store: &Store, now: SystemTime, keep_days: u32) -> SweepReport {
         let compilers = store.remove_unused_compilers(cutoff, leftover);
         report.compilers = compilers.removed;
         report.errors += compilers.errors;
+        // B-63: the manifests runs left for `hushrun build bake`. A replaced baked store's mark
+        // stays (a store replaced stays replaced), and a baked store itself lies outside the
+        // store and is never touched (B-64).
+        let manifests = crate::manifests::sweep(store, now, keep_days);
+        report.leftovers += manifests.removed;
+        report.errors += manifests.errors;
     }
     // B-36: a sandbox's fetch is good for a day, whatever the blocks' kept days.
     let fetched = crate::prefetched::sweep(store, now);

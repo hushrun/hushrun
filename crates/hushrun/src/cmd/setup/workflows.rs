@@ -722,6 +722,17 @@ impl Workflow {
         &self.text
     }
 
+    /// \[B-69\] A GitHub workflow's top-level `name:`, unquoted, when it has one: what
+    /// `workflow_run` names it by (else its path).
+    pub fn name(&self) -> Option<String> {
+        self.text.lines().find_map(|line| {
+            let value = line.strip_prefix("name:")?;
+            let value = strip_comment(value).trim();
+            let value = unquote(value);
+            (!value.is_empty()).then_some(value)
+        })
+    }
+
     /// The jobs whose steps run one of `wrapped`.
     pub fn running<'a>(&'a self, wrapped: &'a [String]) -> impl Iterator<Item = &'a Job> + 'a {
         self.jobs

@@ -26,7 +26,7 @@ use sha2::{Digest as _, Sha256};
 use crate::copy::media_type_of;
 use crate::credentials::{Credential, DockerConfig};
 use crate::registry::{
-    ArtifactError, Descriptor, MANIFEST_TYPES, Manifest, Mount, Registry, Repository,
+    ArtifactError, BlobStream, Descriptor, MANIFEST_TYPES, Manifest, Mount, Registry, Repository,
 };
 
 pub struct OciRegistry {
@@ -76,6 +76,14 @@ impl OciRegistry {
             credentials: Mutex::new(BTreeMap::new()),
             tokens: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// \[B-70\] Uses `credential` for `host`, whatever the Docker configuration says of it.
+    pub fn give(&self, host: &str, credential: Credential) {
+        self.credentials
+            .lock()
+            .expect("lock")
+            .insert(host.to_string(), credential);
     }
 
     fn credential(&self, host: &str) -> Result<Credential, ArtifactError> {
@@ -473,6 +481,118 @@ impl Registry for OciRegistry {
         pushed
             .map(|_| ())
             .map_err(|e| map(&to.host, &to.at_digest(&blob.digest), e))
+    }
+
+    async fn push_blob(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        size: u64,
+        stream: BlobStream,
+    ) -> Result<(), ArtifactError> {
+        let (destination, _) = self.reference(repository, "latest").await?;
+        let verdict = Arc::new(Mutex::new(None));
+        let stream = verified(stream, *digest, size, verdict.clone());
+        let pushed = self
+            .client
+            .push_blob_stream(&destination, stream, &digest.to_string(), Some(size))
+            .await;
+        if let Some(mismatch) = verdict.lock().expect("lock").take() {
+            return Err(mismatch);
+        }
+        pushed
+            .map(|_| ())
+            .map_err(|e| map(&repository.host, &repository.at_digest(digest), e))
+    }
+
+    async fn pull_blob(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        most: u64,
+    ) -> Result<Vec<u8>, ArtifactError> {
+        let (source, _) = self.reference(repository, "latest").await?;
+        let descriptor = OciDescriptor {
+            media_type: "application/octet-stream".into(),
+            digest: digest.to_string(),
+            size: 0,
+            urls: None,
+            annotations: None,
+            ..OciDescriptor::default()
+        };
+        let what = repository.at_digest(digest);
+        let pulled = self
+            .client
+            .pull_blob_stream(&source, &descriptor)
+            .await
+            .map_err(|e| map(&repository.host, &what, e))?;
+        let mut stream = pulled.stream;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| ArtifactError::Network(format!("{what}: {e}")))?;
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() as u64 > most {
+                return Err(ArtifactError::Invalid(format!(
+                    "{what} is larger than {most} bytes"
+                )));
+            }
+        }
+        let actual = Digest::of(&bytes);
+        if actual != *digest {
+            return Err(ArtifactError::DigestMismatch {
+                what,
+                expected: digest.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+        Ok(bytes)
+    }
+
+    async fn referrers(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+    ) -> Result<Option<Vec<u8>>, ArtifactError> {
+        let url = format!(
+            "{}/v2/{}/referrers/{digest}",
+            self.base_url(&repository.host),
+            repository.path
+        );
+        let scopes = [format!("repository:{}:pull", repository.path)];
+        let response = self
+            .send(&repository.host, &scopes, |http| {
+                http.get(&url).header("accept", crate::registry::OCI_INDEX)
+            })
+            .await?;
+        let status = response.status().as_u16();
+        let index = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|t| t.starts_with(crate::registry::OCI_INDEX));
+        match status {
+            200 if index => Ok(Some(
+                response
+                    .bytes()
+                    .await
+                    .map_err(|e| network(&repository.host, &e))?
+                    .to_vec(),
+            )),
+            // No such API: the distribution spec's 404 (registry:2), or a registry that knows no
+            // such route (405). Referrers live under the tag schema's tag.
+            404 | 405 => Ok(None),
+            // Anything else (a refusal, a server's error, a page that isn't an index) is an
+            // error, never "no API": writing the tag schema's index then could hide a referrer.
+            _ => Err(ArtifactError::Invalid(format!(
+                "{}: the referrers of {digest} answered {status}{}",
+                repository.host,
+                if status == 200 {
+                    " with no image index"
+                } else {
+                    ""
+                }
+            ))),
+        }
     }
 
     async fn check_access(&self, repository: &Repository) -> Result<(), ArtifactError> {

@@ -42,8 +42,8 @@
  {
   "RuleID": "generic-api-key",
   "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
-  "StartLine": 338,
-  "EndLine": 338,
+  "StartLine": 366,
+  "EndLine": 366,
   "StartColumn": 41,
   "EndColumn": 61,
   "Match": "auth\": \"REDACTED\"",
@@ -57,7 +57,7 @@
   "Date": "",
   "Message": "",
   "Tags": [],
-  "Fingerprint": "crates/hushrun-artifact/src/credentials.rs:generic-api-key:338"
+  "Fingerprint": "crates/hushrun-artifact/src/credentials.rs:generic-api-key:366"
  },
  {
   "RuleID": "private-key",

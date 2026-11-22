@@ -159,6 +159,8 @@ struct Served {
     first_download: bool,
     cost: u64,
     downloaded_now: bool,
+    /// Opened from the run's baked store for it (B-64).
+    baked_now: bool,
     at: SystemTime,
 }
 
@@ -232,6 +234,8 @@ struct Program {
     /// `close` was answered, or the input ended: the watchdog stops.
     done: AtomicBool,
     parent: Parent,
+    /// What opens a baked store's packs (B-64): the binary's, when it installed one.
+    unseal: Option<&'static dyn crate::baked::Unseal>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -445,6 +449,7 @@ impl Program {
             audits: Mutex::new(HashMap::new()),
             relay_down: AtomicBool::new(false),
             waits,
+            unseal: crate::baked::unseal(),
             faults,
             env,
             done: AtomicBool::new(false),
@@ -831,6 +836,32 @@ impl Program {
         if let Ok(Some(_)) = store.block(&key) {
             return self.serve(current, &store, &key, action, false, at);
         }
+        // B-64: the run's baked store, before the relay.
+        if let (Some(lower), Some(unseal)) = (current.lower_for(Kind::Go), self.unseal)
+            && crate::baked::Reader::new(lower, unseal)
+                .open_into(
+                    &store,
+                    Kind::Go,
+                    &key,
+                    &key,
+                    u64::from(current.min_free_gb).saturating_mul(1 << 30),
+                    current.repository.as_deref(),
+                    at,
+                )
+                .unwrap_or(false)
+        {
+            return self
+                .serve(current, &store, &key, action, false, at)
+                .map(|(value, served)| {
+                    (
+                        value,
+                        Served {
+                            baked_now: true,
+                            ..served
+                        },
+                    )
+                });
+        }
         // B-45: a download, only where sharing is on (the relay says) and the run's Go manifest
         // names it.
         if current.mode != Mode::On {
@@ -873,6 +904,7 @@ impl Program {
             saved_ms: served.cost,
             found: true,
             downloaded: served.downloaded_now,
+            baked: served.baked_now,
             ..go_entry(Outcome::Reused, &served.key)
         });
     }
@@ -905,16 +937,14 @@ impl Program {
         let cost = block.description["rustc_ms"].as_u64().unwrap_or(0);
         let vouch_wait = (Duration::from_millis(cost) / 2 + self.waits.quick).min(self.waits.relay);
         let reusable =
-            current
-                .share
-                .may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
-                    let wait = if matches!(request, Request::Sharing) {
-                        self.waits.quick
-                    } else {
-                        vouch_wait
-                    };
-                    self.ask(request, wait)
-                });
+            current.may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
+                let wait = if matches!(request, Request::Sharing) {
+                    self.waits.quick
+                } else {
+                    vouch_wait
+                };
+                self.ask(request, wait)
+            });
         if !reusable {
             return None;
         }
@@ -959,10 +989,12 @@ impl Program {
         let first_download = origin
             .as_ref()
             .is_some_and(|o| o.downloaded_only() && !o.reused);
+        // B-63: one in ten only where nothing verified where the block came from; never at a
+        // verified baked block's first reuse here.
         let picked = current.mode == Mode::Observe
-            || current
-                .audit
-                .picks(|| crate::audit::sample(key, current.started_ms, first_download));
+            || current.audits_reuse(origin.as_ref(), |reuse| {
+                crate::audit::sample(key, current.started_ms, reuse)
+            });
         if picked && self.claim_audit(current, key) {
             lock(&self.audits).insert(
                 *action,
@@ -987,6 +1019,7 @@ impl Program {
             first_download,
             cost,
             downloaded_now,
+            baked_now: false,
             at,
         };
         Some((value, served))
@@ -1033,9 +1066,10 @@ impl Program {
         }
     }
 
-    /// A hit in Go's own cache, which is served as plain `go` would serve it. When the run
-    /// shares and the toolchain is known already, a package archive is logged for the
-    /// manifest, and compared for free with a block of the same key in hushrun's store
+    /// A hit in Go's own cache, which is served as plain `go` would serve it. When the toolchain
+    /// is known already, a package archive is logged for the manifest (the run's `close` when it
+    /// shares, the store's saved manifest, B-63), and compared for free with a block of the same
+    /// key in hushrun's store
     /// (B-44). A difference is only counted: Go's cache has no toolchain identity and keeps
     /// what an altered `go` command (`-toolexec`, `-overlay`) compiled under plain ids, so it
     /// is no witness against a block, and nothing is suspended or reported on its word. Only a
@@ -1044,9 +1078,6 @@ impl Program {
         let Some(current) = &self.current else {
             return;
         };
-        if current.share.relay().is_none() {
-            return;
-        }
         // Never waited for: a warm build pays nothing for them.
         let (Some(Ok(identity)), Some(None)) = (self.identity.get(), self.altered.get()) else {
             return;
@@ -1162,9 +1193,10 @@ impl Program {
             });
             return;
         }
-        let local = if current.share.relay().is_none() {
-            Some(Local::NotSharing)
-        } else if self.altered().is_some() {
+        // B-42: kept in the store in every run the program serves (one that shares or reads a
+        // baked store), so that `hushrun build bake` finds it (B-63); it goes up only from a run
+        // with a relay.
+        let local = if self.altered().is_some() {
             Some(Local::Altered)
         } else if lock(&self.put_sizes).get(&super::subkey(action, "stdout")) != Some(&0) {
             // F4: what the compile printed, Go prints only from this machine's own cache.
@@ -1240,9 +1272,7 @@ impl Program {
         cost_ms: u64,
         at: SystemTime,
     ) -> bool {
-        let Some(share) = current.share.relay() else {
-            return false;
-        };
+        let share = current.share.relay();
         let description = json!({
             "schema": BLOCK_SCHEMA,
             "kind": Kind::Go.word(),
@@ -1254,7 +1284,17 @@ impl Program {
             "rustc_ms": cost_ms,
             "built_ms": epoch_ms(at),
         });
-        let origin = Origin::built_here(&share.run, Some(share.by.clone()));
+        // B-32: built here, by this run, and by whom when the run shares.
+        let run = share
+            .map(|share| share.run.clone())
+            .or_else(|| {
+                current
+                    .folder
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        let origin = Origin::built_here(&run, share.map(|share| share.by.clone()));
         let files = [NewFile {
             name: ARCHIVE.into(),
             source: path.to_path_buf(),
@@ -1425,6 +1465,7 @@ fn go_entry(outcome: Outcome, key: &Digest) -> Entry {
         step: Some(*key),
         key: Some(*key),
         downloaded: false,
+        baked: false,
         go: Some(GoEntry::default()),
         cc: None,
     }

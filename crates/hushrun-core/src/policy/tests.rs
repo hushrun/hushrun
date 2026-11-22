@@ -998,3 +998,117 @@ fn build_cc_maps_turns_the_launcher_s_prefix_maps_off() {
     );
     assert_error(&format!("{HEAD}build:\n  cc:\n    map: off\n"), 5, "map");
 }
+
+// covers: B-67
+#[test]
+fn build_baked_signers_name_a_keyless_identity_or_a_key() {
+    let text = format!(
+        "{HEAD}checks:\n  unit:\n    run: make test\nbuild:\n  baked:\n    signers:\n      - issuer: https://token.actions.githubusercontent.com\n        subject: https://github.com/acme/shop/.github/workflows/ci.yml@refs/heads/main\n      - key: ed25519:{}\n",
+        "A".repeat(43) + "="
+    );
+    let policy = Policy::parse("hushrun.yaml", text.as_bytes()).unwrap();
+    assert_eq!(policy.build_baked.signers.len(), 2);
+    assert_eq!(
+        policy.build_baked.signers[0],
+        crate::policy::BakedSigner::Identity {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            subject: "https://github.com/acme/shop/.github/workflows/ci.yml@refs/heads/main".into(),
+        }
+    );
+    assert!(matches!(
+        policy.build_baked.signers[1],
+        crate::policy::BakedSigner::Key(_)
+    ));
+    let plain = Policy::parse(
+        "hushrun.yaml",
+        format!("{HEAD}checks:\n  unit:\n    run: make test\n").as_bytes(),
+    )
+    .unwrap();
+    assert!(plain.build_baked.signers.is_empty());
+    // E-6: what a run trusts of a baked store is in every check's definition when the file
+    // names anything, so a pull request that adds a signer has evidence of its own; a file that
+    // names nothing keeps its digests.
+    let unit = |p: &Policy| p.checks[&CheckName::new("unit").unwrap()].definition_digest;
+    assert_ne!(unit(&policy), unit(&plain));
+    let none = Policy::parse(
+        "hushrun.yaml",
+        format!("{HEAD}checks:\n  unit:\n    run: make test\nbuild:\n  env: [X]\n").as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(unit(&none), unit(&plain));
+    let dated = Policy::parse(
+        "hushrun.yaml",
+        format!("{HEAD}checks:\n  unit:\n    run: make test\nbuild:\n  baked:\n    not_before: 2026-11-21T00:00:00Z\n").as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(dated.build_baked.not_before, Some(1_795_219_200_000));
+    assert_ne!(unit(&dated), unit(&plain));
+    assert_error(
+        &format!("{HEAD}build:\n  baked:\n    not_before: yesterday\n"),
+        5,
+        "is a time such as",
+    );
+    assert_error(
+        &format!("{HEAD}build:\n  baked:\n    signers:\n      - issuer: https://x\n"),
+        6,
+        "either `issuer` and `subject`",
+    );
+    assert_error(
+        &format!("{HEAD}build:\n  baked:\n    signers:\n      - key: rsa:abc\n"),
+        6,
+        "public key",
+    );
+    assert_error(
+        &format!(
+            "{HEAD}build:\n  baked:\n    signers:\n      - key: ed25519:{a}\n      - key: ed25519:{a}\n",
+            a = "A".repeat(43) + "="
+        ),
+        7,
+        "twice",
+    );
+}
+
+// covers: B-65, B-69, B-73
+#[test]
+fn build_baked_names_when_images_are_compacted_and_rebaked_and_which_branches_bake() {
+    let text = format!(
+        "{HEAD}checks:\n  unit:\n    run: make test\nbuild:\n  baked:\n    compact_every: 3d\n    rebake_every: 30m\n    rebake_blocks: 20\n    branches: [release, refs/heads/next]\n"
+    );
+    let policy = Policy::parse("hushrun.yaml", text.as_bytes()).unwrap();
+    let settings = &policy.build_bake;
+    assert_eq!(
+        settings.compact_every,
+        Some(crate::time::Dur::from_secs(3 * 86400))
+    );
+    assert_eq!(
+        settings.rebake_every,
+        Some(crate::time::Dur::from_secs(1800))
+    );
+    assert_eq!(settings.rebake_blocks, Some(20));
+    assert_eq!(settings.branches, ["release", "next"]);
+    // None of it is what a run trusts: no check's definition changes.
+    let plain = Policy::parse(
+        "hushrun.yaml",
+        format!("{HEAD}checks:\n  unit:\n    run: make test\n").as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(plain.build_bake, crate::policy::BakeSettings::default());
+    let unit = |p: &Policy| p.checks[&CheckName::new("unit").unwrap()].definition_digest;
+    assert_eq!(unit(&policy), unit(&plain));
+    assert_error(
+        &format!("{HEAD}build:\n  baked:\n    compact_every: weekly\n"),
+        5,
+        "is a duration such as",
+    );
+    assert_error(
+        &format!("{HEAD}build:\n  baked:\n    branches: [release, release]\n"),
+        5,
+        "names release twice",
+    );
+    // A pattern isn't a branch: GitHub's filter would read it as one, a dispatched run wouldn't.
+    assert_error(
+        &format!("{HEAD}build:\n  baked:\n    branches: ['release/*']\n"),
+        5,
+        "by its whole name",
+    );
+}

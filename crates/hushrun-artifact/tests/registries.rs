@@ -16,15 +16,13 @@ use hushrun_artifact::{
 };
 use hushrun_core::digest::Digest;
 
+/// The registries to test against. `--features it` asks for these tests, so with none named they
+/// fail, never pass without running.
 fn hosts() -> Option<(String, String)> {
-    let Ok(text) = std::env::var("HUSHRUN_IT_REGISTRIES") else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "HUSHRUN_IT_REGISTRIES must name two registries in CI"
-        );
-        eprintln!("HUSHRUN_IT_REGISTRIES is not set: nothing to test");
-        return None;
-    };
+    let text = std::env::var("HUSHRUN_IT_REGISTRIES")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+        .expect("HUSHRUN_IT_REGISTRIES must name one or two registry hosts: `--features it` runs these tests against them");
     let mut hosts = text.split_whitespace().map(str::to_string);
     let a = hosts.next().expect("two registry hosts");
     let b = hosts.next().unwrap_or_else(|| a.clone());
@@ -288,4 +286,86 @@ fn seed_a_large_layer() {
     let json = serde_json::json!({"schemaVersion": 2, "mediaType": OCI_MANIFEST, "config": config, "layers": [layer]});
     let digest = seeder.manifest(&repository, "large", OCI_MANIFEST, &json);
     println!("SEEDED {}", repository.at_digest(&digest));
+}
+
+// covers: B-65, B-67
+#[test]
+fn a_baked_image_is_published_and_a_second_bake_uploads_only_what_changed() {
+    use hushrun_artifact::image::{self, Entry, Group, Referrer};
+    let Some((a, _)) = hosts() else { return };
+    let artifacts = artifacts_for(&[&a]);
+    let repository = Repository::parse(&format!("{a}/{}", unique("baked"))).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let entry = |path: &str, bytes: &[u8], group: Group| {
+        let source = dir.path().join(path.replace('/', "_"));
+        std::fs::write(&source, bytes).unwrap();
+        Entry {
+            path: path.into(),
+            size: bytes.len() as u64,
+            sha256: Digest::of(bytes),
+            group,
+            source,
+        }
+    };
+    let pack = |n: u8| format!("hushrun/packs/{}.pack", format!("{n:02x}").repeat(32));
+    let fixed = vec!["hushrun-linux-x64-0123456789abcdef".to_string()];
+    let moving = vec!["hushrun-linux-x64-latest".to_string()];
+    let referrer = Referrer {
+        artifact_type: "application/vnd.dev.sigstore.bundle.v0.3+json".into(),
+        layer_media_type: "application/vnd.dev.sigstore.bundle.v0.3+json".into(),
+        layer: b"{\"bundle\":true}".to_vec(),
+        annotations: Default::default(),
+    };
+    let publish = |entries: &[Entry]| {
+        let previous = artifacts.previous(&repository, &moving[0]).unwrap();
+        let present = |d: &Digest| artifacts.has_blob(&repository, d).unwrap();
+        let plan = image::plan(entries, previous.as_ref(), &present, false);
+        let built = image::build(&plan, "linux-x64", "m", &Default::default()).unwrap();
+        let pushed = artifacts
+            .publish(
+                &repository,
+                &built,
+                &fixed,
+                std::slice::from_ref(&referrer),
+                &moving,
+            )
+            .unwrap();
+        (built, pushed)
+    };
+    let mut first = vec![
+        entry(&pack(1), &[1; 70_000], Group::Deps),
+        entry(&pack(2), &[2; 40_000], Group::Code),
+        entry(&pack(3), &[3; 40_000], Group::Code),
+        entry(&pack(4), &[4; 40_000], Group::Code),
+        entry("hushrun/baked.json", b"{\"v\":1}", Group::Store),
+    ];
+    let (built, pushed) = publish(&first);
+    assert!(
+        pushed
+            .blobs
+            .iter()
+            .filter(|b| b.role != "signature-config")
+            .all(|b| b.uploaded)
+    );
+    // The registry has the image under both tags, and its referrer under the tag schema's tag
+    // when it has no referrers API.
+    let head = artifacts
+        .digest(&ImageRef::parse(&repository.at_tag(&moving[0])).unwrap())
+        .unwrap();
+    assert_eq!(head, built.digest());
+    // A code change: the recent layer and the config are all that go up.
+    first[3] = entry(&pack(5), &[5; 41_000], Group::Code);
+    first[4] = entry("hushrun/baked.json", b"{\"v\":2}", Group::Store);
+    let (second, pushed) = publish(&first);
+    let uploaded: Vec<&str> = pushed
+        .blobs
+        .iter()
+        .filter(|b| b.uploaded)
+        .map(|b| b.role.as_str())
+        .collect();
+    assert_eq!(uploaded, ["recent", "config"], "{pushed:?}");
+    let head = artifacts
+        .digest(&ImageRef::parse(&repository.at_tag(&moving[0])).unwrap())
+        .unwrap();
+    assert_eq!(head, second.digest());
 }

@@ -7,6 +7,7 @@ pub mod credentials;
 #[cfg(test)]
 mod fake;
 pub mod hints;
+pub mod image;
 mod oci;
 mod registry;
 
@@ -26,6 +27,9 @@ pub use registry::{
 pub struct Options {
     /// Hosts reached over plain HTTP (`--insecure-registry`, tests only).
     pub insecure_registries: Vec<String>,
+    /// \[B-70\] A credential given for a host, used for it before anything the Docker
+    /// configuration says: a backend's registry, read with the job's own ID token.
+    pub credentials: Vec<(String, credentials::Credential)>,
 }
 
 /// A registry client and the runtime it runs on: the synchronous API commands use.
@@ -45,8 +49,19 @@ impl std::fmt::Debug for Artifacts {
 impl Artifacts {
     /// Connects with the Docker configuration's credentials (§11.5).
     pub fn connect(options: &Options) -> Result<Artifacts, ArtifactError> {
-        let config = credentials::DockerConfig::load()?;
+        Self::connect_with(credentials::DockerConfig::load()?, options)
+    }
+
+    /// [`Artifacts::connect`] with `config` as the Docker configuration: an empty one when every
+    /// credential it needs is given (`Options::credentials`), so no file is read later.
+    pub fn connect_with(
+        config: credentials::DockerConfig,
+        options: &Options,
+    ) -> Result<Artifacts, ArtifactError> {
         let registry = OciRegistry::new(config, options.insecure_registries.clone())?;
+        for (host, credential) in &options.credentials {
+            registry.give(host, credential.clone());
+        }
         Self::with_registry(Arc::new(registry))
     }
 

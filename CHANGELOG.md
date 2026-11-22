@@ -6,6 +6,196 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Baked stores ([ADR 0098](docs/adr/0098-baked-stores.md), B-63 and B-64): a repository's compiled
+crates, Go packages and C and C++ objects, written once into a folder an image or a read-only
+volume carries, and read underneath a run's own store, so a sandbox starts with them on its own
+disk.
+
+Baked images ([ADR 0099](docs/adr/0099-baked-images.md), B-65 to B-70): a baked store published
+as a layered, signed OCI image that a Dockerfile takes with one line, its tags as the change
+signal, the CI job that bakes it, and publishing into a backend's registry built from the blocks it
+holds.
+
+Baked archives and disk images ([ADR 0100](docs/adr/0100-baked-archives-and-disk-images.md),
+B-71): the same store as one tar, for a sandbox snapshotted while it runs, or as one read-only
+EROFS disk image, for a volume mounted read-only.
+
+Images over time ([ADR 0101](docs/adr/0101-images-over-time.md), B-72 to B-74): a weekly
+compaction, a re-bake limit for a fast-moving main, branch bakes, a first image of the dependencies
+alone, and a measured report of what a store saves.
+
+What a bake builds, and the job that signs it ([ADR 0102](docs/adr/0102-what-a-bake-builds-and-the-job-that-signs.md),
+B-75 and B-76): a bake builds a skipped merge as CI's own file runs it, closes only whole builds,
+hands the build no credential, and carries the blocks bound to CI's folders.
+
+### Added
+
+- **`hushrun build bake --deps-only -- COMMAND`** (B-72) bakes a repository's third-party code
+  before any build of its own: the check's cargo command runs in a store and target folder of the
+  bake's own with the repository's own crates compiled as empty stubs, so every third-party crate
+  is compiled with the key the real build computes, and a Go module's third-party packages are
+  built. Its image takes its fixed tag, moves its tags only over nothing or another
+  dependencies-only image (checked before it builds), and a full bake replaces it.
+- **`hushrun build bake --report -- COMMAND`** (B-74) times COMMAND on this machine cold and from
+  the store just baked, as a sandbox started from the image runs it, and says both times and how
+  many compiles the store served.
+- **The re-bake limit** (B-73): a bake publishes nothing while the image its tag names is younger
+  than `build: baked: rebake_every` (an hour) and fewer than `rebake_blocks` (50) blocks changed,
+  by that image's signed baking time; it exits 0 and says why. `--force` publishes anyway.
+- **A weekly compaction** (B-65): the image's workspace layer is written again once it is older
+  than `build: baked: compact_every` (a week), by the time the image's label records
+  (`compacted_ms`).
+- **A bake builds what a skipped merge left unbuilt** (B-75, [ADR 0102](docs/adr/0102-what-a-bake-builds-and-the-job-that-signs.md)):
+  in CI on the default branch, when the backend's newest build of a check is of a commit the one
+  checked out comes after (CI skipped the checks a pull request passed), the bake builds each check
+  as CI's own file runs it (the command of its `hushrun run NAME -- COMMAND`, its folder, its job's
+  variables and primary matrix entry, read at each bake; a check hushrun.yaml gives a `run` that CI
+  doesn't run is built from it), through hushrun as the job, in one target folder as CI's steps
+  share, compiling only what no trusted store holds, within 30 minutes, then bakes the merged
+  code's blocks. It closes a manifest only for a whole build (succeeded, every block uploaded), never
+  builds an older commit, records no result, and hands the build none of the job's credentials.
+  `--no-build` opts out. The job `init --bake` writes takes the build job's toolchain (its actions,
+  pinned, filled in with the job's values, on GitHub; its image and `before_script` on GitLab).
+- **Blocks bound to CI's folders are baked** (B-76): a bake in CI from the backend's trusted scope
+  records the job's folders in `baked.json` (`paths`); a run at other folders says which folders
+  those blocks need, and `init --bake` prints them.
+- **Branch bakes** (B-69): `hushrun init --bake` bakes the branches `build: baked: branches:` names
+  into their own tags, each by a run on that branch, so its signature names the branch's workflow.
+
+- **`hushrun build bake --tar FILE`** (B-71) writes the store as one tar whose files are under
+  `hushrun/`, so `tar -x -C /` puts it where a run reads it with no variable; a name ending in
+  `.zst` compresses it with zstd, and `-` writes it to stdout (what bake says then goes to stderr),
+  for `curl … | tar -x -C /` in a live snapshot step. **`--erofs FILE`** writes it as a read-only
+  EROFS disk image whose root is the store, made by hushrun with no `mkfs.erofs` and no root, for a
+  volume mounted read-only (at `/hushrun`, or anywhere with `HUSHRUN_BUILD_LOWER`). Both hold the
+  folder's signature, `baked.sigstore.json`, so a run trusts the extracted or mounted store on the
+  same signature as an image's; both are the same bytes for the same store on any machine, and are
+  written whole (temporary file and rename). A bake that signs nothing takes the time in
+  `baked.json` from `SOURCE_DATE_EPOCH` when it is set, so two such bakes are byte for byte the
+  same. `--format json` lists them under `archives`. A partial store exits 11.
+- **`hushrun build bake --oci REPOSITORY`** (B-65) publishes the store as an OCI image to any
+  registry, built by hushrun with no `docker build` (`--oci-dir DIR` writes an OCI image layout
+  instead): a deps layer of third-party crates, a workspace layer of the repository's own, and a
+  recent layer of what changed since, so a code change uploads the recent layer alone. Layers are
+  uncompressed tars whose bytes are a pure function of their files (the byte layout is in the
+  spec). The image holds the store at `/hushrun`, and a run reads a store there when
+  `HUSHRUN_BUILD_LOWER` is unset: `COPY --from=REPOSITORY:hushrun-linux-x64-latest /hushrun /hushrun`
+  is all an image needs. Credentials are docker's, or a CI job's own `GITHUB_TOKEN` for GHCR or
+  GitLab's registry variables.
+- **Tags** (B-66): `hushrun-<platform>-<manifest>` names one complete store and never moves (a
+  partial store takes none); `hushrun-<platform>-latest` moves only from CI on the default branch;
+  **`--branch-tag`** moves `hushrun-<platform>-branch-<name>-latest`, whose name never collides with
+  another branch's. A bake builds on a previous image only when a signer hushrun.yaml names signed
+  it, and carries the blocks its workspace layer keeps unused only as the backend vouches for them
+  now; otherwise it writes the workspace layer again.
+- **Signatures** (B-67): a bake signs keylessly with a CI job's ID token, or with `--signing-key
+  FILE`, writing `baked.sigstore.json` beside `baked.json` and a Sigstore bundle as a referrer of
+  the image that `cosign verify-attestation` checks. A run trusts a signed store, with no backend
+  and in CI too, when hushrun.yaml names the signer under **`build: baked: signers:`** (a keyless
+  `issuer` and `subject` from a run a push, a schedule, a run by hand or the bake job started, or
+  a `key`), for the very `baked.json` and hints signed. **`build: baked: not_before`** (a time)
+  retires stores signed before it. What `build: baked:` names is part of every check's key, so a
+  pull request that adds a signer has results of its own. `hushrun build status` says why a
+  signature isn't evidence.
+- **`hushrun build manifest [--json]`** (B-68) prints the store identity a bake would write, its
+  checks and their parts, the platform and the tags an image of it gets
+  (`hushrun.build-manifest/v1`), for a program that watches for new images.
+- **`hushrun init --bake`** (B-69) adds the bake job: on GitHub a workflow of its own that runs
+  after the build's workflow passes for a push to the default branch of this repository, and by
+  hand on the default branch, with `packages: write` and `id-token: write`; on GitLab a `.post`
+  job. It bakes every check. The plan prints the Dockerfile line and the signer lines for
+  hushrun.yaml. A repository on hushrun's hosted backend bakes into
+  `registry.hushrun.com/<org>/<name>` (B-70), with no `packages: write` and no registry token.
+- **Publishing into a backend's registry** (B-70): `hushrun build bake --from backend --trusted
+  --oci hushrun`, or `--oci` with a repository on the backend's registry host
+  (`registry.hushrun.com` for hushrun's hosted backend, the backend's own host otherwise), sends
+  one request, `POST v0/build/images`, that describes the image (each layer's files in order, a
+  pack by its block, any other file by its bytes, the manifest, config and signature, the moving
+  tag's digest it read, and the commit) instead of pushing blobs: the backend makes each layer from
+  the blocks it already holds, so no block is stored twice. Only CI on the default branch
+  publishes there. The backend computes every layer's digest itself, and a digest other than the
+  bake's fails the bake loudly. A publish that may pass (503, a duplicate, no answer) is sent again
+  as the same bytes; one whose moving tag moved meanwhile reads it again and plans again, once; one
+  a newer run beat publishes nothing and exits 0 with a line. A partial store isn't published there
+  (exit 11): its image would take the fixed tag for good. The wire types are
+  `hushrun_core::blocks::PublishRequest` and `PublishResponse`.
+
+- **`hushrun build bake --out DIR`** (B-63) writes sealed packs, sealed hints and `baked.json`, and
+  refuses to leave anything else in the folder: every check's compiled code, each pack once, with
+  one part per check, kind and platform this machine builds (Rust's target triple, Go's
+  `GOOS_GOARCH`, each C and C++ target triple). `--from store` (the default) bakes what the last
+  run of each check here compiled or reused, with no network, only what may leave any machine,
+  and marks the store untrusted; `--from backend` bakes the org's newest build of each check
+  hushrun.yaml names, as `hushrun build fetch` downloads it. `--check NAME`, repeatable, narrows
+  it; `--trusted` keeps only what came from the repository's trusted scope. One bake of a folder
+  at a time; a bake replaces a store in one step and puts right what a bake that died left. A
+  store missing blocks says how many and exits 0, or **11** (a new exit code) when published for
+  others. `--format json` prints what it wrote. No folder of the machine that baked it is in it,
+  in plain text or as a digest.
+- **`HUSHRUN_BUILD_LOWER`** (B-64) names a baked store a run reads underneath its own store: the
+  wrapper, Go's cache program and the C and C++ launcher look in this machine's store, then the
+  baked store, then the relay; a block found underneath is opened with its key into this
+  machine's store. The baked folder is never written, dated or swept, so it works read-only.
+- A run trusts a baked store's blocks only on evidence of its own, for the very `baked.json` bytes
+  it read: the backend it was baked from vouching for each row's outputs, pack SHA-256 and size in the repository's own
+  trusted scope as the run begins (within 5 seconds, block by block), a signature (above), or
+  **`HUSHRUN_BUILD_LOWER_UNTRUSTED=1`**, in a run that writes nothing others trust (not CI, not a
+  run whose backend lets it write the trusted scope). What `baked.json` says is a claim; a pack
+  named twice is refused. The rows a run may open are written once into its session, and no
+  wrapper reads `baked.json` again. Its blocks' first reuse here is never audited when the store is
+  current and the server vouched for the block in this run in the repository's trusted scope, or
+  a signer hushrun.yaml names signed the store (and passes `not_before`) and the run has no
+  backend that could say otherwise; one time in ten when the person only accepted it, or when a
+  signed store's backend didn't answer or isn't its source; later reuses are one in fifty, as any. `HUSHRUN_BUILD_AUDIT=every` still audits
+  them all.
+- A baked store stays current, with no clock, until its source names a newer manifest for any of
+  its checks; the run learns it as it begins and marks it replaced for good, after which its
+  blocks are reused as downloads. One of another repository, with no part for this machine's
+  platforms, or with no evidence is ignored with one line; a GNU and a musl hushrun read the same
+  store, and a block bound to other folders is only a miss. `/hushrun`, which no variable named, is
+  read only when root or the run's user owns it, its `baked.json` and the folders of its packs and
+  hints, and no other user, nor its group, may write them. A hint file is read only when its bytes
+  are its name.
+- `hushrun build status` shows the baked store's state and evidence (`baked` in its JSON; a store
+  from a backend is `server-decides`, since only a run asks that backend), and a
+  run's summary counts what came from it: `build: 41 of 43 crates reused (41 from the baked
+  store), 2 built`, and the same in the Go and C/C++ lines.
+- Every run of a check with build reuse on leaves its manifests in the store
+  (`manifests/<digest>.json`, one per repository, check and platform, saved under a lock, swept
+  after the kept days; a pair whose block is unused for the kept days goes, and a file that can't
+  be read is set aside and said), which `bake` reads.
+
+### Changed
+
+- **The bake job `init --bake` writes** (B-69, B-73, B-75): runs daily on a schedule too (GitLab:
+  the plan says to add a pipeline schedule), and a scheduled bake publishes whatever the re-bake
+  limit; checks out the whole history; on GitHub copies only setup actions pinned to a commit (or
+  GitHub's own, or the repository's), filled in with the build job's matrix entry and variables,
+  else writes `--no-build` and says how to pin them; one `concurrency` group per branch, on the
+  bake job alone; a dispatch to a branch without the workflow says to merge the default branch
+  into it. A `build: baked: branches` name with `* ? [ ] ! +` is refused.
+- **`build: baked: not_before` compares a keyless signature's timestamp** (B-67), never the baking
+  time it claims; a key's signature keeps its signed `baked_ms`.
+- **A repository's programs go in the image's recent layer** (B-65) and don't count against its
+  bound, so a merge that relinks them no longer rewrites the workspace layer.
+- **A dependencies-only `cargo test` compiles its tests and runs none** (B-72); a Go module's
+  `go` COMMAND gives its build flags to the third-party build. A full bake is never held by the
+  re-bake limit over a dependencies-only image, and a dependencies-only bake asks again before its
+  moving tags move.
+- A bake's or `build manifest`'s `--from store` in a CI job whose commands each have a store of
+  their own (GitLab CI) is refused, naming `--from backend`. The workspace layer's recorded time
+  counts as old more than ten minutes past the bake's clock (it was a day).
+- `/hushrun` refused because another user owns it, or its group or anyone may write it, now says
+  how to fix it (`chmod -R g-w /hushrun`, `chmod -R go-w /hushrun`, or extracting it as root or as
+  the user who runs builds).
+- A bake that publishes signs its folder once, before any image, archive or disk image is made of
+  it, and decides its signer before it bakes (a `workflow_run` job that may not sign stops before
+  baking); `--signing-key` and `--no-sign` apply to archives and disk images too. The "published
+  unsigned" line now says "the store".
+- **Go's cache program also runs where a run reads a baked store** (B-39, B-42), not only in one
+  that shares, and keeps portable archives in the store there, so they can be baked and read back.
+  A Go module's run that neither shares nor reads a baked store is as in 0.18.0.
+
 ### Fixed
 
 - **A build script or a test program that came from the shared store can start** (B-12, B-28):
@@ -18,6 +208,46 @@ codes, environment variables, event formats, the ledger layout) are listed first
   such a file in place needs one `cargo clean -p <package>`: cargo takes the file for up to date,
   so a build script keeps failing and a test program or a binary keeps refusing to start. Packs
   are unchanged: 0.18.0 opens the ones this version writes, and this version opens 0.18.0's.
+- **A GitLab bake that builds keeps its store** (B-31, B-75): the first check's session removed
+  the command's own store mid-bake.
+- **A check's close names no crate that stays on the machine** (B-30): one neither portable nor
+  bound to folders alone was named and never uploaded, so every bake of the check was partial
+  (nushell's nu-command).
+- **A bake from the backend downloads programs** (B-30, B-63): the prefetch leaves programs to be
+  asked for, and a bake asked for none, so any repository whose CI built a program baked a
+  "partial" store, exited 11 and published nothing. A bake's relay now downloads every block the
+  manifests name, programs last.
+- **A run's manifest names only blocks the server holds** (B-30): a CI job's uploads are cut off at
+  the end of its command, yet its `close` named every compile, so a bake of a fast-compiling
+  repository found blocks the server never stored. A block whose upload is still waiting or was
+  cut off is left out; its marker stays for the next run in that store.
+- **A bake runs in GitLab CI** (B-31): with no `RUNNER_TEMP` a bake said "there is no store here",
+  so the job `init --bake` writes for GitLab always failed. A CI command other than `hushrun run`
+  uses a store of its own there, removed when it ends.
+- **A key-signed bake contacts no timestamp authority unless `HUSHRUN_TSA` names one** (B-67): it
+  asked Sigstore's public one by default. Keyless signing keeps its authorities.
+- **A publish into a backend's registry says when a stale answer made it plan again** (B-70), with
+  how many requests it sent and all their bytes (`requests`, `sent_total_bytes`, `replanned`).
+- **`/hushrun` on a read-only mount is read whoever owns it** (B-65): a user-namespaced container
+  (rootless podman, Kubernetes' `hostUsers: false`) sees a root-owned EROFS mount or read-only
+  extract as owned by nobody, and the check refused it with advice (`chown`) no read-only mount
+  takes. The line for another owner now names `HUSHRUN_BUILD_LOWER`.
+- **A bake holds its folder's lock until it is done** (B-63): it let go before signing the folder
+  and writing its archives, so another bake could replace the folder they read.
+- **Archives** (B-71): a file that grew while copied fails the archive; `--tar` and `--erofs`
+  naming one file through `..` or a link are refused; a huge `SOURCE_DATE_EPOCH` no longer
+  panics; `-` to a terminal is refused; the folder is synced after each rename and the
+  signature written whole; a failed archive after a publish still names the image and its tags;
+  a partial store is refused for a backend's registry before anything is signed.
+- **A short cargo home no longer keeps every registry crate on its machine** (B-9, B-10): with
+  `CARGO_HOME=/cargo`, the search of a crate's outputs and records found `/cargo` inside the
+  stand-in `/hushrun/cargo` that rustc writes for it, so registry crates were marked
+  `cargo-home-in-output` and never shared or baked (35 of ripgrep's 38). A folder's text found
+  only inside a stand-in, as part of the stand-in's own text, is now the stand-in. The same held
+  for a root inside a build script output's stand-in, such as a checkout `/work` inside
+  `/hushrun/out/work-0.1.0`. A short root that starts a longer name in a path rustc wrote under a
+  stand-in, such as a checkout `/app` in `/hushrun/cargo/registry/src/…/approx-0.5.1/…`, is that
+  path too; the root's own contents (`/app/…`) and the root alone still count everywhere.
 
 ## [0.18.0] - 2026-11-19
 

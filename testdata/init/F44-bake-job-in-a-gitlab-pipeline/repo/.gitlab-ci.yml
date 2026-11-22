@@ -1,0 +1,13 @@
+stages: [build, test]
+
+build:
+  stage: build
+  image: rust:1.94
+  script:
+    - cargo build --locked
+
+test:
+  stage: test
+  image: rust:1.94
+  script:
+    - cargo test --locked

@@ -21,7 +21,11 @@
 //!
 //! Every failure ends in rustc running as asked (B-19): an answer of "none" is a compile.
 
+pub(crate) mod bake_archive;
+pub(crate) mod bake_image;
+pub(crate) mod baked;
 mod credential;
+pub(crate) mod hosted;
 mod http;
 mod pack;
 pub(crate) mod saved;
@@ -385,6 +389,10 @@ struct State {
     server_date_ms: Option<u64>,
     /// The PUTs in flight, which the end of the command may cut off (B-29).
     puts: HashMap<Digest, tokio::task::AbortHandle>,
+    /// B-75: the blocks `begin` refused for good this check (`too_large`, `unsupported`,
+    /// `no_scope`, `suspended`), by first key: never on the backend, so a bake's build that made
+    /// one isn't whole. Taken at the end of each check.
+    refused: Vec<(Digest, blocks::Refusal)>,
     /// The upload loop of the check is running.
     uploading: bool,
     /// The relay rested once this run: said once (B-26).
@@ -545,6 +553,9 @@ pub(crate) struct Relay {
     ending: AtomicBool,
     /// B-36: it reads only a fetch, and sends nothing.
     saved: bool,
+    /// B-63: a bake's relay: its prefetch downloads every block a manifest names, programs too,
+    /// since nothing will ask for them later and the store holds what the manifest names.
+    whole: AtomicBool,
     /// What the ends of this process's checks waited in CI, which the next one's wait is less
     /// (B-31).
     waited: Mutex<Duration>,
@@ -559,6 +570,18 @@ static RELAY: OnceLock<Arc<Relay>> = OnceLock::new();
 
 /// B-49: a stop signal came while COMMAND ran: the end of the run is short.
 static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// How a check's end goes ([`Relay::end_check_as`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ending {
+    /// A run's: uploads waited for as [`upload::wait_at_end`] says, then `close` names what
+    /// went up.
+    Usual,
+    /// B-75: a bake's build of what's missing. Every upload is waited for, up to `within`, with
+    /// no cut at a share of the compiles' cost (the bake's store goes with its job); `close`
+    /// goes only when the command `succeeded` and nothing it built is left unsent.
+    Bake { succeeded: bool, within: Duration },
+}
 
 /// B-49: the run was asked to stop (a GitLab job cancelled or timed out): its end waits for no
 /// upload, and `close` gets at most [`upload::STOPPED_CLOSE`].
@@ -638,6 +661,7 @@ impl Relay {
             machine,
             ending: AtomicBool::new(false),
             saved: config.saved.is_some(),
+            whole: AtomicBool::new(false),
             waited: Mutex::new(Duration::ZERO),
             wake: tokio::sync::Notify::new(),
             cut: tokio::sync::watch::Sender::new(false),
@@ -672,6 +696,7 @@ impl Relay {
                 check: None,
                 server_date_ms: None,
                 puts: HashMap::new(),
+                refused: Vec::new(),
                 uploading: false,
                 rested: false,
                 ci: in_ci,
@@ -771,6 +796,21 @@ impl Relay {
     /// no, a stop with its line, or no answer yet.
     /// The lines the relay has said and no check's end has taken: for `hushrun build fetch`
     /// (B-36), which ends no check.
+    /// What the relay's requests reach and carry: the org's base URL, the backend's origin, the
+    /// org (B-70 names the backend's registry from them).
+    pub(crate) fn access(&self) -> &crate::results::BuildAccess {
+        &self.config.access
+    }
+
+    /// B-70: the bearer token the relay's requests carry now (a CI job's ID token minted for the
+    /// org's URL), within `timeout`: what the backend's registry takes as a password for the same
+    /// caller.
+    pub(crate) fn bearer_now(&self, timeout: std::time::Duration) -> Result<String, String> {
+        self.runtime
+            .block_on(self.client.bearer_now(timeout))
+            .map_err(|f| f.line())
+    }
+
     pub(crate) fn take_lines(&self) -> Vec<String> {
         std::mem::take(&mut self.state().lines)
     }
@@ -1305,9 +1345,16 @@ impl Relay {
             return;
         }
         let store = self.config.store.clone();
+        // B-63, B-75: a bake's relay takes every block and hint from the backend, held here or
+        // not: what it bakes is what the backend serves (a block its own build just compiled and
+        // uploaded included), and it bakes from what arrives.
+        let whole = self.whole.load(Ordering::SeqCst);
         let (held_blocks, held_hints, kept_local) = self
             .runtime
             .spawn_blocking(move || {
+                if whole {
+                    return (HashSet::new(), HashSet::new(), HashSet::new());
+                }
                 let blocks: HashSet<Hex32> = store
                     .keys()
                     .iter()
@@ -1371,7 +1418,7 @@ impl Relay {
         }
         {
             let mut state = self.state();
-            for found in prefetch_order(looked_up, |found| found.class) {
+            for found in prefetch_order(looked_up, |found| found.class, whole) {
                 if !state.fetches.contains_key(&found.address) {
                     state.queue.push_back(found.address);
                     let looked = state
@@ -2690,10 +2737,23 @@ impl Relay {
     /// rest stays in the outbox; `close` goes once with the manifest and the counts; the socket
     /// goes. The lines for the person.
     pub(crate) fn end_check(self: &Arc<Relay>, entries: &[Entry]) -> Vec<String> {
+        self.end_check_as(entries, Ending::Usual)
+    }
+
+    /// [`Relay::end_check`], ended as `ending` says: a bake's build of what's missing (B-75)
+    /// waits for every upload and closes only a whole build.
+    pub(crate) fn end_check_as(
+        self: &Arc<Relay>,
+        entries: &[Entry],
+        ending: Ending,
+    ) -> Vec<String> {
         self.sweep_cc_built(entries);
         // B-31: no ID token is minted once the end has begun.
         self.client.ending(true);
-        let end = self.end();
+        let mut end = self.end();
+        if let Ending::Bake { within, .. } = ending {
+            end.bake = Some(within);
+        }
         // One deadline for everything after the command (B-29, B-31): uploads are cut off at
         // `cut`, and `close` goes within what is left before `deadline`.
         let wait = upload::wait_at_end(&self.config.tuning, &end);
@@ -2743,7 +2803,62 @@ impl Relay {
         let left = deadline
             .saturating_duration_since(Instant::now())
             .min(self.config.tuning.close);
-        if let (true, false, Some(check), false) = (shares, self.saved, &check, left.is_zero()) {
+        // B-75: a bake's build closes only a whole build: one that failed, was stopped, or left
+        // blocks it built unsent would name the commit with a part of its blocks, and every later
+        // bake would take that part for the commit's build.
+        let mut closes = true;
+        // What `begin` refused for good this check, of the blocks it built: taken whatever the
+        // ending, so none is counted against a later check.
+        let refused: Vec<(Digest, blocks::Refusal)> = std::mem::take(&mut self.state().refused)
+            .into_iter()
+            .filter(|(key, _)| entries.iter().any(|e| e.key == Some(*key)))
+            .collect();
+        if let Ending::Bake { succeeded, .. } = ending {
+            let unsent = {
+                let outbox = Outbox::new(&self.config.store);
+                outbox.waiting().iter().filter(|m| m.by == self.by).count()
+                    + outbox.claimed(&self.run).len()
+            };
+            if !succeeded || unsent > 0 || !refused.is_empty() {
+                closes = false;
+                if shares && check.is_some() {
+                    let why = if !succeeded {
+                        "its command didn't succeed".to_string()
+                    } else if unsent > 0 {
+                        format!(
+                            "{unsent} {} it built {} uploaded",
+                            if unsent == 1 { "block" } else { "blocks" },
+                            if unsent == 1 { "wasn't" } else { "weren't" }
+                        )
+                    } else {
+                        format!(
+                            "the backend refused {} {} it built ({})",
+                            refused.len(),
+                            if refused.len() == 1 {
+                                "block"
+                            } else {
+                                "blocks"
+                            },
+                            refused
+                                .iter()
+                                .map(|(key, reason)| format!(
+                                    "{}: {}",
+                                    key.to_string().chars().take(12).collect::<String>(),
+                                    upload::refusal_words(*reason)
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    self.state().lines.push(format!(
+                        "build: no manifest was closed for this commit: {why}; the backend's newest build stays the last whole one, and the next bake builds again"
+                    ));
+                }
+            }
+        }
+        if let (true, false, Some(check), false, true) =
+            (shares, self.saved, &check, left.is_zero(), closes)
+        {
             let close = self.close_request(Kind::Rustc, check, entries);
             // B-45: the check's Go command closes apart, with its own manifest and run.
             let go = (check.go.is_some() && entries.iter().any(|e| e.kind() == Kind::Go))
@@ -2891,6 +3006,7 @@ impl Relay {
                 .waited
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            bake: None,
         }
     }
 
@@ -2925,12 +3041,38 @@ impl Relay {
         // a later job at the same paths fetches only a key the manifest pairs (B-60).
         let from_a_job = self.client.is_a_jobs_id_token();
         let goes_up = |local: &[String]| local.is_empty() || (from_a_job && local == ["tied"]);
+        // B-30, B-31: a block this run meant to upload and didn't (its marker still waits in the
+        // outbox, or was claimed and cut off at the end of the command) isn't on the server: the
+        // manifest leaves it out, so no bake or fetch counts on it. The marker stays, and the
+        // next run in this store uploads it.
+        let outbox = hushrun_build::outbox::Outbox::new(&self.config.store);
+        let unsent: HashSet<Digest> = outbox
+            .waiting()
+            .into_iter()
+            .chain(outbox.claimed(&self.run))
+            .filter(|m| m.by == self.by && m.kind == kind)
+            .map(|m| m.key)
+            .collect();
+        // B-24, B-29: nor does a compiled crate that may not leave the machine: one neither
+        // portable nor (from a CI job's own ID token) bound to folders alone. Named, it would be a
+        // block no bake or fetch can have (the bake of nushell missed nu-command, whose `extern`
+        // keeps it here, and every image of it was partial).
+        let rust_stays = |e: &Entry| {
+            e.go.is_none()
+                && e.cc.is_none()
+                && e.portable
+                    .as_ref()
+                    .is_some_and(|p| !(p.portable || (from_a_job && p.bound_only())))
+        };
         let kept_here = |e: &Entry| {
             e.go.as_ref().is_some_and(|go| go.local.is_some())
                 || e.cc.as_ref().is_some_and(|cc| !goes_up(&cc.local))
+                || rust_stays(e)
         };
         for entry in entries.iter().filter(|e| e.kind() == kind) {
-            if let (Some(step), Some(key), false) = (entry.step, entry.key, kept_here(entry)) {
+            if let (Some(step), Some(key), false) = (entry.step, entry.key, kept_here(entry))
+                && !unsent.contains(&key)
+            {
                 let pair = Pair(
                     Relay::address_in(kind, &step),
                     Relay::address_in(kind, &key),
@@ -3038,13 +3180,19 @@ fn wire_problem(problem: Problem) -> blocks::Problem {
 
 /// The order the prefetch queues what it found in (B-30): what [`prefetched`] names, proc macros
 /// and build-script binaries first, each kind keeping the order it came in (the manifest's),
-/// then libraries, in that order too.
-fn prefetch_order<T>(found: Vec<T>, class: impl Fn(&T) -> blocks::Class) -> Vec<T> {
-    let (mut first, libraries): (Vec<T>, Vec<T>) = found
+/// then libraries, in that order too. With `whole` (a bake's, B-63) every block, the rest
+/// (programs) last.
+fn prefetch_order<T>(found: Vec<T>, class: impl Fn(&T) -> blocks::Class, whole: bool) -> Vec<T> {
+    let (asked, rest): (Vec<T>, Vec<T>) = found
         .into_iter()
-        .filter(|found| prefetched(class(found)))
+        .partition(|found| prefetched(class(found)));
+    let (mut first, libraries): (Vec<T>, Vec<T>) = asked
+        .into_iter()
         .partition(|found| class(found) != blocks::Class::Library);
     first.extend(libraries);
+    if whole {
+        first.extend(rest);
+    }
     first
 }
 

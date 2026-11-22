@@ -29,6 +29,10 @@ pub enum Exit {
     Signer = 9,
     /// `ready`, and the pre-push hook: a check that can run here hasn't passed on this code.
     NotReady = 10,
+    /// `build bake` (B-63): the store others start from is partial, some blocks its manifests
+    /// name couldn't be had: an image (`--oci`, `--oci-dir`), or `--from backend --trusted`. A
+    /// store baked for this machine alone that is partial exits 0, and says so.
+    Partial = 11,
 }
 
 impl From<Exit> for ExitCode {

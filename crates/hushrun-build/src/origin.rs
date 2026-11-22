@@ -8,6 +8,7 @@
 //! | `built` | A compile here made it: the run, and (when the run had a backend) the backend's host, the org and a fingerprint of the credential. Absent: not built here |
 //! | `vouched` | One entry per host, org and repository whose server answered for this block: the scope, the digest of outputs, the server's date of the last time it answered, and its word, `served` (absent) or `withdrawn`. A download makes the first one |
 //! | `reused` | Whether it has been reused here yet |
+//! | `baked` | It was opened from a baked store underneath this one (B-64): which store, by the SHA-256 of its `baked.json` as the run read it |
 //!
 //! A block with no record (every block from before this record existed) is reused locally as
 //! before and never goes up. A block that was only downloaded never goes up either, and it is
@@ -102,6 +103,18 @@ pub struct Vouch {
     pub word: Word,
 }
 
+/// The host of the entry every block opened from a baked store holds ([`Origin::baked`]): no
+/// backend's origin, so no run's server ever matches it.
+pub const BAKED_HOST: &str = "hushrun:baked-store";
+
+/// A block opened from a baked store (B-63, B-64): which store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Baked {
+    /// The SHA-256 of the store's `baked.json`, as the run that opened it read it
+    /// ([`crate::baked::Lower::contents`]): its rows, outputs among them, are in it.
+    pub store: Hex32,
+}
+
 /// `origin.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
@@ -116,6 +129,11 @@ pub struct Origin {
     /// Whether it has been reused here yet.
     #[serde(default)]
     pub reused: bool,
+    /// It was opened from a baked store (B-64). Reused without asking only while the run's baked
+    /// store is current and is that very store ([`Origin::baked_in`]); otherwise it
+    /// stands as a download no server vouched for yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baked: Option<Baked>,
 }
 
 impl Origin {
@@ -129,6 +147,7 @@ impl Origin {
             }),
             vouched: Vec::new(),
             reused: false,
+            baked: None,
         }
     }
 
@@ -139,12 +158,47 @@ impl Origin {
             built: None,
             vouched: vec![vouch],
             reused: false,
+            baked: None,
         }
     }
 
-    /// Whether the block was only downloaded: no compile here made it.
+    /// The record of a block opened from the baked store `store` (B-64, the SHA-256 of its
+    /// `baked.json`), whose
+    /// outputs' digest is `outputs`. It holds one entry of [`BAKED_HOST`], served, dated never:
+    /// so a hushrun that predates the `baked` field (0.18 and before, on a shared store) reads a
+    /// download no server vouched for, and reuses it only as B-34 lets one, never as a block
+    /// built here; and the relay has the outputs to record a server's word against.
+    pub fn baked(store: Hex32, outputs: Hex32) -> Origin {
+        Origin {
+            schema: ORIGIN_SCHEMA.to_string(),
+            built: None,
+            vouched: vec![Vouch {
+                host: BAKED_HOST.to_string(),
+                org: String::new(),
+                repository: String::new(),
+                scope: String::new(),
+                outputs,
+                date_ms: 0,
+                word: Word::Served,
+            }],
+            reused: false,
+            baked: Some(Baked { store }),
+        }
+    }
+
+    /// Whether the block was only downloaded, or only opened from a baked store: no compile here
+    /// made it. Such a block never goes up, and gives way to a compile here (B-32).
     pub fn downloaded_only(&self) -> bool {
-        self.built.is_none() && !self.vouched.is_empty()
+        self.built.is_none() && (!self.vouched.is_empty() || self.baked.is_some())
+    }
+
+    /// B-63: whether the block came only from the baked store `store` (the SHA-256 of its
+    /// `baked.json`), and no server said it no longer serves it: what lets a run whose baked store
+    /// is current, and is that store, reuse it without asking.
+    pub fn baked_in(&self, store: &Hex32) -> bool {
+        self.built.is_none()
+            && self.baked.as_ref().is_some_and(|b| b.store == *store)
+            && !self.vouched.iter().any(|v| v.word == Word::Withdrawn)
     }
 
     /// The entry of `host`, `org` and `repository`, when there is one.
@@ -315,6 +369,26 @@ mod tests {
             "date_ms": 1}]});
         let before: Origin = serde_json::from_value(before).unwrap();
         assert_eq!(before.vouched[0].word, Word::Served);
+        // A block from a baked store stands as a download no server vouched for, until one does;
+        // a server's no is kept for it as for any download.
+        let mut baked = Origin::baked(Hex32([9; 32]), Hex32([7; 32]));
+        // Read by a hushrun from before the field: a download no server vouched for.
+        let mut old = serde_json::to_value(&baked).unwrap();
+        old.as_object_mut().unwrap().remove("baked");
+        let old: Origin = serde_json::from_value(old).unwrap();
+        assert!(old.downloaded_only());
+        assert_eq!(old.standing(shop, 10 * day), Standing::Stale);
+        assert!(baked.downloaded_only());
+        assert!(baked.baked_in(&Hex32([9; 32])));
+        assert!(!baked.baked_in(&Hex32([8; 32])));
+        assert_eq!(baked.standing(shop, 10 * day), Standing::Stale);
+        assert!(!baked.may_go_up_as(&me()));
+        baked.renew(Vouch {
+            word: Word::Withdrawn,
+            ..vouch("github.com/acme/shop", 11 * day)
+        });
+        assert!(!baked.baked_in(&Hex32([9; 32])));
+        assert_eq!(baked.standing(shop, 10 * day), Standing::Withdrawn);
         // A block built here is reused as any, whatever was said of it.
         let mut built = Origin::built_here("1-2", None);
         built.renew(Vouch {

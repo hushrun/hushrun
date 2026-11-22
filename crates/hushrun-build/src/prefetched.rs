@@ -51,16 +51,22 @@ pub fn fresh(store: &Store, now: SystemTime) -> Option<PathBuf> {
         .map(|_| folder(store))
 }
 
-/// Writes a new fetch whole: `fill` writes into a folder of this process's beside the old one,
-/// which is then renamed in. On any failure the old one stays as it was and the new one goes.
+/// How old a folder a fetch left beside the store's must be before the sweep takes it: a fetch
+/// takes minutes, and a folder in use is dated by its last write.
+pub const LEFTOVER_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// Writes a new fetch whole: `fill` writes into a folder of this fetch's own beside the old one,
+/// which is then renamed in. On any failure the old one stays as it was and the new one goes. The
+/// folders are named for no process (two containers on one store are both process 1), so no
+/// fetch ever removes another's; one a fetch that died left is swept once old
+/// ([`LEFTOVER_AFTER`]).
 pub fn replace(store: &Store, fill: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
-    let pid = std::process::id();
     let root = store.root();
     fs::create_dir_all(root)?;
-    let new = root.join(format!("{FOLDER}.{pid}.tmp"));
-    let old = root.join(format!("{FOLDER}.{pid}.old"));
-    let _ = fs::remove_dir_all(&new);
-    let _ = fs::remove_dir_all(&old);
+    let own = crate::baked::unique(FOLDER);
+    let new = root.join(format!("{own}.tmp"));
+    let old = root.join(format!("{own}.old"));
+    fs::create_dir(&new)?;
     let written = fs::create_dir_all(new.join(PACKS)).and_then(|()| fill(&new));
     if let Err(err) = written {
         let _ = fs::remove_dir_all(&new);
@@ -87,7 +93,8 @@ pub fn replace(store: &Store, fill: impl FnOnce(&Path) -> io::Result<()>) -> io:
 }
 
 /// The sweep's step (B-14, B-36): a fetch that isn't fresh at `now` goes, and so do the folders
-/// a fetch whose process is gone left beside it.
+/// a fetch left beside it, once older than [`LEFTOVER_AFTER`] at `now` (never by a process id:
+/// a process of another container sharing the store isn't one this machine can see).
 pub fn sweep(store: &Store, now: SystemTime) -> Tally {
     let mut tally = Tally::default();
     let current = folder(store);
@@ -103,15 +110,13 @@ pub fn sweep(store: &Store, now: SystemTime) -> Tally {
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(rest) = name.strip_prefix(&format!("{FOLDER}.")) else {
-            continue;
-        };
-        let pid = rest
-            .strip_suffix(".tmp")
-            .or_else(|| rest.strip_suffix(".old"))
-            .and_then(|pid| pid.parse::<i32>().ok());
-        let Some(pid) = pid else { continue };
-        if crate::outbox::process_alive(pid) {
+        let leftover = name.starts_with(&format!("{FOLDER}."))
+            && (name.ends_with(".tmp") || name.ends_with(".old"));
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|changed| changed + LEFTOVER_AFTER < now);
+        if !leftover || !old {
             continue;
         }
         match fs::remove_dir_all(entry.path()) {
@@ -168,5 +173,33 @@ mod tests {
             1
         );
         assert!(!folder(&store).exists());
+    }
+
+    // covers: B-36
+    // Two containers on one store are both process 1, and neither can see the other's processes:
+    // a fetch in progress elsewhere is never taken for a dead one, whatever its name.
+    #[test]
+    fn a_fetch_in_progress_elsewhere_is_kept_and_a_leftover_goes_once_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(&dir.path().join("build"));
+        fs::create_dir_all(store.root()).unwrap();
+        let now = SystemTime::now();
+        let elsewhere = store.root().join(format!("{FOLDER}.999999999.tmp"));
+        let unique = store
+            .root()
+            .join(format!("{}.tmp", crate::baked::unique(FOLDER)));
+        for folder in [&elsewhere, &unique] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        assert_eq!(sweep(&store, now).removed, 0);
+        assert!(elsewhere.is_dir() && unique.is_dir());
+        assert_eq!(sweep(&store, now + LEFTOVER_AFTER * 2).removed, 2);
+        // A fetch leaves only the fetch behind.
+        replace(&store, |new| saved(new, 1)).unwrap();
+        let names: Vec<String> = fs::read_dir(store.root())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, [FOLDER]);
     }
 }

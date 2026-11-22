@@ -73,6 +73,7 @@ pub fn pin_reference(reference: &str, registry: &RegistryOpts) -> Result<String,
 pub fn connect(registry: &RegistryOpts) -> Result<hushrun_artifact::Artifacts, Failure> {
     hushrun_artifact::Artifacts::connect(&hushrun_artifact::Options {
         insecure_registries: registry.insecure.clone(),
+        credentials: Vec::new(),
     })
     .map_err(transfer_failure)
 }

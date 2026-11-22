@@ -34,6 +34,7 @@ pub(crate) struct State {
     blobs: BTreeMap<Repository, BTreeMap<Digest, Vec<u8>>>,
     mounts: BTreeSet<(Repository, Repository, Digest)>,
     copies: Vec<(Repository, Repository, Digest)>,
+    pushed: Vec<(Repository, Digest, u64)>,
 }
 
 pub fn repo(text: &str) -> Repository {
@@ -271,5 +272,61 @@ impl Registry for FakeRegistry {
             .manifests
             .insert((repository.clone(), digest.to_string()), manifest.clone());
         Ok(Some(self.misreport_digest.unwrap_or(digest)))
+    }
+
+    async fn push_blob(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        size: u64,
+        stream: crate::registry::BlobStream,
+    ) -> Result<(), ArtifactError> {
+        use futures_util::StreamExt as _;
+        self.denied(repository)?;
+        let mut bytes = Vec::new();
+        let mut stream = stream;
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.map_err(|e| ArtifactError::Network(e.to_string()))?);
+        }
+        if Digest::of(&bytes) != *digest || bytes.len() as u64 != size {
+            return Err(ArtifactError::DigestMismatch {
+                what: format!("blob {digest}"),
+                expected: digest.to_string(),
+                actual: Digest::of(&bytes).to_string(),
+            });
+        }
+        let mut state = self.state.lock().unwrap();
+        state.pushed.push((repository.clone(), *digest, size));
+        state
+            .blobs
+            .entry(repository.clone())
+            .or_default()
+            .insert(*digest, bytes);
+        Ok(())
+    }
+
+    async fn pull_blob(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        most: u64,
+    ) -> Result<Vec<u8>, ArtifactError> {
+        let state = self.state.lock().unwrap();
+        let bytes = state
+            .blobs
+            .get(repository)
+            .and_then(|blobs| blobs.get(digest))
+            .ok_or_else(|| ArtifactError::NotFound(repository.at_digest(digest)))?;
+        if bytes.len() as u64 > most {
+            return Err(ArtifactError::Invalid("too large".into()));
+        }
+        Ok(bytes.clone())
+    }
+}
+
+impl FakeRegistry {
+    /// The blobs uploaded with `push_blob`, in order: where, which and how many bytes.
+    pub fn pushed(&self) -> Vec<(Repository, Digest, u64)> {
+        self.state.lock().unwrap().pushed.clone()
     }
 }

@@ -112,6 +112,32 @@ impl Signing {
 }
 
 impl Signing {
+    /// B-67: `payload`, an in-toto statement, signed into a Sigstore bundle with a timestamp, as
+    /// an event is (E-1, E-10); a key's without one when no authority answers, a keyless one never.
+    pub fn sign_statement(&self, payload: &[u8]) -> Result<Vec<u8>, Failure> {
+        let signed = hushrun_attest::sign_bundle(
+            hushrun_attest::PAYLOAD_TYPE,
+            payload,
+            self.signer.as_ref(),
+            self.timestamps.as_ref(),
+        )
+        .map_err(sign_failure)?;
+        if let Some(why) = signed.untimestamped
+            && !self.timestamps_off
+            && !self.warned.swap(true, Ordering::SeqCst)
+        {
+            tracing::warn!("{why}. The signature goes out without a trusted timestamp");
+        }
+        Ok(signed.bytes)
+    }
+
+    /// What signs, in words.
+    pub fn describe(&self) -> String {
+        self.signer.describe()
+    }
+}
+
+impl Signing {
     /// \[ADR 0026\] A GC statement for the deletion of `key` from `ledger` (L-9), signed into a
     /// bundle as events are, so that a keyless identity can sign it too.
     pub fn sign_gc(&self, ledger: &str, key: &str) -> Result<Vec<u8>, Failure> {
@@ -289,6 +315,59 @@ impl App<'_> {
             signer,
             timestamps,
             timestamps_off,
+            warned: AtomicBool::new(false),
+            clock: self.clock(),
+            root,
+        })
+    }
+
+    /// B-67: how `hushrun build bake` signs what it publishes: the key file `key_file` names; else
+    /// the key `HUSHRUN_SIGNING_KEY` or `HUSHRUN_SIGNING_KEY_FILE` holds; else, with an ID token at
+    /// hand (a CI job's, GitHub Actions' or `SIGSTORE_ID_TOKEN`), keylessly as its identity; else
+    /// nothing (`None`): a person's machine key and a browser sign-in are never used for an image.
+    pub fn bake_signing(&self, key_file: Option<&Path>) -> Result<Option<Signing>, Failure> {
+        if let Some(path) = key_file {
+            let pem = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))
+                .map_err(Failure::usage)?;
+            let key = SigningKey::from_pem(&pem).map_err(Failure::usage)?;
+            return self.bake_signing_by_key(key).map(Some);
+        }
+        if self.var("HUSHRUN_SIGNING_KEY").is_some()
+            || self.var("HUSHRUN_SIGNING_KEY_FILE").is_some()
+        {
+            return self.bake_signing_by_key(self.signing_key()?).map(Some);
+        }
+        if self.has_id_token() {
+            // B-67: a run `workflow_run` started signs only after a push to this repository's
+            // default branch, which its certificate can't say.
+            crate::cmd::build_relay::bake_image::workflow_run_signs(&|name| self.var(name))
+                .map_err(|why| {
+                    Failure::new(
+                        Exit::Signer,
+                        anyhow!("build bake: this job won't sign the image keylessly: {why}"),
+                    )
+                })?;
+            return self
+                .signing_from(Source::Sigstore, self.sigstore_root()?)
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    /// B-67: a bake signed with a key contacts no outside service unless asked: no timestamp
+    /// authority but those `HUSHRUN_TSA` names (a key's signature is checked against the key, and
+    /// `build: baked: not_before` compares the signed `baked_ms`, not a timestamp). Keyless signing
+    /// keeps its authorities: its certificate lasts minutes.
+    fn bake_signing_by_key(&self, key: SigningKey) -> Result<Signing, Failure> {
+        let root = self.sigstore_root()?;
+        if self.var("HUSHRUN_TSA").is_some() {
+            return self.signing_by_key(key, root);
+        }
+        Ok(Signing {
+            signer: Box::new(key),
+            timestamps: Box::new(NoTimestamps),
+            timestamps_off: true,
             warned: AtomicBool::new(false),
             clock: self.clock(),
             root,

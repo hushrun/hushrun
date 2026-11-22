@@ -2580,6 +2580,82 @@ fn gitlab_run(
     )
 }
 
+// covers: B-31, B-63, B-69
+// GitLab CI has no RUNNER_TEMP: the bake job init writes there bakes in a store of the run's own
+// under the system's temporary folder, removed when it ends, as a run's is.
+#[test]
+fn a_gitlab_bake_job_bakes_in_a_store_of_its_own() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/gitlab.com/acme/shop"),
+        &["protected/gitlab.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let temp = a.root.join("tmp");
+    let token = fake.gitlab_token(5101);
+    let (code, _, stderr, _) = gitlab_run(
+        &a,
+        &fake,
+        &temp,
+        "5101",
+        Some(&token),
+        "cargo build --offline && sleep 2",
+        |_| {},
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let token = fake.gitlab_token(5102);
+    let baked = dir.path().join("baked");
+    let mut cmd = a.hushrun(&fake);
+    in_gitlab_ci(&mut cmd, &temp, "5102", Some(&token));
+    let out = cmd
+        .args([
+            "build",
+            "bake",
+            "--from",
+            "backend",
+            "--check",
+            "build",
+            "--trusted",
+        ])
+        .args(["--format", "json", "--out"])
+        .arg(&baked)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let said: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(said["blocks"], 2, "{said}");
+    // The run's store went with the bake.
+    assert!(
+        named(&temp, "hushrun-build").is_empty(),
+        "{:?}",
+        named(&temp, "")
+    );
+    // A store of the command's own holds no run's blocks: `--from store` says so and reads none.
+    for command in [
+        &["build", "bake", "--out"][..],
+        &["build", "manifest", "--json"][..],
+    ] {
+        let mut cmd = a.hushrun(&fake);
+        in_gitlab_ci(&mut cmd, &temp, "5103", None);
+        let out = cmd
+            .args(command)
+            .args(if command[1] == "bake" {
+                vec![dir.path().join("from-store").into_os_string()]
+            } else {
+                Vec::new()
+            })
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(
+            stderr.contains("each hushrun command has a store of its own"),
+            "{stderr}"
+        );
+    }
+}
+
 /// The build requests the fake has seen since the `after`th request.
 fn build_requests(fake: &FakeBuild, after: usize) -> Vec<hushrun_testkit::fake_build::Seen> {
     fake.seen()
@@ -3126,5 +3202,1448 @@ fn a_gitlab_job_stopped_by_sigterm_stops_its_command_closes_and_leaves_no_store(
         named(&temp, "hushrun-build").is_empty(),
         "{:?}",
         named(&temp, "")
+    );
+}
+
+// covers: B-63, B-64
+#[test]
+fn a_forged_baked_store_claiming_trust_gets_no_reuse_in_ci() {
+    // A laptop bakes its store, and the folder is edited to claim what a trusted bake from the
+    // org's backend would: consistent, trusted, protected rows, this repository. No server ever
+    // vouched for those blocks, so a CI job reads none of them, whatever the folder says or the
+    // job's variables accept, and what it uploads it compiled itself.
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let laptop = Machine::new(dir.path(), "laptop", None);
+    let built = laptop
+        .hushrun(&fake)
+        .env("HUSHRUN_BACKEND", "")
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{built:?}");
+    let baked = dir.path().join("baked");
+    let bake = laptop
+        .hushrun(&fake)
+        .env("HUSHRUN_BACKEND", "")
+        .args(["build", "bake", "--check", "build", "--out"])
+        .arg(&baked)
+        .output()
+        .unwrap();
+    assert!(bake.status.success(), "{bake:?}");
+    let path = baked.join("baked.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(!json["packs"].as_array().unwrap().is_empty());
+    json["trust"] = serde_json::json!({"level": "trusted"});
+    json["source"] = serde_json::json!({"from": "backend", "host": fake.origin(), "org": "acme"});
+    json["repository"] = "github.com/acme/shop".into();
+    for row in json["packs"].as_array_mut().unwrap() {
+        row["scope"] = "protected/github.com/acme/shop".into();
+    }
+    std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+    let job = Machine::new(dir.path(), "job", Some(&laptop.repo));
+    // The same checkout path as the laptop's is no matter here: these crates are portable.
+    let (code, _, stderr) = ci_build(&job, &fake, |cmd| {
+        cmd.env("HUSHRUN_BUILD_LOWER", &baked)
+            .env("HUSHRUN_BUILD_LOWER_UNTRUSTED", "1");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("from the baked store"), "{stderr}");
+    assert!(stderr.contains("2 crates built, none reused"), "{stderr}");
+}
+
+// covers: B-63, B-64
+#[test]
+fn a_store_baked_from_the_backend_is_reused_in_ci_block_by_block_as_the_backend_vouches() {
+    // CI on the default branch builds and uploads to the repository's trusted scope; a bake
+    // from the backend gathers those packs; another job reads them underneath its own store,
+    // each one only as the backend vouches for it as the job begins.
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, _, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!fake.stored().is_empty(), "{stderr}");
+    let baked = dir.path().join("baked");
+    let mut bake = a.hushrun(&fake);
+    in_github_actions(&mut bake, &fake, &a.root.join("runner-temp-bake"));
+    let bake = bake
+        .args([
+            "build",
+            "bake",
+            "--from",
+            "backend",
+            "--check",
+            "build",
+            "--trusted",
+        ])
+        .args(["--format", "json", "--out"])
+        .arg(&baked)
+        .output()
+        .unwrap();
+    let said: serde_json::Value = serde_json::from_slice(&bake.stdout).unwrap_or_default();
+    assert!(bake.status.success(), "{bake:?}");
+    assert_eq!(said["trust"]["level"], "trusted", "{said}");
+    assert_eq!(said["blocks"], 2, "{said}");
+
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let (code, _, stderr) = ci_build(&b, &fake, |cmd| {
+        cmd.env("HUSHRUN_BUILD_LOWER", &baked);
+    });
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("(2 from the baked store)"), "{stderr}");
+}
+
+/// [`workspace`] with a program beside `app`'s library: `app/src/main.rs`.
+fn program_workspace(root: &Path) -> PathBuf {
+    let repo = workspace(root);
+    std::fs::write(
+        repo.join("app/src/main.rs"),
+        "fn main() {\n    println!(\"{}\", app::four());\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&repo, "a program");
+    repo
+}
+
+// covers: B-63, B-30
+// CI builds a program too, and uploads it: a bake from the backend downloads every block the
+// manifest names, programs too (a run asks for a program only when a compile does, B-30; a bake
+// is the one that asks), so the store is whole, not partial.
+#[test]
+fn a_bake_from_the_backend_downloads_the_programs_its_manifest_names() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::with(dir.path(), "a", None, program_workspace);
+    let (code, _, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    let stored = fake.stored().len();
+    assert!(stored >= 3, "the program went up too: {stderr}");
+    let baked = dir.path().join("baked");
+    let mut bake = a.hushrun(&fake);
+    in_github_actions(&mut bake, &fake, &a.root.join("runner-temp-bake"));
+    let bake = bake
+        .args([
+            "build",
+            "bake",
+            "--from",
+            "backend",
+            "--check",
+            "build",
+            "--trusted",
+        ])
+        .args(["--format", "json", "--out"])
+        .arg(&baked)
+        .output()
+        .unwrap();
+    let said: serde_json::Value = serde_json::from_slice(&bake.stdout).unwrap_or_default();
+    assert!(bake.status.success(), "{bake:?}");
+    assert_eq!(said["missing"], 0, "{said}");
+    assert_eq!(said["partial"], false, "{said}");
+    assert_eq!(said["blocks"], stored, "{said}");
+}
+
+// covers: B-30, B-31
+// A CI job's uploads are cut off at the end of its command (a quarter of what its compiles took):
+// its manifest names only blocks the server confirmed stored, so a bake from it is whole; the
+// blocks it couldn't upload stay in the outbox, and the next run in that store uploads them.
+#[test]
+fn a_ci_job_s_manifest_names_only_the_blocks_the_server_stored() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    // Every upload's begin hangs past the end's wait.
+    fake.delay(
+        hushrun_testkit::fake_build::route::BEGIN,
+        std::time::Duration::from_secs(60),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, _, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(fake.stored().is_empty(), "{stderr}");
+    let stored: std::collections::HashSet<_> = fake.stored().iter().map(|b| b.address).collect();
+    let close = fake
+        .closes()
+        .into_iter()
+        .rfind(|c| c.kind == "rustc/1")
+        .expect("a close");
+    for pair in &close.manifest {
+        assert!(
+            stored.contains(&pair.1),
+            "the manifest names {} the server never stored: {stderr}",
+            pair.1
+        );
+    }
+}
+
+// covers: B-70
+// A partial store's image would take the backend registry's fixed tag for good: refused before
+// anything is signed (a keyless signature writes a public timestamp), so the folder holds no
+// signature and nothing was published.
+#[test]
+fn a_partial_store_is_refused_for_the_backend_s_registry_before_anything_is_signed() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, _, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    let gone = fake.stored()[0].address;
+    fake.withdraw(gone);
+    let key = a.root.join("signing.pem");
+    let made = a
+        .hushrun(&fake)
+        .args(["keys", "generate", "--algorithm", "ecdsa-p256", "--out"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let out = dir.path().join("out");
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-bake"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let bake = cmd
+        .args([
+            "build",
+            "bake",
+            "--from",
+            "backend",
+            "--check",
+            "build",
+            "--trusted",
+            "--oci",
+            "hushrun",
+            "--out",
+        ])
+        .arg(&out)
+        .arg("--signing-key")
+        .arg(&key)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&bake.stderr);
+    assert_eq!(bake.status.code(), Some(11), "{stderr}");
+    assert!(stderr.contains("nothing was signed"), "{stderr}");
+    assert!(
+        !out.join("baked.sigstore.json").exists(),
+        "signed before refusing"
+    );
+    assert!(fake.publishes().is_empty());
+}
+
+// covers: B-75, B-69
+// A merge whose CI skipped (the pull request passed this exact code) compiles nothing on the
+// default branch, so the backend's newest build is the commit before. The bake, in CI on the
+// default branch, in a checkout of its own, sees its manifest is of another commit and builds what
+// no trusted store holds as CI's own file runs it: the command init wrapped there
+// (`hushrun run test -- cargo test`, with no `run` in hushrun.yaml) and the variables CI's file
+// gives every step (here `CARGO_INCREMENTAL: 0`, which the bake job's own environment doesn't
+// have: without it no key would match CI's). It bakes the merged code's blocks and records no
+// result. With --no-build it bakes the older build.
+#[test]
+fn a_merge_whose_ci_skipped_is_built_by_the_bake_before_it_bakes() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::create_dir_all(a.repo.join(".github/workflows")).unwrap();
+    std::fs::write(
+        a.repo.join(".github/workflows/ci.yml"),
+        "name: CI\non:\n  push:\n    branches: [main]\nenv:\n  CARGO_INCREMENTAL: \"0\"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: cargo test --offline\n",
+    )
+    .unwrap();
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "ci");
+    // init wraps CI's command: its plan's edit of ci.yml, applied as it is written.
+    let plan = a
+        .hushrun(&fake)
+        .env("HOME", &a.root)
+        .args(["init", "--dry-run", "--no-browser", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{plan:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    let diff = plan["edits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["path"] == ".github/workflows/ci.yml")
+        .and_then(|e| e["diff"].as_str())
+        .unwrap_or_else(|| panic!("init edits no CI file: {plan}"))
+        .to_string();
+    std::fs::write(a.root.join("ci.diff"), &diff).unwrap();
+    git::run(
+        &a.repo,
+        &["apply", a.root.join("ci.diff").to_str().unwrap()],
+        None,
+    );
+    let ci = std::fs::read_to_string(a.repo.join(".github/workflows/ci.yml")).unwrap();
+    assert!(
+        ci.contains("hushrun run test -- cargo test --offline"),
+        "{ci}"
+    );
+    git::commit_all(&a.repo, "init");
+    // CI on the default branch, as its file runs it.
+    let mut ci_run = a.hushrun(&fake);
+    in_github_actions(&mut ci_run, &fake, &a.root.join("runner-temp"));
+    on_the_default_branch(&mut ci_run, &a.root);
+    let ci_run = ci_run
+        .env("CARGO_INCREMENTAL", "0")
+        .args(["run", "test", "--force", "--", "cargo", "test", "--offline"])
+        .output()
+        .unwrap();
+    assert!(ci_run.status.success(), "{ci_run:?}");
+    // B-31: CI's command ends before its last uploads when its compiles were this cheap (a
+    // quarter of what they took), and which block it leaves in its job's outbox is whichever
+    // compile finished last: dep's test program on some runs. What CI's job built counts as
+    // before the merge whether it went up or not, by the keys its compiles logged; one it left
+    // the bake builds again, under the same address.
+    let mut before: std::collections::HashSet<_> =
+        fake.stored().iter().map(|b| b.address).collect();
+    before.extend(built_by(&a));
+    // The merge: app changes, and CI skips.
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    let reports = fake.reports().len();
+    // The bake job's checkout: CI's paths (a runner's are the same in every job), fresh.
+    std::fs::remove_dir_all(a.repo.join("target")).unwrap();
+    let job = &a;
+    let bake = |n: u32, extra: &[&str]| {
+        let mut cmd = job.hushrun(&fake);
+        in_github_actions(
+            &mut cmd,
+            &fake,
+            &job.root.join(format!("runner-temp-bake-{n}")),
+        );
+        on_the_default_branch(&mut cmd, &job.root);
+        let out = cmd
+            .args([
+                "build",
+                "bake",
+                "--from",
+                "backend",
+                "--trusted",
+                "--format",
+                "json",
+                "--out",
+            ])
+            .arg(dir.path().join(format!("out-{n}")))
+            .args(extra)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "{:?} {stderr} {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout)
+        );
+        (
+            serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+            stderr,
+        )
+    };
+    let rows = |n: u32| -> std::collections::HashSet<String> {
+        let json: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(format!("out-{n}/baked.json"))).unwrap(),
+        )
+        .unwrap();
+        json["packs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["address"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // --no-build: the older build, as before.
+    let (_, stderr) = bake(1, &["--no-build"]);
+    assert!(!stderr.contains("building what"), "{stderr}");
+    let old_rows = rows(1);
+    // The bake builds what's missing first, as CI's file says: the new app blocks went up.
+    let (said, stderr) = bake(2, &[]);
+    assert!(stderr.contains("its newest build is of"), "{stderr}");
+    assert!(
+        stderr.contains("building what no trusted store holds with `test`, as CI builds them"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("at most 30 minutes"), "{stderr}");
+    assert!(said["built_missing"]["why"].is_string(), "{said}");
+    let new: Vec<_> = fake
+        .stored()
+        .iter()
+        .map(|b| b.address)
+        .filter(|a| !before.contains(a))
+        .collect();
+    // dep's library came from CI's build (its key matches only with CI's CARGO_INCREMENTAL), and
+    // its test program too when CI's job sent it and it was downloaded before cargo asked (bound
+    // to CI's folders); app's library and test program compiled, and went up.
+    assert_eq!(new.len(), 2, "only app was compiled: {stderr}");
+    let reused: u32 = stderr
+        .split("check `test`: built in ")
+        .nth(1)
+        .and_then(|rest| rest.split_once("s ("))
+        .and_then(|(_, rest)| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        (1..=2).contains(&reused) && stderr.contains(" of 4 compiles reused"),
+        "{stderr}"
+    );
+    let new_rows = rows(2);
+    for block in &new {
+        assert!(new_rows.contains(&block.to_string()), "{said}");
+        assert!(!old_rows.contains(&block.to_string()));
+    }
+    assert_eq!(said["missing"], 0, "{said}");
+    // B-76: CI baked its trusted scope, so the store names the job's folders, which blocks bound
+    // to them need.
+    let baked: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("out-2/baked.json")).unwrap())
+            .unwrap();
+    let home = std::env::var("HOME").unwrap();
+    assert_eq!(baked["paths"]["home"], home.as_str(), "{baked}");
+    let cargo_home = std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{home}/.cargo"));
+    assert_eq!(baked["paths"]["cargo_home"], cargo_home.as_str(), "{baked}");
+    assert_eq!(
+        baked["paths"]["checkout"],
+        job.repo.canonicalize().unwrap().to_str().unwrap()
+    );
+    // It recorded no result, its own or the pull request's, and left no target folder behind.
+    assert_eq!(fake.reports().len(), reports);
+    assert!(!job.repo.join("target").exists());
+    // Now the backend's newest is of HEAD: a second bake builds nothing.
+    let (_, stderr) = bake(3, &[]);
+    assert!(stderr.contains("nothing to build"), "{stderr}");
+}
+
+/// The addresses of the blocks the machine's runs so far compiled or reused, from its key log:
+/// what a run built is known here even when the end of its command cut off the upload (B-31).
+fn built_by(m: &Machine) -> Vec<hushrun_core::blocks::Hex32> {
+    let log = std::fs::read_to_string(m.root.join("keys.jsonl")).unwrap_or_default();
+    log.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| line["keys"]["block"].as_str().map(str::to_string))
+        .map(|key| {
+            let key = hushrun_core::Digest::parse(&key).unwrap();
+            hushrun_core::blocks::address("rustc/1", key.as_bytes())
+        })
+        .collect()
+}
+
+/// A GitHub Actions job on the default branch, as a bake's: a push to `main`, whose event names
+/// `main` the default branch.
+fn on_the_default_branch(cmd: &mut assert_cmd::Command, root: &Path) {
+    let event = root.join("event.json");
+    std::fs::write(&event, r#"{"repository": {"default_branch": "main"}}"#).unwrap();
+    cmd.env("GITHUB_REF", "refs/heads/main")
+        .env("GITHUB_EVENT_NAME", "push")
+        .env("GITHUB_EVENT_PATH", &event);
+}
+
+// covers: B-65, B-66, B-67
+#[test]
+fn an_image_baked_from_the_backend_carries_only_the_blocks_the_backend_still_vouches_for() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let key = a.root.join("signing.pem");
+    let made = a
+        .hushrun(&fake)
+        .args(["keys", "generate", "--algorithm", "ecdsa-p256", "--out"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let public = a
+        .hushrun(&fake)
+        .args(["keys", "public", "--key"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    let public = String::from_utf8_lossy(&public.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("public key: ").map(str::to_string))
+        .unwrap();
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        format!("version: 1\nrepository: github.com/acme/shop\nbuild:\n  baked:\n    signers:\n      - key: {public}\n"),
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "signers");
+    let layout = dir.path().join("layout");
+    let bake = |n: u32| {
+        let mut cmd = a.hushrun(&fake);
+        in_github_actions(
+            &mut cmd,
+            &fake,
+            &a.root.join(format!("runner-temp-bake-{n}")),
+        );
+        on_the_default_branch(&mut cmd, &a.root);
+        let out = cmd
+            .args([
+                "build",
+                "bake",
+                "--from",
+                "backend",
+                "--check",
+                "build",
+                "--trusted",
+            ])
+            .args(["--format", "json", "--oci-dir"])
+            .arg(&layout)
+            .arg("--out")
+            .arg(dir.path().join(format!("out-{n}")))
+            .arg("--signing-key")
+            .arg(&key)
+            // Bakes seconds apart: past the re-bake limit (B-73), which its own test exercises.
+            .arg("--force")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let rows = |n: u32| -> Vec<String> {
+        let json: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(format!("out-{n}/baked.json"))).unwrap(),
+        )
+        .unwrap();
+        json["packs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["address"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let change = |n: u32| {
+        std::fs::write(
+            a.repo.join("app/src/lib.rs"),
+            format!("pub fn four() -> u32 {{\n    dep::two() * 2 + {n}\n}}\n"),
+        )
+        .unwrap();
+        let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+            on_the_default_branch(cmd, &a.root);
+            // A fresh target folder, as a CI job has: every crate's compile is logged, reused
+            // or built, so the run's manifest names the whole build.
+            cmd.env("GITHUB_RUN_ID", format!("{}", 100 + n))
+                .env("CARGO_INCREMENTAL", "0")
+                .env("CARGO_TARGET_DIR", a.root.join(format!("target-{n}")));
+        });
+        assert_eq!(code, 0, "{stderr}");
+    };
+    let uploaded = |said: &serde_json::Value| -> Vec<String> {
+        said["image"]["blobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["uploaded"] == true)
+            .map(|b| b["role"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+        // Not incremental: a workspace crate's compile is then one a store keeps (B-4).
+        cmd.env("CARGO_INCREMENTAL", "0");
+    });
+    assert_eq!(code, 0, "{stderr}");
+
+    // CI on the default branch: the moving tag moves.
+    let first = bake(1);
+    let tags: Vec<&str> = first["image"]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    assert!(tags.iter().any(|t| t.ends_with("-latest")), "{first}");
+    let first_app: Vec<String> = first["image"]["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["role"].as_str().unwrap().to_string())
+        .collect();
+    assert!(first_app.contains(&"workspace".to_string()), "{first}");
+
+    // A code change: the previous image is signed by the key hushrun.yaml names, and the backend
+    // still vouches for the block the workspace layer keeps unused: carried, only the recent
+    // layer goes up.
+    change(1);
+    let second = bake(2);
+    assert!(second["image"]["compacted"].is_null(), "{second}");
+    assert_eq!(second["image"]["stale"], 1, "{second}");
+    let blobs = uploaded(&second);
+    assert!(!blobs.iter().any(|b| b == "workspace"), "{blobs:?}");
+
+    // The backend withdraws the block the workspace layer keeps unused: never carried again;
+    // the workspace layer is written again.
+    let now_used = rows(2);
+    let stale: Vec<String> = rows(1)
+        .into_iter()
+        .filter(|address| !now_used.contains(address))
+        .collect();
+    assert_eq!(stale.len(), 1, "{stale:?}");
+    let stale = fake
+        .stored()
+        .iter()
+        .map(|b| b.address)
+        .find(|address| address.to_string() == stale[0])
+        .unwrap();
+    fake.withdraw(stale);
+    change(2);
+    let third = bake(3);
+    assert!(
+        third["image"]["compacted"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no longer vouches"),
+        "{third}"
+    );
+
+    // B-68: `build manifest --from backend` names the identity, and so the fixed tag, the bake
+    // published: the same parts, from the same function.
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-manifest"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let out = cmd
+        .args([
+            "build", "manifest", "--from", "backend", "--check", "build", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let named: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(named["manifest"], third["manifest"], "{named}");
+    assert_eq!(
+        named["tags"]["fixed"].as_str(),
+        third["image"]["tags"][0].as_str(),
+        "{named}"
+    );
+}
+
+// covers: B-63
+// The person's say-so is decided on the run's authority, not on CI alone: a person whose backend
+// lets them write the repository's trusted scope accepts no unverified store, since what they
+// write others trust; one who writes only their own scope may.
+#[test]
+fn a_person_who_writes_the_trusted_scope_accepts_no_unverified_baked_store() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let laptop = Machine::new(dir.path(), "laptop", None);
+    let built = laptop
+        .hushrun(&fake)
+        .env("HUSHRUN_BACKEND", "")
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{built:?}");
+    let baked = dir.path().join("baked");
+    let bake = laptop
+        .hushrun(&fake)
+        .env("HUSHRUN_BACKEND", "")
+        .args(["build", "bake", "--check", "build", "--out"])
+        .arg(&baked)
+        .output()
+        .unwrap();
+    assert!(bake.status.success(), "{bake:?}");
+    let run = |name: &str, write: &str| {
+        fake.set_scopes(Some(write), &[write]);
+        let person = Machine::new(dir.path(), name, Some(&laptop.repo));
+        let out = person
+            .hushrun(&fake)
+            .env("HUSHRUN_BUILD_LOWER", &baked)
+            .env("HUSHRUN_BUILD_LOWER_UNTRUSTED", "1")
+            .args([
+                "run",
+                "build",
+                "--force",
+                "--",
+                "cargo",
+                "build",
+                "--offline",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let trusted = run("maintainer", "protected/github.com/acme/shop");
+    assert!(!trusted.contains("from the baked store"), "{trusted}");
+    let own = run("contributor", "person/1");
+    assert!(own.contains("from the baked store"), "{own}");
+}
+
+// covers: B-31, B-75
+// On GitLab (no RUNNER_TEMP) a bake's store is a store of the command's own. The bake's build
+// begins its sessions there, and their end used to remove that very store (lock, packs,
+// downloads) while the bake still needed it: the second check reused nothing, and an image with
+// no --out lost the folder being baked. The command's guard holds the store now.
+#[test]
+fn a_gitlab_bake_that_builds_keeps_its_store() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/gitlab.com/acme/shop"),
+        &["protected/gitlab.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: gitlab.com/acme/shop\nchecks:\n  build:\n    run: cargo build --offline\n  zlist:\n    run: S=\"$(dirname $(dirname $HUSHRUN_BUILD_SESSION))\"; ls \"$S\" >&2; test -d \"$S/tmp\" || echo STORE-GONE >&2; cargo build --offline\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "checks");
+    let temp = a.root.join("tmp");
+    let token = fake.gitlab_token(6101);
+    let (code, _, stderr, _) = gitlab_run(
+        &a,
+        &fake,
+        &temp,
+        "6101",
+        Some(&token),
+        "cargo build --offline",
+        |cmd| {
+            cmd.env("CI_COMMIT_BRANCH", "main")
+                .env("CI_DEFAULT_BRANCH", "main")
+                .env("CI_PIPELINE_SOURCE", "push");
+        },
+    );
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    let token = fake.gitlab_token(6102);
+    let baked = dir.path().join("baked");
+    let mut cmd = a.hushrun(&fake);
+    in_gitlab_ci(&mut cmd, &temp, "6102", Some(&token));
+    cmd.env("CI_COMMIT_BRANCH", "main")
+        .env("CI_DEFAULT_BRANCH", "main")
+        .env("CI_PIPELINE_SOURCE", "push");
+    let out = cmd
+        .args(["build", "bake", "--from", "backend", "--trusted"])
+        .args(["--format", "json", "--out"])
+        .arg(&baked)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{stderr}");
+    let said: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let lines: Vec<String> = said["built_missing"]["lines"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|l| l.as_str().map(str::to_string))
+        .filter(|l| l.starts_with("check `"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{said}");
+    assert!(lines.iter().all(|l| l.contains(": built")), "{said}");
+    assert!(
+        !stderr.contains("STORE-GONE"),
+        "the bake's store was removed after the first check's build: {stderr}"
+    );
+    // The first check reused what CI's build stored (the bake's checkout has CI's target
+    // folder, so it built into a fresh one), and the second shares its target, as CI's
+    // checks do: nothing to compile again.
+    assert!(lines[0].contains("1 of 2 compiles reused"), "{said}");
+    assert!(lines[1].contains("0 of 0 compiles reused"), "{said}");
+    assert_eq!(said["missing"], 0, "{said}");
+}
+
+// covers: B-75
+// A B-75 build that fails part way (a compile error, a missing service before the
+// last compile, the 30-minute stop) still closes a manifest naming HEAD, so the backend's newest
+// build "is of HEAD": the bake bakes that partial manifest, and every later bake says "nothing to
+// build" and bakes it again, where --no-build would have baked the last whole build.
+#[test]
+fn a_failed_build_in_the_bake_leaves_no_partial_manifest_of_head() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  build:\n    run: cargo build --offline\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "checks");
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+        cmd.env("CARGO_INCREMENTAL", "0");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    // The merge, whose build in the bake stops after `dep` (as a stop at 30 minutes would).
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  build:\n    run: cargo build --offline -p dep && exit 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    let bake = |n: u32, extra: &[&str]| {
+        let mut cmd = a.hushrun(&fake);
+        in_github_actions(
+            &mut cmd,
+            &fake,
+            &a.root.join(format!("runner-temp-bake-{n}")),
+        );
+        on_the_default_branch(&mut cmd, &a.root);
+        let out = cmd
+            .args([
+                "build",
+                "bake",
+                "--from",
+                "backend",
+                "--check",
+                "build",
+                "--trusted",
+                "--format",
+                "json",
+                "--out",
+            ])
+            .arg(dir.path().join(format!("out-{n}")))
+            .args(extra)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{stderr}");
+        (
+            serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+            stderr,
+        )
+    };
+    let (no_build, _) = bake(1, &["--no-build"]);
+    let (built, stderr2) = bake(2, &[]);
+    let (_, stderr3) = bake(3, &[]);
+    assert!(
+        stderr2.contains("no manifest was closed for this commit"),
+        "{stderr2}"
+    );
+    // What the failed build leaves is never less than the whole build --no-build bakes, and a
+    // later bake builds again rather than calling a partial manifest current.
+    assert!(
+        built["blocks"].as_u64() >= no_build["blocks"].as_u64(),
+        "{built}"
+    );
+    assert!(!stderr3.contains("nothing to build"), "{stderr3}");
+}
+
+// covers: B-75
+// The bake's build runs code the repository chose (build scripts, proc macros, tests, copied
+// tools) in the job that holds the signing identity: it gets none of the job's credentials (its
+// ID token request, GITHUB_TOKEN, hushrun's token), looks up and records no result of its own
+// (HUSHRUN_BACKEND empty, and it knows it runs inside a run), and on Linux, where the bake is its
+// subreaper, nothing it left running outlives it.
+#[test]
+fn a_bake_s_build_gets_no_credential_and_leaves_no_process_behind() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let out = a.root.join("seen");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  build:\n    run: env > \"$SEEN/env.txt\"; (sleep 300 >/dev/null 2>&1 & echo $! > \"$SEEN/pid\"); cargo build --offline\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "checks");
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+        cmd.env("CARGO_INCREMENTAL", "0");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    std::fs::remove_dir_all(a.repo.join("target")).unwrap();
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-bake"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let baked = cmd
+        .env("SEEN", &out)
+        .env("GITHUB_TOKEN", "ghs_the_jobs_own_token")
+        .env("CARGO_INCREMENTAL", "0")
+        .args(["build", "bake", "--from", "backend", "--trusted", "--out"])
+        .arg(dir.path().join("out"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&baked.stderr).into_owned();
+    assert!(baked.status.success(), "{stderr}");
+    assert!(stderr.contains("check `build`: built"), "{stderr}");
+    let env = std::fs::read_to_string(out.join("env.txt")).unwrap();
+    for secret in [
+        FakeBuild::ID_TOKEN_REQUEST,
+        FakeBuild::AGENT_TOKEN,
+        "ghs_the_jobs_own_token",
+    ] {
+        assert!(!env.contains(secret), "the build saw {secret}:\n{env}");
+    }
+    for name in [
+        "ACTIONS_ID_TOKEN_REQUEST_URL=",
+        "HUSHRUN_TOKEN=",
+        "GITHUB_TOKEN=",
+    ] {
+        assert!(!env.lines().any(|l| l.starts_with(name)), "{name}\n{env}");
+    }
+    assert!(env.lines().any(|l| l == "HUSHRUN_BACKEND="), "{env}");
+    assert!(env.lines().any(|l| l == "HUSHRUN_INSIDE_RUN=1"), "{env}");
+    let pid = std::fs::read_to_string(out.join("pid")).unwrap();
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if cfg!(target_os = "linux") {
+        assert!(!alive(), "the build's background process outlived the bake");
+    } else {
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+    }
+}
+
+// covers: B-75
+// A bake's build whose blocks didn't all go up (the object store refused them) closes no
+// manifest for the commit: the backend's newest stays the last whole build, and the next bake
+// builds again, where a manifest of the blocks that went up would have been taken for the
+// commit's build for good.
+#[test]
+fn a_bake_s_build_whose_blocks_didn_t_all_go_up_closes_no_manifest() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  build:\n    run: cargo build --offline\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "checks");
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+        cmd.env("CARGO_INCREMENTAL", "0");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    let closes = fake.closes().len();
+    fake.fail(hushrun_testkit::fake_build::route::STORE_PUT, 500, 1000);
+    let bake = |n: u32| {
+        let _ = std::fs::remove_dir_all(a.repo.join("target"));
+        let mut cmd = a.hushrun(&fake);
+        in_github_actions(
+            &mut cmd,
+            &fake,
+            &a.root.join(format!("runner-temp-bake-{n}")),
+        );
+        on_the_default_branch(&mut cmd, &a.root);
+        let baked = cmd
+            .env("CARGO_INCREMENTAL", "0")
+            .args(["build", "bake", "--from", "backend", "--trusted", "--out"])
+            .arg(dir.path().join(format!("out-{n}")))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&baked.stderr).into_owned();
+        assert!(baked.status.success(), "{stderr}");
+        stderr
+    };
+    let started = std::time::Instant::now();
+    let first = bake(1);
+    assert!(
+        first.contains("no manifest was closed for this commit"),
+        "{first}"
+    );
+    assert!(first.contains("wasn't uploaded"), "{first}");
+    assert_eq!(fake.closes().len(), closes, "a part build was closed");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(120),
+        "{:?}",
+        started.elapsed()
+    );
+    // The next bake builds again.
+    let second = bake(2);
+    assert!(
+        second.contains("building what no trusted store holds"),
+        "{second}"
+    );
+}
+
+// covers: B-31, B-72
+// `--deps-only` builds in a store of the bake's own and bakes that one, and init's plan names it
+// for a job on the default branch. The refusal of `--from store` in a CI command's own store
+// (GitLab, no RUNNER_TEMP) is for a bake that reads that store: `--deps-only`, whose `--from` is
+// `store` by default, reads its own build's, and a GitLab job bakes it.
+#[test]
+fn a_gitlab_deps_only_bake_is_not_refused_for_its_command_s_store() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let lock = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(&a.repo)
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{lock:?}");
+    git::commit_all(&a.repo, "lockfile");
+    let temp = a.root.join("tmp");
+    let mut cmd = a.hushrun(&fake);
+    in_gitlab_ci(&mut cmd, &temp, "7101", None);
+    cmd.env("CI_COMMIT_BRANCH", "main")
+        .env("CI_DEFAULT_BRANCH", "main")
+        .env("CI_PIPELINE_SOURCE", "push");
+    let out = cmd
+        .args(["build", "bake", "--deps-only", "--out"])
+        .arg(dir.path().join("deps"))
+        .args(["--", "cargo", "build", "--offline"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("each hushrun command has a store of its own"),
+        "{stderr}"
+    );
+}
+
+// covers: B-75
+// The bake asks for every check CI's files wrap. A check that compiles nothing (a linter, a JS
+// test, a docs check) closes an empty manifest of the commit its run named, which counts as its
+// build of that commit: at the very commit CI built, a bake builds nothing, where it used to run
+// every check's command (tests included, up to 30 minutes, in the job that signs). Only the
+// checks that are behind are built, and the line names them alone.
+#[test]
+fn a_check_that_compiles_nothing_doesnt_make_every_bake_build() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  build:\n    run: cargo build --offline\n  lint:\n    run: \"true\"\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "checks");
+    // CI on the default branch, both checks, at this commit.
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+        cmd.env("CARGO_INCREMENTAL", "0");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    let mut lint = a.hushrun(&fake);
+    in_github_actions(&mut lint, &fake, &a.root.join("runner-temp"));
+    on_the_default_branch(&mut lint, &a.root);
+    let lint = lint
+        .args(["run", "lint", "--force", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(lint.status.success(), "{lint:?}");
+    // The bake, at the commit CI built: nothing is missing.
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-bake"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let out = cmd
+        .args(["build", "bake", "--from", "backend", "--trusted"])
+        .args(["--format", "json", "--out"])
+        .arg(dir.path().join("out"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("building what no trusted store holds"),
+        "a bake at the commit CI built ran every check again: {stderr}"
+    );
+    assert!(stderr.contains("nothing to build"), "{stderr}");
+    // A merge whose `build` CI skipped and whose `lint` ran: only `build` is behind, built, and
+    // named.
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    let mut lint = a.hushrun(&fake);
+    in_github_actions(&mut lint, &fake, &a.root.join("runner-temp-lint"));
+    on_the_default_branch(&mut lint, &a.root);
+    let lint = lint
+        .args(["run", "lint", "--force", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(lint.status.success(), "{lint:?}");
+    let _ = std::fs::remove_dir_all(a.repo.join("target"));
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-bake-2"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let out = cmd
+        .env("CARGO_INCREMENTAL", "0")
+        .args(["build", "bake", "--from", "backend", "--trusted", "--out"])
+        .arg(dir.path().join("out-2"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("`build`: its newest build is of"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("building what no trusted store holds with `build`, as CI builds them"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("`lint`"), "{stderr}");
+    assert!(!stderr.contains("check `lint`"), "{stderr}");
+}
+
+// covers: B-72, B-74
+// ADR 0102 decision 5 keeps every credential of the signing job from what a bake's build runs,
+// on every path that runs one: `--deps-only` (which init's plan names for a job on the default
+// branch, signed keylessly as that job) and `--report`'s builds go through the same function as
+// the build of what's missing. Third-party build scripts and proc macros get neither the ID token
+// request, GITHUB_TOKEN nor hushrun's token, record no result, and leave nothing running.
+#[test]
+fn a_deps_only_build_in_ci_gets_no_credential() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let lock = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(&a.repo)
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{lock:?}");
+    git::commit_all(&a.repo, "lockfile");
+    let seen = a.root.join("seen");
+    std::fs::create_dir_all(&seen).unwrap();
+    // Each build writes what it was handed, and leaves a process running.
+    let script = "env > \"$SEEN/env-$$.txt\"; (sleep 300 >/dev/null 2>&1 & echo $! > \"$SEEN/pid-$$\"); cargo build --offline";
+    let bake = |extra: &[&str], out: &str| {
+        let mut cmd = a.hushrun(&fake);
+        in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp"));
+        on_the_default_branch(&mut cmd, &a.root);
+        cmd.env("GITHUB_TOKEN", "ghs_the_jobs_own_token")
+            .env("SEEN", &seen)
+            .args(["build", "bake"])
+            .args(extra)
+            .arg("--out")
+            .arg(dir.path().join(out))
+            .args(["--", "sh", "-c", script])
+            .output()
+            .unwrap()
+    };
+    // The dependencies-only build (this repository has no third-party crate, so it bakes
+    // nothing; its build ran all the same).
+    let _ = bake(&["--deps-only"], "deps");
+    // `--report`'s two builds, cold and from the baked store, of a store a run here left.
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+    });
+    assert_eq!(code, 0, "{stderr}");
+    let reported = bake(&["--report"], "report");
+    let stderr = String::from_utf8_lossy(&reported.stderr);
+    assert!(reported.status.success(), "{stderr}");
+    let mut envs = Vec::new();
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir(&seen).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.starts_with("env-") {
+            envs.push(text);
+        } else {
+            pids.push(text.trim().to_string());
+        }
+    }
+    assert_eq!(
+        envs.len(),
+        3,
+        "the deps-only build and --report's two: {stderr}"
+    );
+    for env in &envs {
+        let held: Vec<&str> = [
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "GITHUB_TOKEN",
+            "HUSHRUN_TOKEN",
+        ]
+        .into_iter()
+        .filter(|name| env.lines().any(|l| l.starts_with(&format!("{name}="))))
+        .collect();
+        assert!(held.is_empty(), "a bake's build was handed {held:?}");
+        assert!(env.lines().any(|l| l == "HUSHRUN_BACKEND="), "{env}");
+        assert!(env.lines().any(|l| l == "HUSHRUN_INSIDE_RUN=1"), "{env}");
+    }
+    for pid in pids {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .is_ok_and(|s| s.success());
+        if cfg!(target_os = "linux") {
+            assert!(!alive, "a process of the bake's build outlived it");
+        } else {
+            let _ = std::process::Command::new("kill").arg(&pid).status();
+        }
+    }
+}
+
+// covers: B-75
+// A block `begin` refuses for good (`suspended`, `too_large`, `unsupported`, `no_scope`) is never
+// on the backend: a bake's build that made one isn't whole, so it closes no manifest for the
+// commit and says which blocks were refused and why, where counting them as sent would have named
+// blocks the backend doesn't hold and left every later bake taking the part for the commit's
+// build.
+#[test]
+fn a_bake_s_build_with_a_refused_block_closes_no_manifest() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  build:\n    run: cargo build --offline\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "checks");
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+        cmd.env("CARGO_INCREMENTAL", "0");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    let closes = fake.closes().len();
+    fake.refuse_begins("suspended", 1000);
+    let _ = std::fs::remove_dir_all(a.repo.join("target"));
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-bake"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let baked = cmd
+        .env("CARGO_INCREMENTAL", "0")
+        .args(["build", "bake", "--from", "backend", "--trusted", "--out"])
+        .arg(dir.path().join("out"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&baked.stderr).into_owned();
+    assert!(baked.status.success(), "{stderr}");
+    assert!(stderr.contains("check `build`: built"), "{stderr}");
+    assert!(
+        stderr.contains("no manifest was closed for this commit: the backend refused"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("suspended in the repository"), "{stderr}");
+    assert_eq!(fake.closes().len(), closes, "a part build was closed");
+}
+
+// covers: B-65
+// ADR 0102: the bake settles its registry's credential before it builds. A build that plants a
+// credential helper on PATH (one the Docker configuration names) is never run by the bake after
+// the build, with the bake's own environment.
+#[cfg(unix)]
+#[test]
+fn a_credential_helper_the_build_planted_never_runs() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let plant = a.root.join("bin");
+    let docker = a.root.join("docker");
+    std::fs::create_dir_all(&plant).unwrap();
+    std::fs::create_dir_all(&docker).unwrap();
+    std::fs::write(
+        docker.join("config.json"),
+        r#"{"credHelpers": {"127.0.0.1:9": "planted"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  build:\n    run: printf '#!/bin/sh\\ntouch \"$MARK\"\\nexit 1\\n' > \"$PLANT/docker-credential-planted\"; chmod +x \"$PLANT/docker-credential-planted\"; cargo build --offline\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "checks");
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+        cmd.env("CARGO_INCREMENTAL", "0");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(
+        a.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 40\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "the merge");
+    let _ = std::fs::remove_dir_all(a.repo.join("target"));
+    let mark = a.root.join("helper-ran");
+    let path = format!(
+        "{}:{}",
+        plant.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-bake"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let baked = cmd
+        .env("CARGO_INCREMENTAL", "0")
+        .env("PATH", &path)
+        .env("PLANT", &plant)
+        .env("MARK", &mark)
+        .env("DOCKER_CONFIG", &docker)
+        .args([
+            "build",
+            "bake",
+            "--from",
+            "backend",
+            "--trusted",
+            "--no-sign",
+        ])
+        .args([
+            "--oci",
+            "127.0.0.1:9/acme/shop",
+            "--insecure-registry",
+            "127.0.0.1:9",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&baked.stderr).into_owned();
+    assert!(stderr.contains("check `build`: built"), "{stderr}");
+    assert!(plant.join("docker-credential-planted").exists(), "{stderr}");
+    assert!(
+        !mark.exists(),
+        "the bake ran a credential helper its build planted: {stderr}"
+    );
+}
+
+// covers: B-76
+// A baked store records the folders the default branch's build ran with: CI's file gives its
+// build job CARGO_HOME under the workspace (`${{ github.workspace }}`, the bake job's same
+// folder), so baked.json names that one, not the bake process's own.
+#[test]
+fn a_baked_store_names_the_folders_ci_s_file_gives_the_build() {
+    let fake = FakeBuild::start();
+    fake.set_scopes(
+        Some("protected/github.com/acme/shop"),
+        &["protected/github.com/acme/shop"],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::create_dir_all(a.repo.join(".github/workflows")).unwrap();
+    std::fs::write(
+        a.repo.join(".github/workflows/ci.yml"),
+        "name: CI\non:\n  push:\n    branches: [main]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      CARGO_HOME: ${{ github.workspace }}/.cargo-ci\n    steps:\n      - uses: actions/checkout@v5\n      - run: hushrun run build -- cargo build --offline\n",
+    )
+    .unwrap();
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: github.com/acme/shop\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "ci");
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        on_the_default_branch(cmd, &a.root);
+    });
+    assert_eq!(code, 0, "{stderr}");
+    let workspace = a.repo.canonicalize().unwrap();
+    let mut cmd = a.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp-bake"));
+    on_the_default_branch(&mut cmd, &a.root);
+    let baked = cmd
+        .env("GITHUB_WORKSPACE", &workspace)
+        .args([
+            "build",
+            "bake",
+            "--from",
+            "backend",
+            "--trusted",
+            "--no-build",
+        ])
+        .arg("--out")
+        .arg(dir.path().join("out"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&baked.stderr).into_owned();
+    assert!(baked.status.success(), "{stderr}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("out/baked.json")).unwrap()).unwrap();
+    assert_eq!(
+        json["paths"]["cargo_home"],
+        format!("{}/.cargo-ci", workspace.display()).as_str(),
+        "{json}"
     );
 }

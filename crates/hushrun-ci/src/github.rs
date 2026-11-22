@@ -33,9 +33,20 @@ pub(crate) fn context(env: &Env) -> RunContext {
         Some("workflow_run") => payload.as_deref().and_then(triggering_run),
         _ => None,
     };
+    // A scheduled run has no webhook behind it, so its event names no repository; GitHub runs it
+    // only on the default branch's latest commit, with that branch as its ref: for `schedule`,
+    // and that event alone, the ref's branch is the default branch.
+    let scheduled_on = (event == Some("schedule"))
+        .then(|| env.get("GITHUB_REF")?.strip_prefix("refs/heads/"))
+        .flatten()
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string);
     let source = repository.map(|repo| crate::SourceRepository {
         url: format!("{}/{repo}", server.trim_end_matches('/')),
-        default_branch: payload.as_deref().and_then(default_branch_of),
+        default_branch: payload
+            .as_deref()
+            .and_then(default_branch_of)
+            .or(scheduled_on),
         id: env
             .get("GITHUB_REPOSITORY_ID")
             .filter(|id| !id.is_empty())
@@ -773,6 +784,38 @@ mod tests {
             .unwrap();
         assert_eq!(source.default_branch, None);
         assert_eq!(source.id, None);
+    }
+
+    // covers: T-4
+    // A scheduled run's event holds the cron line, not the repository (no webhook is behind it).
+    // GitHub runs it only on the default branch's latest commit, with that branch as its ref: for
+    // `schedule` alone, the ref's branch is the default branch.
+    #[test]
+    fn a_scheduled_run_s_branch_is_the_default_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event.json");
+        std::fs::write(&path, br#"{"schedule": "17 4 * * *"}"#).unwrap();
+        let path = path.to_str().unwrap();
+        let of = |event: &str| {
+            crate::context(&github(&[
+                ("GITHUB_EVENT_NAME", event),
+                ("GITHUB_EVENT_PATH", path),
+                ("GITHUB_REF", "refs/heads/trunk"),
+            ]))
+            .source
+            .unwrap()
+            .default_branch
+        };
+        assert_eq!(of("schedule").as_deref(), Some("trunk"));
+        // Any other event without the repository in its payload names none.
+        for event in [
+            "push",
+            "workflow_dispatch",
+            "workflow_run",
+            "repository_dispatch",
+        ] {
+            assert_eq!(of(event), None, "{event}");
+        }
     }
 
     #[test]

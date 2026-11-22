@@ -33,11 +33,14 @@ const STORE_DIR: &str = "HUSHRUN_BUILD_DIR";
 /// can't find. Every other reason for none is silent. `repository_env` is the repository's
 /// `build: env:` (B-35), which every compile of the run is keyed by. `place` gives the run's
 /// backend, which a saved fetch must be from (B-36), asked only when the store holds one.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn begin(
     now: SystemTime,
     repository: Option<&str>,
     repository_env: &[String],
     cc_maps: bool,
+    signers: &hushrun_core::policy::BakedTrust,
+    check: Option<&str>,
     share: Option<ShareStart>,
     place: &dyn Fn() -> Option<crate::results::BuildPlace>,
 ) -> Result<Session, Option<String>> {
@@ -46,6 +49,45 @@ pub(crate) fn begin(
     let org_shares = share.as_ref().is_some_and(|start| start.access.shares);
     let mut session = begin_here(now, repository, repository_env, cc_maps, share, place)
         .map_err(|line| line.filter(|line| line != WRAPPER_SET || org_shares))?;
+    let env = |name: &str| hushrun_ci::var_os(name);
+    let folder = std::env::current_dir().ok();
+    let checkout = folder.as_deref().map(|folder| checkout_root(folder, &env));
+    // B-63, B-64: the baked store the run reads, decided once its relay, if any, began. Go's
+    // platform, for its part of the store, is the program's when the relay started it, else
+    // what `go env` says.
+    let go_platform = match session.go() {
+        Some(go) => Some(go.platform.clone()),
+        None if !session.go_asked() && hushrun_build::baked::named(&env).is_some() => {
+            folder.as_deref().and_then(hushrun_build::go::probe::env_of)
+        }
+        None => None,
+    };
+    give_lower(
+        &mut session,
+        repository,
+        folder.as_deref(),
+        signers,
+        go_platform.as_deref(),
+    );
+    // B-39, B-63: Go's cache program, asked once: as the relay started, in a run that shares;
+    // here, in one that doesn't, only where the run reads a baked store (never one its state
+    // ignores, such as `/hushrun` in CI with no signer named). A Go module's run that does
+    // neither leaves Go as plain go runs it.
+    if !session.go_asked() && session.current().lower.is_some() {
+        let go = go_program(&mut session, &env);
+        session.set_go(go);
+    }
+    // B-63: the check's manifest stays in the store when the run ends, for `hushrun build bake`.
+    if let Some(check) = check {
+        session.set_manifest_slot(hushrun_build::manifests::Slot {
+            check: Some(check_id(repository, check)),
+            target: platform(),
+            checkout: checkout
+                .as_deref()
+                .and_then(|root| root.to_str().map(str::to_string)),
+            go: session.go().map(|go| go.platform.clone()),
+        });
+    }
     let cargo = std::env::current_dir().ok().is_some_and(|folder| {
         folder
             .ancestors()
@@ -55,6 +97,157 @@ pub(crate) fn begin(
         session.add_line(RUST_LEFT_OUT.to_string());
     }
     Ok(session)
+}
+
+/// B-75: the session of a build a bake runs in CI on the default branch, because the backend's
+/// newest build is of another commit: in the bake's own store `store`, sharing through the
+/// process's relay (the bake's), as a CI job's run shares, so what it compiles goes to the
+/// repository's trusted scope with the job's own ID token, and what the trusted scope holds is
+/// reused. No results lookup, nothing recorded. `Err` is the line that says why there is none.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn begin_for_bake(
+    now: SystemTime,
+    repository: Option<&str>,
+    repository_env: &[String],
+    cc_maps: bool,
+    check: &str,
+    store: &Path,
+    start: ShareStart,
+) -> Result<Session, String> {
+    let settings = Credentials::build_settings_path()
+        .ok_or_else(|| "there is no folder for hushrun's settings".to_string())?;
+    let cache_dir = context::cache_dir();
+    let env = |name: &str| hushrun_ci::var_os(name);
+    let here = Here {
+        settings: &settings,
+        cache_dir: cache_dir.as_deref(),
+        in_ci: true,
+        repository,
+        repository_env,
+        cc_maps,
+        env: &env,
+        now,
+        folder: std::env::current_dir().ok(),
+        sysroot: &|folder| rustc_sysroot(folder, &env),
+    };
+    let mut session = begin_with(&here, std::env::current_exe(), Some(store))
+        .map_err(|line| line.unwrap_or_else(|| OFF.to_string()))?;
+    let relay = match start_sharing(&mut session, start, repository, &env) {
+        Ok(relay) => relay,
+        Err(line) => {
+            session.finish(now);
+            return Err(line.unwrap_or_else(|| format!("{OFF}: the backend doesn't share")));
+        }
+    };
+    match relay.wait_open(crate::cmd::build_relay::Tuning::default().ci_open) {
+        crate::cmd::build_relay::Opened::Answering => {}
+        _ => {
+            relay.end_check(&[]);
+            session.finish(now);
+            return Err(NO_ANSWER.to_string());
+        }
+    }
+    session.set_manifest_slot(hushrun_build::manifests::Slot {
+        check: Some(check_id(repository, check)),
+        target: platform(),
+        checkout: None,
+        go: session.go().map(|go| go.platform.clone()),
+    });
+    Ok(session)
+}
+
+/// B-72, B-74: a session in `store`, a folder of a bake's own, for a build the bake runs itself
+/// (the dependencies-only build, or a measurement): no person's settings, no relay, nothing at
+/// `/hushrun` or `HUSHRUN_BUILD_LOWER` read (a caller that wants a baked store underneath gives
+/// it, [`give_own_lower`]), Go's cache program in a Go module's folder (`go`), and the toolchain's
+/// view without sources made before COMMAND. `Err` is the line that says why there is none.
+pub(crate) fn begin_own(
+    now: SystemTime,
+    repository: Option<&str>,
+    repository_env: &[String],
+    store: &Path,
+    folder: &Path,
+    go: bool,
+) -> Result<Session, String> {
+    let settings = Credentials::build_settings_path()
+        .ok_or_else(|| "there is no folder for hushrun's settings".to_string())?;
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("hushrun can't find its own binary: {err}"))?;
+    let env = |name: &str| hushrun_ci::var_os(name);
+    let cache_dir = context::cache_dir();
+    let in_ci = crate::gitlab_job::in_ci(&Env::from_process());
+    let start = session::Start {
+        settings: &settings,
+        cache_dir: cache_dir.as_deref(),
+        exe: &exe,
+        in_ci,
+        repository,
+        repository_env,
+        env: &env,
+        now,
+    };
+    let floor = if in_ci {
+        session::CI_MIN_FREE_GB
+    } else {
+        hushrun_build::settings::MIN_FREE_GB
+    };
+    let mut session = session::begin_isolated(&start, store, floor).map_err(|not| match not {
+        NotBegun::Unusable(why) => why,
+        NotBegun::WrapperSet => {
+            "RUSTC_WRAPPER is set, and hushrun's wrapper doesn't run beside another".to_string()
+        }
+        NotBegun::Off => "HUSHRUN_BUILD turns build reuse off".to_string(),
+        other => format!("build reuse can't run here ({other:?})"),
+    })?;
+    if let Some(sysroot) = rustc_sysroot(folder, &env) {
+        session.hide_sources(&sysroot);
+    }
+    if go {
+        let program = go_program(&mut session, &env);
+        session.set_go(program);
+    }
+    Ok(session)
+}
+
+/// B-74: gives a measurement's session the baked store at `lower` underneath, as a sandbox started
+/// from its image reads it: on the signature `signers` names when it verifies, else as accepted,
+/// since the bake that made it from its own store is the one reading it, and nothing this session
+/// builds leaves its own store. The state's words, for the report.
+pub(crate) fn give_own_lower(
+    session: &mut Session,
+    lower: &Path,
+    repository: Option<&str>,
+    folder: &Path,
+    go: Option<&str>,
+    signers: &hushrun_core::policy::BakedTrust,
+) -> String {
+    use hushrun_build::baked;
+    let named = lower.as_os_str().to_os_string();
+    let env = |name: &str| -> Option<OsString> {
+        if name == baked::LOWER {
+            Some(named.clone())
+        } else if name == baked::LOWER_UNTRUSTED {
+            Some("1".into())
+        } else {
+            hushrun_ci::var_os(name)
+        }
+    };
+    let store = session.current().store.clone();
+    let session_folder = session.current().folder.clone();
+    let (state, _) = lower_state(
+        &env,
+        false,
+        &store,
+        Some(folder),
+        repository,
+        go,
+        baked::Asked::NoBackend,
+        signers,
+        &session_folder,
+    );
+    let words = state.words();
+    let _ = session.set_lower(&state);
+    words
 }
 
 /// B-2, B-39, B-50: whether the run's own `RUSTC_WRAPPER` (sccache) is set in a Go module's
@@ -89,6 +282,12 @@ fn cmake_project(folder: &Path) -> bool {
 /// worktree's is a file), in the form the shell named it (`PWD`) when that is the same folder;
 /// else `folder` itself.
 fn checkout_root(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+    checkout_of(folder, env)
+}
+
+/// [`checkout_root`], for `hushrun build bake`: the checkout a run in `folder` names in its
+/// manifest and compares a baked store's paths with (B-63).
+pub(crate) fn checkout_of(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
     let given = env("PWD")
         .map(PathBuf::from)
         .filter(|pwd| {
@@ -100,6 +299,218 @@ fn checkout_root(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> PathB
         .ancestors()
         .find(|dir| dir.join(".git").exists())
         .map_or(given.clone(), Path::to_path_buf)
+}
+
+/// B-63, B-64, B-67: the state of the baked store the run's variables name, as this machine
+/// would read it: the one place that gathers what [`hushrun_build::baked::state`] decides from,
+/// for the run, `hushrun build status` and `hushrun build bake`. `may_write_trusted` is the run's
+/// authority ([`hushrun_build::baked::authority`]); `upper` is the run's own store; `folder` the
+/// folder the run is in; `server` what the store's backend answered as the run began (status and
+/// bake ask none); `signers` the repository's `build: baked: signers:`, whose signature over the
+/// store ([`signed_evidence`]) is evidence, its covered hints listed in `session`. The second
+/// value says why a signature there isn't evidence, when it isn't.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_state(
+    env: &dyn Fn(&str) -> Option<OsString>,
+    may_write_trusted: bool,
+    upper: &Path,
+    folder: Option<&Path>,
+    repository: Option<&str>,
+    go: Option<&str>,
+    server: hushrun_build::baked::Asked<'_>,
+    signers: &hushrun_core::policy::BakedTrust,
+    session: &Path,
+) -> (hushrun_build::baked::State, Option<String>) {
+    use hushrun_build::baked;
+    use hushrun_build::model::Kind;
+    let named = baked::named(env);
+    let Some(named_folder) = named.as_deref() else {
+        return (baked::State::Absent, None);
+    };
+    let (signed, unsigned) = match signed_evidence(env, named_folder, signers, session) {
+        Ok(signed) => (signed, None),
+        Err(why) => (None, Some(why)),
+    };
+    // B-63: the compiler's own target (a GNU and a musl hushrun read one store), else hushrun's.
+    let target = folder
+        .and_then(|folder| compiler_host(folder, env))
+        .unwrap_or_else(platform);
+    let mut platforms = vec![(Kind::Rustc, target.clone()), (Kind::Cc, target)];
+    if let Some(go) = go {
+        platforms.push((Kind::Go, go.to_string()));
+    }
+    // B-76: the folders this run's compiles are keyed by, which a store's bound blocks need.
+    let paths = folder.and_then(|folder| baked::BakedPaths::of(env, &checkout_of(folder, env)));
+    let state = baked::state(
+        named.as_deref(),
+        &baked::Here {
+            repository,
+            platforms: &platforms,
+            untrusted_ok: baked::accepts_untrusted(env, may_write_trusted),
+            server,
+            signed: signed.as_ref(),
+            upper,
+            paths: paths.as_ref(),
+            // B-65: at `/hushrun` because no variable named a store.
+            default: env(baked::LOWER).is_none(),
+        },
+    );
+    (state, unsigned)
+}
+
+/// B-67: the signature beside the baked store in `folder`, verified against `signers`, as the
+/// run's evidence: `Ok(None)` when there is no signature or no signer is named; `Err` says why
+/// one there isn't evidence. The hint files it covers are written to `session`'s
+/// [`hushrun_build::baked::SIGNED_HINTS`].
+pub(crate) fn signed_evidence(
+    env: &dyn Fn(&str) -> Option<OsString>,
+    folder: &Path,
+    signers: &hushrun_core::policy::BakedTrust,
+    session: &Path,
+) -> Result<Option<hushrun_build::baked::Signed>, String> {
+    use crate::cmd::build_relay::bake_image;
+    use hushrun_build::baked;
+    if signers.signers.is_empty() || !folder.join(baked::SIGNATURE).is_file() {
+        return Ok(None);
+    }
+    let root = bake_image::run_root(env);
+    let verified = bake_image::verify_store(folder, &signers.signers, root.as_ref())?;
+    // B-67: an old signed store, replayed where no backend says it was replaced, is evidence only
+    // from `not_before` on: by its timestamp when signed keylessly, else by the time its signed
+    // baked.json says it was baked.
+    bake_image::not_before_holds(
+        signers.not_before,
+        verified.signed_ms,
+        i64::try_from(verified.baked_ms).ok(),
+    )?;
+    let hints = session.join(baked::SIGNED_HINTS);
+    std::fs::create_dir_all(session).map_err(|e| format!("{}: {e}", session.display()))?;
+    baked::write_signed_hints(&hints, &verified.hints)
+        .map_err(|e| format!("{}: {e}", hints.display()))?;
+    Ok(Some(baked::Signed {
+        signer: verified.signer,
+        baked_json: verified.baked_json,
+        hints,
+        current: false,
+    }))
+}
+
+/// What `rustc -vV` names as its `host:` in `folder` (`RUSTC`, else `rustc`): the compiler's own
+/// target triple. `None` when it can't be asked.
+pub(crate) fn compiler_host(
+    folder: &Path,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<String> {
+    let rustc = env("RUSTC")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from("rustc"));
+    let out = std::process::Command::new(rustc)
+        .arg("-vV")
+        .current_dir(folder)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(|host| host.trim().to_string())
+        .filter(|host| hushrun_core::blocks::is_platform(host))
+}
+
+/// B-63 how long a run waits, as it begins, for its relay's answer about its baked store: the
+/// same as a CI job waits for `open`.
+const BAKED_CHECK_WAIT: Duration = Duration::from_secs(5);
+
+/// B-63, B-64: records the baked store the run reads, before COMMAND starts. When the run's
+/// relay talks to the backend the store was baked from, for its repository, the relay first
+/// checks it (within [`BAKED_CHECK_WAIT`]): what the backend vouches for in the trusted scope,
+/// for the very bytes of `baked.json` read here, is the run's evidence, and a newer manifest of
+/// one of its checks marks it replaced before anything is reused. A store the run ignores costs a
+/// line, never the run. `go` is Go's platform (`GOOS_GOARCH`) in a Go module's run.
+fn give_lower(
+    session: &mut Session,
+    repository: Option<&str>,
+    folder: Option<&Path>,
+    signers: &hushrun_core::policy::BakedTrust,
+    go: Option<&str>,
+) {
+    use hushrun_build::baked;
+    let env = |name: &str| hushrun_ci::var_os(name);
+    let Some(named) = baked::named(&env) else {
+        return;
+    };
+    let in_ci = crate::gitlab_job::in_ci(&Env::from_process());
+    let store = session.current().store.clone();
+    let relay = session
+        .current()
+        .share
+        .relay()
+        .cloned()
+        .zip(crate::cmd::build_relay::Relay::running());
+    let mut vouched = None;
+    if let Some((share, relay)) = &relay
+        && let Ok((baked, contents)) = baked::Baked::read_bytes(&named)
+    {
+        let server = baked::Server {
+            host: share.by.host.clone(),
+            org: share.by.org.clone(),
+            repository: share.repository.clone(),
+            scope: String::new(),
+        };
+        if baked::server_verifies(&baked, &server)
+            && let Some(checked) = relay.check_baked(&baked, BAKED_CHECK_WAIT)
+        {
+            vouched = Some(baked::Vouched {
+                server: baked::Server {
+                    scope: checked.scope,
+                    ..server
+                },
+                baked_json: contents,
+                rows: checked.verified,
+            });
+        }
+    }
+    // B-63: whether this run may read a store nothing verifies is decided on its authority,
+    // asked only of a run that would: what its server lets it write.
+    let accepting = env(baked::LOWER_UNTRUSTED).is_some_and(|v| v == "1");
+    let may_write_trusted = !accepting
+        || baked::authority(
+            in_ci,
+            relay
+                .as_ref()
+                .map(|(_, relay)| relay.writes_trusted_within(BAKED_CHECK_WAIT)),
+        );
+    let session_folder = session.current().folder.clone();
+    let (state, unsigned) = lower_state(
+        &env,
+        may_write_trusted,
+        &store,
+        folder,
+        repository,
+        go,
+        match (&vouched, &relay) {
+            (Some(vouched), _) => baked::Asked::Answered(vouched),
+            (None, Some(_)) => baked::Asked::NoAnswer,
+            // B-63: no backend to ask: a signature is all the run can know.
+            (None, None) => baked::Asked::NoBackend,
+        },
+        signers,
+        &session_folder,
+    );
+    if let Some(why) = unsigned {
+        session.add_line(format!(
+            "build: the baked store's signature isn't evidence here: {why}"
+        ));
+    }
+    if let Err(err) = session.set_lower(&state) {
+        session.add_line(format!(
+            "build: the baked store isn't read in this run: {err}"
+        ));
+    }
 }
 
 /// B-50: gives COMMAND the C and C++ launcher, for the checkout the run is in. A launcher that
@@ -447,7 +858,7 @@ enum CiStore {
     /// |---|---|---|
     /// | absent | [`CiStore::prepare`]: created exclusively (0700), then its lock taken and held for the run ([`RUN_STORE`]) | this run's |
     /// | there already | nothing: never adopted, never removed by this run | no store, one line |
-    /// | this run's | the session's end, on every outcome ([`end_run_store`]) | absent |
+    /// | this run's | the session's end, on every outcome ([`end_run_store`]); a CI command's, when its guard goes ([`CommandStore`], which takes the lock from [`RUN_STORE`], so no session it begins there removes it) | absent |
     /// | a dead run's (its lock free, taken over an hour ago) | any run's [`CiStore::prepare`] in the same folder | absent |
     Run(PathBuf),
 }
@@ -651,6 +1062,66 @@ pub(crate) fn ci_job_store(env: &dyn Fn(&str) -> Option<OsString>) -> Option<Pat
             Some(path)
         }
         CiStore::Run(_) => None,
+    }
+}
+
+/// B-31: the store a CI job's command other than `hushrun run` uses (a bake, `hushrun build
+/// manifest`, `hushrun build status`): the job's own store under `RUNNER_TEMP` where the job has
+/// one, else a store of this command's own, made as a run's is ([`CiStore::Run`]: GitLab CI has
+/// no `RUNNER_TEMP`) and removed when the guard goes, on every outcome. `None` when neither can be
+/// made.
+pub(crate) fn ci_command_store(env: &dyn Fn(&str) -> Option<OsString>) -> Option<CommandStore> {
+    match CiStore::of(env) {
+        CiStore::Job(path) => {
+            CiStore::Job(path.clone()).prepare().ok()?;
+            Some(CommandStore { path, run: None })
+        }
+        CiStore::Run(path) => {
+            CiStore::Run(path.clone()).prepare().ok()?;
+            // The guard holds the store's lock from here on, not the process's run entry: a
+            // session the command begins in it (a bake's build of what's missing, B-75) ends
+            // without removing it ([`end_run_store`] leaves a path it doesn't hold alone), and
+            // the store goes once, with the guard.
+            let lock = {
+                let mut held = RUN_STORE
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match held.take() {
+                    Some((store, lock)) if store == path => Some(lock),
+                    other => {
+                        *held = other;
+                        None
+                    }
+                }
+            };
+            Some(CommandStore { path, run: lock })
+        }
+    }
+}
+
+/// A CI command's store ([`ci_command_store`]): one of the command's own (with the lock it
+/// holds while it lives) goes when this does, on every outcome.
+pub(crate) struct CommandStore {
+    pub(crate) path: PathBuf,
+    run: Option<std::fs::File>,
+}
+
+impl CommandStore {
+    /// Whether the store is the command's own, made for it and gone with it (no job folder to
+    /// share, as in GitLab CI): it holds no other command's runs.
+    pub(crate) fn own(&self) -> bool {
+        self.run.is_some()
+    }
+}
+
+impl Drop for CommandStore {
+    fn drop(&mut self) {
+        // The store goes while its lock is still held, so nothing that waits on the lock finds a
+        // half-removed store; the lock goes after.
+        if let Some(lock) = self.run.take() {
+            let _ = std::fs::remove_dir_all(&self.path);
+            drop(lock);
+        }
     }
 }
 
@@ -918,19 +1389,16 @@ fn start_sharing(
     };
     // B-36: a Go module's COMMAND gets Go's cache program, and the check asks for its Go
     // manifest apart.
-    let go = go_program(session, env);
-    let share = relay.begin_check(
-        &current.folder,
-        Some(check),
-        go.as_ref().map(|go| go.platform.clone()),
-        env,
-    )?;
+    // B-39: asked once the relay is starting, as it always was in a run that shares.
+    if !session.go_asked() {
+        let go = go_program(session, env);
+        session.set_go(go);
+    }
+    let go = session.go().map(|go| go.platform.clone());
+    let share = relay.begin_check(&current.folder, Some(check), go, env)?;
     if let Err(err) = session.set_share(share) {
         relay.end_check(&[]);
         return Err(Some(format!("build: sharing is off for this run: {err}")));
-    }
-    if let Some(go) = go {
-        session.set_go(go);
     }
     Ok(relay)
 }
@@ -950,7 +1418,7 @@ fn go_program(
         Ok(go) => Some(go),
         Err(NotSet::Unquotable(path)) => {
             session.add_line(format!(
-                "build: Go packages are not shared in this run: the store's path holds a space and both kinds of quote, which Go can't be given ({})",
+                "build: Go packages aren't reused in this run: the store's path holds a space and both kinds of quote, which Go can't be given ({})",
                 path.display()
             ));
             None
@@ -992,12 +1460,22 @@ pub(crate) fn platform() -> String {
 /// Ends a run's session (B-20, B-26): the relay ends the check first (uploads in flight get
 /// their wait, `close` goes with the manifest and the counts), then the session's summary,
 /// with what the relay said.
-pub(crate) fn finish(mut session: Session, now: SystemTime) -> hushrun_build::session::Summary {
+pub(crate) fn finish(session: Session, now: SystemTime) -> hushrun_build::session::Summary {
+    finish_as(session, now, crate::cmd::build_relay::Ending::Usual)
+}
+
+/// [`finish`], the relay ending the check as `ending` says (B-75: a bake's build closes only a
+/// whole build).
+pub(crate) fn finish_as(
+    mut session: Session,
+    now: SystemTime,
+    ending: crate::cmd::build_relay::Ending,
+) -> hushrun_build::session::Summary {
     if session.current().share.relay().is_some()
         && let Some(relay) = crate::cmd::build_relay::Relay::running()
     {
         let entries = session.current().entries();
-        for line in relay.end_check(&entries) {
+        for line in relay.end_check_as(&entries, ending) {
             session.add_line(line);
         }
     }

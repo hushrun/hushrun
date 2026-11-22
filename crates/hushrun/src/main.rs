@@ -46,6 +46,8 @@ fn main() -> ExitCode {
         .next()
         .is_some_and(|name| hushrun_build::wrapper::called_as_wrapper(&name))
     {
+        // B-64: what opens a baked store's sealed packs, which the wrapper's crate can't.
+        cmd::build_relay::baked::install();
         return hushrun_build::wrapper::main();
     }
     // B-39: called by the Go cache program's name, it serves the `go` command that started it
@@ -55,6 +57,7 @@ fn main() -> ExitCode {
         .next()
         .is_some_and(|name| hushrun_build::go::called_as_program(&name))
     {
+        cmd::build_relay::baked::install();
         return hushrun_build::go::main();
     }
     // B-50: called by the C and C++ launcher's name, it stands in front of one compile and does
@@ -63,6 +66,7 @@ fn main() -> ExitCode {
         .next()
         .is_some_and(|name| hushrun_build::cc::called_as_launcher(&name))
     {
+        cmd::build_relay::baked::install();
         return hushrun_build::cc::main();
     }
     // \[ADR 0068\] As the target runner Cargo starts a test binary through, hushrun is no command

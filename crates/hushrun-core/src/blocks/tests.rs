@@ -190,6 +190,7 @@ fn open_and_its_policy() {
         allowance_bytes: 10_000_000_000,
         held_bytes: 123,
         manifest: vec![Pair(hex(2), hex(3))],
+        manifest_commit: None,
     };
     round_trip(
         &policy,

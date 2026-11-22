@@ -101,12 +101,12 @@ pub trait Ports {
     /// Whether the audit picks the compile of block `key` in the run started at `started_ms`
     /// (B-16). Tests choose.
     fn audited(&self, key: &Digest, started_ms: u64) -> bool {
-        audit::sample(key, started_ms, false)
+        audit::sample(key, started_ms, audit::Reuse::Any)
     }
     /// Whether the audit picks the first reuse here of the downloaded library `key` (B-16,
     /// B-34): one time in ten. Tests choose.
     fn audited_first(&self, key: &Digest, started_ms: u64) -> bool {
-        audit::sample(key, started_ms, true)
+        audit::sample(key, started_ms, audit::Reuse::FirstDownload)
     }
     /// Asks the run's relay (B-26). Tests stand in for it.
     fn relay(
@@ -122,6 +122,11 @@ pub trait Ports {
     /// Tests stand in for the programs.
     fn asker(&self) -> Box<link::Ask<'static>> {
         Box::new(ask_program)
+    }
+    /// What opens a baked store's sealed packs and hints (B-64): the binary's, when it installed
+    /// one. Tests stand in for it.
+    fn unseal(&self) -> Option<&dyn crate::baked::Unseal> {
+        crate::baked::unseal()
     }
 }
 
@@ -195,6 +200,9 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
             unit::forget_for_args(args, Some(&cwd));
             unit::mark_as_asked_for_args(args, &cwd);
             if let Some(current) = session::current(&|name| ports.var(name)) {
+                if let Some(stubbed) = stubbed(&current, args, ports) {
+                    return ports.exec(rustc, &stubbed);
+                }
                 let var = |name: &str| env.get(name).and_then(OsStr::to_str).map(str::to_string);
                 current.log(&Entry {
                     crate_name: crate_name_of(args).unwrap_or_default(),
@@ -209,6 +217,10 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         unit::forget_for_args(args, Some(&cwd));
         return ports.exec(rustc, args);
     };
+    if let Some(stubbed) = stubbed(&current, args, ports) {
+        unit::forget_for_args(args, Some(&cwd));
+        return ports.exec(rustc, &stubbed);
+    }
     let floor = inputs::floor(
         ports.file_clock(&Path::new(invocation.cwd()).join(invocation.out_dir())),
         start,
@@ -236,11 +248,21 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         asked: None,
         native_cpu: false,
         downloaded: std::cell::Cell::new(false),
+        baked: std::cell::Cell::new(false),
         replace_downloaded: std::cell::Cell::new(false),
         kept_local: std::cell::Cell::new(false),
         cant_start: std::cell::RefCell::new(None),
     }
     .run()
+}
+
+/// B-72: in a dependencies-only run, the arguments that compile one of the repository's own
+/// crates as a stub instead ([`session::Stub::args`]); `None` in any other run or compile.
+fn stubbed(current: &Current, args: &[OsString], ports: &dyn Ports) -> Option<Vec<OsString>> {
+    current
+        .stub
+        .as_ref()?
+        .args(&current.folder, args, &|name| ports.var(name))
 }
 
 /// An entry with nothing measured yet.
@@ -260,6 +282,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         step: None,
         key: None,
         downloaded: false,
+        baked: false,
         go: None,
         cc: None,
     }
@@ -344,6 +367,8 @@ struct Call<'a> {
     native_cpu: bool,
     /// The block this compile reuses was downloaded for it (B-26).
     downloaded: std::cell::Cell<bool>,
+    /// The block this compile reuses was opened from the run's baked store for it (B-64).
+    baked: std::cell::Cell<bool>,
     /// The block in the store under this compile's key was only downloaded and no server
     /// vouches for it now: the compile's block takes its place (B-32, B-34).
     replace_downloaded: std::cell::Cell<bool>,
@@ -476,6 +501,9 @@ enum Hit {
     Value(String),
     /// The toolchain's own folder, searched for in linked outputs (B-10).
     Toolchain,
+    /// A stand-in rustc writes for a folder (B-9): searched for only so that a text inside it
+    /// is not taken for the folder it holds as text.
+    StandIn,
 }
 
 /// What outputs are searched for: the roots (B-10), the folders that name the machine and the
@@ -512,6 +540,9 @@ impl Search {
         for form in toolchain {
             add(form.as_bytes().to_vec(), Hit::Toolchain);
         }
+        for stand_in in roots.stand_ins() {
+            add(stand_in.into_bytes(), Hit::StandIn);
+        }
         let kinds: Vec<Vec<Hit>> = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
         let mut needles = Needles::new(texts.into_iter().map(|(text, _)| text).collect());
         // The texts are distinct and none is empty, so the needles are the texts, in order.
@@ -520,6 +551,24 @@ impl Search {
         // `TMPDIR` above a store, a user's name in the home folder) is that folder, which its own
         // rule reports; the value is in the output only where it lies outside them (B-24).
         let value_only = |kinds: &[Hit]| kinds.iter().all(|k| matches!(k, Hit::Value(_)));
+        // B-9: a root, a machine's folder, the toolchain's or a value found only as part of a
+        // stand-in rustc wrote (`/hushrun/cargo` holds a cargo home of `/cargo` as text) is the
+        // stand-in, the same on every machine. A stand-in that is also a folder's own text is
+        // that folder, and judged as one.
+        let stand_in_only = |kinds: &[Hit]| kinds.iter().all(|k| *k == Hit::StandIn);
+        for (inner, inner_kinds) in kinds.iter().enumerate() {
+            if stand_in_only(inner_kinds) {
+                continue;
+            }
+            for (outer, outer_kinds) in kinds.iter().enumerate() {
+                if stand_in_only(outer_kinds) {
+                    needles.not_within(inner, outer);
+                    // A short root (`/app`) at the start of a longer name in a path rustc
+                    // wrote under a stand-in (`…/approx-0.5.1/…`) is that path's.
+                    needles.not_continuing(inner, outer);
+                }
+            }
+        }
         for (inner, inner_kinds) in kinds.iter().enumerate() {
             if !value_only(inner_kinds) {
                 continue;
@@ -571,6 +620,7 @@ impl Search {
                         values.insert(name.clone());
                     }
                     Hit::Toolchain => toolchain = true,
+                    Hit::StandIn => {}
                 }
             }
         }
@@ -1150,8 +1200,16 @@ impl Call<'_> {
             .share
             .relay()
             .filter(|_| !self.kept_local.get());
+        // B-64: the baked store underneath, after this machine's own store and before the relay.
+        let unseal = self.ports.unseal();
+        let lower = self
+            .current
+            .lower_for(crate::model::Kind::Rustc)
+            .filter(|_| !self.kept_local.get())
+            .zip(unseal)
+            .map(|(lower, unseal)| crate::baked::Reader::new(lower, unseal));
         let local = store.hints(&cx.step);
-        if local.is_empty() && share.is_none() {
+        if local.is_empty() && share.is_none() && lower.is_none() {
             return Lookup::Missing;
         }
         let shared = match common.get_or_insert_with(|| cx.common()) {
@@ -1169,16 +1227,24 @@ impl Call<'_> {
                 measure: share.is_some(),
                 largest: &mut local_bytes,
             },
+            lower.as_ref(),
             &mut candidates,
             found,
         ) {
             return lookup;
         }
-        let Some(share) = share else {
+        if share.is_none() && lower.is_none() {
             return Lookup::Missing;
-        };
+        }
         let mut downloaded = store.shared_hints(&cx.step);
         if downloaded.is_empty()
+            && let Some(lower) = &lower
+            && lower.hints_into(store, crate::model::Kind::Rustc, &cx.step, self.ports.now()) > 0
+        {
+            downloaded = store.shared_hints(&cx.step);
+        }
+        if downloaded.is_empty()
+            && let Some(share) = share
             && let Some(Answer::Hints { count }) = self.ports.relay(
                 &share.socket,
                 &Request::Hints { step: cx.step },
@@ -1200,6 +1266,7 @@ impl Call<'_> {
             &shared,
             &downloaded,
             Following::Downloaded { budget },
+            lower.as_ref(),
             &mut candidates,
             found,
         ) {
@@ -1209,6 +1276,50 @@ impl Call<'_> {
             return Lookup::Missing;
         }
         candidates.truncate(MOST_FETCH_KEYS);
+        // B-64: a second key whose pack the baked store holds is opened into this machine's
+        // store, and found there as any block is.
+        if let Some(lower) = &lower {
+            let floor = u64::from(self.current.min_free_gb).saturating_mul(1 << 30);
+            let opened = candidates.iter().position(|(key, _, _)| {
+                lower
+                    .open_into(
+                        store,
+                        crate::model::Kind::Rustc,
+                        key,
+                        &cx.step,
+                        floor,
+                        self.current.repository.as_deref(),
+                        self.ports.now(),
+                    )
+                    .unwrap_or(false)
+            });
+            if let Some(at) = opened {
+                let (key, observed, watched) = candidates.swap_remove(at);
+                match store.block(&key) {
+                    Err(_) => return Lookup::StoreFailed,
+                    Ok(None) => {}
+                    Ok(Some(block)) => {
+                        let origin = store.origin(&key);
+                        if self.vouched(&key, &cx.step, &block, origin.as_ref())
+                            && self.starts_here(&block, origin.as_ref())
+                            && let Some(lookup) =
+                                self.found(cx.step, key, block, observed, watched, origin, found)
+                        {
+                            self.baked.set(true);
+                            return lookup;
+                        }
+                        self.replace_downloaded.set(true);
+                        return Lookup::Missing;
+                    }
+                }
+            }
+        }
+        let Some(share) = share else {
+            return Lookup::Missing;
+        };
+        if candidates.is_empty() {
+            return Lookup::Missing;
+        }
         let asked = Request::Fetch {
             step: cx.step,
             keys: candidates.iter().map(|(key, _, _)| *key).collect(),
@@ -1253,6 +1364,7 @@ impl Call<'_> {
         shared: &Common,
         hints: &[Vec<u8>],
         mut following: Following<'_>,
+        lower: Option<&crate::baked::Reader<'_>>,
         candidates: &mut Vec<(Digest, Observed, Vec<inputs::Watched>)>,
         found: &mut Option<Found>,
     ) -> Option<Lookup> {
@@ -1290,7 +1402,30 @@ impl Call<'_> {
                     }
                 }
                 Ok(Some(block)) => {
-                    let origin = store.origin(&key);
+                    let mut origin = store.origin(&key);
+                    // B-64: a copy only an older baked store gave, which the run's baked store
+                    // holds too, is this store's from now on: opening its pack finds the same
+                    // outputs and renames the record, never the block.
+                    let mut from_lower = false;
+                    if let Some(lower) = lower
+                        && origin
+                            .as_ref()
+                            .is_some_and(|o| o.baked.is_some() && !o.baked_in(&lower.contents()))
+                        && lower
+                            .open_into(
+                                store,
+                                crate::model::Kind::Rustc,
+                                &key,
+                                &cx.step,
+                                u64::from(self.current.min_free_gb).saturating_mul(1 << 30),
+                                self.current.repository.as_deref(),
+                                self.ports.now(),
+                            )
+                            .unwrap_or(false)
+                    {
+                        origin = store.origin(&key);
+                        from_lower = true;
+                    }
                     // B-34: a block that was only downloaded is reused only while a server the
                     // run belongs to vouches for it. Not vouched for, it is a miss: rustc runs,
                     // and its block takes this one's place.
@@ -1308,6 +1443,9 @@ impl Call<'_> {
                     if let Some(lookup) =
                         self.found(cx.step, key, block, observed, watched, origin, found)
                     {
+                        if from_lower {
+                            self.baked.set(true);
+                        }
                         return Some(lookup);
                     }
                 }
@@ -1334,17 +1472,14 @@ impl Call<'_> {
         let serves_form = description.messages.form() == self.invocation.form()
             || description.messages.only_notices();
         // Every class, linked outputs among them (B-16, B-34).
-        let first_download = origin
-            .as_ref()
-            .is_some_and(|o| o.downloaded_only() && !o.reused);
+        // B-63: a verified baked block's first reuse here is never sampled.
         let started = self.current.started_ms;
-        let audit = self.current.audit.picks(|| {
-            if first_download {
-                self.ports.audited_first(&key, started)
-            } else {
-                self.ports.audited(&key, started)
-            }
-        });
+        let audit = self
+            .current
+            .audits_reuse(origin.as_ref(), |reuse| match reuse {
+                audit::Reuse::FirstDownload => self.ports.audited_first(&key, started),
+                _ => self.ports.audited(&key, started),
+            });
         if self.current.key_log.is_some() {
             let mut keys = self.keys.borrow_mut();
             keys.block = Some(key);
@@ -1419,7 +1554,7 @@ impl Call<'_> {
             step: *step,
             outputs: outputs_of(block),
         };
-        self.current.share.may_reuse(
+        self.current.may_reuse(
             origin,
             epoch_ms(self.ports.now()),
             vouch,
@@ -1489,6 +1624,7 @@ impl Call<'_> {
             step: Some(found.description.step),
             key: Some(found.block.key),
             downloaded: self.downloaded.get(),
+            baked: self.baked.get(),
             ..entry(verdict.outcome, Some(self.invocation.class()))
         });
         Some(0)
@@ -1911,6 +2047,7 @@ impl Call<'_> {
             records: &records,
             in_outputs: &in_outputs,
             machine: roots.machine_needles(),
+            stand_ins: &roots.stand_ins(),
             variable_names_base,
             externs: &common.externs_portable,
             unkeyed: &unkeyed,
@@ -3335,6 +3472,56 @@ mod tests {
             .unwrap()
             .machine;
         assert!(found.contains(&Folder::CargoHome), "{found:?}");
+    }
+
+    // covers: B-9, B-10, B-24
+    #[test]
+    fn a_machine_folder_inside_a_stand_in_is_the_stand_in_not_the_folder() {
+        // A cargo home of `/cargo` and a crate of the registry: rustc writes its paths under the
+        // stand-in `/hushrun/cargo`, which holds `/cargo` as text. That is the stand-in, the same
+        // on every machine, not this machine's cargo home; nor is a workspace `/work` inside the
+        // build script output's stand-in `/hushrun/out/work-0.1.0`.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = "/work";
+        let paths = RootPaths {
+            workspace: ws.to_string(),
+            package: Some("/cargo/registry/src/index/work-0.1.0".to_string()),
+            script_out: Some(format!("{ws}/target/debug/build/work-1/out")),
+            out_dir: format!("{ws}/target/debug/deps"),
+            deps: vec![],
+            native: vec![],
+            package_id: "work-0.1.0".to_string(),
+            target_dir: None,
+            build_target_dir: None,
+            target_tmpdir: None,
+            bin_exe_dirs: vec![],
+        };
+        let machine = Machine {
+            cargo_home: Some("/cargo".into()),
+            toolchain: Some("/rustup/toolchains/stable-x".into()),
+            toolchain_view: None,
+            rustup_home: Some("/rustup".into()),
+            home: Some("/home/runner".into()),
+        };
+        let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
+        let search = Search::new(&roots, &[], &[]);
+        let path = dir.path().join("libwork.rlib");
+        std::fs::write(
+            &path,
+            b"\0/hushrun/cargo/registry/src/index/x/src/lib.rs\0/hushrun/out/work-0.1.0/gen.rs\0",
+        )
+        .unwrap();
+        let found = search
+            .file(path.clone(), "libwork.rlib".into(), OutputKind::Link)
+            .unwrap();
+        assert!(found.machine.is_empty(), "{:?}", found.machine);
+        assert!(!found.tied);
+        // The folder itself, outside any stand-in, is still this machine's.
+        std::fs::write(&path, b"\0/hushrun/cargo/a.rs\0/cargo/registry/src/b.rs\0").unwrap();
+        let found = search
+            .file(path, "libwork.rlib".into(), OutputKind::Link)
+            .unwrap();
+        assert!(found.machine.contains(&Folder::CargoHome));
     }
 
     // covers: B-10, B-24

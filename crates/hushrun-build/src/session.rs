@@ -76,8 +76,11 @@ pub struct Session {
     rebuilt: Vec<String>,
     /// Lines the run adds to its summary: what its relay said (B-26).
     more: Vec<String>,
-    /// The Go cache program COMMAND gets (B-39), when the run is a Go module's and shares.
+    /// The Go cache program COMMAND gets (B-39), when the run is a Go module's and shares or
+    /// reads a baked store.
     go: Option<crate::go::probe::Go>,
+    /// Whether the run asked for Go's cache program already, given one or not: it asks once.
+    go_asked: bool,
     /// Another compiler wrapper is set (B-2): COMMAND gets no `RUSTC_WRAPPER` of hushrun's, and
     /// the session serves Go alone.
     rustc_left_out: bool,
@@ -86,6 +89,8 @@ pub struct Session {
     cc_env: Vec<(OsString, OsString)>,
     /// The person's `cc_maps` setting as the run began (B-55).
     cc_maps_setting: bool,
+    /// Which manifest the run leaves in the store when it ends (B-63), when it is a check's.
+    slot: Option<crate::manifests::Slot>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -154,6 +159,108 @@ pub struct Current {
     /// What the C and C++ launcher reads (B-50): absent, it passes every call through (B-62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc: Option<crate::cc::CcRun>,
+    /// The baked store the run reads underneath its store (B-63, B-64), as its state said when
+    /// the run began. Absent: none, or one the run ignores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower: Option<Reading>,
+    /// B-72: the repository's own crates, compiled as empty stubs in this run (`hushrun build
+    /// bake --deps-only`): never stored, never reused, never recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stub: Option<Stub>,
+}
+
+/// B-72: which compiles a dependencies-only run stubs: a crate of one of `packages` (the
+/// lockfile's path packages, which no registry or git source names) whose `CARGO_MANIFEST_DIR`
+/// is inside `under` (the checkout). Its one source file is replaced by an empty one in the
+/// session's folder, so its dependents compile and the third-party crates under them compile as
+/// the real build compiles them, with the same keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stub {
+    pub packages: Vec<String>,
+    pub under: PathBuf,
+}
+
+/// The stub sources in a session's folder (B-72): a library's, and a program's.
+pub const STUB_LIB: &str = "stub-lib.rs";
+pub const STUB_MAIN: &str = "stub-main.rs";
+
+impl Stub {
+    /// B-72: the arguments to run instead of `args` for a compile of the process whose variables
+    /// `var` gives, when it is one of the repository's own crates: its one `.rs` argument replaced
+    /// by the session folder's stub (a program's for a `bin` crate that is no test). `None` for
+    /// any other compile, or one whose source isn't one argument ending in `.rs`: that compiles
+    /// as asked.
+    pub fn args(
+        &self,
+        folder: &Path,
+        args: &[OsString],
+        var: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Option<Vec<OsString>> {
+        let package = var("CARGO_PKG_NAME")?;
+        if !self.packages.iter().any(|p| OsStr::new(p) == package) {
+            return None;
+        }
+        let dir = PathBuf::from(var("CARGO_MANIFEST_DIR")?);
+        if !dir.starts_with(&self.under) {
+            return None;
+        }
+        let sources: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                a.to_str()
+                    .is_some_and(|a| a.ends_with(".rs") && !a.starts_with('-'))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let [at] = sources[..] else {
+            return None;
+        };
+        let bin = args
+            .windows(2)
+            .any(|w| w[0] == "--crate-type" && w[1] == "bin")
+            || args.iter().any(|a| a == "--crate-type=bin");
+        let test = args.iter().any(|a| a == "--test");
+        let stub = folder.join(if bin && !test { STUB_MAIN } else { STUB_LIB });
+        let mut out = args.to_vec();
+        out[at] = stub.into_os_string();
+        Some(out)
+    }
+}
+
+/// How a run reads its baked store (B-63): the two states of [`crate::baked::State`] a run reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Reading {
+    /// Its blocks are reused without asking.
+    Current(crate::baked::Lower),
+    /// Its source named a newer manifest: its blocks stand as downloads no server vouched for
+    /// yet (B-34).
+    Replaced(crate::baked::Lower),
+}
+
+impl Reading {
+    /// The baked store.
+    pub fn lower(&self) -> &crate::baked::Lower {
+        match self {
+            Reading::Current(lower) | Reading::Replaced(lower) => lower,
+        }
+    }
+
+    fn lower_mut(&mut self) -> &mut crate::baked::Lower {
+        match self {
+            Reading::Current(lower) | Reading::Replaced(lower) => lower,
+        }
+    }
+
+    /// The reading of a state, when the run reads the store at all.
+    pub fn of(state: &crate::baked::State) -> Option<Reading> {
+        match state {
+            crate::baked::State::Current(lower) => Some(Reading::Current(lower.clone())),
+            crate::baked::State::Replaced(lower) => Some(Reading::Replaced(lower.clone())),
+            _ => None,
+        }
+    }
 }
 
 fn share_on() -> Mode {
@@ -189,6 +296,88 @@ impl Current {
     /// What the wrapper does with this run's programs on an Apple target (B-9, B-21).
     pub fn programs(&self) -> Programs {
         self.programs_setting.in_a_run(self.shares())
+    }
+
+    /// B-64: the baked store a wrapper, the Go cache program or the launcher of this run looks
+    /// in for blocks of `kind`, after this machine's own store and before a relay: a current one
+    /// always; a replaced one only where a block from it could be reused (the run shares or
+    /// would, B-34), since elsewhere opening it would only be undone.
+    pub fn lower_for(&self, kind: crate::model::Kind) -> Option<&crate::baked::Lower> {
+        match &self.lower {
+            Some(Reading::Current(lower)) if lower.reads(kind) => Some(lower),
+            Some(Reading::Replaced(lower)) if self.shares() && lower.reads(kind) => Some(lower),
+            _ => None,
+        }
+    }
+
+    /// B-16, B-34, B-63: how the audit samples a reuse of a block with record `origin`, the one
+    /// definition the `rustc` wrapper, Go's cache program and the C and C++ launcher pick by. A
+    /// block only downloaded and not reused here yet is at its first reuse here: one in ten
+    /// ([`crate::audit::Reuse::FirstDownload`]), unless it was opened from the run's baked store,
+    /// current (not replaced), under evidence that verifies where it came from and is this run's
+    /// (`baked::Evidence::current`: the server's word for its row in the repository's trusted
+    /// scope given in this run, or a signature by a signer the repository names that passes
+    /// `not_before` where the run has no backend to ask): then never
+    /// ([`crate::audit::Reuse::FirstVerified`]). A block from a store the person accepted
+    /// unverified, or signed where the backend didn't answer or isn't its source, keeps the one in
+    /// ten; every other reuse is one in fifty.
+    pub fn reuse_pick(&self, origin: Option<&crate::origin::Origin>) -> crate::audit::Reuse {
+        let Some(origin) = origin else {
+            return crate::audit::Reuse::Any;
+        };
+        if !origin.downloaded_only() || origin.reused {
+            return crate::audit::Reuse::Any;
+        }
+        // Verified now: the store is current (not replaced), and its evidence for this block is
+        // this run's (`Evidence::current`).
+        let verified = self.lower.as_ref().is_some_and(|reading| {
+            let lower = reading.lower();
+            matches!(reading, Reading::Current(_))
+                && lower.evidence.current()
+                && origin.baked_in(&lower.contents)
+        });
+        if verified {
+            crate::audit::Reuse::FirstVerified
+        } else {
+            crate::audit::Reuse::FirstDownload
+        }
+    }
+
+    /// B-16, B-63: whether the audit picks this reuse of a block with record `origin`: every one
+    /// with `HUSHRUN_BUILD_AUDIT=every`, none with `none`, else as [`Current::reuse_pick`] says,
+    /// `sample` asked for the pick (the caller's port) except at a verified baked block's first
+    /// reuse here, which is never audited. The one place the three callers decide it.
+    pub fn audits_reuse(
+        &self,
+        origin: Option<&crate::origin::Origin>,
+        sample: impl FnOnce(crate::audit::Reuse) -> bool,
+    ) -> bool {
+        let reuse = self.reuse_pick(origin);
+        self.audit
+            .picks(|| reuse != crate::audit::Reuse::FirstVerified && sample(reuse))
+    }
+
+    /// Whether a block may be reused as far as who vouches for it goes (B-34, B-63): a block
+    /// only opened from the run's baked store, while that store is current and is the very
+    /// `baked.json` its record names, and the person accepted it unverified (in a run that writes
+    /// nothing others trust) or a
+    /// signature by a signer the repository names covers it (B-67), may without asking; every
+    /// other block as [`Shared::may_reuse`] says, which a block the
+    /// backend vouched for as the run began passes on its fresh word.
+    pub fn may_reuse(
+        &self,
+        origin: Option<&crate::origin::Origin>,
+        now_ms: u64,
+        vouch: crate::relay::Request,
+        ask: &mut dyn FnMut(&Path, &crate::relay::Request) -> Option<crate::relay::Answer>,
+    ) -> bool {
+        if let (Some(Reading::Current(lower)), Some(origin)) = (&self.lower, origin)
+            && lower.evidence.reuses_unasked()
+            && origin.baked_in(&lower.contents)
+        {
+            return true;
+        }
+        self.share.may_reuse(origin, now_ms, vouch, ask)
     }
 }
 
@@ -296,6 +485,9 @@ pub struct Entry {
     /// The block was downloaded from the shared store for this compile (B-26).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub downloaded: bool,
+    /// The block was opened from the run's baked store for this compile (B-64).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub baked: bool,
     /// A Go package archive's line, logged by the Go cache program (B-46): absent for the
     /// `rustc` wrapper's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -396,7 +588,7 @@ impl Current {
 
 /// A folder a variable names, else `default` under the home folder, as cargo and rustup find
 /// theirs.
-fn under_home(
+pub(crate) fn under_home(
     env: &dyn Fn(&str) -> Option<OsString>,
     variable: &str,
     default: &str,
@@ -432,6 +624,8 @@ pub struct Counts {
     pub reused: u64,
     /// Of those, the ones whose block was downloaded from the shared store for them (B-26).
     pub downloaded: u64,
+    /// Of those, the ones whose block was opened from the run's baked store for them (B-64).
+    pub baked: u64,
     /// Compiles that ran and were stored.
     pub built_and_stored: u64,
     /// Compiles that ran and were not stored, for any reason.
@@ -472,6 +666,8 @@ pub struct CcCounts {
     pub reused: u64,
     /// Of those, downloaded from the shared store for it.
     pub downloaded: u64,
+    /// Of those, opened from the run's baked store for it (B-64).
+    pub baked: u64,
     /// Compiles that ran, stored or not, passed through or not.
     pub built: u64,
     /// Compiles that ran exactly as asked.
@@ -505,6 +701,7 @@ impl CcCounts {
             Outcome::Reused => {
                 self.reused += 1;
                 self.downloaded += u64::from(entry.downloaded);
+                self.baked += u64::from(entry.baked);
                 self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
             }
             Outcome::PassedThrough(_) => {
@@ -560,9 +757,7 @@ impl CcCounts {
         } else {
             let mut parts = Vec::new();
             let mut reused = format!("{} reused", self.reused);
-            if self.downloaded > 0 {
-                reused.push_str(&format!(" ({} from the shared store)", self.downloaded));
-            }
+            reused.push_str(&from_where(self.downloaded, self.baked));
             parts.push(reused);
             parts.push(format!("{} built", self.built));
             format!(
@@ -626,6 +821,8 @@ pub struct GoCounts {
     pub reused: u64,
     /// Of those, downloaded from the shared store for it.
     pub downloaded: u64,
+    /// Of those, opened from the run's baked store for it (B-64).
+    pub baked: u64,
     /// Compiled by Go.
     pub built: u64,
     /// Compiled and compared with a block of the same key (an audit, a block there already).
@@ -653,6 +850,7 @@ impl GoCounts {
             Outcome::Reused => {
                 self.reused += 1;
                 self.downloaded += u64::from(entry.downloaded);
+                self.baked += u64::from(entry.baked);
                 self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
             }
             Outcome::BuiltAndStored | Outcome::BuiltNotStored(_) | Outcome::PassedThrough(_) => {
@@ -695,9 +893,7 @@ impl GoCounts {
         }
         if self.reused > 0 {
             let mut part = format!("{} reused", self.reused);
-            if self.downloaded > 0 {
-                part.push_str(&format!(" ({} from the shared store)", self.downloaded));
-            }
+            part.push_str(&from_where(self.downloaded, self.baked));
             parts.push(part);
         }
         if self.built > 0 {
@@ -769,6 +965,7 @@ impl Counts {
                 Outcome::Reused => {
                     counts.reused += 1;
                     counts.downloaded += u64::from(entry.downloaded);
+                    counts.baked += u64::from(entry.baked);
                 }
                 Outcome::BuiltAndStored => counts.built_and_stored += 1,
                 Outcome::BuiltNotStored(why) => {
@@ -898,9 +1095,7 @@ fn rust_lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
         }
         Mode::On | Mode::Off => {
             let mut line = format!("build: {} of {all} reused", counts.reused);
-            if counts.downloaded > 0 {
-                line.push_str(&format!(" ({} from the shared store)", counts.downloaded));
-            }
+            line.push_str(&from_where(counts.downloaded, counts.baked));
             if counts.built() > 0 {
                 line.push_str(&format!(", {} built", counts.built()));
             }
@@ -933,6 +1128,16 @@ fn rust_lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// ` (2 from the shared store, 3 from the baked store)`, or what of it applies, or nothing.
+fn from_where(downloaded: u64, baked: u64) -> String {
+    match (downloaded, baked) {
+        (0, 0) => String::new(),
+        (d, 0) => format!(" ({d} from the shared store)"),
+        (0, b) => format!(" ({b} from the baked store)"),
+        (d, b) => format!(" ({d} from the shared store, {b} from the baked store)"),
+    }
 }
 
 /// `1 crate`, `41 crates`.
@@ -1000,6 +1205,17 @@ pub const CI_MIN_FREE_GB: u32 = 2;
 /// [`CI_MIN_FREE_GB`], and `HUSHRUN_BUILD_DIR` is not followed, so nothing outlives the job.
 pub fn begin_in_ci(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun> {
     begin_without_settings(start, store, Mode::On, CI_MIN_FREE_GB)
+}
+
+/// B-72: starts a session in `store`, a folder of the caller's own (a bake's dependencies-only
+/// build): no person's settings file is read, reuse is on unless `HUSHRUN_BUILD` says otherwise,
+/// and the floor is `min_free_gb`.
+pub fn begin_isolated(
+    start: &Start<'_>,
+    store: &Path,
+    min_free_gb: u32,
+) -> Result<Session, NotBegun> {
+    begin_without_settings(start, store, Mode::On, min_free_gb)
 }
 
 /// B-25, B-36: starts a session in `store` on a machine where no person is signed in (a
@@ -1078,6 +1294,8 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         share: Shared::Off,
         share_setting: settings.share,
         cc: None,
+        lower: None,
+        stub: None,
     };
     write_current(&current)
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", current.folder.display())))?;
@@ -1087,9 +1305,11 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         rebuilt: Vec::new(),
         more: Vec::new(),
         go: None,
+        go_asked: false,
         rustc_left_out: false,
         cc_env: Vec::new(),
         cc_maps_setting: settings.cc_maps,
+        slot: None,
     })
 }
 
@@ -1145,6 +1365,44 @@ impl Session {
         write_current(&self.current)
     }
 
+    /// Records in `session.json`, before COMMAND starts, the baked store the run reads (B-63,
+    /// B-64), as [`crate::baked::state`] said; a state the run ignores leaves none, and its line
+    /// goes into the run's summary.
+    pub fn set_lower(&mut self, state: &crate::baked::State) -> std::io::Result<()> {
+        for line in state.lines() {
+            self.add_line(line);
+        }
+        // B-64: the rows the run may open, as the state read them, go into the session's index,
+        // which every wrapper reads instead of `baked.json`.
+        let mut reading = Reading::of(state);
+        if let Some(reading) = &mut reading {
+            let lower = reading.lower_mut();
+            let index = self.current.folder.join(crate::baked::INDEX);
+            crate::baked::write_index(&index, &lower.openable)?;
+            lower.index = Some(index);
+        }
+        self.current.lower = reading;
+        write_current(&self.current)
+    }
+
+    /// B-72: records in `session.json`, before COMMAND starts, that this run compiles the
+    /// repository's own crates as stubs, and writes the stub sources into the session's folder.
+    pub fn set_stub(&mut self, stub: Stub) -> std::io::Result<()> {
+        let folder = &self.current.folder;
+        std::fs::write(folder.join(STUB_LIB), "#![allow(warnings)]\n")?;
+        std::fs::write(
+            folder.join(STUB_MAIN),
+            "#![allow(warnings)]\nfn main() {}\n",
+        )?;
+        self.current.stub = Some(stub);
+        write_current(&self.current)
+    }
+
+    /// Names the manifest the run leaves in the store when it ends (B-63): its check's.
+    pub fn set_manifest_slot(&mut self, slot: crate::manifests::Slot) {
+        self.slot = Some(slot);
+    }
+
     /// Records in `session.json`, before COMMAND starts, that the run would share and its
     /// backend couldn't be reached (B-34). A run with a relay keeps it: the relay is what knows
     /// whether its server can be reached.
@@ -1173,8 +1431,8 @@ impl Session {
     }
 
     /// What to set on COMMAND: the wrapper for cargo, the session for the wrapper, and Go's
-    /// cache program when [`Session::set_go`] gave one and the run shares (B-39): with sharing
-    /// off, the program would only do what Go's own cache does.
+    /// cache program when [`Session::set_go`] gave one (B-39): in a run that shares or reads a
+    /// baked store; elsewhere the program would only do what Go's own cache does.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
         let mut env = vec![(SESSION.into(), self.current.folder.clone().into_os_string())];
         if !self.rustc_left_out {
@@ -1183,9 +1441,7 @@ impl Session {
                 (RUSTC_WRAPPER.into(), self.link.clone().into_os_string()),
             );
         }
-        if let Some(go) = &self.go
-            && self.current.share != Shared::Off
-        {
+        if let Some(go) = &self.go {
             env.push((crate::go::GOCACHEPROG.into(), go.value.clone().into()));
         }
         env.extend(self.cc_env.iter().cloned());
@@ -1254,8 +1510,7 @@ impl Session {
         if std::fs::read_link(&link).is_ok_and(|target| target == exe) {
             return Ok(link);
         }
-        let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-        let _ = std::fs::remove_file(&temp);
+        let temp = dir.join(crate::baked::unique(&format!(".{name}.tmp")));
         symlink(&exe, &temp)?;
         std::fs::rename(&temp, &link)?;
         Ok(link)
@@ -1278,16 +1533,23 @@ impl Session {
         self.rustc_left_out
     }
 
-    /// Gives COMMAND Go's cache program (B-39), as [`crate::go::probe::probe`] decided it.
-    pub fn set_go(&mut self, go: crate::go::probe::Go) {
-        self.go = Some(go);
+    /// Gives COMMAND Go's cache program (B-39), as [`crate::go::probe::probe`] decided it, or
+    /// none; either way the run has asked, and asks no more ([`Session::go_asked`]).
+    pub fn set_go(&mut self, go: Option<crate::go::probe::Go>) {
+        self.go = go;
+        self.go_asked = true;
     }
 
-    /// The Go cache program the run sets, when it sets one.
+    /// Whether the run asked for Go's cache program already.
+    pub fn go_asked(&self) -> bool {
+        self.go_asked
+    }
+
+    /// The Go cache program the run sets, when it sets one: in a Go module's session that
+    /// shares or reads a baked store (B-39), which keeps its portable archives in the store
+    /// (B-42).
     pub fn go(&self) -> Option<&crate::go::probe::Go> {
-        self.go
-            .as_ref()
-            .filter(|_| self.current.share != Shared::Off)
+        self.go.as_ref()
     }
 
     /// Adds a line to the run's summary, once: what its relay said (B-26).
@@ -1324,12 +1586,26 @@ impl Session {
     /// same at once.
     pub fn finish(self, now: SystemTime) -> Summary {
         let current = &self.current;
-        let mut summary = Summary::of_run(
-            current.mode,
-            current.min_free_gb,
-            &current.entries(),
-            &self.rebuilt,
-        );
+        let entries = current.entries();
+        let mut summary =
+            Summary::of_run(current.mode, current.min_free_gb, &entries, &self.rebuilt);
+        // B-63: the check's manifest stays in the store, for `hushrun build bake`.
+        if let Some(slot) = &self.slot {
+            match crate::manifests::save(
+                &Store::new(&current.store),
+                current.repository.as_deref(),
+                slot,
+                &entries,
+                now,
+                current.keep_days,
+            ) {
+                Ok(None) => {}
+                Ok(Some(line)) => summary.lines.push(line),
+                Err(err) => summary
+                    .lines
+                    .push(format!("build: this check's manifest wasn't saved: {err}")),
+            }
+        }
         // B-16: whoever turned the audit off turned a guard off; the run says so every time.
         if current.audit == Audit::Never {
             summary.lines.push(AUDIT_OFF.to_string());
@@ -1441,12 +1717,10 @@ fn link_to(store: &Path, exe: &Path) -> std::io::Result<PathBuf> {
         return Ok(link);
     }
     std::fs::create_dir_all(&dir)?;
-    let temp = dir.join(format!(
-        ".{}.{}.tmp",
-        crate::WRAPPER_NAME,
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&temp);
+    let temp = dir.join(crate::baked::unique(&format!(
+        ".{}.tmp",
+        crate::WRAPPER_NAME
+    )));
     std::os::unix::fs::symlink(exe, &temp)?;
     std::fs::rename(&temp, &link)?;
     Ok(link)
@@ -1470,6 +1744,78 @@ fn symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    // covers: B-72
+    #[test]
+    fn a_dependencies_only_run_stubs_the_repository_s_own_crates_alone() {
+        let stub = Stub {
+            packages: vec!["app".into(), "core".into()],
+            under: PathBuf::from("/work/repo"),
+        };
+        let folder = Path::new("/store/sessions/1");
+        let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
+        let vars = |pkg: &'static str, dir: &'static str| {
+            move |name: &str| match name {
+                "CARGO_PKG_NAME" => Some(OsString::from(pkg)),
+                "CARGO_MANIFEST_DIR" => Some(OsString::from(dir)),
+                _ => None,
+            }
+        };
+        let lib = args(&[
+            "--crate-name",
+            "core",
+            "--edition=2021",
+            "core/src/lib.rs",
+            "--crate-type",
+            "lib",
+        ]);
+        let out = stub
+            .args(folder, &lib, &vars("core", "/work/repo/core"))
+            .unwrap();
+        assert_eq!(out[3], folder.join(STUB_LIB));
+        assert_eq!(out.len(), lib.len());
+        // A program and a build script get a main; a test harness makes its own.
+        let bin = args(&["--crate-name", "app", "src/main.rs", "--crate-type", "bin"]);
+        let out = stub.args(folder, &bin, &vars("app", "/work/repo")).unwrap();
+        assert_eq!(out[2], folder.join(STUB_MAIN));
+        let script = args(&[
+            "--crate-name",
+            "build_script_build",
+            "build.rs",
+            "--crate-type=bin",
+        ]);
+        let out = stub
+            .args(folder, &script, &vars("app", "/work/repo"))
+            .unwrap();
+        assert_eq!(out[2], folder.join(STUB_MAIN));
+        let test = args(&[
+            "--crate-name",
+            "app",
+            "src/main.rs",
+            "--test",
+            "--crate-type",
+            "bin",
+        ]);
+        let out = stub
+            .args(folder, &test, &vars("app", "/work/repo"))
+            .unwrap();
+        assert_eq!(out[2], folder.join(STUB_LIB));
+        // Third-party code, a path package outside the checkout, or no single source: as asked.
+        let dep = args(&["--crate-name", "serde", "src/lib.rs"]);
+        assert!(
+            stub.args(folder, &dep, &vars("serde", "/home/.cargo/registry/serde"))
+                .is_none()
+        );
+        assert!(
+            stub.args(folder, &lib, &vars("core", "/elsewhere/core"))
+                .is_none()
+        );
+        let two = args(&["--crate-name", "core", "a.rs", "b.rs"]);
+        assert!(
+            stub.args(folder, &two, &vars("core", "/work/repo/core"))
+                .is_none()
+        );
+    }
 
     fn start<'a>(
         dir: &'a Path,
@@ -1537,6 +1883,7 @@ mod tests {
             step: None,
             key: None,
             downloaded: false,
+            baked: false,
             go: None,
             cc: None,
         };
@@ -1650,6 +1997,7 @@ mod tests {
             step: None,
             key: None,
             downloaded: false,
+            baked: false,
             go: None,
             cc: None,
         }
@@ -2083,6 +2431,255 @@ mod tests {
     }
 
     // covers: B-9, B-21
+    // covers: B-63, B-64
+    #[test]
+    fn a_block_from_the_baked_store_is_reused_without_asking_only_while_the_store_is_current() {
+        use crate::baked::{Evidence, Lower, LowerPart, Source, State, Trust, Untrusted};
+        use crate::model::Kind;
+        use crate::origin::Origin;
+        use hushrun_core::blocks::Hex32;
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("build.json");
+        let exe = dir.path().join("hushrun");
+        std::fs::write(&exe, b"binary").unwrap();
+        let none = |_: &str| None;
+        settings::update(&settings, |s| s.mode = Mode::On).unwrap();
+        let mut session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        let read = |session: &Session| {
+            let folder = session.env()[1].1.clone();
+            current(&|name| (name == SESSION).then(|| folder.clone())).unwrap()
+        };
+        let accepted = Lower {
+            folder: dir.path().join("baked"),
+            manifest: Hex32([9; 32]),
+            contents: Hex32([7; 32]),
+            claim: Trust::Untrusted {
+                because: Untrusted::LocalStore,
+            },
+            source: Source::Store,
+            repository: None,
+            checks: vec![None],
+            parts: vec![LowerPart {
+                kind: "rustc/1".into(),
+                platform: "aarch64-unknown-linux-gnu".into(),
+            }],
+            evidence: Evidence::Accepted,
+            notes: Vec::new(),
+            openable: Vec::new(),
+            index: None,
+        };
+        // What session.json keeps of it: everything but its rows, which are in the index.
+        let bare = |lower: Option<&Lower>| {
+            lower.map(|lower| {
+                assert!(lower.index.as_ref().is_some_and(|i| i.is_file()));
+                Lower {
+                    index: None,
+                    ..lower.clone()
+                }
+            })
+        };
+        let vouch = || crate::relay::Request::Sharing;
+        let mut asked = 0;
+        let mut ask = |_: &Path, _: &crate::relay::Request| {
+            asked += 1;
+            None
+        };
+        let from_store = Origin::baked(Hex32([7; 32]), Hex32([1; 32]));
+        let from_older = Origin::baked(Hex32([6; 32]), Hex32([1; 32]));
+        let built = Origin::built_here("1-1", None);
+
+        // No baked store: a block from one stands as a download no server vouched for, in a run
+        // that shares nothing by a decision.
+        assert!(read(&session).lower_for(Kind::Rustc).is_none());
+        assert!(!read(&session).may_reuse(Some(&from_store), 0, vouch(), &mut ask));
+        assert!(read(&session).may_reuse(Some(&built), 0, vouch(), &mut ask));
+
+        // Current and accepted unverified: its own blocks without asking, an older store's not;
+        // its parts only.
+        session
+            .set_lower(&State::Current(accepted.clone()))
+            .unwrap();
+        assert_eq!(
+            bare(read(&session).lower_for(Kind::Rustc)),
+            Some(accepted.clone())
+        );
+        assert!(read(&session).lower_for(Kind::Go).is_none());
+        assert!(read(&session).may_reuse(Some(&from_store), 0, vouch(), &mut ask));
+        assert!(!read(&session).may_reuse(Some(&from_older), 0, vouch(), &mut ask));
+
+        // Current with the server's evidence: never unasked on the store's word, only on the
+        // server's (a vouch the record holds), which a run with no relay can't have.
+        let verified = Lower {
+            evidence: Evidence::Server(crate::baked::Server {
+                host: "https://api.example.com".into(),
+                org: "acme".into(),
+                repository: "github.com/acme/shop".into(),
+                scope: "protected/4242".into(),
+            }),
+            ..accepted.clone()
+        };
+        session.set_lower(&State::Current(verified)).unwrap();
+        assert!(!read(&session).may_reuse(Some(&from_store), 0, vouch(), &mut ask));
+
+        // Replaced: read only where the run shares or would; its blocks as stale downloads.
+        session
+            .set_lower(&State::Replaced(accepted.clone()))
+            .unwrap();
+        assert!(read(&session).lower_for(Kind::Rustc).is_none());
+        assert!(!read(&session).may_reuse(Some(&from_store), 0, vouch(), &mut ask));
+        session.set_unreached().unwrap();
+        assert_eq!(
+            bare(read(&session).lower_for(Kind::Rustc)),
+            Some(accepted.clone())
+        );
+        assert!(read(&session).may_reuse(Some(&from_store), 0, vouch(), &mut ask));
+
+        // A state the run ignores leaves no reading, and its line.
+        session
+            .set_lower(&State::WrongPlatform {
+                folder: accepted.folder.clone(),
+                baked: "rustc/1 x86_64-unknown-linux-gnu".into(),
+                here: "rustc/1 aarch64-unknown-linux-gnu".into(),
+            })
+            .unwrap();
+        assert!(read(&session).lower.is_none());
+        assert_eq!(asked, 0);
+        let summary = session.finish(SystemTime::now());
+        assert!(
+            summary.lines().iter().any(
+                |l| l.contains("is ignored: it was baked for rustc/1 x86_64-unknown-linux-gnu")
+            ),
+            "{:?}",
+            summary.lines()
+        );
+    }
+
+    // covers: B-16, B-63
+    #[test]
+    fn a_verified_baked_block_s_first_reuse_is_never_audited() {
+        use crate::audit::Reuse;
+        use crate::baked::{Evidence, Lower, LowerPart, Server, Source, State, Trust};
+        use crate::origin::Origin;
+        use hushrun_core::blocks::Hex32;
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("build.json");
+        let exe = dir.path().join("hushrun");
+        std::fs::write(&exe, b"binary").unwrap();
+        let none = |_: &str| None;
+        settings::update(&settings, |s| s.mode = Mode::On).unwrap();
+        let mut session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        let read = |session: &Session| {
+            let folder = session.env()[1].1.clone();
+            current(&|name| (name == SESSION).then(|| folder.clone())).unwrap()
+        };
+        let lower = |evidence: Evidence| Lower {
+            folder: dir.path().join("baked"),
+            manifest: Hex32([9; 32]),
+            contents: Hex32([7; 32]),
+            claim: Trust::Trusted,
+            source: Source::Store,
+            repository: None,
+            checks: vec![None],
+            parts: vec![LowerPart {
+                kind: "rustc/1".into(),
+                platform: "aarch64-unknown-linux-gnu".into(),
+            }],
+            evidence,
+            notes: Vec::new(),
+            openable: Vec::new(),
+            index: None,
+        };
+        let from_store = Origin::baked(Hex32([7; 32]), Hex32([1; 32]));
+        let from_other = Origin::baked(Hex32([6; 32]), Hex32([1; 32]));
+        // No baked store: a block from one is a download, audited one time in ten.
+        assert_eq!(
+            read(&session).reuse_pick(Some(&from_store)),
+            Reuse::FirstDownload
+        );
+        // Accepted unverified: still.
+        session
+            .set_lower(&State::Current(lower(Evidence::Accepted)))
+            .unwrap();
+        assert_eq!(
+            read(&session).reuse_pick(Some(&from_store)),
+            Reuse::FirstDownload
+        );
+        // Verified by the server or a signature: never at its first reuse, for that store's
+        // blocks only.
+        let server = Evidence::Server(Server {
+            host: "https://api.example.com".into(),
+            org: "acme".into(),
+            repository: "github.com/acme/shop".into(),
+            scope: "protected/4242".into(),
+        });
+        session.set_lower(&State::Current(lower(server))).unwrap();
+        assert_eq!(
+            read(&session).reuse_pick(Some(&from_store)),
+            Reuse::FirstVerified
+        );
+        assert_eq!(
+            read(&session).reuse_pick(Some(&from_other)),
+            Reuse::FirstDownload
+        );
+        let signed = |current: bool| {
+            Evidence::Signed(crate::baked::Signed {
+                signer: "key x".into(),
+                baked_json: Hex32([7; 32]),
+                hints: dir.path().join("hints"),
+                current,
+            })
+        };
+        // Signed, and no backend to ask: as verified as it can be now.
+        session
+            .set_lower(&State::Current(lower(signed(true))))
+            .unwrap();
+        assert_eq!(
+            read(&session).reuse_pick(Some(&from_store)),
+            Reuse::FirstVerified
+        );
+        // Signed, where a backend didn't answer for it or isn't its source: a withdrawal can't
+        // reach the run, so its first reuse keeps the audit; and a store replaced since does too.
+        session
+            .set_lower(&State::Current(lower(signed(false))))
+            .unwrap();
+        assert_eq!(
+            read(&session).reuse_pick(Some(&from_store)),
+            Reuse::FirstDownload
+        );
+        session
+            .set_lower(&State::Replaced(lower(signed(true))))
+            .unwrap();
+        assert_eq!(
+            read(&session).reuse_pick(Some(&from_store)),
+            Reuse::FirstDownload
+        );
+        session
+            .set_lower(&State::Current(lower(signed(true))))
+            .unwrap();
+        // What the callers decide by: never sampled, whatever the sample would say, unless the
+        // run audits every compile.
+        let mut current = read(&session);
+        assert!(!current.audits_reuse(Some(&from_store), |_| panic!("sampled")));
+        assert!(current.audits_reuse(Some(&from_other), |r| r == Reuse::FirstDownload));
+        current.audit = crate::audit::Audit::Every;
+        assert!(current.audits_reuse(Some(&from_store), |_| false));
+        current.audit = crate::audit::Audit::Never;
+        assert!(!current.audits_reuse(Some(&from_other), |_| true));
+        // A block built here, reused here already (a verified one's second reuse among them),
+        // or with no record, is audited as any reuse is.
+        assert_eq!(
+            read(&session).reuse_pick(Some(&Origin::built_here("1-1", None))),
+            Reuse::Any
+        );
+        let mut reused = from_store.clone();
+        reused.reused = true;
+        assert_eq!(read(&session).reuse_pick(Some(&reused)), Reuse::Any);
+        let mut reused = from_other.clone();
+        reused.reused = true;
+        assert_eq!(read(&session).reuse_pick(Some(&reused)), Reuse::Any);
+        assert_eq!(read(&session).reuse_pick(None), Reuse::Any);
+    }
+
     #[test]
     fn a_runs_programs_are_decided_from_its_setting_and_whether_it_shares() {
         let dir = tempfile::tempdir().unwrap();

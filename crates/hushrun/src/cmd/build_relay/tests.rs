@@ -1116,7 +1116,7 @@ fn an_unpacked_program_is_runnable_only_where_the_umask_lets_it_be_read() {
     }
 }
 
-// covers: B-12, B-28
+// covers: B-12, B-28, B-64
 #[cfg(unix)]
 #[test]
 fn a_downloaded_build_script_is_a_program_cargo_can_start() {
@@ -1483,11 +1483,17 @@ fn the_prefetch_queues_macros_and_scripts_before_libraries_each_in_the_manifests
         (ProcMacro, 7),
         (Library, 8),
     ];
-    let order: Vec<u8> = super::prefetch_order(found, |found| found.0)
+    let order: Vec<u8> = super::prefetch_order(found.clone(), |found| found.0, false)
         .into_iter()
         .map(|found| found.1)
         .collect();
     assert_eq!(order, [3, 5, 7, 1, 4, 8]);
+    // B-63: a bake's relay takes the rest too, last.
+    let whole: Vec<u8> = super::prefetch_order(found, |found| found.0, true)
+        .into_iter()
+        .map(|found| found.1)
+        .collect();
+    assert_eq!(whole, [3, 5, 7, 1, 4, 8, 2, 6]);
 }
 
 // covers: B-29, B-34
@@ -3484,9 +3490,51 @@ fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_buil
         step: Some(key),
         key: Some(key),
         downloaded: false,
+        baked: false,
         go: Some(hushrun_build::session::GoEntry::default()),
         cc: None,
     }
+}
+
+// covers: B-24, B-30
+// A check's close names only the crates that went up or could: one that may not leave the
+// machine (here an `extern` keeps it, as nu-command in nushell) never goes up, and named it would
+// be a block no bake or fetch can have, every image of the check partial. A block bound to
+// folders goes up only from a CI job's own ID token, so a person's close leaves it out too.
+#[test]
+fn a_close_names_no_crate_that_stays_on_the_machine() {
+    use hushrun_build::portable::{Portability, Reason};
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    relay
+        .begin_check(&m.session, None, None, &|_| None)
+        .unwrap();
+    until("open", || answering(&relay));
+    let with = |name: &[u8], reasons: &[Reason]| {
+        let key = Digest::of(name);
+        hushrun_build::session::Entry {
+            go: None,
+            class: Some(LocalClass::Library),
+            portable: Some(Portability {
+                portable: reasons.is_empty(),
+                reasons: reasons.to_vec(),
+                ..Portability::default()
+            }),
+            ..go_entry(key, hushrun_build::model::Outcome::BuiltAndStored)
+        }
+    };
+    let travels = with(b"travels", &[]);
+    let extern_ = with(b"extern", &[Reason::CargoHomeInOutput, Reason::Extern]);
+    let bound = with(b"bound", &[Reason::CargoHomeInOutput]);
+    relay.end_check(&[travels.clone(), extern_, bound]);
+    let closes = fake.closes();
+    let rust = closes
+        .iter()
+        .find(|c| c.kind == "rustc/1")
+        .expect("a close");
+    let key = travels.key.unwrap();
+    assert_eq!(rust.manifest, vec![Pair(address(&key), address(&key))]);
 }
 
 // covers: B-45
@@ -4099,5 +4147,872 @@ fn a_cc_open_that_answers_after_its_check_ended_is_not_taken_for_the_next_check_
         relay.state().cc_manifests.get(LINUX) == Some(&super::CcManifest::Asking),
         "the first check's manifest was kept for the second"
     );
+    relay.end_check(&[]);
+}
+
+// covers: B-34, B-64
+#[test]
+fn a_block_from_a_baked_store_keeps_the_server_s_word_once_asked() {
+    use hushrun_build::origin::{BAKED_HOST, Standing, Word};
+    let fake = FakeBuild::start();
+    let crates = served(&fake, 2, 5_000, 1000);
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    for (key, step) in &crates {
+        assert_eq!(
+            ask(
+                &relay,
+                Request::Fetch {
+                    step: *step,
+                    keys: vec![*key],
+                    class: LocalClass::Library,
+                    local_ms: None,
+                }
+            ),
+            Answer::Ready { key: *key }
+        );
+        // As though it had been opened from a baked store: its record names the store alone.
+        let outputs = b.store.origin(key).unwrap().vouched[0].outputs;
+        b.store
+            .update_origin(key, |_| Some(Origin::baked(Hex32([7; 32]), outputs)))
+            .unwrap();
+    }
+    relay.end_check(&[]);
+    // The second block is withdrawn meanwhile.
+    fake.withdraw(address(&crates[1].0));
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    let word = |key: &Digest| {
+        b.store
+            .origin(key)
+            .unwrap()
+            .vouched
+            .into_iter()
+            .find(|v| v.host != BAKED_HOST)
+            .map(|v| v.word)
+    };
+    for (n, (key, step)) in crates.iter().enumerate() {
+        let outputs = b.store.origin(key).unwrap().vouched[0].outputs;
+        let answer = ask(
+            &relay,
+            Request::Vouch {
+                key: *key,
+                step: *step,
+                outputs,
+            },
+        );
+        assert_eq!(answer, if n == 0 { Answer::Served } else { Answer::None });
+    }
+    relay.end_check(&[]);
+    // The server's word is in each record: served, renewed for a day; withdrawn, for good.
+    assert_eq!(word(&crates[0].0), Some(Word::Served));
+    assert_eq!(word(&crates[1].0), Some(Word::Withdrawn));
+    assert_eq!(
+        b.store.origin(&crates[1].0).unwrap().standing(None, 0),
+        Standing::Withdrawn
+    );
+}
+
+// covers: B-63
+#[test]
+fn as_a_run_begins_the_relay_vouches_for_what_its_backend_serves_trusted_and_sees_a_newer_manifest()
+{
+    use hushrun_build::baked::{self, Baked, PackRow, Part, Source, Trust};
+    let fake = FakeBuild::start();
+    let src = machine();
+    let (key, _) = block(&src.store, 90, 5_000, None);
+    let packed = super::pack::pack_block(&src.store, &key, &src.session).unwrap();
+    fake.put_block(
+        address(&key),
+        "protected/github.com/acme/shop",
+        &packed.pack.bytes().unwrap(),
+        packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    // One served from a person's scope, which is no evidence; one not served at all.
+    let (person, _) = block(&src.store, 91, 5_000, None);
+    let person_packed = super::pack::pack_block(&src.store, &person, &src.session).unwrap();
+    fake.put_block(
+        address(&person),
+        "person/1",
+        &person_packed.pack.bytes().unwrap(),
+        person_packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    // One served from the trusted scope of another repository, which is no evidence for this
+    // one; one whose row names other outputs than the server's; one whose row names another
+    // pack.
+    let (other_repo, _) = block(&src.store, 92, 5_000, None);
+    let other_packed = super::pack::pack_block(&src.store, &other_repo, &src.session).unwrap();
+    fake.put_block(
+        address(&other_repo),
+        "protected/github.com/acme/other",
+        &other_packed.pack.bytes().unwrap(),
+        other_packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    let (lying, _) = block(&src.store, 93, 5_000, None);
+    let lying_packed = super::pack::pack_block(&src.store, &lying, &src.session).unwrap();
+    fake.put_block(
+        address(&lying),
+        "protected/github.com/acme/shop",
+        &lying_packed.pack.bytes().unwrap(),
+        lying_packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    let (repacked, _) = block(&src.store, 94, 5_000, None);
+    let repacked_packed = super::pack::pack_block(&src.store, &repacked, &src.session).unwrap();
+    fake.put_block(
+        address(&repacked),
+        "protected/github.com/acme/shop",
+        &repacked_packed.pack.bytes().unwrap(),
+        repacked_packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    let gone = Digest::of(b"never uploaded");
+    // A backend lists one trusted scope, the repository's own (two are no evidence at all:
+    // `two_trusted_scopes_in_open_s_answer_vouch_for_nothing`); a block another repository's
+    // trusted scope holds is never served here.
+    fake.set_scopes(
+        Some("person/1"),
+        &["protected/github.com/acme/shop", "person/1"],
+    );
+    // The backend's newest manifest for the store's second check is another one; its first
+    // check's is the one baked.
+    let first = vec![Pair(address(&key), address(&key))];
+    fake.set_check_manifest(Hex32([3; 32]), first.clone());
+    fake.set_check_manifest(Hex32([4; 32]), vec![Pair(address(&gone), address(&gone))]);
+    let row = |address: Hex32, packed: Option<&super::pack::Packed>, outputs: Hex32| PackRow {
+        kind: "rustc/1".into(),
+        address,
+        bytes: packed.map_or(1, |p| p.sealed.bytes),
+        sha256: packed.map_or(Hex32([1; 32]), |p| p.sealed.sha256),
+        outputs,
+        class: blocks::Class::Library,
+        cost_ms: 1,
+        scope: Some("protected/github.com/acme/shop".into()),
+        link_environment: None,
+    };
+    let part = |manifest: Hex32| Part {
+        kind: "rustc/1".into(),
+        platform: "aarch64-unknown-linux-gnu".into(),
+        manifest,
+    };
+    let checks = vec![
+        baked::BakedCheck {
+            check: Some(Hex32([3; 32])),
+            parts: vec![part(baked::manifest_id("rustc/1", &first))],
+        },
+        baked::BakedCheck {
+            check: Some(Hex32([4; 32])),
+            parts: vec![part(Hex32([5; 32]))],
+        },
+    ];
+    let mut wrong_pack = row(
+        address(&repacked),
+        Some(&repacked_packed),
+        repacked_packed.outputs,
+    );
+    wrong_pack.sha256 = Hex32([7; 32]);
+    let stored = Baked {
+        schema: baked::SCHEMA.into(),
+        trust: Trust::Trusted,
+        manifest: baked::store_manifest(&checks),
+        source: Source::Backend {
+            host: fake.url(),
+            org: "acme".into(),
+        },
+        repository: Some("github.com/acme/shop".into()),
+        platform: "linux-arm64".into(),
+        checks,
+        toolchains: Vec::new(),
+        packs: vec![
+            row(address(&key), Some(&packed), packed.outputs),
+            row(
+                address(&person),
+                Some(&person_packed),
+                person_packed.outputs,
+            ),
+            row(
+                address(&other_repo),
+                Some(&other_packed),
+                other_packed.outputs,
+            ),
+            row(address(&lying), Some(&lying_packed), Hex32([0xee; 32])),
+            wrong_pack,
+            row(address(&gone), None, Hex32([3; 32])),
+        ],
+        baked_ms: 0,
+        paths: None,
+    };
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    let checked = relay
+        .check_baked(&stored, Duration::from_secs(10))
+        .expect("the backend answered");
+    // Only the row the backend serves in this repository's trusted scope with that row's
+    // outputs, pack and size, whole.
+    assert_eq!(checked.verified, vec![stored.packs[0].clone()]);
+    assert_eq!(checked.scope, "protected/github.com/acme/shop");
+    // Replaced: one of its checks has a newer manifest.
+    assert!(baked::is_replaced(b.store.root(), &stored.manifest));
+    relay.end_check(&[]);
+
+    // A backend that doesn't answer in time is no evidence and no replacement.
+    let other = machine();
+    let silent = FakeBuild::start();
+    let relay = start(&silent, &other, |c| {
+        c.access.base = "http://127.0.0.1:9/o/acme".into();
+        c.tuning.open = Duration::from_millis(300);
+    });
+    begin(&relay, &other);
+    assert!(relay.check_baked(&stored, Duration::from_secs(2)).is_none());
+    assert!(!baked::is_replaced(other.store.root(), &stored.manifest));
+    relay.end_check(&[]);
+}
+
+// A forged baked store that names one pack twice, the first row with the server's outputs and
+// the second with another build's, sealed under the same key (which anyone with the sources can
+// compute): the run's store never gets the other build's files with the server's word.
+#[test]
+fn a_pack_named_twice_never_gets_an_unvouched_block_past_the_start_of_run_check() {
+    use hushrun_build::baked::{self, Baked, PackRow, Part, Source, Trust};
+    use hushrun_build::model::Kind;
+    let fake = FakeBuild::start();
+    let src = machine();
+    let (key, step) = block(&src.store, 90, 5_000, None);
+    let packed = super::pack::pack_block(&src.store, &key, &src.session).unwrap();
+    fake.put_block(
+        address(&key),
+        "protected/github.com/acme/shop",
+        &packed.pack.bytes().unwrap(),
+        packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    fake.set_scopes(
+        Some("person/1"),
+        &["protected/github.com/acme/shop", "person/1"],
+    );
+    let evil = machine();
+    let dir = evil.store.root().with_file_name("evil-src");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("liba.rlib"), b"attacker's rlib").unwrap();
+    evil.store
+        .publish_with_origin(
+            &key,
+            &json!({"step": step, "class": "library", "repository": "github.com/acme/shop", "rustc_ms": 1000, "built_ms": 1}),
+            &[NewFile {
+                name: "liba.rlib".into(),
+                source: dir.join("liba.rlib"),
+            }],
+            &Origin::built_here("1-1", None),
+            SystemTime::now(),
+        )
+        .unwrap();
+    let evil_packed = super::pack::pack_block(&evil.store, &key, &evil.session).unwrap();
+    assert_ne!(evil_packed.outputs, packed.outputs);
+    let row = |outputs: Hex32, sha: Hex32, bytes: u64| PackRow {
+        kind: "rustc/1".into(),
+        address: address(&key),
+        bytes,
+        sha256: sha,
+        outputs,
+        class: blocks::Class::Library,
+        cost_ms: 1,
+        scope: Some("protected/github.com/acme/shop".into()),
+        link_environment: None,
+    };
+    let checks = vec![baked::BakedCheck {
+        check: None,
+        parts: vec![Part {
+            kind: "rustc/1".into(),
+            platform: "aarch64-unknown-linux-gnu".into(),
+            manifest: Hex32([5; 32]),
+        }],
+    }];
+    let forged = Baked {
+        schema: baked::SCHEMA.into(),
+        trust: Trust::Trusted,
+        manifest: baked::store_manifest(&checks),
+        source: Source::Backend {
+            host: fake.url(),
+            org: "acme".into(),
+        },
+        repository: Some("github.com/acme/shop".into()),
+        platform: "linux-arm64".into(),
+        checks,
+        toolchains: Vec::new(),
+        packs: vec![
+            row(packed.outputs, packed.sealed.sha256, packed.sealed.bytes),
+            row(
+                evil_packed.outputs,
+                evil_packed.sealed.sha256,
+                evil_packed.sealed.bytes,
+            ),
+        ],
+        baked_ms: 0,
+        paths: None,
+    };
+    let folder = evil.store.root().with_file_name("baked");
+    std::fs::create_dir_all(folder.join("packs")).unwrap();
+    std::fs::write(
+        folder.join("baked.json"),
+        serde_json::to_vec(&forged).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        baked::pack_path(&folder, &address(&key)),
+        evil_packed.pack.bytes().unwrap(),
+    )
+    .unwrap();
+
+    // A pack named twice is refused as the file is read: no run checks or opens it.
+    assert!(
+        baked::Baked::read_bytes(&folder)
+            .unwrap_err()
+            .0
+            .contains("twice")
+    );
+    // And were the relay handed it all the same, it vouches only for the row whose outputs,
+    // pack and size are the server's, whole, never for an address.
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    let checked = relay
+        .check_baked(&forged, Duration::from_secs(10))
+        .expect("answered");
+    relay.end_check(&[]);
+    assert_eq!(checked.verified, vec![forged.packs[0].clone()]);
+    let contents = Hex32::sha256(&std::fs::read(folder.join("baked.json")).unwrap());
+    let vouched = baked::Vouched {
+        server: baked::Server {
+            host: fake.url(),
+            org: "acme".into(),
+            repository: "github.com/acme/shop".into(),
+            scope: checked.scope.clone(),
+        },
+        baked_json: contents,
+        rows: checked.verified,
+    };
+    let platforms = vec![(Kind::Rustc, "aarch64-unknown-linux-gnu".to_string())];
+    let state = baked::state(
+        Some(&folder),
+        &baked::Here {
+            repository: Some("github.com/acme/shop"),
+            platforms: &platforms,
+            untrusted_ok: false,
+            server: baked::Asked::Answered(&vouched),
+            signed: None,
+            upper: b.store.root(),
+            paths: None,
+            default: false,
+        },
+    );
+    assert_eq!(state.word(), "invalid");
+    if let Some(lower) = state.lower() {
+        let reader = baked::Reader::new(lower, &super::baked::PACKS);
+        let _ = reader.open_into(
+            &b.store,
+            Kind::Rustc,
+            &key,
+            &step,
+            0,
+            Some("github.com/acme/shop"),
+            SystemTime::now(),
+        );
+    }
+    if let Ok(Some(block)) = b.store.block(&key) {
+        let rlib = std::fs::read(&block.files[0].path).unwrap_or_default();
+        assert_ne!(
+            rlib, b"attacker's rlib",
+            "the run's store holds the other build's files"
+        );
+    }
+}
+
+// B-63: a bake whose folder another bake is writing, from another container on the same volume
+// (where a process id says nothing), leaves that bake's folders alone and says so.
+#[test]
+fn a_bake_never_touches_what_another_live_bake_of_the_same_folder_is_writing() {
+    use hushrun_build::baked::{self, Baked, Source, Trust, Untrusted};
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    // The other bake: its half-written folder, named with a process id that means nothing
+    // here, and the folder's lock, which it holds.
+    let theirs = dir.path().join(".out.bake-new.999999999.0123456789abcdef");
+    std::fs::create_dir(&theirs).unwrap();
+    let lock = std::fs::File::create(dir.path().join(".out.bake.lock")).unwrap();
+    lock.lock().unwrap();
+    let empty = |_: &Path| {
+        let checks: Vec<baked::BakedCheck> = Vec::new();
+        Ok(Baked {
+            schema: baked::SCHEMA.into(),
+            trust: Trust::Untrusted {
+                because: Untrusted::LocalStore,
+            },
+            manifest: baked::store_manifest(&checks),
+            source: Source::Store,
+            repository: None,
+            platform: "linux-arm64".into(),
+            checks,
+            toolchains: Vec::new(),
+            packs: Vec::new(),
+            baked_ms: 0,
+            paths: None,
+        })
+    };
+    let refused = super::baked::write_whole(&out, empty);
+    assert!(theirs.is_dir(), "another bake's folder was removed");
+    let err = refused.expect_err("written under another bake");
+    assert!(err.contains("another bake"), "{err}");
+    // Once it is done (its lock let go), what it left is a dead bake's, and goes.
+    drop(lock);
+    let (_, held) = super::baked::write_whole(&out, empty).unwrap();
+    assert!(!theirs.exists());
+    assert!(out.join("baked.json").is_file());
+    // The lock stays with the bake that wrote the folder while it signs and archives it: another
+    // bake of the folder waits, then says so.
+    let other = super::baked::write_whole(&out, empty);
+    assert!(
+        other
+            .expect_err("written under a live bake")
+            .contains("another bake")
+    );
+    drop(held);
+    super::baked::write_whole(&out, empty).unwrap();
+}
+
+// B-63: evidence is per block. A lookup that fails vouches for none of its blocks, and takes
+// nothing from the blocks another lookup vouched for.
+#[test]
+fn one_failed_lookup_at_the_start_of_a_run_keeps_the_evidence_of_the_others() {
+    use hushrun_build::baked::{self, Baked, PackRow, Part, Source, Trust};
+    let fake = FakeBuild::start();
+    let src = machine();
+    let mut rows = Vec::new();
+    for seed in [101u8, 102] {
+        let (key, _) = block(&src.store, seed, 5_000, None);
+        let packed = super::pack::pack_block(&src.store, &key, &src.session).unwrap();
+        fake.put_block(
+            address(&key),
+            "protected/github.com/acme/shop",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Library,
+        );
+        rows.push(PackRow {
+            kind: "rustc/1".into(),
+            address: address(&key),
+            bytes: packed.sealed.bytes,
+            sha256: packed.sealed.sha256,
+            outputs: packed.outputs,
+            class: blocks::Class::Library,
+            cost_ms: 1,
+            scope: Some("protected/github.com/acme/shop".into()),
+            link_environment: None,
+        });
+    }
+    fake.set_scopes(
+        Some("person/1"),
+        &["protected/github.com/acme/shop", "person/1"],
+    );
+    // One block a lookup: the first lookup fails.
+    fake.set_policy(|p| p.limits.lookup = 1);
+    let checks = vec![baked::BakedCheck {
+        check: None,
+        parts: vec![Part {
+            kind: "rustc/1".into(),
+            platform: "aarch64-unknown-linux-gnu".into(),
+            manifest: Hex32([5; 32]),
+        }],
+    }];
+    let stored = Baked {
+        schema: baked::SCHEMA.into(),
+        trust: Trust::Trusted,
+        manifest: baked::store_manifest(&checks),
+        source: Source::Backend {
+            host: fake.url(),
+            org: "acme".into(),
+        },
+        repository: Some("github.com/acme/shop".into()),
+        platform: "linux-arm64".into(),
+        checks,
+        toolchains: Vec::new(),
+        packs: rows,
+        baked_ms: 0,
+        paths: None,
+    };
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    fake.fail(route::LOOKUP, 400, 1);
+    let checked = relay
+        .check_baked(&stored, Duration::from_secs(10))
+        .expect("open answered");
+    relay.end_check(&[]);
+    // The lookups go together, so whichever failed, the other's evidence stands.
+    assert_eq!(checked.verified.len(), 1, "{:?}", checked.verified);
+    assert!(stored.packs.contains(&checked.verified[0]));
+}
+
+/// B-70: a publish of an image of one layer, store `manifest`, config `config`, built on the
+/// moving tag's image `previous`.
+fn prepared(manifest: u8, config: &str, previous: Option<String>) -> super::hosted::Prepared {
+    use hushrun_core::blocks::{Base64, PublishFile, PublishLayer, PublishRequest};
+    let config = config.as_bytes().to_vec();
+    let layer = Digest::of(&[manifest, 9]);
+    let image = serde_json::to_vec(&json!({
+        "schemaVersion": 2,
+        "config": {"digest": Digest::of(&config).to_string(), "size": config.len()},
+        "layers": [{"digest": layer.to_string(), "size": 2048}],
+    }))
+    .unwrap();
+    super::hosted::Prepared {
+        request: PublishRequest {
+            platform: "linux-x64".into(),
+            manifest: Hex32([manifest; 32]),
+            image: Base64(image.clone()),
+            config: Base64(config),
+            layers: vec![PublishLayer {
+                role: "recent".into(),
+                files: vec![PublishFile {
+                    path: "hushrun/baked.json".into(),
+                    size: 2,
+                    sha256: Hex32::sha256(b"{}"),
+                    pack: None,
+                }],
+            }],
+            blobs: vec![blocks::Base64(b"{}".to_vec())],
+            signature: None,
+            previous,
+            commit: Some("a".repeat(40)),
+        },
+        digest: Digest::of(&image),
+        layers: vec![(layer, 2048)],
+    }
+}
+
+fn published(sent: super::hosted::Sent) -> (blocks::PublishResponse, bool) {
+    match sent {
+        super::hosted::Sent::Published { answer, before, .. } => (answer, before),
+        other => panic!("not published: {other:?}"),
+    }
+}
+
+// covers: B-70
+#[test]
+fn a_hosted_publish_moves_the_moving_tag_and_a_store_published_before_keeps_its_image() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    let mut asked = Vec::new();
+    let (answer, before) = published(
+        relay
+            .publish_image(&mut |stale| {
+                asked.push(stale);
+                Ok(prepared(1, "first", None))
+            })
+            .unwrap(),
+    );
+    assert_eq!(asked, [None]);
+    assert!(!before);
+    assert_eq!(answer.state, blocks::PublishState::Published);
+    assert_eq!(answer.digest, prepared(1, "first", None).digest.to_string());
+    assert_eq!(fake.latest_image().as_deref(), Some(answer.digest.as_str()));
+    assert_eq!(answer.tags.latest, "hushrun-linux-x64-latest");
+    // One request, read with the wire type, with the relay's credential and the commit.
+    let seen: Vec<_> = fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.route == route::IMAGES)
+        .collect();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some(format!("Bearer {}", FakeBuild::TOKEN).as_str())
+    );
+    assert_eq!(fake.publishes()[0].commit, Some("a".repeat(40)));
+    // The same store baked again is another image (its baked.json holds when): the fixed tag
+    // never moves, and the moving tag names the first image still.
+    let first = answer.digest;
+    let (answer, before) = published(
+        relay
+            .publish_image(&mut |_| Ok(prepared(1, "again", Some(first.clone()))))
+            .unwrap(),
+    );
+    assert!(before);
+    assert_eq!(answer.digest, first);
+    assert_eq!(answer.state, blocks::PublishState::Unchanged);
+}
+
+// covers: B-70
+#[test]
+fn a_stale_publish_reads_the_moving_tag_again_and_plans_again_once() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    let other = format!("sha256:{}", Hex32([5; 32]));
+    fake.set_latest_image(Some(&other));
+    let mut asked = Vec::new();
+    let sent = relay
+        .publish_image(&mut |stale| {
+            asked.push(stale.clone());
+            Ok(prepared(2, "c", stale.flatten()))
+        })
+        .unwrap();
+    // Said: two requests, both counted, and the plan made again.
+    let super::hosted::Sent::Published { tries, bytes, .. } = &sent else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(tries.requests, 2);
+    assert!(tries.replanned);
+    assert!(tries.bytes > *bytes, "{tries:?} {bytes}");
+    let (answer, _) = published(sent);
+    // Planned again from the image the backend named, which the second request expects.
+    assert_eq!(asked, [None, Some(Some(other.clone()))]);
+    let publishes = fake.publishes();
+    assert_eq!(publishes.len(), 2);
+    assert_eq!(publishes[0].previous, None);
+    assert_eq!(publishes[1].previous.as_deref(), Some(other.as_str()));
+    assert_eq!(answer.previous.as_deref(), Some(other.as_str()));
+    // Stale twice: another bake is publishing, and this one stops after planning once more.
+    let stale =
+        json!({"error": {"code": "stale", "message": "moved"}, "current": {"digest": other}});
+    fake.force_publish(409, stale.clone());
+    fake.force_publish(409, stale);
+    let mut plans = 0;
+    let err = relay
+        .publish_image(&mut |stale| {
+            plans += 1;
+            Ok(prepared(3, "d", stale.flatten()))
+        })
+        .unwrap_err();
+    assert_eq!(plans, 2);
+    assert!(err.contains("moved again"), "{err}");
+}
+
+// covers: B-70
+#[test]
+fn a_newer_run_s_image_stays_and_nothing_of_this_bake_is_published() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    fake.set_newer_run(true);
+    let sent = relay
+        .publish_image(&mut |_| Ok(prepared(4, "e", None)))
+        .unwrap();
+    assert!(
+        matches!(&sent, super::hosted::Sent::NotNewer(why) if why.contains("newer")),
+        "{sent:?}"
+    );
+    assert_eq!(fake.latest_image(), None);
+    assert_eq!(fake.publishes().len(), 1);
+}
+
+// covers: B-70
+#[test]
+fn layers_the_backend_computed_otherwise_than_this_bake_fail_the_publish_loudly() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    fake.set_corrupt_layers(true);
+    let err = relay
+        .publish_image(&mut |_| Ok(prepared(5, "f", None)))
+        .unwrap_err();
+    assert!(err.contains("OTHER LAYERS THAN THIS BAKE"), "{err}");
+    assert!(err.contains(&Hex32([0xee; 32]).to_string()), "{err}");
+    assert!(err.contains(&Digest::of(&[5, 9]).to_string()), "{err}");
+    // The backend's own check: a layer read with another digest than the manifest names.
+    fake.force_publish(
+        422,
+        json!({"error": {"code": "mismatch", "message": "m"}, "current": {"layers": ["sha256:abc"]}}),
+    );
+    let err = relay
+        .publish_image(&mut |_| Ok(prepared(6, "g", None)))
+        .unwrap_err();
+    assert!(err.contains("OTHER LAYERS THAN THE IMAGE NAMES"), "{err}");
+    assert!(err.contains("sha256:abc"), "{err}");
+}
+
+// covers: B-70
+#[test]
+fn a_publish_that_may_pass_is_sent_again_with_the_same_bytes() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    // Two 503s (busy, then unavailable), then another image of this store published meanwhile.
+    fake.fail(route::IMAGES, 503, 2);
+    fake.force_publish(
+        409,
+        json!({"error": {"code": "duplicate", "message": "published meanwhile"}}),
+    );
+    let mut plans = 0;
+    let (answer, _) = published(
+        relay
+            .publish_image(&mut |_| {
+                plans += 1;
+                Ok(prepared(7, "h", None))
+            })
+            .unwrap(),
+    );
+    assert_eq!(plans, 1);
+    let bodies: Vec<Vec<u8>> = fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.route == route::IMAGES)
+        .map(|s| s.body)
+        .collect();
+    assert_eq!(bodies.len(), 4, "two 503s, the duplicate, the answer");
+    assert!(bodies.iter().all(|b| *b == bodies[0]));
+    assert_eq!(fake.latest_image(), Some(answer.digest));
+    // A refusal that won't pass is said, once: a laptop is no publisher.
+    fake.force_publish(
+        403,
+        json!({"error": {"code": "not_publisher", "message": "no"}, "current": {"word": "default_branch"}}),
+    );
+    let err = relay
+        .publish_image(&mut |_| Ok(prepared(8, "i", None)))
+        .unwrap_err();
+    assert!(
+        err.contains("default_branch") && err.contains("--oci-dir"),
+        "{err}"
+    );
+}
+
+/// B-63: a backend's store of `n` blocks of the repository's trusted scope, from seed `first`, as
+/// a baked store names them.
+fn trusted_store(fake: &FakeBuild, first: u8, n: u8) -> hushrun_build::baked::Baked {
+    use hushrun_build::baked::{self, Baked, PackRow, Part, Source, Trust};
+    let src = machine();
+    let mut rows = Vec::new();
+    for seed in first..first + n {
+        let (key, _) = block(&src.store, seed, 2_000, None);
+        let packed = super::pack::pack_block(&src.store, &key, &src.session).unwrap();
+        fake.put_block(
+            address(&key),
+            "protected/github.com/acme/shop",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Library,
+        );
+        rows.push(PackRow {
+            kind: "rustc/1".into(),
+            address: address(&key),
+            bytes: packed.sealed.bytes,
+            sha256: packed.sealed.sha256,
+            outputs: packed.outputs,
+            class: blocks::Class::Library,
+            cost_ms: 1,
+            scope: Some("protected/github.com/acme/shop".into()),
+            link_environment: None,
+        });
+    }
+    let checks = vec![baked::BakedCheck {
+        check: None,
+        parts: vec![Part {
+            kind: "rustc/1".into(),
+            platform: "aarch64-unknown-linux-gnu".into(),
+            manifest: Hex32([5; 32]),
+        }],
+    }];
+    Baked {
+        schema: baked::SCHEMA.into(),
+        trust: Trust::Trusted,
+        manifest: baked::store_manifest(&checks),
+        source: Source::Backend {
+            host: fake.url(),
+            org: "acme".into(),
+        },
+        repository: Some("github.com/acme/shop".into()),
+        platform: "linux-arm64".into(),
+        checks,
+        toolchains: Vec::new(),
+        packs: rows,
+        baked_ms: 0,
+        paths: None,
+    }
+}
+
+// covers: B-63
+// A large store's rows are looked up a few at a time: with every lookup slow and one block a
+// lookup, a run's wait still gets an answer for its last rows, as for its first.
+#[test]
+fn a_baked_store_s_rows_are_looked_up_together_within_the_wait() {
+    let fake = FakeBuild::start();
+    let stored = trusted_store(&fake, 111, 8);
+    fake.set_scopes(
+        Some("person/1"),
+        &["protected/github.com/acme/shop", "person/1"],
+    );
+    fake.set_policy(|p| p.limits.lookup = 1);
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    assert!(until_open(&relay));
+    fake.delay(route::LOOKUP, Duration::from_millis(700));
+    let checked = relay
+        .check_baked(&stored, Duration::from_secs(3))
+        .expect("open answered");
+    relay.end_check(&[]);
+    // One after another, eight lookups of 0.7 s don't fit in 3 s.
+    assert_eq!(checked.verified.len(), 8, "{:?}", checked.verified.len());
+}
+
+/// Whether the relay's `open` answered, within 10 seconds.
+fn until_open(relay: &Arc<Relay>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !answering(relay) {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+// covers: B-63
+// Which scope is the repository's trusted one never rests on the order `open` lists them in: two
+// `protected/` scopes are no evidence.
+#[test]
+fn two_trusted_scopes_in_open_s_answer_vouch_for_nothing() {
+    assert_eq!(
+        super::baked::trusted_scope(&["protected/1".into(), "person/1".into()]),
+        Some("protected/1")
+    );
+    assert_eq!(
+        super::baked::trusted_scope(&["person/1".into(), "protected/1".into()]),
+        Some("protected/1")
+    );
+    assert_eq!(
+        super::baked::trusted_scope(&["protected/1".into(), "protected/2".into()]),
+        None
+    );
+    assert_eq!(super::baked::trusted_scope(&["person/1".into()]), None);
+    let fake = FakeBuild::start();
+    let stored = trusted_store(&fake, 121, 2);
+    fake.set_scopes(
+        Some("person/1"),
+        &[
+            "protected/github.com/acme/shop",
+            "protected/github.com/acme/other",
+            "person/1",
+        ],
+    );
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    assert!(relay.check_baked(&stored, Duration::from_secs(5)).is_none());
     relay.end_check(&[]);
 }

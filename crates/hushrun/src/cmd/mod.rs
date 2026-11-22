@@ -3,6 +3,7 @@
 pub mod adopt;
 pub mod artifact;
 pub mod attest;
+mod bake_build;
 pub mod build;
 pub(crate) mod build_relay;
 pub(crate) mod build_session;

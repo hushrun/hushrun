@@ -206,6 +206,9 @@ pub struct Facts<'a> {
     pub in_outputs: &'a BTreeSet<Folder>,
     /// The folders that name this machine, each form as text ([`crate::roots::Roots::machine_needles`]).
     pub machine: &'a [(Folder, String)],
+    /// The stand-ins rustc writes for folders ([`crate::roots::Roots::stand_ins`]): a folder's
+    /// text found only inside one is the stand-in (B-9).
+    pub stand_ins: &'a [String],
     /// A variable the compile read names a base and no second compile proved it harmless.
     pub variable_names_base: bool,
     /// Each proc macro among the externs by crate name, and whether another machine names it
@@ -275,8 +278,12 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
     let mut texts: Vec<String> = facts.records.to_vec();
     texts.extend(serde_json::to_string(facts.asked).ok());
     texts.extend(serde_json::to_string(facts.observed).ok());
+    let outers: Vec<&[u8]> = facts.stand_ins.iter().map(String::as_bytes).collect();
     for (folder, needle) in facts.machine {
-        if texts.iter().any(|text| text.contains(needle.as_str())) {
+        if texts
+            .iter()
+            .any(|text| crate::scan::occurs_outside(text.as_bytes(), needle.as_bytes(), &outers))
+        {
             reasons.insert(Reason::in_record(*folder));
         }
     }
@@ -1163,6 +1170,7 @@ mod tests {
             records,
             in_outputs: &in_outputs,
             machine: &machine,
+            stand_ins: &[],
             variable_names_base: false,
             externs,
             unkeyed: &[],
@@ -1171,6 +1179,38 @@ mod tests {
             keyed_by_place: false,
             searchable: true,
         })
+    }
+
+    // covers: B-9, B-24
+    #[test]
+    fn a_machine_folder_inside_a_stand_in_in_a_record_is_the_stand_in() {
+        // A cargo home of `/cargo`: a record that names `/hushrun/cargo/...`, the stand-in rustc
+        // writes for it, names no machine.
+        let machine = vec![(Folder::CargoHome, "/cargo".to_string())];
+        let records = vec!["src /hushrun/cargo/registry/src/i/a-1.0.0/src/lib.rs".to_string()];
+        let check = |records: &[String]| {
+            portable(&Facts {
+                class: Class::Library,
+                asked: &asked(),
+                observed: &observed(),
+                records,
+                in_outputs: &BTreeSet::new(),
+                machine: &machine,
+                stand_ins: &["/hushrun/cargo".to_string()],
+                variable_names_base: false,
+                externs: &[],
+                unkeyed: &[],
+                native_cpu: false,
+                toolchain_in_output: false,
+                keyed_by_place: false,
+                searchable: true,
+            })
+        };
+        assert!(check(&records).portable, "{:?}", check(&records));
+        let mut real = records.clone();
+        real.push("read /cargo/config.toml".into());
+        let found: Vec<&str> = check(&real).reasons.iter().map(|r| r.as_str()).collect();
+        assert_eq!(found, ["cargo-home-in-record"]);
     }
 
     #[test]
@@ -1267,6 +1307,7 @@ mod tests {
             records: &[],
             in_outputs: &BTreeSet::new(),
             machine: &machine,
+            stand_ins: &[],
             variable_names_base: true,
             externs: &[],
             unkeyed: &[],
@@ -1320,6 +1361,7 @@ mod tests {
                 records: &[],
                 in_outputs: &BTreeSet::new(),
                 machine: &machine,
+                stand_ins: &[],
                 variable_names_base: false,
                 externs: &[],
                 unkeyed: &[],
@@ -1368,6 +1410,7 @@ mod tests {
                 records,
                 in_outputs: &BTreeSet::new(),
                 machine: &machine,
+                stand_ins: &[],
                 variable_names_base: false,
                 externs: &[],
                 unkeyed: &[],
@@ -1399,6 +1442,7 @@ mod tests {
             records: &records,
             in_outputs: &BTreeSet::new(),
             machine: &machine,
+            stand_ins: &[],
             variable_names_base: false,
             externs: &[],
             unkeyed: &[],
@@ -1557,6 +1601,7 @@ mod tests {
             records: &[],
             in_outputs: &BTreeSet::new(),
             machine: &machine,
+            stand_ins: &[],
             variable_names_base: false,
             externs: &[],
             unkeyed: &unkeyed,

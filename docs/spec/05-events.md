@@ -77,11 +77,12 @@ There is exactly one subject. Its digest is the source digest, which is the SHA-
 | `superseded` | `{reason, byRevision?}`, where `reason` is `stale` or `cancelled` |
 | `approval` | `{check, comment?}` |
 
-**E-6 Definition digest.** It is `sha256:` over the RFC 8785 (JCS) canonical JSON of the check's definition object, `{name, kind, run?, shell?, image?, platform?, env?, network?, version?}`, taken from `hushrun.yaml`:
+**E-6 Definition digest.** It is `sha256:` over the RFC 8785 (JCS) canonical JSON of the check's definition object, `{name, kind, run?, shell?, image?, platform?, env?, network?, version?, baked?}`, taken from `hushrun.yaml`:
 
 - fields absent from the policy are absent from the object, but for `kind`: [ADR 0045] a check that doesn't write it is `source`, and has the digest it has with `kind: source`;
 - `env` is the sorted list of variable names;
-- `max_age`, `timeout`, `retries` and [ADR 0045] `counts_from` are not part of the definition.
+- `max_age`, `timeout`, `retries` and [ADR 0045] `counts_from` are not part of the definition;
+- `baked` is what `build.baked` names (B-67, C-3), as C-9 writes it, only when it names a signer or `not_before`: a result rests on the blocks a run trusts.
 
 Changing a definition invalidates its evidence.
 

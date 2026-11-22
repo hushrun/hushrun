@@ -341,7 +341,7 @@ pub(crate) fn publish(
     }
     // A pack keeps no file modes: a linked output of a program, a build script or a proc macro
     // gets the mode its compile gives it, so that cargo can start a build script reused from a
-    // download (B-12, B-28).
+    // download or a baked store (B-12, B-28, B-64).
     linked_outputs_executable(&description, &opened.files).map_err(|err| err.to_string())?;
     let files: Vec<NewFile> = opened
         .files

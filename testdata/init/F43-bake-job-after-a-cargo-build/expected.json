@@ -1,0 +1,81 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -7,7 +7,11 @@\n jobs:\n   build:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - run: cargo build --locked\n-      - run: cargo test --locked\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run test -- cargo test --locked\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/.github/workflows/hushrun-bake.yml\n@@ -0,0 +1,38 @@\n+# hushrun: bakes the compiled code of main's build into an image that sandboxes and containers\n+# start warm from (hushrun build bake). It runs after 'CI' passes on main, and by hand.\n+# A Dockerfile takes the image with one line:\n+#   COPY --from=ghcr.io/acme/shop:hushrun-linux-x64-latest /hushrun /hushrun\n+name: hushrun bake\n+on:\n+  workflow_run:\n+    workflows: ['CI']\n+    branches: [main]\n+    types: [completed]\n+  workflow_dispatch:\n+  # Daily, so that an image the re-bake limit held back catches up with main (B-73).\n+  schedule:\n+    - cron: '17 4 * * *'\n+# One bake at a time: a later one never lands under an earlier one's tag.\n+concurrency:\n+  group: hushrun-bake\n+  cancel-in-progress: false\n+permissions:\n+  contents: read\n+  packages: write   # pushes the image to this repository's packages\n+  id-token: write   # reads the build from hushrun's backend, and signs the image keylessly\n+jobs:\n+  bake:\n+    # By hand on the default branch alone, or on the schedule (which GitHub runs on the default\n+    # branch alone); after the build only for a push to it, in this repository (never a fork's\n+    # pull request whose branch has the same name).\n+    if: (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || github.event_name == 'schedule' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)\n+    runs-on: ubuntu-latest\n+    steps:\n+      # The whole history: the bake builds only a commit that comes after the backend's newest\n+      # build (B-75), which a shallow checkout can't tell.\n+      - uses: actions/checkout@v5\n+        with:\n+          fetch-depth: 0\n+      - run: npx --yes hushrun@^<version> build bake --from backend --trusted --oci ghcr.io/acme/shop\n+        env:\n+          GITHUB_TOKEN: ${{ github.token }}\n",
+      "path": ".github/workflows/hushrun-bake.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run test -- cargo test --locked",
+          "before": "cargo test --locked",
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 13,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "build",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "A Dockerfile takes the baked image with: COPY --from=ghcr.io/acme/shop:hushrun-linux-x64-latest /hushrun /hushrun",
+    "Blocks bound to the build's folders (C -sys crates, build scripts, what depends on them) are baked too, at the paths of GitHub's runner: a sandbox reuses them only where HOME=/home/runner, CARGO_HOME=/home/runner/.cargo and the checkout is /home/runner/work/shop/shop (the image's baked.json names them, B-76); elsewhere they compile",
+    "Before CI's first build is baked, `hushrun build bake --deps-only --oci <image> -- <the check's cargo command>` in a job on the default branch publishes an image of the dependencies alone (a `cargo test` compiles its tests and runs none, the repository's own crates as stubs); the first full bake replaces it. `--report -- <command>` on any bake measures that command cold and from the image, on the machine it runs on",
+    "Change by hand: to let a run trust the baked image's signature with no backend, add to hushrun.yaml:\n  build:\n    baked:\n      signers:\n        - issuer: https://token.actions.githubusercontent.com\n          subject: https://github.com/acme/shop/.github/workflows/hushrun-bake.yml@refs/heads/main"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

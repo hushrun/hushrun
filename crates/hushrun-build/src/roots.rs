@@ -585,6 +585,19 @@ impl Roots {
         out
     }
 
+    /// The stand-ins [`Roots::remaps`] writes that are paths (B-9): `/hushrun/cargo`, a build
+    /// script output's, each once. A folder's text found only inside one of them is the
+    /// stand-in, not the folder (`/hushrun/cargo` holds a cargo home of `/cargo` as text).
+    pub fn stand_ins(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (_, to) in self.remaps() {
+            if to.starts_with('/') && !out.contains(&to) {
+                out.push(to);
+            }
+        }
+        out
+    }
+
     /// `--remap-path-prefix=<from>=<to>` for each of [`Roots::remaps`], in order.
     pub fn remap_args(&self) -> Vec<OsString> {
         self.remaps()

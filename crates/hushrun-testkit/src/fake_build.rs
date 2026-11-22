@@ -33,7 +33,7 @@ use base64::Engine as _;
 use hushrun_core::blocks::{
     self, Base64, BeginRequest, Class, CloseRequest, CommitRequest, Found, FoundHints, Hex32,
     HintsLookupRequest, HintsLookupResponse, HintsRequest, HintsResponse, Limits, Link,
-    LookupRequest, LookupResponse, Mode, OpenRequest, Pair, Policy, ReportRequest,
+    LookupRequest, LookupResponse, Mode, OpenRequest, Pair, Policy, PublishRequest, ReportRequest,
 };
 use serde_json::{Value, json};
 
@@ -51,6 +51,7 @@ pub mod route {
     pub const COMMIT: &str = "blocks/commit";
     pub const CLOSE: &str = "close";
     pub const REPORT: &str = "blocks/report";
+    pub const IMAGES: &str = "build/images";
     /// `GET /store/<id>`: a download.
     pub const STORE_GET: &str = "store-get";
     /// `PUT /store/<id>`: an upload.
@@ -158,6 +159,8 @@ struct State {
     reports: Vec<ReportRequest>,
     begins: Vec<BeginRequest>,
     forced_begin: Vec<Forced>,
+    /// `begin` refuses every block with this reason, this many more times.
+    refuse_begins: Option<(String, usize)>,
     forced_commit: Vec<Forced>,
     delays: BTreeMap<String, Duration>,
     failures: Vec<Failure>,
@@ -182,6 +185,21 @@ struct State {
     unreachable: bool,
     /// The paths of the requests dropped so.
     dropped: Vec<String>,
+    /// B-70: the registry's images, as `POST v0/build/images` moves them.
+    registry: Registry,
+}
+
+/// B-70: what the fake's registry keeps: the moving tag's image, each store's image (the fixed
+/// tag, which never moves), each image's layers as its manifest names them, and what tests steer.
+#[derive(Debug, Default)]
+struct Registry {
+    latest: Option<String>,
+    fixed: BTreeMap<Hex32, String>,
+    layers: BTreeMap<String, Vec<(String, u64)>>,
+    publishes: Vec<PublishRequest>,
+    newer: bool,
+    corrupt: bool,
+    forced: Vec<(u16, Value)>,
 }
 
 /// A gitlab.com job the fake knows (B-49).
@@ -206,12 +224,14 @@ struct Kept {
     /// none and answers any.
     kind: Option<String>,
     pairs: Vec<Pair>,
+    /// The commit its close named.
+    commit: Option<String>,
 }
 
 /// The manifest `open` answers, as the contract says ([`OpenRequest::check`]): for an `open`
 /// naming a check, the newest kept for that check of the repository and platform, else none; for
 /// one naming none, the newest kept of the repository and platform, whatever its check.
-fn manifest_for(kept: &[Kept], open: &OpenRequest) -> Vec<Pair> {
+fn manifest_for(kept: &[Kept], open: &OpenRequest) -> (Vec<Pair>, Option<String>) {
     kept.iter()
         .rev()
         .find(|k| {
@@ -220,9 +240,14 @@ fn manifest_for(kept: &[Kept], open: &OpenRequest) -> Vec<Pair> {
                 .is_none_or(|r| Some(r) == open.repository.as_ref())
                 && k.platform.as_ref().is_none_or(|p| *p == open.platform)
                 && k.kind.as_ref().is_none_or(|kind| *kind == open.kind)
-                && (open.check.is_none() || k.check == open.check)
+                // With no check, the newest build of any check that compiled something (or a
+                // seeded one, as it is).
+                && open.check.map_or(
+                    !k.pairs.is_empty() || k.platform.is_none(),
+                    |_| k.check == open.check,
+                )
         })
-        .map(|k| k.pairs.clone())
+        .map(|k| (k.pairs.clone(), k.commit.clone()))
         .unwrap_or_default()
 }
 
@@ -261,6 +286,7 @@ impl FakeBuild {
             reports: Vec::new(),
             begins: Vec::new(),
             forced_begin: Vec::new(),
+            refuse_begins: None,
             forced_commit: Vec::new(),
             delays: BTreeMap::new(),
             failures: Vec::new(),
@@ -275,6 +301,7 @@ impl FakeBuild {
             gitlab_jobs: BTreeMap::new(),
             unreachable: false,
             dropped: Vec::new(),
+            registry: Registry::default(),
         }));
         let shared = state.clone();
         let link = store_link;
@@ -421,6 +448,7 @@ impl FakeBuild {
             platform: None,
             kind: None,
             pairs: manifest,
+            commit: None,
         });
     }
 
@@ -432,6 +460,7 @@ impl FakeBuild {
             platform: None,
             kind: None,
             pairs: manifest,
+            commit: None,
         });
     }
 
@@ -521,6 +550,12 @@ impl FakeBuild {
         }
     }
 
+    /// Refuses the next `times` blocks `begin` names, whatever they are, with `reason`
+    /// (`suspended`, `too_large`, …).
+    pub fn refuse_begins(&self, reason: &str, times: usize) {
+        self.state().refuse_begins = Some((reason.to_string(), times));
+    }
+
     /// Lists `address` as suspended in the repository: lookups name it and serve it not, and
     /// `begin` refuses it.
     pub fn suspend(&self, address: Hex32) {
@@ -601,6 +636,37 @@ impl FakeBuild {
     }
 
     // --- what tests read ---------------------------------------------------------------------
+
+    /// B-70: the image the registry's moving tag names, as another bake moved it.
+    pub fn set_latest_image(&self, digest: Option<&str>) {
+        self.state().registry.latest = digest.map(str::to_string);
+    }
+
+    /// B-70: the image the registry's moving tag names.
+    pub fn latest_image(&self) -> Option<String> {
+        self.state().registry.latest.clone()
+    }
+
+    /// B-70: whether a newer run moved the moving tag, so that every publish is `not_newer`.
+    pub fn set_newer_run(&self, newer: bool) {
+        self.state().registry.newer = newer;
+    }
+
+    /// B-70: whether the registry answers other layer digests than an image's manifest names,
+    /// as a backend whose bytes differ would.
+    pub fn set_corrupt_layers(&self, corrupt: bool) {
+        self.state().registry.corrupt = corrupt;
+    }
+
+    /// B-70: the next publishes answer `status` with `body`, in order, before anything else.
+    pub fn force_publish(&self, status: u16, body: Value) {
+        self.state().registry.forced.push((status, body));
+    }
+
+    /// B-70: every publish the registry was sent, read with the wire type.
+    pub fn publishes(&self) -> Vec<PublishRequest> {
+        self.state().registry.publishes.clone()
+    }
 
     /// Every block, in every scope and state.
     pub fn blocks(&self) -> Vec<Block> {
@@ -688,6 +754,7 @@ fn default_policy() -> Policy {
         allowance_bytes: 10_000_000_000,
         held_bytes: 0,
         manifest: Vec::new(),
+        manifest_commit: None,
     }
 }
 
@@ -729,6 +796,7 @@ fn route_of(below: &str) -> Option<&'static str> {
         "v0/build/blocks/commit" => route::COMMIT,
         "v0/build/close" => route::CLOSE,
         "v0/build/blocks/report" => route::REPORT,
+        "v0/build/images" => route::IMAGES,
         "v0/machines" => route::MACHINES,
         _ if below.starts_with("v0/results/") => route::RESULTS,
         _ => return None,
@@ -885,7 +953,7 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         route::OPEN => match serde_json::from_slice::<OpenRequest>(&request.body) {
             Ok(open) => {
                 let mut policy = state.policy.clone();
-                policy.manifest = manifest_for(&state.manifests, &open);
+                (policy.manifest, policy.manifest_commit) = manifest_for(&state.manifests, &open);
                 state.opens.push(open);
                 Response::json(200, &serde_json::to_value(&policy).expect("json"))
             }
@@ -951,16 +1019,24 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
                 // Sent again with the same run, it counts once.
                 if !state.closes.iter().any(|c| c.run == close.run) {
                     // The manifest is kept for the repository, check and platform, unless the
-                    // one kept has more than twice its entries (the contract's 7 days aside).
+                    // one kept is of the same commit and has more than twice its entries (the
+                    // contract's 7 days aside): a newer commit's manifest replaces it however
+                    // small, as the server's keep rule does. An empty one (a check that compiles
+                    // nothing) is kept, with its commit, only where none with entries is: it says
+                    // the check was built at that commit (B-75), and never hides a build's blocks.
                     let kept = state.manifests.iter().rposition(|k| {
                         k.repository == close.repository
                             && k.check == close.check
                             && k.platform.as_deref() == Some(close.platform.as_str())
                             && k.kind.as_deref() == Some(close.kind.as_str())
                     });
-                    let smaller = kept
-                        .is_some_and(|i| close.manifest.len() * 2 < state.manifests[i].pairs.len());
-                    if !smaller && !close.manifest.is_empty() {
+                    let smaller = kept.is_some_and(|i| {
+                        state.manifests[i].commit == close.commit
+                            && close.manifest.len() * 2 < state.manifests[i].pairs.len()
+                    });
+                    let keeps = !close.manifest.is_empty()
+                        || kept.is_none_or(|i| state.manifests[i].pairs.is_empty());
+                    if !smaller && keeps {
                         if let Some(i) = kept {
                             state.manifests.remove(i);
                         }
@@ -970,6 +1046,7 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
                             platform: Some(close.platform.clone()),
                             kind: Some(close.kind.clone()),
                             pairs: close.manifest.clone(),
+                            commit: close.commit.clone(),
                         });
                     }
                     state.closes.push(close);
@@ -988,9 +1065,86 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
             }
             Err(err) => invalid(err),
         },
+        route::IMAGES => match serde_json::from_slice::<PublishRequest>(&request.body) {
+            Ok(ask) => publish(&mut state, ask),
+            Err(err) => invalid(err),
+        },
         _ => error(404, "not_found", "no such endpoint"),
     };
     answer(response, pause)
+}
+
+/// B-70: a publish, as registry-v0 §3 answers it, without reading layers (the fake holds no
+/// packs): forced answers first; then `stale` when `previous` isn't the moving tag's image,
+/// `not_newer` when a newer run moved it; else the moving tag goes to the store's image (the one
+/// sent, or the one published of this store before: the fixed tag never moves), whose layers are
+/// those its manifest names (one changed when the layers are corrupt).
+fn publish(state: &mut State, ask: PublishRequest) -> Response {
+    let registry = &mut state.registry;
+    registry.publishes.push(ask.clone());
+    if !registry.forced.is_empty() {
+        let (status, body) = registry.forced.remove(0);
+        return Response::json(status, &body);
+    }
+    let digest = format!("sha256:{}", Hex32::sha256(&ask.image.0));
+    if ask.previous != registry.latest {
+        return Response::json(
+            409,
+            &json!({"error": {"code": "stale", "message": "the moving tag moved"}, "current": {"digest": registry.latest}}),
+        );
+    }
+    if registry.newer {
+        return error(409, "not_newer", "a newer run moved the moving tag");
+    }
+    let named: Vec<(String, u64)> = serde_json::from_slice::<Value>(&ask.image.0)
+        .ok()
+        .and_then(|m| m["layers"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|l| {
+            (
+                l["digest"].as_str().unwrap_or_default().to_string(),
+                l["size"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    registry.layers.entry(digest.clone()).or_insert(named);
+    let image = registry
+        .fixed
+        .entry(ask.manifest)
+        .or_insert_with(|| digest.clone())
+        .clone();
+    let word = if registry.latest.as_deref() == Some(image.as_str()) {
+        "unchanged"
+    } else {
+        "published"
+    };
+    let previous = registry.latest.replace(image.clone());
+    let mut layers = registry.layers.get(&image).cloned().unwrap_or_default();
+    if registry.corrupt
+        && let Some(first) = layers.first_mut()
+    {
+        first.0 = format!("sha256:{}", Hex32([0xee; 32]));
+    }
+    let host = state
+        .origin
+        .split_once("://")
+        .map_or(state.origin.as_str(), |(_, rest)| rest)
+        .to_string();
+    Response::json(
+        200,
+        &json!({
+            "state": word,
+            "digest": image,
+            "previous": previous,
+            "image": format!("{host}/{}/shop", state.org),
+            "tags": {
+                "fixed": blocks::image::fixed_tag(&ask.platform, &ask.manifest.to_string()),
+                "latest": blocks::image::latest_tag(&ask.platform),
+            },
+            "layers": layers.iter().map(|(d, s)| json!({"digest": d, "size": s})).collect::<Vec<_>>(),
+        }),
+    )
 }
 
 /// B-49: a gitlab.com job's request, checked as the backend checks it: its key and signature over
@@ -1163,7 +1317,16 @@ fn begin(state: &mut State, ask: BeginRequest, machine: Option<String>) -> Respo
     let mut answers = Vec::new();
     for sent in &ask.blocks {
         let refused = |reason: &str| json!({"answer": "refused", "reason": reason});
-        let answer = if let Some(forced) = take_forced(&mut state.forced_begin, &sent.address) {
+        let refuse_all = match &mut state.refuse_begins {
+            Some((reason, left)) if *left > 0 => {
+                *left -= 1;
+                Some(reason.clone())
+            }
+            _ => None,
+        };
+        let answer = if let Some(reason) = refuse_all {
+            refused(&reason)
+        } else if let Some(forced) = take_forced(&mut state.forced_begin, &sent.address) {
             forced
         } else if let Some(write) = write.as_deref().filter(|_| state.policy.writes) {
             let held = read.iter().find_map(|scope| {
@@ -1377,6 +1540,48 @@ mod tests {
 
     fn address(n: u8) -> Hex32 {
         Hex32([n; 32])
+    }
+
+    // covers: B-75
+    // As the server keeps them: within one commit the larger manifest stays (a smaller one under
+    // half of it is a part build); a newer commit's manifest replaces it however small.
+    #[test]
+    fn the_kept_manifest_is_the_larger_only_within_one_commit() {
+        let fake = FakeBuild::start();
+        let check = address(1);
+        let close = |commit: &str, n: u8| {
+            let mut run = [0u8; 32];
+            run[0] = fake.closes().len() as u8 + 1;
+            let pairs: Vec<Pair> = (0..n)
+                .map(|i| Pair(address(100 + i), address(150 + i)))
+                .collect();
+            let body = json!({
+                "kind": "rustc/1",
+                "run": Hex32(run),
+                "repository": "github.com/acme/shop",
+                "check": check,
+                "platform": "aarch64-apple-darwin",
+                "commit": commit,
+                "manifest": pairs,
+            });
+            assert_eq!(post(&fake, "close", &body).0, 200);
+        };
+        let kept = || {
+            let body = json!({
+                "kind": "rustc/1",
+                "repository": "github.com/acme/shop",
+                "check": check,
+                "platform": "aarch64-apple-darwin",
+            });
+            let policy: Policy = serde_json::from_value(post(&fake, "open", &body).1).unwrap();
+            (policy.manifest.len(), policy.manifest_commit)
+        };
+        let (one, two) = ("a".repeat(40), "b".repeat(40));
+        close(&one, 10);
+        close(&one, 4);
+        assert_eq!(kept(), (10, Some(one.clone())));
+        close(&two, 4);
+        assert_eq!(kept(), (4, Some(two)));
     }
 
     // covers: B-30, B-36

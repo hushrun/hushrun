@@ -29,8 +29,8 @@ pub use keys::{KeyError, SigningKey};
 pub use signer::{NoTimestamps, SignError, Signer, Timestamper};
 pub use trust_root::TrustedRoot;
 pub use verify::{
-    Expected, Location, Rejection, SignedBy, Verified, certified_identity, signed_by_one_of,
-    verify, verify_with,
+    Expected, Location, Rejection, SignedBy, Verified, certified_identity, certified_identity_at,
+    signed_by_one_of, verify, verify_with,
 };
 
 use base64::Engine as _;

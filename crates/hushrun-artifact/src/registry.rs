@@ -126,6 +126,10 @@ pub fn valid_tag(tag: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
+/// The bytes of a blob being uploaded.
+pub type BlobStream =
+    futures_util::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>>;
+
 /// A manifest exactly as the registry served it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -223,6 +227,41 @@ pub trait Registry: Send + Sync + fmt::Debug {
     async fn check_access(&self, repository: &Repository) -> Result<(), ArtifactError> {
         let _ = repository;
         Ok(())
+    }
+
+    /// \[B-65\] Uploads a blob of `size` bytes whose SHA-256 is `digest`, from `stream`, hashing
+    /// while it goes; fails on a mismatch, and the upload never completes then.
+    async fn push_blob(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        size: u64,
+        stream: BlobStream,
+    ) -> Result<(), ArtifactError> {
+        let _ = (repository, digest, size, stream);
+        Err(ArtifactError::Unsupported("pushing blobs".into()))
+    }
+
+    /// \[B-65\] A blob's bytes, checked against `digest`; refused past `most` bytes.
+    async fn pull_blob(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        most: u64,
+    ) -> Result<Vec<u8>, ArtifactError> {
+        let _ = (repository, digest, most);
+        Err(ArtifactError::Unsupported("reading blobs".into()))
+    }
+
+    /// \[B-67\] The OCI referrers API's answer for `digest`, an image index, or `None` when the
+    /// registry has no such API (it then keeps referrers under the tag schema's tag).
+    async fn referrers(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+    ) -> Result<Option<Vec<u8>>, ArtifactError> {
+        let _ = (repository, digest);
+        Ok(None)
     }
 
     /// Pushes the manifest bytes unchanged under `reference` (a tag or `sha256:…`); returns

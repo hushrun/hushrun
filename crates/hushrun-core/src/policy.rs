@@ -60,10 +60,106 @@ pub struct Policy {
     /// what it compiles (B-55); `on` unless the file says `off`. Not part of any check's
     /// definition (E-6).
     pub build_cc_maps: bool,
+    /// `build: baked:`: whose signature makes a baked store trusted in a run, with no backend,
+    /// and how old a signed store may be (B-67). Part of every check's definition (E-6) and every
+    /// run's key (C-9) when it names anything: a result rests on the blocks it trusts.
+    pub build_baked: BakedTrust,
+    /// `build: baked:`'s publishing settings: when a bake compacts an image, when it publishes
+    /// none, and which branches the bake job bakes (B-65, B-69, B-73). Not part of any check's
+    /// definition or key: they decide what an image holds and when, never what a run trusts.
+    pub build_bake: BakeSettings,
     /// The file name used in error messages.
     pub file: String,
     /// The file's text, for `plan --explain-json`.
     pub text: String,
+}
+
+/// B-67: `build: baked:`: the signers whose signature over a baked store a run takes as evidence,
+/// and the oldest a signed store may be.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BakedTrust {
+    /// `signers:`.
+    pub signers: Vec<BakedSigner>,
+    /// `not_before:`, in milliseconds since the epoch: a signed store baked before it (by its
+    /// signed `baked_ms`) is no evidence.
+    pub not_before: Option<i64>,
+}
+
+impl BakedTrust {
+    /// What a check's definition (E-6) and a run's key (C-9) hold of it: `None` when it names
+    /// nothing, so a repository without it keeps every digest it had.
+    pub fn key(&self) -> Option<serde_json::Value> {
+        if self.signers.is_empty() && self.not_before.is_none() {
+            return None;
+        }
+        let mut signers: Vec<String> = self.signers.iter().map(BakedSigner::words).collect();
+        signers.sort();
+        let mut key = serde_json::Map::new();
+        key.insert("signers".into(), json!(signers));
+        if let Some(not_before) = self.not_before {
+            key.insert("not_before".into(), json!(not_before.to_string()));
+        }
+        Some(serde_json::Value::Object(key))
+    }
+}
+
+/// `build: baked:`'s settings for publishing images (B-65, B-69, B-73): each `None` is "the
+/// default", which the bake decides; a zero duration turns its rule off.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BakeSettings {
+    /// `compact_every:`: a bake writes the image's workspace layer again once it is this old.
+    pub compact_every: Option<crate::time::Dur>,
+    /// `rebake_every:`: a bake publishes nothing while the image its moving tag names is younger
+    /// than this and fewer than `rebake_blocks` blocks changed.
+    pub rebake_every: Option<crate::time::Dur>,
+    /// `rebake_blocks:`: that many changed blocks or more publish whatever the image's age.
+    pub rebake_blocks: Option<u64>,
+    /// `branches:`: the long-lived branches whose builds the bake job bakes, each into its own
+    /// tag (`hushrun-<platform>-branch-<name>-latest`), as the default branch's goes into
+    /// `-latest`.
+    pub branches: Vec<String>,
+}
+
+/// B-67: a signer whose signature over a baked store a run takes as evidence, as `build: baked:
+/// signers:` names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BakedSigner {
+    /// A keyless signature's certificate, by its OIDC issuer and its subject (the certificate's
+    /// subject alternative name: for GitHub Actions the workflow, `https://github.com/<owner>/<repo>/.github/workflows/<file>@refs/heads/<branch>`),
+    /// both compared exactly.
+    Identity { issuer: String, subject: String },
+    /// A key: `ecdsa-p256:<base64 of its SubjectPublicKeyInfo>`, `ed25519:<base64>`, or a PEM
+    /// `PUBLIC KEY` block of a P-256 key, as `cosign generate-key-pair` writes it.
+    Key(crate::signers::PublicKey),
+}
+
+impl BakedSigner {
+    /// The signer in words, for a line.
+    pub fn words(&self) -> String {
+        match self {
+            BakedSigner::Identity { issuer, subject } => {
+                format!("issuer {issuer}, subject {subject}")
+            }
+            BakedSigner::Key(key) => format!("key {}", key.keyid()),
+        }
+    }
+}
+
+/// A key as `build: baked: signers:` may write it.
+fn parse_signer_key(text: &str) -> Result<crate::signers::PublicKey, String> {
+    let text = text.trim();
+    if let Some(body) = text
+        .strip_prefix("-----BEGIN PUBLIC KEY-----")
+        .and_then(|rest| rest.trim_end().strip_suffix("-----END PUBLIC KEY-----"))
+    {
+        let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        use base64::Engine as _;
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|_| "the PEM block is not valid base64".to_string())?;
+        return crate::signers::PublicKey::from_p256_spki(&der);
+    }
+    crate::signers::PublicKey::parse(text)
 }
 
 /// \[ADR 0062\] A key of an older hushrun.yaml that this release parses and ignores, such as
@@ -244,6 +340,38 @@ struct RawBuild {
     env: Vec<Spanned<String>>,
     #[serde(default)]
     cc: Option<RawBuildCc>,
+    #[serde(default)]
+    baked: Option<RawBuildBaked>,
+}
+
+/// `build: baked:`: how a run trusts a baked store (B-67).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBuildBaked {
+    #[serde(default)]
+    signers: Vec<Spanned<RawBakedSigner>>,
+    #[serde(default)]
+    not_before: Option<Spanned<String>>,
+    #[serde(default)]
+    compact_every: Option<Spanned<String>>,
+    #[serde(default)]
+    rebake_every: Option<Spanned<String>>,
+    #[serde(default)]
+    rebake_blocks: Option<Spanned<u64>>,
+    #[serde(default)]
+    branches: Vec<Spanned<String>>,
+}
+
+/// One of `build: baked: signers:`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBakedSigner {
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
 }
 
 /// `build: cc:`: what the C and C++ launcher does in every machine's runs (B-55).
@@ -497,6 +625,127 @@ impl Policy {
             });
         }
 
+        // B-67
+        let mut build_baked_signers = Vec::new();
+        for signer in raw
+            .build
+            .iter()
+            .filter_map(|build| build.baked.as_ref())
+            .flat_map(|baked| &baked.signers)
+        {
+            let parsed = match (&signer.value.issuer, &signer.value.subject, &signer.value.key) {
+                (Some(issuer), Some(subject), None)
+                    if !issuer.trim().is_empty() && !subject.trim().is_empty() =>
+                {
+                    Ok(BakedSigner::Identity {
+                        issuer: issuer.trim().to_string(),
+                        subject: subject.trim().to_string(),
+                    })
+                }
+                (None, None, Some(key)) => parse_signer_key(key)
+                    .map(BakedSigner::Key)
+                    .map_err(|why| format!("`build.baked.signers`: {why}")),
+                _ => Err(
+                    "each of `build.baked.signers` is either `issuer` and `subject` (a keyless signature's certificate) or `key`"
+                        .to_string(),
+                ),
+            };
+            match parsed {
+                Ok(parsed) if build_baked_signers.contains(&parsed) => errors.push(
+                    signer.pos,
+                    format!("`build.baked.signers` names {} twice", parsed.words()),
+                ),
+                Ok(parsed) => build_baked_signers.push(parsed),
+                Err(why) => errors.push(signer.pos, why),
+            }
+        }
+        let not_before = raw
+            .build
+            .iter()
+            .filter_map(|build| build.baked.as_ref())
+            .find_map(|baked| baked.not_before.as_ref())
+            .and_then(|text| match crate::time::Time::parse(text.value.trim()) {
+                Ok(time) => Some(time.millis()),
+                Err(_) => {
+                    errors.push(
+                        text.pos,
+                        format!(
+                            "`build.baked.not_before` is a time such as 2026-11-21T00:00:00Z, not {:?}",
+                            text.value
+                        ),
+                    );
+                    None
+                }
+            });
+        let build_baked = BakedTrust {
+            signers: build_baked_signers,
+            not_before,
+        };
+        let baked_key = build_baked.key();
+        // B-65, B-69, B-73
+        let raw_baked = raw.build.iter().find_map(|build| build.baked.as_ref());
+        let mut duration = |field: &str, text: Option<&Spanned<String>>| {
+            let text = text?;
+            match crate::time::Dur::parse(text.value.trim()) {
+                Ok(dur) => Some(dur),
+                Err(_) => {
+                    errors.push(
+                        text.pos,
+                        format!(
+                            "`build.baked.{field}` is a duration such as 7d, 1h or 30m (0s turns it off), not {:?}",
+                            text.value
+                        ),
+                    );
+                    None
+                }
+            }
+        };
+        let compact_every = duration(
+            "compact_every",
+            raw_baked.and_then(|b| b.compact_every.as_ref()),
+        );
+        let rebake_every = duration(
+            "rebake_every",
+            raw_baked.and_then(|b| b.rebake_every.as_ref()),
+        );
+        let mut branches: Vec<String> = Vec::new();
+        for branch in raw_baked.iter().flat_map(|b| &b.branches) {
+            let name = branch.value.trim();
+            let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+            if name.is_empty() || name.contains(char::is_whitespace) {
+                errors.push(
+                    branch.pos,
+                    format!(
+                        "`build.baked.branches` names a branch, not {:?}",
+                        branch.value
+                    ),
+                );
+            } else if name.contains(['*', '?', '[', ']', '!', '+']) {
+                // B-69: a branch by its name: GitHub's `workflow_run` filter would read these as a
+                // pattern, where a dispatched run and GitLab compare the name exactly.
+                errors.push(
+                    branch.pos,
+                    format!(
+                        "`build.baked.branches` names a branch by its whole name, with none of * ? [ ] ! +, not {:?}",
+                        branch.value
+                    ),
+                );
+            } else if branches.iter().any(|b| b == name) {
+                errors.push(
+                    branch.pos,
+                    format!("`build.baked.branches` names {name} twice"),
+                );
+            } else {
+                branches.push(name.to_string());
+            }
+        }
+        let build_bake = BakeSettings {
+            compact_every,
+            rebake_every,
+            rebake_blocks: raw_baked.and_then(|b| b.rebake_blocks.as_ref().map(|n| n.value)),
+            branches,
+        };
+
         // C-5
         let mut checks = BTreeMap::new();
         let mut reports = BTreeMap::new();
@@ -509,7 +758,10 @@ impl Policy {
                     instead: "delete it; every check is a source check",
                 });
             }
-            checks.insert(name.clone(), validate_check(name, pos, check, &mut errors));
+            checks.insert(
+                name.clone(),
+                validate_check(name, pos, check, baked_key.as_ref(), &mut errors),
+            );
             if let Some(level) = counts_from::level(&check.counts_from, &mut errors) {
                 rules.checks.insert(name.clone(), level);
             }
@@ -661,6 +913,8 @@ impl Policy {
             retired,
             build_env,
             build_cc_maps,
+            build_baked,
+            build_bake,
             file: file.to_string(),
             text: String::from_utf8_lossy(bytes).into_owned(),
         })
@@ -992,7 +1246,13 @@ fn validate_tests(
     tests.is_on().then_some(tests)
 }
 
-fn validate_check(name: &CheckName, _pos: Pos, check: &RawCheck, errors: &mut Errors) -> CheckDef {
+fn validate_check(
+    name: &CheckName,
+    _pos: Pos,
+    check: &RawCheck,
+    baked: Option<&serde_json::Value>,
+    errors: &mut Errors,
+) -> CheckDef {
     if let Some(image) = &check.image
         && crate::event::pinned_digest(&image.value).is_none()
     {
@@ -1041,6 +1301,10 @@ fn validate_check(name: &CheckName, _pos: Pos, check: &RawCheck, errors: &mut Er
     }
     if let Some(version) = &check.version {
         definition.insert("version".into(), json!(version));
+    }
+    // B-67: what a run trusts of a baked store is part of what its result rests on.
+    if let Some(baked) = baked {
+        definition.insert("baked".into(), baked.clone());
     }
     let definition_digest = crate::jcs::digest(&serde_json::Value::Object(definition))
         .expect("definitions hold only strings");

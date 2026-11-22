@@ -600,6 +600,16 @@ fn certified(
 /// in a bundle, verified as E-8 step 2 verifies it, but against no signers: its timestamp, its
 /// certificate's chain to `sigstore` at that time, and its signature. For display only.
 pub fn certified_identity(bytes: &[u8], sigstore: &TrustedRoot) -> Result<CertIdentity, Rejection> {
+    certified_identity_at(bytes, sigstore).map(|(identity, _)| identity)
+}
+
+/// [`certified_identity`], with the trusted time the certificate was checked at: the signature's
+/// timestamp, which an authority of `sigstore` made and which lies within the certificate's
+/// validity. Unlike a time the signed payload claims, the signer can't choose it.
+pub fn certified_identity_at(
+    bytes: &[u8],
+    sigstore: &TrustedRoot,
+) -> Result<(CertIdentity, Time), Rejection> {
     let object = Object::parse(bytes).map_err(|e| Rejection::Envelope(e.to_string()))?;
     let Object::Bundle(bundle) = &object else {
         return Err(Rejection::Signature(
@@ -623,7 +633,9 @@ pub fn certified_identity(bytes: &[u8], sigstore: &TrustedRoot) -> Result<CertId
     let at = at.ok_or_else(|| {
         Rejection::Signature("a keyless signature needs a trusted timestamp".into())
     })?;
-    certified(&der, sigstore, &message, &sig, at).map_err(Rejection::Signature)
+    certified(&der, sigstore, &message, &sig, at)
+        .map(|identity| (identity, at))
+        .map_err(Rejection::Signature)
 }
 
 /// A certificate's identity, for messages.

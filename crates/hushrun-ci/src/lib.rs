@@ -380,7 +380,8 @@ pub struct SourceRepository {
     /// `CI_PROJECT_URL`).
     pub url: String,
     /// Its default branch, when the provider says: the event's `repository.default_branch` on
-    /// GitHub, `CI_DEFAULT_BRANCH` on GitLab.
+    /// GitHub (for a `schedule` run, whose event names no repository, the ref's branch: GitHub
+    /// runs schedules only on the default branch), `CI_DEFAULT_BRANCH` on GitLab.
     pub default_branch: Option<String>,
     /// Its numeric id: `GITHUB_REPOSITORY_ID`, `CI_PROJECT_ID`.
     pub id: Option<String>,

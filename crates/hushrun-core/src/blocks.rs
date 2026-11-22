@@ -20,11 +20,13 @@
 //! | `POST v0/build/blocks/commit` | [`CommitRequest`] | [`CommitResponse`] |
 //! | `POST v0/build/close` | [`CloseRequest`] | `{}` |
 //! | `POST v0/build/blocks/report` | [`ReportRequest`] | `{}` |
+//! | `POST v0/build/images` | [`PublishRequest`] | [`PublishResponse`] |
 //!
 //! A server with no object store has none of these routes. An org that doesn't share answers an
 //! authenticated request to any of them as a route that doesn't exist (404), as a server from before
 //! them does. Whether to ask `open` at all, a results lookup's answer says in its
-//! [`SHARING_HEADER`]. A request that lost a race in the server's database answers 503 with
+//! [`SHARING_HEADER`]. A server with a registry (optional, B-70, [`publish`]) answers
+//! `v0/build/images`; one without answers 404 as a missing route. A request that lost a race in the server's database answers 503 with
 //! `Retry-After`: send it again.
 //!
 //! Like the rest of this crate it does no IO.
@@ -516,22 +518,29 @@ pub struct Policy {
     /// The compiles of the newest build like this one, in order.
     #[serde(default)]
     pub manifest: Vec<Pair>,
+    /// The commit that manifest's run named in its `close` (B-75): what a bake on the default
+    /// branch compares with the commit it checked out. Absent when the backend doesn't keep it,
+    /// or the run named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_commit: Option<String>,
 }
 
 /// The start of the scope a repository's trusted blocks are written to, `protected/<repository>`:
 /// only a trusted job of the repository writes there.
 pub const TRUSTED_SCOPE: &str = "protected/";
 
+/// Whether `scope` is a repository's trusted scope ([`TRUSTED_SCOPE`]): the one definition every
+/// reader of a scope decides trust by.
+pub fn is_trusted_scope(scope: &str) -> bool {
+    scope.starts_with(TRUSTED_SCOPE)
+}
+
 impl Policy {
     /// Whether this caller writes the repository's trusted blocks: the scope it writes is the
     /// repository's trusted one, and nothing else decides it. A pull request's job writes
     /// `ci/…` with no reason it isn't trusted, and is not trusted.
     pub fn writes_trusted(&self) -> bool {
-        self.writes
-            && self
-                .write
-                .as_deref()
-                .is_some_and(|scope| scope.starts_with(TRUSTED_SCOPE))
+        self.writes && self.write.as_deref().is_some_and(is_trusted_scope)
     }
 }
 
@@ -867,8 +876,15 @@ pub struct ReportRequest {
     pub commit: Option<String>,
 }
 
+pub mod erofs;
+pub mod image;
 #[cfg(feature = "pack")]
 pub mod pack;
+pub mod publish;
+pub use publish::{
+    IMAGES_PATH, PublishCurrent, PublishFile, PublishLayer, PublishPack, PublishRefusal,
+    PublishRequest, PublishResponse, PublishSignature, PublishState, PublishTags, PublishedLayer,
+};
 
 #[cfg(test)]
 mod tests;

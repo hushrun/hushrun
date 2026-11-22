@@ -362,6 +362,148 @@ pub enum BuildCommand {
     /// (`hushrun login`), or in GitHub Actions the job's ID token. Good for 24 hours; no token is
     /// kept.
     Fetch(BuildFetchArgs),
+    /// Write a self-contained store of one repository's compiled crates, Go packages and C and
+    /// C++ objects for this machine's platforms: sealed packs, sealed hints and baked.json,
+    /// nothing else.
+    ///
+    /// For an image or a read-only volume a sandbox starts from: a run reads it underneath its
+    /// own store when HUSHRUN_BUILD_LOWER names its folder, reusing a block once the backend it
+    /// was baked from vouches for it (or, outside CI, with HUSHRUN_BUILD_LOWER_UNTRUSTED=1),
+    /// until its source has a newer manifest. From this machine's store (the default) it needs no
+    /// network, holds only what may leave any machine and is untrusted, for you alone; from the
+    /// org's backend it needs a credential, as `fetch` does. A store missing blocks its manifests
+    /// named is still written and said; it exits 11 when others start from it (an image, an
+    /// archive, a disk image or --from backend --trusted).
+    ///
+    /// With --oci REPOSITORY it also publishes the store as a layered image, built without
+    /// docker: its third-party code, its own code and what changed since are separate layers, so
+    /// a change to the code uploads only the last. It is tagged hushrun-PLATFORM-MANIFEST and
+    /// hushrun-PLATFORM-latest, signed keylessly in a CI job with an ID token (or with
+    /// --signing-key), and a Dockerfile takes it with one line:
+    /// COPY --from=REPOSITORY:hushrun-linux-x64-latest /hushrun /hushrun
+    ///
+    /// With --tar FILE it writes the same store as one archive, for a sandbox snapshotted while
+    /// it runs (`curl -fsSL URL | tar -x -C /`, then snapshot); with --erofs FILE as a read-only
+    /// disk image, for a volume mounted read-only. Both are the same bytes for the same store.
+    ///
+    /// A bake within the hour of the image its tag names publishes nothing unless 50 blocks
+    /// changed (--force publishes). With --deps-only -- COMMAND it bakes the third-party code
+    /// alone, compiled by the check's cargo command with the repository's own crates as stubs,
+    /// for a new repository's first image; with --report -- COMMAND it times COMMAND cold and
+    /// from the store on this machine.
+    #[command(verbatim_doc_comment)]
+    Bake(BuildBakeArgs),
+    /// Print the newest manifest of this repository's compiled code: the identity a bake would
+    /// publish now, its parts, its platform and the image tags it maps to. For a program that
+    /// watches for new images.
+    Manifest(BuildManifestArgs),
+}
+
+/// `hushrun build manifest` (B-68).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct BuildManifestArgs {
+    /// Where the manifest comes from, as `bake` reads it.
+    #[arg(long, value_enum, default_value_t = BakeFrom::Store)]
+    pub from: BakeFrom,
+    /// Name only these checks, as `bake --check` takes them; repeat for more.
+    #[arg(long = "check", value_name = "NAME")]
+    pub checks: Vec<String>,
+    /// Print JSON (hushrun.build-manifest/v1), as --format json does.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `hushrun build bake --out DIR` (B-63).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct BuildBakeArgs {
+    /// The folder to write. It must not exist, be empty, or hold a baked store, which is replaced
+    /// whole. With --oci, --oci-dir, --tar or --erofs it may be left out: the store is written
+    /// aside and removed.
+    #[arg(long, value_name = "DIR", required_unless_present_any = ["oci", "oci_dir", "tar", "erofs"])]
+    pub out: Option<std::path::PathBuf>,
+    /// Where the compiled code comes from: this machine's store (what the last run of each check
+    /// here compiled or reused), or the org's backend (its newest build of each check).
+    #[arg(long, value_enum, default_value_t = BakeFrom::Store)]
+    pub from: BakeFrom,
+    /// Bake only this check, by the name `hushrun run` runs it under; repeat for more. With none,
+    /// every check: from this machine's store, each check a run here left a manifest of; from a
+    /// backend, each check hushrun.yaml names (else the repository's newest build).
+    #[arg(long = "check", value_name = "NAME")]
+    pub checks: Vec<String>,
+    /// Bake only what a published image may hold: blocks from the repository's trusted scope,
+    /// which only CI on the default branch writes. Refused for this machine's store.
+    #[arg(long)]
+    pub trusted: bool,
+    /// Publish the store as an image to this repository of any OCI registry, such as
+    /// ghcr.io/acme/app, with the credentials docker uses. hushrun names the tags. `hushrun`, or a
+    /// repository on the registry host of the repository's backend (registry.hushrun.com for
+    /// hushrun's hosted backend), publishes into that backend's registry instead, from CI on the
+    /// default branch, with --from backend --trusted.
+    #[arg(long, value_name = "REPOSITORY", conflicts_with = "oci_dir")]
+    pub oci: Option<String>,
+    /// Write the image into this folder as an OCI image layout instead, no registry.
+    #[arg(long, value_name = "DIR")]
+    pub oci_dir: Option<std::path::PathBuf>,
+    /// Also write the store as one tar archive whose files are under hushrun/, so that `tar -x
+    /// -C /` puts it at /hushrun, where a run reads it: for a sandbox snapshotted while it runs.
+    /// Signed as an image is. A name ending in .zst is compressed with zstd; `-` writes the tar to
+    /// stdout (and what bake says to stderr), for `| tar -x -C /`.
+    #[arg(long, value_name = "FILE")]
+    pub tar: Option<std::path::PathBuf>,
+    /// Also write the store as a read-only EROFS disk image whose root is the store, for a volume
+    /// mounted read-only: at /hushrun a run reads it as it is, elsewhere name the mount with
+    /// HUSHRUN_BUILD_LOWER. Built by hushrun: no mkfs.erofs, no root.
+    #[arg(long, value_name = "FILE")]
+    pub erofs: Option<std::path::PathBuf>,
+    /// Sign the image, archive or disk image with this private key, PKCS#8 PEM, such as `hushrun
+    /// keys generate --algorithm ecdsa-p256` writes, instead of as the CI job.
+    #[arg(long, value_name = "FILE", conflicts_with = "no_sign")]
+    pub signing_key: Option<std::path::PathBuf>,
+    /// Publish unsigned, even where hushrun could sign.
+    #[arg(long)]
+    pub no_sign: bool,
+    /// Also move the tag of the branch checked out (in CI, the run's branch),
+    /// hushrun-PLATFORM-branch-NAME-latest. The moving tag hushrun-PLATFORM-latest moves only
+    /// from CI on the default branch.
+    #[arg(long)]
+    pub branch_tag: bool,
+    /// Write the image's workspace layer again from this store, dropping blocks it keeps unused.
+    #[arg(long)]
+    pub compact: bool,
+    /// Publish even while the image the tag names is younger than an hour and few blocks changed
+    /// (hushrun.yaml's build: baked: rebake_every and rebake_blocks).
+    #[arg(long)]
+    pub force: bool,
+    /// Compile only the third-party code, like cargo chef, and bake that: COMMAND (the check's
+    /// cargo command, given after --) runs with the repository's own crates stubbed, in a store
+    /// and target folder of its own, and a Go module's third-party packages are built. For a new
+    /// repository's first image, before CI has built anything. Never replaces a full image.
+    #[arg(long, conflicts_with_all = ["trusted"])]
+    pub deps_only: bool,
+    /// Measure what the store saves on this machine: COMMAND (after --) cold, in a fresh target
+    /// folder with nothing to reuse, then from the store, as a sandbox started from the image
+    /// runs it. With --deps-only the cold time is the dependencies' build itself.
+    #[arg(long, requires = "command")]
+    pub report: bool,
+    /// In CI on the default branch, bake what the backend holds even when its newest build is of
+    /// an older commit (a merge whose checks CI skipped), instead of first building what's missing
+    /// with the checks hushrun.yaml names.
+    #[arg(long)]
+    pub no_build: bool,
+    /// The build command --deps-only and --report run, such as `cargo test --locked`.
+    #[arg(last = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
+    #[command(flatten)]
+    pub registry: RegistryOpts,
+}
+
+/// Where `hushrun build bake` reads blocks from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum BakeFrom {
+    /// This machine's store: no network.
+    Store,
+    /// The org's backend, as `hushrun build fetch` reads it.
+    Backend,
 }
 
 /// `hushrun build fetch [CHECK]...` (B-36).
@@ -587,6 +729,12 @@ pub struct InitArgs {
     #[arg(long, conflicts_with_all = ["org", "pipeline_flags"])]
     pub local: bool,
 
+    /// Also add the bake job: after the default branch's build passes, and when run by hand, CI
+    /// bakes its compiled code into an image in the repository's registry, signed, which a
+    /// Dockerfile takes with one line. Needs a backend; the merge itself bakes the first image.
+    #[arg(long, conflicts_with_all = ["local", "pipeline_flags"])]
+    pub bake: bool,
+
     /// Write a starter hushrun.yaml for a deploy pipeline instead. The flags below imply it.
     #[arg(long, help_heading = "Pipeline")]
     pub pipeline: bool,
@@ -669,7 +817,7 @@ pub struct ResolveArgs {
     pub registry: RegistryOpts,
 }
 
-#[derive(Debug, Default, Args)]
+#[derive(Debug, Default, Args, Clone, PartialEq, Eq)]
 pub struct RegistryOpts {
     /// A registry reached over plain HTTP instead of HTTPS (tests only; repeatable).
     #[arg(long = "insecure-registry", value_name = "HOST")]

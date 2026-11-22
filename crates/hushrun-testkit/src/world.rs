@@ -148,12 +148,17 @@ const CLEARED: &[&str] = &[
     "CI_DEFAULT_BRANCH",
     // B-1, B-2: build blocks follow the world's own settings, never the developer's mode or
     // store, and a test run under cargo, which may itself compile through the wrapper, doesn't
-    // pass its wrapper on.
+    // pass its wrapper on, nor the C and C++ launcher (B-50) or Go's cache program (B-39) the
+    // run around it gives its command.
     "HUSHRUN_BUILD",
     "HUSHRUN_BUILD_KEEP_DAYS",
     "HUSHRUN_BUILD_DIR",
     "HUSHRUN_BUILD_SESSION",
     "RUSTC_WRAPPER",
+    "CMAKE_C_COMPILER_LAUNCHER",
+    "CMAKE_CXX_COMPILER_LAUNCHER",
+    "HUSHRUN_CC",
+    "GOCACHEPROG",
 ];
 
 /// A git repository with a policy, a fake HTTP server (L-10), and test keys. \[ADR 0031\] The

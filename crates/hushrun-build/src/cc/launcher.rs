@@ -93,14 +93,18 @@ pub trait Ports {
     /// Writes to the launcher's stderr.
     fn stderr(&mut self, bytes: &[u8]);
     /// Whether the audit picks the reuse of block `key` in the run started at `started_ms`
-    /// (B-59): one in ten on a downloaded block's first reuse here (`first_download`), else one
-    /// in fifty. Tests choose.
-    fn audited(&self, key: &Digest, started_ms: u64, first_download: bool) -> bool {
-        crate::audit::sample(key, started_ms, first_download)
+    /// (B-59): as `reuse` says (`audit::sample`). Tests choose.
+    fn audited(&self, key: &Digest, started_ms: u64, reuse: crate::audit::Reuse) -> bool {
+        crate::audit::sample(key, started_ms, reuse)
     }
     /// Asks the run's relay at `socket` within `wait` (B-60); `None` is a miss.
     fn relay(&self, socket: &Path, request: &Request, wait: Duration) -> Option<Answer> {
         crate::relay::ask(socket, request, wait)
+    }
+    /// What opens a baked store's packs (B-64): the binary's, when it installed one. Tests stand
+    /// in for it.
+    fn unseal(&self) -> Option<&'static dyn crate::baked::Unseal> {
+        crate::baked::unseal()
     }
     /// Hands the run's relay a notice; whether it was written.
     fn tell(&self, socket: &Path, request: &Request, wait: Duration) -> bool {
@@ -269,6 +273,7 @@ fn entry(outcome: Outcome) -> Entry {
         step: None,
         key: None,
         downloaded: false,
+        baked: false,
         go: None,
         cc: None,
     }
@@ -442,9 +447,12 @@ fn decide(
                 ports, current, &store, &step, &hit, &compile, &identity, start,
             ) {
                 Vetted::Serve { first_download } => {
-                    let audited = current
-                        .audit
-                        .picks(|| ports.audited(&hit.key, current.started_ms, first_download));
+                    // B-63: one in ten only where nothing verified where the block came from;
+                    // never at a verified baked block's first reuse here.
+                    let origin = hit.origin.as_ref().filter(|_| first_download);
+                    let audited = current.audits_reuse(origin, |reuse| {
+                        ports.audited(&hit.key, current.started_ms, reuse)
+                    });
                     if current.mode == Mode::On && !audited {
                         // A restore that fails before any message compiles as asked (B-57).
                         let at = Restore {
@@ -532,6 +540,8 @@ struct Hit {
     outputs: hushrun_core::blocks::Hex32,
     /// The relay downloaded it for this compile.
     downloaded_now: bool,
+    /// It was opened from the run's baked store for this compile (B-64).
+    baked_now: bool,
 }
 
 impl Hit {
@@ -619,11 +629,21 @@ fn find(
     if let Some(hit) = follow(store, step, &own, false, seen, digests, &mut candidates)? {
         return Ok(Some(hit));
     }
-    // A first key kept on this machine asks the shared store nothing (B-34).
-    if !current.shares() || store.kept_local_at(step, at).is_some() {
+    let target = &seen.identity.target;
+    // A first key kept on this machine asks the shared store nothing (B-34), nor the baked one.
+    if store.kept_local_at(step, at).is_some() {
         return Ok(None);
     }
-    let target = &seen.identity.target;
+    // B-64: the run's baked store, for a target whose objects can be checked (B-59).
+    let unseal = ports.unseal();
+    let lower = current
+        .lower_for(crate::model::Kind::Cc)
+        .filter(|lower| lower.reads_for(crate::model::Kind::Cc, target) && checks::knows(target))
+        .zip(unseal)
+        .map(|(lower, unseal)| crate::baked::Reader::new(lower, unseal));
+    if !current.shares() && lower.is_none() {
+        return Ok(None);
+    }
     // Sharing is never above the local mode, and only `on` reuses a download (B-33); a target
     // whose objects can't be checked is never served one (B-59).
     let asks = current.mode == Mode::On
@@ -633,6 +653,12 @@ fn find(
     let waits = Waits::of(&|name| ports.var(name));
     let local_ms = store.step_cost(step);
     let mut downloaded = store.shared_hints(step);
+    if downloaded.is_empty()
+        && let Some(lower) = &lower
+        && lower.hints_into(store, crate::model::Kind::Cc, step, at) > 0
+    {
+        downloaded = store.shared_hints(step);
+    }
     if downloaded.is_empty() && asks {
         let asked = Request::CcHints {
             step: *step,
@@ -661,10 +687,32 @@ fn find(
     )? {
         return Ok(Some(hit));
     }
+    candidates.truncate(MOST_FETCH_KEYS);
+    if let Some(lower) = &lower {
+        let floor = u64::from(current.min_free_gb).saturating_mul(1 << 30);
+        for (key, hint) in &candidates {
+            let opened = lower
+                .open_into(
+                    store,
+                    crate::model::Kind::Cc,
+                    key,
+                    step,
+                    floor,
+                    current.repository.as_deref(),
+                    at,
+                )
+                .unwrap_or(false);
+            if opened && let Some(hit) = hit_of(store, *key, hint)? {
+                return Ok(Some(Hit {
+                    baked_now: true,
+                    ..hit
+                }));
+            }
+        }
+    }
     if !asks || candidates.is_empty() {
         return Ok(None);
     }
-    candidates.truncate(MOST_FETCH_KEYS);
     let asked = Request::CcFetch {
         step: *step,
         keys: candidates.iter().map(|(key, _)| *key).collect(),
@@ -790,6 +838,7 @@ fn hit_of(
         origin: store.origin(&key),
         outputs,
         downloaded_now: false,
+        baked_now: false,
     }))
 }
 
@@ -826,7 +875,7 @@ fn vet(
         key: hit.key,
         outputs: hit.outputs,
     };
-    let reusable = current.share.may_reuse(
+    let reusable = current.may_reuse(
         hit.origin.as_ref(),
         epoch_ms(at),
         vouch,
@@ -998,20 +1047,23 @@ fn restore(
     Ok(Reused {
         stdout,
         stderr,
-        entry: reused_entry(
-            *step,
-            hit.key,
-            CcEntry {
-                source: places.hide(&compile.source),
-                platform: platform.to_string(),
-                took_ms: took,
-                local: hit.local.clone(),
-                shared: current.share.relay().is_some(),
-                ..CcEntry::default()
-            },
-            hit.compile_ms.saturating_sub(took),
-            hit.downloaded_now,
-        ),
+        entry: Entry {
+            baked: hit.baked_now,
+            ..reused_entry(
+                *step,
+                hit.key,
+                CcEntry {
+                    source: places.hide(&compile.source),
+                    platform: platform.to_string(),
+                    took_ms: took,
+                    local: hit.local.clone(),
+                    shared: current.share.relay().is_some(),
+                    ..CcEntry::default()
+                },
+                hit.compile_ms.saturating_sub(took),
+                hit.downloaded_now,
+            )
+        },
     })
 }
 

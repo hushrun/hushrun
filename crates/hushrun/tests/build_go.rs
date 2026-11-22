@@ -403,6 +403,52 @@ fn a_compile_that_printed_stays_here_and_the_other_machine_prints_it_too() {
     assert!(stderr.contains("can inline F"), "{stderr}");
 }
 
+// covers: B-39, B-63
+#[test]
+fn go_s_cache_program_is_set_only_where_a_run_shares_or_reads_a_baked_store() {
+    if !have_go() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None, &[]);
+    let program = |change: &dyn Fn(&mut Command)| {
+        let (code, stdout, stderr) =
+            a.run_with(&fake, "printf %s \"$GOCACHEPROG\"", |cmd| change(cmd));
+        assert_eq!(code, 0, "{stderr}");
+        stdout
+    };
+    // Neither sharing nor a baked store: Go runs as plain go does, as before 0.19.
+    let plain = program(&|cmd| {
+        cmd.env("HUSHRUN_BACKEND", "")
+            .env("HUSHRUN_BUILD_LOWER", "");
+    });
+    assert_eq!(plain, "");
+    // A store named that the run's state ignores (here an empty folder): as plain go.
+    let ignored = dir.path().join("ignored");
+    std::fs::create_dir_all(&ignored).unwrap();
+    let with_ignored = program(&|cmd| {
+        cmd.env("HUSHRUN_BACKEND", "")
+            .env("HUSHRUN_BUILD_LOWER", &ignored)
+            .env("HUSHRUN_BUILD_LOWER_UNTRUSTED", "1");
+    });
+    assert_eq!(with_ignored, "");
+    // A baked store the run reads, though it shares nothing: the program reads it.
+    let baked = dir.path().join("baked");
+    empty_go_store(&baked);
+    let with_store = program(&|cmd| {
+        cmd.env("HUSHRUN_BACKEND", "")
+            .env("HUSHRUN_BUILD_LOWER", &baked)
+            .env("HUSHRUN_BUILD_LOWER_UNTRUSTED", "1");
+    });
+    assert!(with_store.contains("hushrun-gocache"), "{with_store:?}");
+    // A run that shares: set, as it always was.
+    let sharing = program(&|cmd| {
+        cmd.env("HUSHRUN_BUILD_LOWER", "");
+    });
+    assert!(sharing.contains("hushrun-gocache"), "{sharing:?}");
+}
+
 // covers: B-39
 #[test]
 fn a_cache_program_the_person_set_stays_and_none_is_set_outside_a_module() {
@@ -1111,4 +1157,48 @@ fn a_gitlab_job_s_go_requests_are_signed_with_the_job_s_one_key_beside_rust_s() 
         "{stderr}"
     );
     assert!(!fake.gitlab_jobs()[&7102].withdrawn);
+}
+
+/// B-63: a baked store with nothing in it but a Go part for this machine's platform, untrusted,
+/// for no repository: what a run reads under `HUSHRUN_BUILD_LOWER_UNTRUSTED=1`, where an empty
+/// folder is a store its state ignores.
+fn empty_go_store(folder: &Path) {
+    use hushrun_build::baked::{self, Baked, BakedCheck, Part, Source, Trust, Untrusted};
+    let out = Command::new("go")
+        .args(["env", "GOOS", "GOARCH"])
+        .env("GOTOOLCHAIN", "local")
+        .output()
+        .unwrap();
+    let said = String::from_utf8(out.stdout).unwrap();
+    let mut lines = said.lines();
+    let platform = format!("{}_{}", lines.next().unwrap(), lines.next().unwrap());
+    let checks = vec![BakedCheck {
+        check: None,
+        parts: vec![Part {
+            kind: "go/1".into(),
+            platform,
+            manifest: hushrun_core::blocks::Hex32([7; 32]),
+        }],
+    }];
+    let store = Baked {
+        schema: baked::SCHEMA.into(),
+        trust: Trust::Untrusted {
+            because: Untrusted::LocalStore,
+        },
+        manifest: baked::store_manifest(&checks),
+        source: Source::Store,
+        repository: None,
+        platform: "linux-x64".into(),
+        checks,
+        toolchains: Vec::new(),
+        packs: Vec::new(),
+        baked_ms: 0,
+        paths: None,
+    };
+    std::fs::create_dir_all(folder).unwrap();
+    std::fs::write(
+        folder.join(baked::BAKED_JSON),
+        serde_json::to_vec_pretty(&store).unwrap(),
+    )
+    .unwrap();
 }

@@ -73,6 +73,9 @@ getrandom.workspace = true
 # \[B-49\] A GitLab job's key, derived from its job token by HKDF-SHA256 and wiped from
 # memory. Both already part of the binary's build, through hushrun-attest.
 ring.workspace = true
+# \[B-71\] A baked store's archive compressed with zstd when its name ends in `.zst`. Already part
+# of the binary's build, through hushrun-core's packs.
+zstd.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

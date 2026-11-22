@@ -814,6 +814,110 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   `hushrun build status` count a cloned file in full in each place. A block not used for 15 days is
   deleted, and nothing is stored while the disk has less than 10 GB free.
 
+- **Baked into an image.** `hushrun build bake --out DIR` writes the crates, Go packages and C and
+  C++ objects the last run of each check here used (`--check NAME` narrows it) into a folder of
+  sealed packs, for an image or a read-only volume a sandbox starts from. A run there reads it
+  underneath its own store when `HUSHRUN_BUILD_LOWER` names the folder, and never writes to it.
+  Baked from your machine it holds only what may leave any machine and is untrusted, for you
+  alone: read only with `HUSHRUN_BUILD_LOWER_UNTRUSTED=1`, never in CI, and never in a run whose
+  backend lets it write the repository's trusted blocks. Go packages are in it only from runs that
+  shared or read a baked store. `--from backend` bakes what the org's CI compiled, and a run whose
+  backend vouches for each block as it begins reuses them, in CI too. A store missing blocks says
+  so and exits 0; one published for others exits 11. Bake on the platform the sandbox has.
+
+- **Published as an image.** `hushrun build bake --oci ghcr.io/acme/app` publishes the store as a
+  layered, signed image, and a Dockerfile takes it with
+  `COPY --from=ghcr.io/acme/app:hushrun-linux-x64-latest /hushrun /hushrun`: a run finds a store at
+  `/hushrun` (owned by root or you, and writable by nobody else) with no variable. The `-latest`
+  tag moves only from CI on the default branch; elsewhere a bake publishes its fixed tag, which
+  never moves, and with `--branch-tag` its branch's tag. A code change uploads only the image's
+  last layer when the image it builds on is signed by a signer hushrun.yaml names and the backend
+  still vouches for what it keeps. A run trusts the image when hushrun.yaml names its signer under
+  `build: baked: signers:` (and `build: baked: not_before` retires older ones); `hushrun init
+  --bake` adds the CI job that bakes after the default branch's build, and `hushrun build manifest
+  --json` says which image is newest. Keyless signing, as the CI job's own identity, is the setup
+  to use. A signing key (`--signing-key FILE`, `HUSHRUN_SIGNING_KEY_FILE`) is read before the bake
+  builds anything, but its file stays readable to that build, whose build scripts and tests run as
+  the same user: a key in a job that builds can leak, and a leaked key stays good until you take it
+  out of `build: baked: signers`.
+
+- **Over time.** An image's workspace layer is written again once a week (`build: baked:
+  compact_every`). A bake within the hour of the image its tag names publishes nothing unless 50
+  blocks changed (`rebake_every`, `rebake_blocks`; `--force` publishes anyway): sandboxes started in
+  between fetch the difference, and the job's daily run publishes whatever the limit, so a quiet
+  day after a held bake still catches up. Long-lived branches listed under `build: baked: branches:` get
+  their own tags from the job `hushrun init --bake` writes, each signed as that branch's workflow;
+  a run on the default branch trusts one only if hushrun.yaml names that branch's identity.
+
+- **After a merge CI skipped.** When CI on the default branch skips the checks a pull request
+  passed, it compiles nothing; the bake job then builds the merged code itself before it bakes, so
+  the image follows main: each check as CI's own workflow runs it (the command after `hushrun run
+  NAME --`, its folder and its job's variables, read from CI's file at each bake), reusing what CI
+  already built, at most 30 minutes; only the checks whose newest build is behind are built (a
+  check that compiles nothing counts as built at the commit its run named). A build that fails,
+  doesn't finish uploading or has a block the backend refuses leaves the backend's newest build as
+  it was, and the next bake tries again. The build gets none of the job's tokens. `--no-build`
+  turns it off. The job copies the build job's setup actions only when they are pinned to a commit
+  (`uses: owner/action@<40-hex commit>`), and a local action (`uses: ./…`) only when every action
+  its `action.yml` uses is; `hushrun init --bake` says which to pin otherwise.
+
+- **Blocks bound to CI's folders.** A crate whose output holds CI's home or cargo home (C `-sys`
+  crates, and what depends on them) is baked too, for sandboxes at the same folders: on GitHub's
+  runner `HOME=/home/runner`, `CARGO_HOME=/home/runner/.cargo` and the checkout at
+  `/home/runner/work/<name>/<name>` (the image's `baked.json` names them under `paths`). Elsewhere
+  they compile, and the run says which folders they need.
+
+- **Dependencies first, for a new repository.** Before CI's first build is baked, `hushrun build
+  bake --deps-only --oci ghcr.io/acme/app -- cargo test --locked` (the check's own cargo command,
+  for its profile and features; a `cargo test` compiles its tests and runs none) compiles the
+  third-party crates with your own crates as empty stubs, and publishes an image of them; the first full bake replaces it, and it
+  never replaces a full one. In a Go module it builds the third-party packages, with no command,
+  or with the check's `go test` flags (`-- go test -race -tags x ./...`, which isn't run).
+
+- **What it saves, measured.** Add `--report -- cargo build` to a bake to time that command on this
+  machine cold and from the store just baked: both times, and how many compiles the store served.
+
+- **As an archive, for a sandbox snapshotted while it runs.** `hushrun build bake --tar store.tar`
+  writes the same store, signed the same way, as one tar whose files are under `hushrun/`
+  (`store.tar.zst` compresses it; it saves little, since the packs are compressed already, and `-`
+  writes it to stdout). Put it where the sandbox can download it, then in the snapshot step:
+
+  ```sh
+  curl -fsSL https://files.example.com/acme/store.tar | tar -x -C /   # the store lands at /hushrun
+  # ...then take the snapshot
+  ```
+
+  Extract it as root or as the user who runs the builds: both are read at `/hushrun` with no
+  variable. A non-root user needs `/hushrun` made and given to it first (`sudo install -d -o
+  "$USER" /hushrun`). A folder its group may write isn't read there, and the line says the fix
+  (`chmod -R g-w /hushrun`). Extracted elsewhere (`tar -x -C /opt`), name it:
+  `HUSHRUN_BUILD_LOWER=/opt/hushrun`. To refresh, boot the last snapshot and run `hushrun build
+  fetch` (it downloads the backend's newest blocks into the sandbox's own store, kept for a day),
+  or replace `/hushrun` with a newer archive (good until a newer manifest replaces it), then
+  snapshot again. A stale snapshot is slower, never wrong: what it lacks is fetched or compiled.
+
+- **As a disk image, for a volume mounted read-only.** `hushrun build bake --erofs store.erofs`
+  writes the store as a read-only EROFS image whose root is the store, made without root or
+  `mkfs.erofs`. Write it to the volume once (or attach it as the volume's disk), mount it
+  read-only, and point runs at it: mounted at `/hushrun` it is read as it is
+  (`mount -t erofs -o ro store.erofs /hushrun`); anywhere else, `HUSHRUN_BUILD_LOWER=/mnt/store`.
+  Runs write only their own store. Linux reads EROFS from 5.4; where nothing can mount it,
+  `fsck.erofs --extract=DIR store.erofs` unpacks it, or use the tar.
+
+  The same store gives the same archive and disk image byte for byte, on any machine; two bakes of
+  it differ only in when they were baked and the signature (an unsigned bake with
+  `SOURCE_DATE_EPOCH` set gives the same bytes twice). Bake on the platform the sandbox has.
+
+- **In hosted mode** the image lives at `registry.hushrun.com/<org>/<name>`, built from the blocks
+  the org's backend already holds, so no block is stored twice: the bake job publishes there with
+  `hushrun build bake --from backend --trusted --oci hushrun` (or `--oci
+  registry.hushrun.com/<org>/<name>`), and only CI on the default branch can. `docker login
+  registry.hushrun.com -u x -p <pull token>`, then
+  `COPY --from=registry.hushrun.com/<org>/<name>:hushrun-linux-x64-latest /hushrun /hushrun`. A
+  pull token is read-only, for one repository; an owner or admin makes it, and it stops working
+  when its maker leaves the org or loses the role. A backend of your own serves its registry on its
+  own host.
+
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
 

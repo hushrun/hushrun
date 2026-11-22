@@ -1,6 +1,7 @@
 //! Golden init fixtures (C-15): each case under `testdata/init/` is a minimal repository, written by
 //! hand, of a pattern the survey of 100 repositories' CI found (its `case.md` says which), and
-//! `expected.json` pins the plan `hushrun init --dry-run --format json` makes of it.
+//! `expected.json` pins the plan `hushrun init --dry-run --format json` makes of it, with the flags
+//! its `args` file names, when it has one.
 //! `HUSHRUN_UPDATE_GOLDEN=1` rewrites them instead, for a review of the diff in git.
 //!
 //! A9: init's prediction is the run's decision. For each line init wraps and each wrapped script a
@@ -90,6 +91,8 @@ struct Case {
     _dir: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
+    /// \[B-69\] The flags the case's `args` file gives init besides `--dry-run`, such as `--bake`.
+    args: Vec<String>,
 }
 
 impl Case {
@@ -110,10 +113,16 @@ impl Case {
             None,
         );
         git::commit_all(&repo, "the fixture");
+        let args = std::fs::read_to_string(case.join("args"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
         Case {
             _dir: dir,
             root,
             repo,
+            args,
         }
     }
 
@@ -144,6 +153,7 @@ impl Case {
         let out = self
             .command(&assert_cmd::cargo::cargo_bin("hushrun"))
             .args(["init", "--dry-run", "--format", "json"])
+            .args(&self.args)
             .output()
             .expect("hushrun");
         assert!(out.status.success(), "{}", text(&out.stderr));

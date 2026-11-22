@@ -334,6 +334,8 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
                 repository.as_deref(),
                 &policy.build_env,
                 policy.build_cc_maps,
+                &policy.build_baked,
+                Some(name.as_str()),
                 None,
                 &place,
             ) {
@@ -788,6 +790,16 @@ impl Program {
 /// tree stops growing. The check stays in hushrun's process group: a terminal's signals and
 /// prompts reach it as before.
 fn kill(child: &mut Child) {
+    kill_trees(&[child.id()]);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Stops, then kills, each process of `roots` and every process under them (Unix), as [`kill`]
+/// does for a check: the trees are found while each process found is stopped, so none starts
+/// another meanwhile, and all are killed once they stop growing. Nobody is reaped: that is the
+/// parent's.
+pub(crate) fn kill_trees(roots: &[u32]) {
     #[cfg(unix)]
     {
         use rustix::process::{Pid, Signal, kill_process};
@@ -796,7 +808,7 @@ fn kill(child: &mut Child) {
                 let _ = kill_process(pid, signal);
             }
         };
-        let mut tree = vec![child.id()];
+        let mut tree = roots.to_vec();
         let mut stopped = 0;
         while stopped < tree.len() {
             for &pid in &tree[stopped..] {
@@ -819,13 +831,13 @@ fn kill(child: &mut Child) {
             send(pid, Signal::KILL);
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    #[cfg(not(unix))]
+    let _ = roots;
 }
 
 /// Every process's ID and its parent's, from `/proc`.
 #[cfg(target_os = "linux")]
-fn processes() -> Vec<(u32, u32)> {
+pub(crate) fn processes() -> Vec<(u32, u32)> {
     let Ok(dir) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -842,7 +854,7 @@ fn processes() -> Vec<(u32, u32)> {
 
 /// Every process's ID and its parent's, from `ps`.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn processes() -> Vec<(u32, u32)> {
+pub(crate) fn processes() -> Vec<(u32, u32)> {
     let Ok(output) = Command::new("ps")
         .args(["-A", "-o", "pid=", "-o", "ppid="])
         .stdin(Stdio::null())

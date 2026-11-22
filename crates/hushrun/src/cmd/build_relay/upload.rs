@@ -74,6 +74,26 @@ pub(crate) fn after_begin(answer: &Answer, class: LocalClass) -> Move {
     }
 }
 
+/// Whether `begin` refused a block for good: it never goes up, and the marker is done.
+pub(crate) fn refused_for_good(reason: Refusal) -> bool {
+    after_begin(&Answer::Refused { reason }, LocalClass::Library) == Move::Done
+}
+
+/// What a refusal says, in words.
+pub(crate) fn refusal_words(reason: Refusal) -> &'static str {
+    match reason {
+        Refusal::TooLarge => "too large",
+        Refusal::Unsupported => "a class the backend doesn't take",
+        Refusal::NoScope => "this job writes nowhere",
+        Refusal::Suspended => "suspended in the repository",
+        Refusal::OverAllowance => "the org's store is full",
+        Refusal::Differs => "a trusted copy differs",
+        Refusal::Busy => "busy",
+        Refusal::TooManyUploads => "too many uploads under way",
+        Refusal::Unknown => "a reason this version doesn't know",
+    }
+}
+
 /// The PUT's status: 2xx, or 412 "already there" (the same pack, sent before).
 pub(crate) fn after_put(status: Option<u16>) -> Move {
     match status {
@@ -108,6 +128,8 @@ pub(crate) struct End {
     pub(crate) waiting_cost: Duration,
     /// What this `hushrun run` call already waited at the end of its earlier checks.
     pub(crate) waited: Duration,
+    /// B-75: a bake's build of what's missing, which waits for every upload up to this long.
+    pub(crate) bake: Option<Duration>,
 }
 
 /// B-49: the most a run that was asked to stop gives `close`: GitLab's grace period before it
@@ -135,6 +157,14 @@ pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> EndWait {
         return EndWait {
             uploads: Duration::ZERO,
             total: STOPPED_CLOSE.min(tuning.close),
+        };
+    }
+    // B-75: a bake's build waits for its uploads whatever its compiles cost: what it leaves
+    // unsent, it leaves out of no manifest, since it closes none then.
+    if let Some(within) = end.bake {
+        return EndWait {
+            uploads: within,
+            total: within + tuning.close,
         };
     }
     let (uploads, total) = if end.in_ci {
@@ -415,6 +445,13 @@ impl Relay {
                 .find(|a| a.address == address)
                 .map_or(Answer::Unknown, |a| a.answer.clone());
             let step = after_begin(&answer, marker.class);
+            // B-75: refused for good, it is never on the backend: a bake's build that made it
+            // isn't whole.
+            if let Answer::Refused { reason } = &answer
+                && refused_for_good(*reason)
+            {
+                self.state().refused.push((marker.key, *reason));
+            }
             let Answer::Put { link } = answer else {
                 p.pack.remove();
                 finish(&marker, step);
@@ -674,6 +711,7 @@ mod tests {
                     trusted,
                     waiting_cost: Duration::from_secs(cost_s),
                     waited: Duration::from_secs(waited_s),
+                    bake: None,
                 },
             );
             (wait.uploads.as_millis(), wait.total.as_millis())
@@ -687,11 +725,28 @@ mod tests {
                 trusted: true,
                 waiting_cost: Duration::from_secs(600),
                 waited: Duration::ZERO,
+                bake: None,
             },
         );
         assert_eq!(
             (stopped.uploads.as_millis(), stopped.total.as_millis()),
             (0, 2_000)
+        );
+        // B-75: a bake's build waits for every upload, up to its own bound, whatever the cost.
+        let bake = wait_at_end(
+            &tuning,
+            &End {
+                in_ci: true,
+                stopping: false,
+                trusted: true,
+                waiting_cost: Duration::from_secs(4),
+                waited: Duration::from_secs(300),
+                bake: Some(Duration::from_secs(600)),
+            },
+        );
+        assert_eq!(
+            (bake.uploads.as_millis(), bake.total.as_millis()),
+            (600_000, 605_000)
         );
         // A person's machine: the 5 seconds for those in flight, whatever waits, then `close`'s 5.
         assert_eq!(end(false, true, 10_000, 0), (5_000, 10_000));

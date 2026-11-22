@@ -35,6 +35,25 @@ impl Failure {
     }
 }
 
+/// What the server answered a request, whatever its status.
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
+    /// The `Date` header, in milliseconds since the epoch.
+    pub(crate) date_ms: Option<u64>,
+    /// The `Retry-After` header, in seconds.
+    pub(crate) retry_after: Option<Duration>,
+}
+
+impl Reply {
+    /// The error's code, `{"error": {"code"}}`, when the body says one.
+    pub(crate) fn code(&self) -> Option<String> {
+        serde_json::from_slice::<serde_json::Value>(&self.body)
+            .ok()
+            .and_then(|v| v["error"]["code"].as_str().map(str::to_string))
+    }
+}
+
 /// An answer, with the server's date (the `Date` header, in milliseconds since the epoch).
 pub(crate) struct Answered<T> {
     pub(crate) body: T,
@@ -134,6 +153,32 @@ impl Client {
         signature: Option<String>,
     ) -> Result<Answered<R>, Failure> {
         let url = format!("{}/{path}", self.base);
+        let reply = self.post_raw(path, bytes, timeout, signature).await?;
+        match reply.status {
+            200..=299 => serde_json::from_slice(&reply.body)
+                .map(|body| Answered {
+                    body,
+                    date_ms: reply.date_ms,
+                })
+                .map_err(|err| Failure::Failed(format!("{url}: the answer isn't one: {err}"))),
+            401 | 403 | 404 | 405 => Err(Failure::Refused(reply.status, reply.code())),
+            status => Err(Failure::Failed(format!("{url}: answered {status}"))),
+        }
+    }
+
+    /// `POST {base}/{path}` of `bytes`, within `timeout`, with the credential and the headers
+    /// every build request carries: whatever status the server answers, with its body. A 401 to
+    /// an ID token is tried once more with a fresh one; a 503 or 429 whose `Retry-After` fits, or
+    /// a connection that failed at once, once more (every request may be sent again). `Err` only
+    /// when no answer came.
+    pub(crate) async fn post_raw(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        timeout: Duration,
+        signature: Option<String>,
+    ) -> Result<Reply, Failure> {
+        let url = format!("{}/{path}", self.base);
         let deadline = tokio::time::Instant::now() + timeout;
         let mut tries = 0;
         // The token a 401 refused: never sent again.
@@ -191,37 +236,40 @@ impl Client {
             let body = response
                 .bytes()
                 .await
-                .map_err(|err| Failure::Unreachable(format!("{url}: {}", chain(&err))))?;
+                .map_err(|err| Failure::Unreachable(format!("{url}: {}", chain(&err))))?
+                .to_vec();
+            let reply = Reply {
+                status,
+                body,
+                date_ms,
+                retry_after,
+            };
             match status {
-                200..=299 => {
-                    return serde_json::from_slice(&body)
-                        .map(|body| Answered { body, date_ms })
-                        .map_err(|err| {
-                            Failure::Failed(format!("{url}: the answer isn't one: {err}"))
-                        });
-                }
                 // An ID token the backend no longer takes: mint a fresh one and try once more.
                 401 if refused.is_none() && self.credential.renews() => {
                     refused = Some(token);
                     tries -= 1;
                 }
-                401 | 403 | 404 | 405 => {
-                    let code = serde_json::from_slice::<serde_json::Value>(&body)
-                        .ok()
-                        .and_then(|v| v["error"]["code"].as_str().map(str::to_string));
-                    return Err(Failure::Refused(status, code));
-                }
                 429 | 503 if tries < 2 => {
                     let wait = retry_after.unwrap_or(Duration::from_secs(1));
                     let left = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if wait >= left {
-                        return Err(Failure::Failed(format!("{url}: answered {status}")));
+                        return Ok(reply);
                     }
                     tokio::time::sleep(wait).await;
                 }
-                _ => return Err(Failure::Failed(format!("{url}: answered {status}"))),
+                _ => return Ok(reply),
             }
         }
+    }
+
+    /// The bearer token this client's requests carry now (B-31: an ID token minted for the org's
+    /// URL, within `timeout`): what the backend's registry takes as a password, for the same
+    /// caller.
+    pub(crate) async fn bearer_now(&self, timeout: Duration) -> Result<String, Failure> {
+        self.credential
+            .bearer(&self.http, None, tokio::time::Instant::now() + timeout)
+            .await
     }
 
     /// The object store's request for a link, the token never sent.

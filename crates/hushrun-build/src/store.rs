@@ -1453,13 +1453,13 @@ fn place(temp: &Path, dest: &Path) -> io::Result<Published> {
 /// `renameatx_np` with `RENAME_SWAP` on macOS): each takes the other's name, and nothing ever
 /// sees the name empty.
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+pub(crate) fn exchange(a: &Path, b: &Path) -> io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, a, CWD, b, RenameFlags::EXCHANGE).map_err(io::Error::from)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
-fn exchange(_a: &Path, _b: &Path) -> io::Result<()> {
+pub(crate) fn exchange(_a: &Path, _b: &Path) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
