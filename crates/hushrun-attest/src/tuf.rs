@@ -18,7 +18,7 @@ use hushrun_core::time::Time;
 
 use crate::keys::verify_signature;
 
-/// Sigstore's TUF root, version 15, from which updates start (`sigstore/README.md`).
+/// Sigstore's TUF root, version 16, from which updates start (`sigstore/README.md`).
 pub const SIGSTORE_ROOT: &[u8] = include_bytes!("../sigstore/root.json");
 /// The `targets.json` that pins the vendored trust root.
 pub const SIGSTORE_TARGETS: &[u8] = include_bytes!("../sigstore/targets.json");

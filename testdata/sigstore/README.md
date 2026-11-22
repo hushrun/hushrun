@@ -6,3 +6,8 @@
 public, logged in Sigstore's CT log, and expired ten minutes after it was issued. Tests read its
 identity and verify its chain and SCT against the public-good trust root, as hushrun reads
 certificates it didn't make.
+
+`15.root.json` is version 15 of public-good Sigstore's TUF root
+(`https://tuf-repo-cdn.sigstore.dev/15.root.json`), which the binary carried before version 16. A
+test checks that it signed the vendored `crates/hushrun-attest/sigstore/root.json`, as a refresh
+from it would.

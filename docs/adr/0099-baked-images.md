@@ -262,6 +262,11 @@ follows (B-65 to B-69):
      `targets.json` pins `trusted_root.json`), then the workspace's tests: a run's keyless checks
      read `trusted_root.json`.
 
+  Done on 2026-11-22: root version 16 (expiring on 2027-04-22) is vendored, and Sigstore's
+  `targets.json` (version 14) and `trusted_root.json` hadn't changed. The steps now live in
+  `crates/hushrun-attest/sigstore/README.md`, with a test that the root vendored before signed
+  the new one.
+
 ## Amendment: publishing into a backend's registry (B-70)
 
 A backend can serve a read-only registry built from the packs it already holds (its pull API is

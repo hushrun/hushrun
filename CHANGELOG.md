@@ -6,6 +6,14 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Fixed
+
+- **The vendored Sigstore TUF root is current again** (T-12): version 15, which
+  `hushrun sigstore refresh` starts from, expired on 2026-11-20; the binary now carries version 16,
+  which version 15 signed and which expires on 2027-04-22. A refresh walked to it already when
+  Sigstore's repository could be reached; `targets.json` (version 14) and the trust root itself
+  are unchanged, so verification reads the same certificate and timestamp authorities.
+
 ## [0.19.0] - 2026-11-23
 
 Baked stores ([ADR 0098](docs/adr/0098-baked-stores.md), B-63 and B-64): a repository's compiled

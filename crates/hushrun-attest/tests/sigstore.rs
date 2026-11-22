@@ -37,7 +37,7 @@ fn sigstores_timestamp_authority_answers_with_a_timestamp_that_verifies() {
 #[test]
 fn sigstores_tuf_repository_refreshes_the_vendored_trust_root() {
     let refreshed = remote_tuf::refresh(SIGSTORE_MIRROR, SIGSTORE_ROOT, &[], None, now()).unwrap();
-    assert!(refreshed.root_version >= 15);
+    assert!(refreshed.root_version >= 16);
     assert!(refreshed.targets_version >= 14);
     verify_cached(
         SIGSTORE_ROOT,

@@ -9,10 +9,10 @@ fn at(text: &str) -> Time {
 // covers: T-12
 #[test]
 fn the_vendored_trust_root_is_the_one_sigstore_published() {
-    // Root version 15's targets keys signed targets.json version 14, which pins the vendored
+    // Root version 16's targets keys signed targets.json version 14, which pins the vendored
     // trusted_root.json.
     let verified = verify_cached(SIGSTORE_ROOT, &[], SIGSTORE_TARGETS, PUBLIC_GOOD).unwrap();
-    assert_eq!(verified.root_version, 15);
+    assert_eq!(verified.root_version, 16);
     assert_eq!(verified.targets_version, 14);
     let root = Root::parse(SIGSTORE_ROOT).unwrap();
     assert!(root.consistent_snapshot);
@@ -20,6 +20,37 @@ fn the_vendored_trust_root_is_the_one_sigstore_published() {
     let mut changed = PUBLIC_GOOD.to_vec();
     changed[10] ^= 1;
     assert!(verify_cached(SIGSTORE_ROOT, &[], SIGSTORE_TARGETS, &changed).is_err());
+}
+
+// covers: T-12
+#[test]
+fn the_vendored_root_follows_the_one_before_and_was_current_when_vendored() {
+    // The root vendored before (`testdata/sigstore/15.root.json`) signed this one, as a
+    // refresh from it walks: the threshold of its root keys and of the new root's own.
+    let before = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../testdata/sigstore/15.root.json"
+    ))
+    .unwrap();
+    let next = Root::parse(&before)
+        .unwrap()
+        .verify_next(SIGSTORE_ROOT)
+        .unwrap();
+    assert_eq!(next, Root::parse(SIGSTORE_ROOT).unwrap());
+    let verified = verify_cached(
+        &before,
+        &[SIGSTORE_ROOT.to_vec()],
+        SIGSTORE_TARGETS,
+        PUBLIC_GOOD,
+    )
+    .unwrap();
+    assert_eq!(verified.root_version, next.version);
+    // Unexpired on the day it was vendored (`sigstore/README.md`): a refresh moves both.
+    assert!(
+        next.expires > at("2026-11-22T00:00:00Z"),
+        "{}",
+        next.expires
+    );
 }
 
 // covers: T-12
