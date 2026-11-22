@@ -90,13 +90,13 @@ pub enum RootsError {
     #[error("{0:?} is the file system's root")]
     TooBroad(String),
     /// More `-L dependency=` folders than a root name can number.
-    #[error("more than 256 dependency folders")]
+    #[error("more than 65536 dependency folders")]
     TooManyDeps,
     /// More folders of `CARGO_BIN_EXE_*` values than a root name can number.
     #[error("more than 256 folders of programs")]
     TooManyBinFolders,
     /// A native folder whose place among the `-L` flags a root name can't number.
-    #[error("a native folder after the 256th -L flag")]
+    #[error("a native folder after the 65536th -L flag")]
     TooManySearchFolders,
     /// A placeholder names a root this call doesn't have.
     #[error("{0:?} names no root of this call")]
@@ -244,11 +244,11 @@ impl Roots {
         }
         candidates.push((RootName::OutDir, &paths.out_dir));
         for (i, dir) in paths.deps.iter().enumerate() {
-            let i = u8::try_from(i).map_err(|_| RootsError::TooManyDeps)?;
+            let i = u16::try_from(i).map_err(|_| RootsError::TooManyDeps)?;
             candidates.push((RootName::Deps(i), dir));
         }
         for (i, dir) in &paths.native {
-            let i = u8::try_from(*i).map_err(|_| RootsError::TooManySearchFolders)?;
+            let i = u16::try_from(*i).map_err(|_| RootsError::TooManySearchFolders)?;
             candidates.push((RootName::Native(i), dir));
         }
         // What cargo or the person gave: never derived from another root by position.
@@ -764,8 +764,8 @@ fn precedence(name: RootName) -> (u8, u16) {
         RootName::BinExe(i) => (5, 255 - u16::from(i)),
         RootName::TargetTmp => (6, 0),
         // The first folder of a kind wins over a later one with the same text.
-        RootName::Native(i) => (7, 255 - u16::from(i)),
-        RootName::Deps(i) => (8, 255 - u16::from(i)),
+        RootName::Native(i) => (7, u16::MAX - i),
+        RootName::Deps(i) => (8, u16::MAX - i),
         RootName::OutDir => (9, 0),
         // A package's own output named as a native folder too is its output (B-6 `generated`).
         RootName::ScriptOut => (10, 0),
@@ -1568,10 +1568,44 @@ mod tests {
             "/elsewhere/target/debug/build/z-1/out".into()
         )));
         let mut far = paths("/w/ws");
-        far.native = vec![(300, "/x".into())];
+        far.native = vec![(70_000, "/x".into())];
         assert_eq!(
             Roots::new(&far, &[], &Machine::default(), |_| None),
             Err(RootsError::TooManySearchFolders)
+        );
+    }
+
+    // covers: B-8
+    #[test]
+    fn a_folder_per_dependency_as_cargo_1_100_lays_them_out_is_no_error() {
+        // Cargo 1.100's default layout gives each unit its own `build/PKG/HASH/out` and passes
+        // one `-L dependency=` per dependency: cg-editor's compile had 434 of them on
+        // 2026-11-22, and every crate with more than 256 was passed through as `roots`. The
+        // native folders come after them among the `-L` flags.
+        let mut p = paths("/w/ws");
+        p.deps = (0..434)
+            .map(|i| format!("/w/ws/target/debug/build/dep{i}/{i:016x}/out"))
+            .collect();
+        p.native = vec![(434, "/w/ws/target/debug/build/zstd-sys/1/out".into())];
+        // By their spelling, which records and placeholders hold.
+        let name = |text: &str| RootName::parse(text).expect(text);
+        let roots = Roots::new(&p, &shared(), &Machine::default(), |_| None).unwrap();
+        let last = format!("/w/ws/target/debug/build/dep433/{:016x}/out", 433);
+        assert_eq!(
+            roots.locate(&format!("{last}/libdep433.rmeta")),
+            rooted(name("deps-433"), "libdep433.rmeta")
+        );
+        assert_eq!(
+            roots.to_placeholders(&format!("dependency={last}")),
+            "dependency={hushrun:deps-433}"
+        );
+        assert_eq!(
+            roots.from_placeholders("{hushrun:deps-433}/x").unwrap(),
+            format!("{last}/x")
+        );
+        assert_eq!(
+            roots.locate("/w/ws/target/debug/build/zstd-sys/1/out/libzstd.a"),
+            rooted(name("native-434"), "libzstd.a")
         );
     }
 
@@ -1834,7 +1868,7 @@ mod tests {
             Err(RootsError::TooBroad(_))
         ));
         let mut p = paths("/w/ws");
-        p.deps = (0..300).map(|i| format!("/d/{i}")).collect();
+        p.deps = (0..70_000).map(|i| format!("/d/{i}")).collect();
         assert_eq!(
             Roots::new(&p, &[], &Machine::default(), |_| None),
             Err(RootsError::TooManyDeps)

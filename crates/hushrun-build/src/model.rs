@@ -472,11 +472,12 @@ pub enum RootName {
     ScriptOut,
     /// `--out-dir`.
     OutDir,
-    /// The i-th `-L dependency=` folder, counted from 0.
-    Deps(u8),
+    /// The i-th `-L dependency=` folder, counted from 0. Cargo 1.100's layout gives each
+    /// dependency a folder of its own, so a crate can have hundreds.
+    Deps(u16),
     /// A `-L native=`, `-L all=` or bare `-L` folder, by its place among all the `-L` flags,
     /// counted from 0: usually another package's build-script output (B-6, B-8).
-    Native(u8),
+    Native(u16),
     /// `CARGO_TARGET_DIR`, when it is absolute: cargo's target folder as the person named it.
     TargetDir,
     /// `CARGO_BUILD_TARGET_DIR`, when it is absolute.
@@ -550,16 +551,19 @@ impl RootName {
             "home" => Some(RootName::Home),
             "rustup-home" => Some(RootName::RustupHome),
             _ => {
-                let (make, digits): (fn(u8) -> RootName, &str) =
+                let (make, digits): (fn(u16) -> Option<RootName>, &str) =
                     if let Some(digits) = text.strip_prefix("deps-") {
-                        (RootName::Deps, digits)
+                        (|i| Some(RootName::Deps(i)), digits)
                     } else if let Some(digits) = text.strip_prefix("bin-exe-") {
-                        (RootName::BinExe, digits)
+                        (|i| u8::try_from(i).ok().map(RootName::BinExe), digits)
                     } else {
-                        (RootName::Native, text.strip_prefix("native-")?)
+                        (|i| Some(RootName::Native(i)), text.strip_prefix("native-")?)
                     };
-                let i: u8 = digits.parse().ok()?;
-                (i.to_string() == digits).then_some(make(i))
+                let i: u16 = digits.parse().ok()?;
+                if i.to_string() != digits {
+                    return None;
+                }
+                make(i)
             }
         }
     }
@@ -709,8 +713,11 @@ mod tests {
             RootName::OutDir,
             RootName::Deps(0),
             RootName::Deps(255),
+            RootName::Deps(433),
+            RootName::Deps(u16::MAX),
             RootName::Native(0),
             RootName::Native(17),
+            RootName::Native(434),
             RootName::TargetDir,
             RootName::BuildTargetDir,
             RootName::TargetTmp,
@@ -724,7 +731,9 @@ mod tests {
         }
         for bad in [
             "deps-01",
-            "deps-256",
+            "deps-65536",
+            "native-65536",
+            "bin-exe-256",
             "deps-",
             "deps--1",
             "native-01",

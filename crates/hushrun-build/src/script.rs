@@ -11,9 +11,12 @@
 //! cargo 1.94, default layout     target/debug/build/PKG-HASH/out      .../PKG-HASH/output
 //! cargo 1.94, -Zbuild-dir-new-layout  .../build/PKG/HASH/build-script/out  .../build-script/output
 //! cargo master (new layout)      .../build/PKG/HASH/run/out           .../run/stdout
+//! cargo 1.100 (new layout)       .../build/PKG/HASH/out               .../HASH/run/stdout
 //! ```
 //!
-//! In every case the file sits beside `OUT_DIR`. Cargo 1.94 (`custom_build.rs`) writes
+//! Up to cargo master the file sits beside `OUT_DIR`; cargo 1.100, where the new layout is the
+//! default, puts it in the `run/` folder beside `OUT_DIR` (seen on 2026-11-22, with
+//! `run/root-output` naming `HASH/out`). Cargo 1.94 (`custom_build.rs`) writes
 //! `script_run_dir.join("output")`; cargo master (`src/compiler/custom_build.rs`,
 //! `BuildScriptRunFiles::for_unit`) writes `root.join("stdout")` under the new layout and
 //! `root.join("output")` otherwise. `OUT_DIR` is `build_script_run_dir(unit).join("out")` in both
@@ -97,12 +100,15 @@ pub enum Error {
     },
 }
 
-/// The names cargo saves a build script's stdout under, beside `OUT_DIR`: `output` (cargo 1.94,
-/// both layouts; the old layout on master) and `stdout` (the new layout on master).
-const SAVED_NAMES: [&str; 2] = ["output", "stdout"];
+/// Where cargo saves a build script's stdout, from the folder that holds `OUT_DIR`: `output`
+/// (cargo 1.94, both layouts; the old layout on master), `stdout` (the new layout on master, with
+/// `OUT_DIR` in `run/`) and `run/stdout` (cargo 1.100, whose new layout is the default, with
+/// `OUT_DIR` beside `run/`).
+const SAVED_NAMES: [&str; 3] = ["output", "stdout", "run/stdout"];
 
 /// Where cargo saved the stdout of the build script whose `OUT_DIR` is `out_dir`: the first of
-/// `<OUT_DIR>/../output` and `<OUT_DIR>/../stdout` that is a file. `None` when neither is.
+/// `<OUT_DIR>/../output`, `<OUT_DIR>/../stdout` and `<OUT_DIR>/../run/stdout` that is a file.
+/// `None` when none is.
 pub fn saved_output(out_dir: &Path) -> Option<PathBuf> {
     let run_dir = out_dir.parent()?;
     SAVED_NAMES
@@ -428,6 +434,22 @@ cargo:rerun-if-changed=build.rs
         fs::create_dir_all(new.join("out")).unwrap();
         fs::write(new.join("stdout"), "").unwrap();
         assert_eq!(saved_output(&new.join("out")), Some(new.join("stdout")));
+        // cargo 1.100, whose new layout is the default: OUT_DIR is build/PKG/HASH/out and the
+        // stdout is build/PKG/HASH/run/stdout, beside it in `run/` (seen on 2026-11-22: every
+        // crate with a build script was `built, not stored: script-output-missing`).
+        let stable = dir.path().join("build/foo/5678");
+        fs::create_dir_all(stable.join("out")).unwrap();
+        fs::create_dir_all(stable.join("run")).unwrap();
+        assert_eq!(saved_output(&stable.join("out")), None);
+        fs::write(
+            stable.join("run/stdout"),
+            "cargo:rerun-if-changed=build.rs\n",
+        )
+        .unwrap();
+        assert_eq!(
+            saved_output(&stable.join("out")),
+            Some(stable.join("run/stdout"))
+        );
         // A folder by that name is not the file.
         let odd = dir.path().join("odd");
         fs::create_dir_all(odd.join("out")).unwrap();

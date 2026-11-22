@@ -40,6 +40,14 @@ to "in CI" decides what signs a bake, and a CI job with no backend says why it k
   which version 15 signed and which expires on 2027-04-22. A refresh walked to it already when
   Sigstore's repository could be reached; `targets.json` (version 14) and the trust root itself
   are unchanged, so verification reads the same certificate and timestamp authorities.
+- **Build reuse works with cargo 1.100's build folder layout** (B-6, B-8). Cargo 1.100 lays
+  out each unit in a folder of its own by default (`build/PKG/HASH/`), which broke two things:
+  a build script's saved stdout is `HASH/run/stdout` beside `OUT_DIR` (`HASH/out`), which
+  hushrun didn't look for, so every crate with a build script was `built, not stored:
+  script-output-missing` and a test binary that read one always ran; and each dependency gets
+  its own `-L dependency=` folder, so a crate with more than 256 of them (434 for one GPUI
+  application) was passed through as `roots`. hushrun now finds `run/stdout`, and numbers up to
+  65536 dependency and search folders.
 
 ## [0.19.0] - 2026-11-23
 
