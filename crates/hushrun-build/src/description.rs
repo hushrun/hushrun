@@ -169,6 +169,16 @@ impl Description {
         let description: Description = serde_json::from_value(value.clone()).ok()?;
         (description.schema == SCHEMA).then_some(description)
     }
+
+    /// Whether the output `name` is one that something starts or loads: the linked output of a
+    /// program, a build script or a proc macro, which rustc writes with its run bits (B-12).
+    pub fn starts(&self, name: &str) -> bool {
+        self.class != Class::Library
+            && self
+                .outputs
+                .iter()
+                .any(|o| o.name == name && o.kind == OutputKind::Link)
+    }
 }
 
 #[cfg(test)]

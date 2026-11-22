@@ -215,6 +215,109 @@ fn a_library_one_machine_built_is_reused_on_another_from_the_shared_store() {
     );
 }
 
+/// A workspace of one library, `app`, whose build script gives it a variable, committed in a
+/// repository.
+fn script_workspace(root: &Path) -> PathBuf {
+    let repo = root.join("repo");
+    let write = |path: &str, text: &str| {
+        let path = repo.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        "build.rs",
+        "fn main() {\n    println!(\"cargo:rustc-env=APP_GREETING=hello\");\n}\n",
+    );
+    write(
+        "src/lib.rs",
+        "pub fn greeting() -> &'static str {\n    env!(\"APP_GREETING\")\n}\n",
+    );
+    write(".gitignore", "target/\n");
+    git::init(&repo, "sha1");
+    git::commit_all(&repo, "init");
+    repo
+}
+
+/// The files of each build script's block in the store under `dir` that a compile here didn't
+/// make: the blocks only downloaded.
+fn downloaded_build_scripts(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(shards) = std::fs::read_dir(dir.join("blocks")) else {
+        return found;
+    };
+    for block in shards
+        .flatten()
+        .flat_map(|s| std::fs::read_dir(s.path()))
+        .flatten()
+    {
+        let block = block.unwrap().path();
+        let record = std::fs::read_to_string(block.join("block.json")).unwrap_or_default();
+        let origin = std::fs::read_to_string(block.join("origin.json")).unwrap_or_default();
+        if record.contains("\"build-script\"") && !origin.contains("\"built\"") {
+            let files = std::fs::read_dir(block.join("files")).unwrap();
+            found.extend(files.flatten().map(|f| f.path()));
+        }
+    }
+    found
+}
+
+// covers: B-12, B-28
+#[test]
+fn a_build_script_from_the_shared_store_starts_also_when_the_store_holds_it_without_its_run_bits() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // A pack keeps no file mode. Cargo starts a build script itself, so one put in place without
+    // its run bits fails the build with "Permission denied", and every build after it.
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::with(dir.path(), "a", None, script_workspace);
+    for _ in 0..5 {
+        let (code, stderr) = a.build(&fake);
+        assert_eq!(code, 0, "{stderr}");
+        let stored = fake.stored();
+        if stored.len() >= 2
+            && stored
+                .iter()
+                .any(|b| b.class == hushrun_core::blocks::Class::BuildScript)
+        {
+            break;
+        }
+    }
+    let stored = fake.stored();
+    assert!(
+        stored
+            .iter()
+            .any(|b| b.class == hushrun_core::blocks::Class::BuildScript),
+        "A's build script is stored: {}",
+        a.may_leave()
+    );
+
+    let b = Machine::with(dir.path(), "b", Some(&a.repo), script_workspace);
+    let (code, stderr) = b.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    let store = b.root.join("cache/build");
+    let scripts = downloaded_build_scripts(&store);
+    assert!(
+        !scripts.is_empty(),
+        "B downloaded no build script: {stderr}"
+    );
+
+    // The store as a hushrun that unpacked it without its run bits left it: B's next build in a
+    // clean target folder reuses that block, and cargo starts what it puts in place.
+    for file in &scripts {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    let stderr = rebuilt(&b, &fake, |_| {});
+    assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
+    for file in &scripts {
+        let mode = std::fs::metadata(file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o444, "a stored block is never rewritten");
+    }
+}
+
 // covers: B-26
 #[test]
 fn a_server_that_sleeps_ten_seconds_on_open_doesnt_delay_cargo() {

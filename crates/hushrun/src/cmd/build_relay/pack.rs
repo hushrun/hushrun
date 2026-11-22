@@ -339,6 +339,10 @@ pub(crate) fn publish(
             }
         }
     }
+    // A pack keeps no file modes: a linked output of a program, a build script or a proc macro
+    // gets the mode its compile gives it, so that cargo can start a build script reused from a
+    // download (B-12, B-28).
+    linked_outputs_executable(&description, &opened.files).map_err(|err| err.to_string())?;
     let files: Vec<NewFile> = opened
         .files
         .iter()
@@ -366,6 +370,33 @@ pub(crate) fn publish(
         });
     }
     Ok(replaced)
+}
+
+/// Makes each linked output an opened pack of a program, a build script or a proc macro holds
+/// executable where it is readable, as rustc writes it under the umask: the store copies a file's
+/// mode in, and a reuse copies it out.
+pub(crate) fn linked_outputs_executable(
+    description: &serde_json::Value,
+    files: &[(String, PathBuf)],
+) -> io::Result<()> {
+    let Some(description) = hushrun_build::description::Description::from_value(description) else {
+        return Ok(());
+    };
+    for (name, path) in files {
+        if description.starts(name) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                // The file as it was unpacked, under this process's umask, as rustc's would be.
+                let mode = fs::metadata(path)?.permissions().mode();
+                let mode = hushrun_build::restore::runnable(mode);
+                fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            }
+            #[cfg(not(unix))]
+            let _ = path;
+        }
+    }
+    Ok(())
 }
 
 /// The SHA-256s of an opened pack's files, by name, against a stored block's: whether they

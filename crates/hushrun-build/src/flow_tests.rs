@@ -6232,6 +6232,114 @@ fn a_linked_output_compiled_over_a_differing_download_takes_its_place_without_a_
     );
 }
 
+// covers: B-12, B-28
+#[cfg(unix)]
+#[test]
+fn a_downloaded_program_stored_without_its_run_bits_is_put_in_place_runnable() {
+    use std::os::unix::fs::PermissionsExt;
+    // A pack keeps no file mode, and an older hushrun stored a downloaded program as it unpacked
+    // it, without its run bits. Cargo starts a build script, and a test runner a test program,
+    // themselves: put in place as the store holds it, it fails with "Permission denied".
+    let other = world_that_shares(Mode::On);
+    other.plan("a", program_plan(false));
+    let there = program_checkout(&other, "ws");
+    settle();
+    let built = call_program(&other, &there, &[]);
+    assert_eq!(built.outcome(), STORED, "{}", built.stderr);
+    let key = built.entry.unwrap().key.unwrap();
+    let step = only_step(&other);
+
+    let mut w = world(Mode::On);
+    w.share("acme");
+    w.plan("a", program_plan(false));
+    let ws = program_checkout(&w, "ws");
+    settle();
+    let block = other.store().block(&key).unwrap().unwrap();
+    let program = w.dir.path().join("their-program");
+    fs::write(&program, crate::loader::tests::host_program(None)).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut files: Vec<crate::store::NewFile> = block
+        .files
+        .iter()
+        .map(|f| crate::store::NewFile {
+            name: f.name.clone(),
+            source: f.path.clone(),
+        })
+        .collect();
+    // The fake compiler writes a program under a library's name.
+    files
+        .iter_mut()
+        .find(|f| f.name == "liba-xa.rlib")
+        .unwrap()
+        .source = program;
+    w.store()
+        .publish_with_origin(
+            &key,
+            &block.description,
+            &files,
+            &Origin::downloaded(vouch(now_ms())),
+            SystemTime::now(),
+        )
+        .unwrap();
+    let stored = w.store().block(&key).unwrap().unwrap();
+    let stored = stored
+        .files
+        .iter()
+        .find(|f| f.name == "liba-xa.rlib")
+        .unwrap();
+    let mode = fs::metadata(&stored.path).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o111,
+        0,
+        "stored as an older hushrun left it: {mode:o}"
+    );
+    for hint in other.store().hints(&step) {
+        w.store()
+            .add_shared_hint(&step, &hint, SystemTime::now())
+            .unwrap();
+    }
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let tools = ws.join("tools").to_str().unwrap().to_string();
+    let r = w.call_args(&ws, "a", program_args(&w, &ws, &[]), move |fake| {
+        fake.vars.insert("PATH".into(), tools);
+        fake.relay = Some(relay);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let here = ws.join("target/debug/deps/liba-xa.rlib");
+    let mode = fs::metadata(&here).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "{mode:o}");
+}
+
+// covers: B-12
+#[cfg(unix)]
+#[test]
+fn a_downloaded_library_is_put_in_place_without_run_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    // Only what starts gets run bits: a library's linked output and its metadata are data, as
+    // rustc writes them.
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = serving(other.store(), w.store(), None);
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(relay);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let block = w.store().block(&key).unwrap().unwrap();
+    assert!(
+        block.files.iter().any(|f| f.name.ends_with(".rlib")),
+        "{block:?}"
+    );
+    for file in &block.files {
+        let here = w.rlib(&ws, "a").with_file_name(&file.name);
+        let mode = fs::metadata(&here).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0, "{}: {mode:o}", file.name);
+    }
+}
+
 // covers: B-38, B-34
 #[cfg(unix)]
 #[test]

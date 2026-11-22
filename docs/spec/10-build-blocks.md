@@ -458,7 +458,10 @@ toolchain by content (B-17).
 
 **B-12 Reuse.** Each file of the block is cloned (copied where the file system can't clone) under
 a temporary name that doesn't begin with `lib`, in the output folder, and renamed into place: a
-new file the owner can write. All get one modification time, the wrapper's start. A program's
+new file the owner can write. The linked output of a program, a build script or a proc macro is
+also given a run bit wherever it has a read bit, whatever mode the store holds: a pack keeps no
+file mode (B-28), and a block an older hushrun downloaded is stored without them. All get one
+modification time, the wrapper's start. A program's
 debug bundle is cloned whole into a temporary folder in the output folder, and that folder is
 renamed into place after a bundle already there is moved aside and removed, so that no bundle is
 ever there in part. The bundle goes first, then the other files, then the dep-info file, which
@@ -1194,8 +1197,11 @@ last chunk, with data after it, or with a chunk over 1 MiB fails), each file's s
 against the record, that the record names the key and the first key it was asked for, and that
 the **digest of outputs** (SHA-256 of the canonical JSON of the files sorted by name, each its
 name, size and SHA-256, and nothing else) is the row's. A pack that fails any check is dropped
-and reported `unreadable`. Before it writes any file, the reader refuses a record whose files
-come to more than 64 times the pack, or to more than the disk can take above the free-space floor
+and reported `unreadable`. A pack keeps no file mode: the reader gives the linked output of a
+program, a build script or a proc macro a run bit wherever it has a read bit, as rustc writes it
+under the umask, so that cargo can start a build script that came in a pack. Before it writes any
+file, the reader refuses a record whose files come to more than 64 times the pack, or to more
+than the disk can take above the free-space floor
 (B-22), by one rule (`Relay::room_for`) for a download and for shared `observe`'s comparison
 (B-33), which writes nothing but would spend as much work; that is a compile, not a report (in
 `observe`, no comparison), and each file stops at its declared size whatever the stream holds. A pack over 2 GiB is not shared. *Rests on:* the digest of outputs

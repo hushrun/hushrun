@@ -1031,6 +1031,154 @@ fn a_cold_machine_prefetches_the_manifest_s_libraries_and_opens_them_when_asked(
     relay.end_check(&[]);
 }
 
+/// The description of a block of `class` whose one linked output is `output`.
+#[cfg(unix)]
+fn linked_description(
+    class: LocalClass,
+    output: &str,
+    step: Digest,
+) -> hushrun_build::description::Description {
+    use hushrun_build::description::{Description, Output, OutputKind, StoredDepInfo};
+    let messages = hushrun_build::messages::Recorder::new(
+        Vec::new(),
+        hushrun_build::messages::Form::new(Some("json"), None, None),
+    )
+    .finish()
+    .store(|p| p.to_string());
+    Description {
+        schema: hushrun_build::description::SCHEMA.into(),
+        repository: Some("github.com/acme/shop".into()),
+        class,
+        crate_name: "build_script_build".into(),
+        package: Some("shop".into()),
+        step,
+        origin: step,
+        place: hushrun_build::key::PlaceKind::Anywhere,
+        portability: hushrun_build::portable::Portability {
+            portable: true,
+            reasons: Vec::new(),
+            externs: Vec::new(),
+            variables: Vec::new(),
+            link_environment: None,
+        },
+        outputs: vec![Output {
+            name: output.into(),
+            kind: OutputKind::Link,
+            metadata: None,
+        }],
+        dep_info: StoredDepInfo {
+            targets: Vec::new(),
+            files: Vec::new(),
+            env: Vec::new(),
+        },
+        messages,
+        rustc_ms: 1000,
+        built_ms: 1,
+        link_environment: None,
+    }
+}
+
+// covers: B-28
+#[cfg(unix)]
+#[test]
+fn an_unpacked_program_is_runnable_only_where_the_umask_lets_it_be_read() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // The reader writes each file under this process's umask, as rustc writes its program: under
+    // `umask 077` a file comes out 0600, and the program rustc would link is 0700, not 0755. The
+    // umask is the process's, so the test gives the file that mode rather than change it under
+    // the tests running beside it. A library's linked output is data and gets no run bit.
+    let dir = tempfile::tempdir().unwrap();
+    let step = Digest::of(b"its first key");
+    for (class, output, before, after) in [
+        (
+            LocalClass::BuildScript,
+            "build_script_build-0123",
+            0o600,
+            0o700,
+        ),
+        (LocalClass::Program, "shop-0123", 0o640, 0o750),
+        (
+            LocalClass::BuildScript,
+            "build_script_build-0123",
+            0o644,
+            0o755,
+        ),
+        (LocalClass::Library, "libshop-0123.rlib", 0o600, 0o600),
+    ] {
+        let file = dir.path().join(output);
+        std::fs::write(&file, b"\x7fELF a program").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(before)).unwrap();
+        let description = linked_description(class, output, step).to_value().unwrap();
+        super::pack::linked_outputs_executable(&description, &[(output.into(), file.clone())])
+            .unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, after, "{class:?} {before:o}: {mode:o}");
+    }
+}
+
+// covers: B-12, B-28
+#[cfg(unix)]
+#[test]
+fn a_downloaded_build_script_is_a_program_cargo_can_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // A pack keeps no file modes: a build script stored here as rustc wrote it (with its run
+    // bit) and downloaded on another machine must come out of that machine's store runnable,
+    // since cargo starts it itself.
+    let fake = FakeBuild::start();
+    let a = machine();
+    let key = Digest::of(b"a build script");
+    let step = Digest::of(b"its first key");
+    let dir = a.store.root().with_file_name("script-src");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("build_script_build-0123");
+    std::fs::write(&file, b"\x7fELF a program").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let description = linked_description(LocalClass::BuildScript, "build_script_build-0123", step);
+    a.store
+        .publish_with_origin(
+            &key,
+            &description.to_value().unwrap(),
+            &[NewFile {
+                name: "build_script_build-0123".into(),
+                source: file,
+            }],
+            &Origin::built_here("1-1", Some(me(&fake))),
+            SystemTime::now(),
+        )
+        .unwrap();
+    let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+    fake.put_block(
+        address(&key),
+        "person/1",
+        &packed.pack.bytes().unwrap(),
+        packed.outputs,
+        1000,
+        blocks::Class::BuildScript,
+    );
+    fake.set_manifest(vec![Pair(address(&step), address(&key))]);
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    let answer = ask(
+        &relay,
+        Request::Fetch {
+            step,
+            keys: vec![key],
+            class: LocalClass::BuildScript,
+            local_ms: None,
+        },
+    );
+    assert_eq!(answer, Answer::Ready { key });
+    let block = b.store.block(&key).unwrap().expect("published");
+    let mode = std::fs::metadata(&block.files[0].path)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+    relay.end_check(&[]);
+}
+
 // covers: B-32
 #[test]
 fn a_second_run_s_download_of_a_block_already_downloaded_leaves_its_folder_in_place() {

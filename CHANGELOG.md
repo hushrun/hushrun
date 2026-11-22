@@ -6,6 +6,19 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Fixed
+
+- **A build script or a test program that came from the shared store can start** (B-12, B-28):
+  a pack keeps no file mode, so a build script's or a program's block downloaded from the shared
+  store was stored without its run bits and put in place without them, and cargo failed with
+  "failed to run custom build command … Permission denied". The reader now makes the linked
+  output of a program, a build script or a proc macro executable wherever it is readable, as
+  rustc writes it under the umask, and a reuse gives that output its run bits whatever mode the
+  store holds, so a block 0.18.0 downloaded starts too. A target folder where 0.18.0 already put
+  such a file in place needs one `cargo clean -p <package>`: cargo takes the file for up to date,
+  so a build script keeps failing and a test program or a binary keeps refusing to start. Packs
+  are unchanged: 0.18.0 opens the ones this version writes, and this version opens 0.18.0's.
+
 ## [0.18.0] - 2026-11-19
 
 C and C++ build blocks ([ADR 0097](docs/adr/0097-c-and-c++-build-blocks.md), phases 1 to 3):

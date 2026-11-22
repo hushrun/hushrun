@@ -264,7 +264,7 @@ impl Restore<'_> {
                         fs::create_dir_all(parent).map_err(at(parent))?;
                     }
                     copy_checked(&file.path, &copy, file.sha256)?;
-                    finish_file(&copy, self.start)?;
+                    finish_file(&copy, self.start, false)?;
                 }
             }
             for (n, file) in self.block.files.iter().enumerate() {
@@ -284,7 +284,7 @@ impl Restore<'_> {
                         .and_then(|o| o.metadata),
                 });
                 copy_checked(&file.path, &temp, file.sha256)?;
-                finish_file(&temp, self.start)?;
+                finish_file(&temp, self.start, description.starts(&file.name))?;
             }
             let temp = out_dir.join(format!(".hushrun-restore.{}.d.tmp", self.pid));
             fs::write(&temp, dep_text.as_bytes()).map_err(at(&temp))?;
@@ -294,7 +294,7 @@ impl Restore<'_> {
                 sha256: Some(Digest::of(dep_text.as_bytes())),
                 metadata: None,
             });
-            finish_file(&temp, self.start)
+            finish_file(&temp, self.start, false)
         })();
         if let Err(err) = prepared {
             for file in &ready {
@@ -421,15 +421,26 @@ fn remove_path(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Makes a placed file the owner's to write and dates it `start` (B-12).
-fn finish_file(path: &Path, start: SystemTime) -> Result<(), RestoreError> {
+/// `mode` with a run bit wherever it has a read bit: what rustc's program gets under the umask
+/// that gave `mode` its read bits (B-12, B-28).
+pub fn runnable(mode: u32) -> u32 {
+    mode | (mode & 0o444) >> 2
+}
+
+/// Makes a placed file the owner's to write, one that `starts` runnable by whoever may read it,
+/// and dates it `start` (B-12). A pack keeps no file mode (B-28), and an older hushrun stored a
+/// downloaded program without its run bits: the mode is given here, whatever the store holds.
+fn finish_file(path: &Path, start: SystemTime, starts: bool) -> Result<(), RestoreError> {
     let meta = fs::metadata(path).map_err(at(path))?;
     let mut perms = meta.permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(perms.mode() | 0o200);
+        let mode = perms.mode() | 0o200;
+        perms.set_mode(if starts { runnable(mode) } else { mode });
     }
+    #[cfg(not(unix))]
+    let _ = starts;
     // Elsewhere this clears the read-only attribute, which is all the owner needs to write.
     #[cfg(not(unix))]
     #[allow(clippy::permissions_set_readonly_false)]
