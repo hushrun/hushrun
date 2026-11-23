@@ -45,6 +45,22 @@ const CLEARED: &[&str] = &[
     "CMAKE_C_COMPILER_LAUNCHER",
     "CMAKE_CXX_COMPILER_LAUNCHER",
     "RUSTC_WRAPPER",
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE",
+    "CODEX_SANDBOX",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "CURSOR_AGENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "GEMINI_CLI",
+    "AUGMENT_AGENT",
+    "ANTIGRAVITY_AGENT",
+    "COPILOT_MODEL",
+    "COPILOT_ALLOW_ALL",
+    "COPILOT_GITHUB_TOKEN",
 ];
 
 /// Where the hosted backend would be: nothing listens on the discard port, so no test reaches

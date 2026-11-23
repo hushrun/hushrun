@@ -181,6 +181,15 @@ pub fn credential_line(env: &hushrun_ci::Env, place: Option<&Place>) -> String {
             Credential::Token { agent: false } => "HUSHRUN_TOKEN".to_string(),
             Credential::Login { .. } => "the token hushrun login saved".to_string(),
             Credential::GithubOidc => "GitHub Actions' ID token".to_string(),
+            Credential::Session { saved: true } => {
+                "the session hushrun login --session saved".to_string()
+            }
+            Credential::Session { saved: false } => "HUSHRUN_TOKEN, a session token".to_string(),
+            Credential::Bearer => "HUSHRUN_TOKEN, sent with no key".to_string(),
+            Credential::Proxy => {
+                "the credential this network adds to requests for the backend (HUSHRUN_AUTH=proxy)"
+                    .to_string()
+            }
             Credential::Nothing => "none: requests carry no token".to_string(),
         },
         Some(Place::Directory { .. }) | None if env.agent_set() => {

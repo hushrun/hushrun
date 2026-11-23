@@ -957,6 +957,21 @@ pub struct LoginArgs {
     /// Print the approval page's address without opening a browser.
     #[arg(long)]
     pub no_browser: bool,
+
+    /// Swap this sandbox's credential for a short session of one repository, and save it: an
+    /// agent token (HUSHRUN_TOKEN), a Cursor cloud agent's ID token, or a GitHub Actions job's
+    /// ID token. For agents, with no browser.
+    #[arg(long, conflicts_with = "no_browser")]
+    pub session: bool,
+
+    /// With --session: how long it lasts, 1 to 12 hours [default: the server's, 4].
+    #[arg(long, value_name = "HOURS", requires = "session", value_parser = clap::value_parser!(u32).range(1..=12))]
+    pub hours: Option<u32>,
+
+    /// With --session: the repository, for an agent token of the whole org, such as
+    /// github.com/acme/shop [default: the repository hushrun runs in].
+    #[arg(long, value_name = "REPO", requires = "session")]
+    pub repository: Option<String>,
 }
 
 /// `hushrun token` (C-17).
@@ -1005,6 +1020,12 @@ pub struct TokenCreateArgs {
     /// hushrun cloud].
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub rate: Option<u32>,
+
+    /// A bearer token, with no machine key: for a sandbox whose network adds the token to
+    /// hushrun's requests (HUSHRUN_AUTH=proxy), or one that swaps it for a session. The server
+    /// records its results as the agent's, unsigned.
+    #[arg(long)]
+    pub bearer: bool,
 
     #[command(flatten)]
     pub target: TokenBackendArgs,

@@ -41,6 +41,22 @@ const CLEARED: &[&str] = &[
     "HUSHRUN_MACHINE_KEY",
     "HUSHRUN_MACHINE_KEY_FILE",
     "npm_lifecycle_event",
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE",
+    "CODEX_SANDBOX",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "CURSOR_AGENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "GEMINI_CLI",
+    "AUGMENT_AGENT",
+    "ANTIGRAVITY_AGENT",
+    "COPILOT_MODEL",
+    "COPILOT_ALLOW_ALL",
+    "COPILOT_GITHUB_TOKEN",
 ];
 
 /// Where the hosted backend is unless a test names its fake: nothing listens on the discard

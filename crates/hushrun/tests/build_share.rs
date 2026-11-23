@@ -49,6 +49,22 @@ const CLEARED: &[&str] = &[
     "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_TARGET_DIR",
     "CARGO_INCREMENTAL",
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE",
+    "CODEX_SANDBOX",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "CURSOR_AGENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "GEMINI_CLI",
+    "AUGMENT_AGENT",
+    "ANTIGRAVITY_AGENT",
+    "COPILOT_MODEL",
+    "COPILOT_ALLOW_ALL",
+    "COPILOT_GITHUB_TOKEN",
 ];
 
 /// A workspace of two libraries, `app` on `dep`, committed in a repository.

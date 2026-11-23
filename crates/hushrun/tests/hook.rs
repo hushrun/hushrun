@@ -971,15 +971,6 @@ fn a_push_of_something_else_is_left_alone() {
     let refused = r.push("feature", AGENT);
     assert!(!refused.status.success());
 
-    // A CI job pushes for its own reasons, an agent's step in one included.
-    assert!(
-        r.push(
-            "feature",
-            &[("CI", "true"), ("GITHUB_ACTIONS", "true"), ("CLAUDECODE", "1")]
-        )
-        .status
-        .success()
-    );
     // ADR 0104: an agent's sandbox that sets only CI=true isn't CI, and is refused.
     assert!(
         !r.push("feature", &[("CI", "true"), ("CLAUDECODE", "1")])
@@ -990,6 +981,20 @@ fn a_push_of_something_else_is_left_alone() {
         !r.push("feature", &[("CLAUDE_CODE_REMOTE", "true"), ("CI", "true")])
             .status
             .success()
+    );
+
+    // A CI job (last: once pushed, the branch has nothing more to push) pushes for its own reasons, an agent's step in one included.
+    assert!(
+        r.push(
+            "feature",
+            &[
+                ("CI", "true"),
+                ("GITHUB_ACTIONS", "true"),
+                ("CLAUDECODE", "1")
+            ]
+        )
+        .status
+        .success()
     );
 
     // Another repository's remote: a fork or a mirror has CI of its own.

@@ -605,6 +605,16 @@ pub enum Credential {
     Login { email: String },
     /// A GitHub Actions ID token whose audience is the backend.
     GithubOidc,
+    /// \[ADR 0105\] A session token (C-52): `HUSHRUN_TOKEN`'s, or the one `hushrun login --session`
+    /// saved (`saved`). Its results carry no machine's signature.
+    Session { saved: bool },
+    /// \[ADR 0105\] `HUSHRUN_TOKEN` sent with no key: `HUSHRUN_AUTH=bearer` says it is a bearer
+    /// agent token, or it isn't hushrun's shape in a hosted sandbox, as a placeholder the
+    /// platform's network replaces is (C-51).
+    Bearer,
+    /// \[ADR 0105\] `HUSHRUN_AUTH=proxy`: requests carry no token, and the sandbox's network adds
+    /// the credential for the backend's host (C-51).
+    Proxy,
     /// No token at all.
     Nothing,
 }
@@ -617,6 +627,10 @@ impl Credential {
             Credential::Agent => hushrun_core::agent::VARIABLE,
             Credential::Login { .. } => "your login",
             Credential::GithubOidc => "this job's ID token",
+            Credential::Session { saved: true } => "the session hushrun login --session saved",
+            Credential::Session { saved: false } => "HUSHRUN_TOKEN, a session token",
+            Credential::Bearer => "HUSHRUN_TOKEN, sent with no key",
+            Credential::Proxy => "the credential this network adds (HUSHRUN_AUTH=proxy)",
             Credential::Nothing => "a request without a token",
         }
     }
@@ -755,6 +769,51 @@ pub enum Selection {
     Off(Off),
 }
 
+/// \[ADR 0105\] `HUSHRUN_AUTH` (C-51): unset, `proxy` or `bearer`. A value hushrun doesn't know
+/// is ignored (§10.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Auth {
+    Default,
+    /// The network adds the credential: requests carry none.
+    Proxy,
+    /// `HUSHRUN_TOKEN` is a bearer agent token, sent with no key.
+    Bearer,
+}
+
+impl Auth {
+    fn of(value: Option<&str>) -> Auth {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("proxy") => Auth::Proxy,
+            Some("bearer") => Auth::Bearer,
+            _ => Auth::Default,
+        }
+    }
+}
+
+/// Whether `token` has the shape of one of hushrun's own: a personal, an agent, a session or a
+/// repository API token. Anything else in a hosted sandbox is a placeholder the platform's network
+/// replaces (C-51).
+fn hushrun_shaped(token: &str) -> bool {
+    [
+        USER_TOKEN_PREFIX,
+        AGENT_TOKEN_PREFIX,
+        crate::session::PREFIX,
+        "hrl_",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+}
+
+/// \[ADR 0105\] The saved session for `url`'s origin, good now; in a Cursor cloud agent's sandbox,
+/// one it gets now, with Cursor's ID token, when none is saved (C-52).
+fn saved_session(env: &Env, url: &LedgerUrl) -> Option<crate::session::Session> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    crate::session::load_for(&crate::credentials::origin(url), now)
+        .or_else(|| crate::session::for_cursor(env, url, now))
+}
+
 /// Where this machine keeps its results, `<cache dir>/results` (C-11), whether or not a backend
 /// sends them elsewhere; `None` without a cache directory.
 pub fn local_directory() -> Option<PathBuf> {
@@ -868,9 +927,20 @@ impl Backend {
         // doesn't speak for it, as no login does (`Credentials::login_at`).
         let given = var("HUSHRUN_TOKEN")
             .filter(|token| !(env.agent_unreadable() && token.starts_with(USER_TOKEN_PREFIX)));
-        let agent = given.as_deref().is_some_and(is_agent_token);
+        // \[ADR 0105\] How the sandbox authenticates (C-51): HUSHRUN_AUTH, and what the token is.
+        let auth = Auth::of(var("HUSHRUN_AUTH").as_deref());
+        let in_sandbox = hushrun_ci::sandbox(&env).is_some();
+        let bearer = given.as_deref().is_some_and(|token| {
+            crate::session::is_session_token(token)
+                || (auth == Auth::Bearer && env.agent().is_none())
+                || (in_sandbox && !hushrun_shaped(token))
+        });
+        let agent = given.as_deref().is_some_and(is_agent_token) && !bearer;
+        // An agent token, a session or a bearer token goes to hushrun's host, as C-13 says of
+        // agent tokens, whoever named the backend.
         let sends = named_by == NamedBy::Environment
-            || (agent && hosted::agent_token_goes_to(&env, &crate::credentials::origin(&url)));
+            || ((agent || bearer)
+                && hosted::agent_token_goes_to(&env, &crate::credentials::origin(&url)));
         // \[ADR 0060\] CI takes no person's login, as the repository's ledger doesn't (C-13): on a
         // runner where someone signed in, a job's results aren't that person's.
         let in_ci = hushrun_ci::is_ci(hushrun_ci::detect(&env));
@@ -892,8 +962,18 @@ impl Backend {
         let mut signed_in_machine = None;
         let (token, mut credential) = match given.filter(|_| sends && !id_token_first) {
             Some(token) if env.agent().is_some() => (Some(token), Credential::Agent),
+            Some(token) if crate::session::is_session_token(&token) => {
+                (Some(token), Credential::Session { saved: false })
+            }
+            Some(token) if bearer => (Some(token), Credential::Bearer),
             Some(token) => (Some(token), Credential::Token { agent }),
+            None if auth == Auth::Proxy && !id_token_first => (None, Credential::Proxy),
             None if in_ci => (None, Credential::Nothing),
+            // \[ADR 0105\] The session `hushrun login --session` saved for this origin (C-52).
+            None if saved_session(&env, &url).is_some() => (
+                saved_session(&env, &url).map(|session| session.token),
+                Credential::Session { saved: true },
+            ),
             None => match Credentials::load()?.login_for(&url) {
                 Some(login) => {
                     // The key its sign-in registered counts in the org of that sign-in only.
@@ -2055,6 +2135,15 @@ impl Server {
         );
         let kind = match status {
             401 if self.credential == Credential::Nothing => Some(Refusal::NoToken(why())),
+            // \[ADR 0105\] The network was to add the credential, and didn't: not set up (C-51).
+            401 if self.credential == Credential::Proxy => Some(Refusal::NoToken(format!(
+                "this network added no credential for {}: with HUSHRUN_AUTH=proxy the platform's secrets add it to requests for that host",
+                self.base
+                    .split("://")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .unwrap_or(&self.base)
+            ))),
             // ADR 0028: the result needs a machine's signature that counts, which the person or
             // the agent fixes as when they have no key.
             401 if machine => Some(Refusal::Machine(

@@ -11,6 +11,7 @@ hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says 
 
 ### Changed
 
+- **`hushrun.whoami/v1`'s `credential`** adds `session`, `bearer` and `proxy`.
 - **A hosted platform's own variable makes a sandbox** (C-50): `CLAUDE_CODE_REMOTE` (Claude Code on
   the web), `CURSOR_AGENT_SOCKET` (Cursor's cloud agents), `COPILOT_AGENT_SESSION_ID` (Copilot's
   cloud agent, unconfirmed) and `CODEX_PROXY_CERT` (Codex cloud, unconfirmed) make a run local
@@ -21,6 +22,14 @@ hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says 
 
 ### Added
 
+- **Sessions** (C-52, [ADR 0105](docs/adr/0105-credentials-a-sandboxs-network-adds-and-sessions.md)):
+  `hushrun login --session` swaps an agent token, a Cursor cloud agent's ID token (minted over
+  `CURSOR_AGENT_SOCKET`) or a GitHub Actions job's ID token for a session of one repository, saved
+  in `sessions.json` beside the credentials, which runs then use. A Cursor cloud agent's run gets
+  one by itself.
+- **`HUSHRUN_AUTH=proxy` and `HUSHRUN_AUTH=bearer`** (C-51): a sandbox whose network adds the
+  credential, and a bearer agent token with no key. `hushrun token create --bearer` makes one. In a
+  hosted sandbox, a placeholder in `HUSHRUN_TOKEN` is sent as it is.
 - **`hushrun doctor` in a sandbox** (C-50), or with `--hosts`: the platform, where the credential
   comes from, whether each host answers over TLS, the allowlist's exact entry and what is shared.
 - **`scripts/agent-cloud-probe.sh`**: what a sandbox looks like to hushrun, with variable names only.

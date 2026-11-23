@@ -23,6 +23,7 @@ mod planfile;
 mod reach;
 mod releases;
 mod results;
+mod session;
 mod signing;
 mod skill;
 mod units;

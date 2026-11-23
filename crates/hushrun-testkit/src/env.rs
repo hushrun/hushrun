@@ -28,6 +28,29 @@ const NAMES: &[&str] = &[
     "VIRTUAL_ENV",
     "COVERAGE_CORE",
     "COVERAGE_PROCESS_START",
+    // \[ADR 0104\] What says a coding agent runs, or which hosted sandbox this is: a test's
+    // hushrun decides CI, sandbox or person by what the test sets, never by the shell it runs in.
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
+    "CODEX_SANDBOX",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "CURSOR_AGENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "GEMINI_CLI",
+    "AUGMENT_AGENT",
+    "ANTIGRAVITY_AGENT",
+    "COPILOT_MODEL",
+    "COPILOT_ALLOW_ALL",
+    "COPILOT_GITHUB_TOKEN",
 ];
 
 /// Variables scrubbed by their prefix: Python's own (`PYTHONPATH`, `PYTHONHOME`, …), pytest's, and

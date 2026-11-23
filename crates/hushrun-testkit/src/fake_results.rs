@@ -87,6 +87,10 @@ struct State {
     /// \[RFC 0004 §3.8\] It takes what a server from before tests took: 5,000 results a run in
     /// 1 MiB, and no `savedMs` above 0 with `units.reused` 0.
     older_limits: bool,
+    /// \[ADR 0105\] It answers a request with no token as if a sandbox's network had added one.
+    proxy: bool,
+    /// \[ADR 0105\] What `POST {base}/v0/sessions` carried, each: its bearer and its body.
+    sessions: Vec<(String, Value)>,
 }
 
 /// \[C-38\] One hint the fake keeps, where it is: what `PUT {base}/v0/units/hints/{sha256}` sent.
@@ -136,6 +140,12 @@ impl FakeResults {
     pub const TOKEN: &'static str = "fake-results-token";
     /// The agent token it takes once it knows the agent's key.
     pub const AGENT_TOKEN: &'static str = "hra_fakeresults0123456789abcdefghijABCDEFGH";
+    /// \[ADR 0105\] A bearer agent token: it records with no machine's signature.
+    pub const BEARER_TOKEN: &'static str = "hra_fakebearer00123456789abcdefghijABCDEFGH";
+    /// \[ADR 0105\] The session token `POST {base}/v0/sessions` answers.
+    pub const SESSION_TOKEN: &'static str = "hrs_fakesession0123456789abcdefghijABCDEFGH";
+    /// \[ADR 0105\] A Codex-style placeholder the fake's "network" takes for a bearer token.
+    pub const PLACEHOLDER: &'static str = "codex-secret-placeholder-hushrun";
 
     pub fn start() -> FakeResults {
         let state = Arc::new(Mutex::new(State::default()));
@@ -163,6 +173,17 @@ impl FakeResults {
             body,
             times,
         });
+    }
+
+    /// \[ADR 0105\] Answers requests with no token as if the sandbox's network had added one.
+    pub fn add_credentials_as_a_proxy(&self) {
+        self.state().proxy = true;
+    }
+
+    /// \[ADR 0105\] Each `POST {base}/v0/sessions` so far: what it carried as its bearer, and its
+    /// body.
+    pub fn sessions(&self) -> Vec<(String, Value)> {
+        self.state().sessions.clone()
     }
 
     /// What `GET {base}/v0/usage` answers from now on, with 200 (ADR 0032).
@@ -425,6 +446,11 @@ fn handle(state: &Mutex<State>, request: Request) -> Reply {
     match bearer.as_deref().and_then(|v| v.strip_prefix("Bearer ")) {
         Some(FakeResults::TOKEN) => {}
         Some(FakeResults::AGENT_TOKEN) if state.agent.is_some() => agent = state.agent,
+        Some(FakeResults::BEARER_TOKEN | FakeResults::SESSION_TOKEN | FakeResults::PLACEHOLDER) => {
+        }
+        // An ID token, Cursor's or GitHub's, swaps for a session and is good for nothing else.
+        Some(token) if path == "v0/sessions" && token.split('.').count() == 3 => {}
+        None if state.proxy => {}
         Some(_) => return error(401, "unauthenticated", "this token is unknown here"),
         None if request.method == "GET"
             && path.starts_with("v0/results/")
@@ -467,6 +493,38 @@ fn handle(state: &Mutex<State>, request: Request) -> Reply {
             return error(404, "not_found", "no such endpoint");
         }
         return units(&mut state, &request, &path, agent.as_ref());
+    }
+    if request.method == "POST" && path == "v0/sessions" {
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap_or(Value::Null);
+        let carried = bearer
+            .as_deref()
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_string();
+        if carried == FakeResults::SESSION_TOKEN {
+            return error(403, "forbidden", "a session can't make another");
+        }
+        state.sessions.push((carried, body.clone()));
+        let agent = if bearer
+            .as_deref()
+            .is_some_and(|b| b.matches('.').count() == 2)
+        {
+            "cursor"
+        } else {
+            "fleet-a"
+        };
+        return Reply::Send(Response::json(
+            201,
+            &json!({
+                "token": FakeResults::SESSION_TOKEN,
+                "prefix": &FakeResults::SESSION_TOKEN[..10],
+                "repository": body["repository"].as_str().unwrap_or("github.com/acme/shop"),
+                "agent": agent,
+                "as": format!("agent:{agent}"),
+                "expires_at": "2099-01-01T00:00:00.000Z",
+                "backend": format!("/o/{}", FakeResults::ORG),
+            }),
+        ));
     }
     let key = path.strip_prefix("v0/results/").map(str::to_string);
     match (request.method.as_str(), path.as_str(), key) {
