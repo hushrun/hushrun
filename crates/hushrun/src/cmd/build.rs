@@ -33,6 +33,7 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
         BuildCommand::Status => status(global, &place),
         BuildCommand::Clean => clean(global, &place),
         BuildCommand::Fetch(fetch_args) => fetch(global, &place, &fetch_args.checks),
+        BuildCommand::Pull(pull_args) => crate::cmd::build_pull::run(global, &pull_args),
         BuildCommand::Bake(bake_args) => bake(global, &place, &bake_args),
         BuildCommand::Manifest(manifest_args) => manifest(global, &place, &manifest_args),
         BuildCommand::Share(share) => set_share(

@@ -22,6 +22,11 @@ hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says 
 
 ### Added
 
+- **`hushrun build pull`** (B-77, [ADR 0107](docs/adr/0107-a-baked-store-pulled-into-a-fixed-sandbox.md)):
+  the repository's newest baked store from the backend's registry, checked (and its signature, when
+  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`.
+- **Recipes per agent cloud** in `recipes/agent-clouds/`, and a Dev Container Feature in
+  `features/src/hushrun`, to publish as `ghcr.io/hushrun/features/hushrun`.
 - **A results outbox** (C-53, [ADR 0106](docs/adr/0106-results-that-wait-and-what-a-sandbox-fetches.md)):
   outside CI, a result whose backend couldn't be reached waits in `<cache dir>/outbox/` for 7 days,
   and the next run, `hushrun ready` or the new `hushrun flush` sends it. While the backend is out of

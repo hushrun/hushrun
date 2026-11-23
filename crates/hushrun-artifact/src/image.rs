@@ -874,6 +874,44 @@ impl crate::Artifacts {
         })
     }
 
+    /// \[B-77\] The image `tag` names in `repository`: its manifest's digest and each of its
+    /// layers, read whole, checked against their digests, and refused past `most` bytes each;
+    /// `None` when the tag names nothing.
+    pub fn pull_layers(
+        &self,
+        repository: &Repository,
+        tag: &str,
+        most: u64,
+    ) -> Result<Option<(Digest, Vec<Vec<u8>>)>, ArtifactError> {
+        self.runtime.block_on(async {
+            let manifest = match self.registry.manifest(repository, tag).await {
+                Ok(manifest) => manifest,
+                Err(ArtifactError::NotFound(_)) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let json: Value = serde_json::from_slice(&manifest.bytes)
+                .map_err(|e| ArtifactError::Invalid(format!("{tag}'s manifest: {e}")))?;
+            let layers = json["layers"]
+                .as_array()
+                .ok_or_else(|| ArtifactError::Invalid(format!("{tag} names no layers")))?;
+            let mut out = Vec::new();
+            for layer in layers {
+                let digest = layer["digest"]
+                    .as_str()
+                    .and_then(|d| Digest::parse(d).ok())
+                    .ok_or_else(|| ArtifactError::Invalid(format!("{tag}: a layer's digest")))?;
+                let bytes = self.registry.pull_blob(repository, &digest, most).await?;
+                if Digest::of(&bytes) != digest {
+                    return Err(ArtifactError::Invalid(format!(
+                        "{tag}: a layer isn't {digest}"
+                    )));
+                }
+                out.push(bytes);
+            }
+            Ok(Some((manifest.digest(), out)))
+        })
+    }
+
     /// The manifest `tag` names in `repository`, checked against the digest it is served under;
     /// `None` when the tag names nothing.
     pub fn tagged(

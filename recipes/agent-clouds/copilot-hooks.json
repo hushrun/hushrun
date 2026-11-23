@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionEnd": [
+      { "type": "command", "bash": "npx --no-install hushrun flush -q", "timeoutSec": 60 }
+    ]
+  }
+}

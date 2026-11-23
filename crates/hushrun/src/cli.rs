@@ -375,6 +375,14 @@ pub enum BuildCommand {
     /// (`hushrun login`), or in GitHub Actions the job's ID token. Good for 24 hours; no token is
     /// kept.
     Fetch(BuildFetchArgs),
+    /// Put this repository's newest baked store where runs read one (HUSHRUN_BUILD_LOWER, or
+    /// /hushrun), from the backend's registry: for a sandbox whose image is fixed.
+    ///
+    /// It pulls <registry>/<org>/<name>:hushrun-<platform>-latest with a pull token in
+    /// HUSHRUN_REGISTRY_TOKEN, the backend's credential here, or nothing for a public
+    /// repository; checks the store, and its signature when hushrun.yaml names signers of baked
+    /// stores; and only then replaces what was there.
+    Pull(BuildPullArgs),
     /// Write a self-contained store of one repository's compiled crates, Go packages and C and
     /// C++ objects for this machine's platforms: sealed packs, sealed hints and baked.json,
     /// nothing else.
@@ -525,6 +533,26 @@ pub struct FetchArgs {
     /// The checks whose newest builds to fetch, by the names `hushrun run` runs them under. Every
     /// check of the tree has its newest result fetched whatever is named.
     pub checks: Vec<String>,
+}
+
+/// `hushrun build pull` (B-77).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct BuildPullArgs {
+    /// The image, `<host>/<org>/<name>` [default: this repository's on its backend's registry].
+    #[arg(long, value_name = "REPOSITORY")]
+    pub image: Option<String>,
+    /// The tag [default: hushrun-<platform>-latest].
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+    /// The platform, as tags name it, such as linux-x64 [default: this machine's].
+    #[arg(long, value_name = "PLATFORM", conflicts_with = "tag")]
+    pub platform: Option<String>,
+    /// Where to put it [default: HUSHRUN_BUILD_LOWER, else /hushrun].
+    #[arg(long, value_name = "FOLDER")]
+    pub to: Option<std::path::PathBuf>,
+    /// The registry is reached over plain HTTP (tests only).
+    #[arg(long, hide = true)]
+    pub insecure: bool,
 }
 
 /// `hushrun build fetch [CHECK]...` (B-36).
