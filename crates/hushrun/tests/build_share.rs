@@ -893,7 +893,9 @@ fn build_status_in_ci_says_what_a_run_does_there_and_why() {
             cmd.env_remove("HUSHRUN_BACKEND")
                 .env_remove("HUSHRUN_TOKEN");
         }),
-        "ci        this is CI, where `hushrun run` reuses nothing here: no backend is signed in to"
+        format!(
+            "ci        this is CI, where `hushrun run` reuses nothing here: {NO_BACKEND_IN_CI}"
+        )
     );
 }
 
@@ -4646,4 +4648,64 @@ fn a_baked_store_names_the_folders_ci_s_file_gives_the_build() {
         format!("{}/.cargo-ci", workspace.display()).as_str(),
         "{json}"
     );
+}
+
+/// What a CI job with no backend reads, from `hushrun run` when the job asks for reuse, from
+/// `hushrun build status` and from a bake of the job's store.
+const NO_BACKEND_IN_CI: &str = "in CI hushrun keeps compiled code only in the job's own store, for a backend that shares it, and nothing names one here (hushrun.yaml's `backend`, or HUSHRUN_BACKEND)";
+
+// covers: B-2, B-25, B-31, B-63
+// A GitHub Actions job with no backend (`HUSHRUN_BACKEND=""`) keeps no compiled code (B-25's "CI
+// otherwise"). A run whose job asked for reuse (`HUSHRUN_BUILD=on`) says so in one line, and a
+// later bake of the job's store says what works there instead of telling it to run the build
+// through hushrun first, which it just did. A job that asked nothing reads nothing.
+#[test]
+fn a_job_with_no_backend_says_why_it_keeps_nothing_and_its_bake_says_what_works_there() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let no_backend = |cmd: &mut assert_cmd::Command| {
+        cmd.env("HUSHRUN_BACKEND", "").env_remove("HUSHRUN_TOKEN");
+    };
+    let (code, stdout, stderr) = ci_build(&a, &fake, no_backend);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    let line = format!("hushrun: build reuse is off for this run: {NO_BACKEND_IN_CI}");
+    assert_eq!(stderr.matches(&line).count(), 1, "{stderr}");
+    // Nobody asked: nothing said.
+    let (code, _, stderr) = ci_build(&a, &fake, |cmd| {
+        no_backend(cmd);
+        cmd.env_remove("HUSHRUN_BUILD");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("build reuse is off"), "{stderr}");
+    // The bake that follows in the job, and `build manifest`: refused, with what works.
+    let job = |args: &[&str]| {
+        let mut cmd = a.hushrun(&fake);
+        in_github_actions(&mut cmd, &fake, &a.root.join("runner-temp"));
+        no_backend(&mut cmd);
+        let output = cmd.args(args).output().unwrap();
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let out = a.root.join("baked");
+    let (code, stderr) = job(&[
+        "build",
+        "bake",
+        "--from",
+        "store",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains(NO_BACKEND_IN_CI), "{stderr}");
+    assert!(stderr.contains("--deps-only -- COMMAND"), "{stderr}");
+    assert!(!stderr.contains("first, with build reuse on"), "{stderr}");
+    let (code, stderr) = job(&["build", "manifest"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains(NO_BACKEND_IN_CI), "{stderr}");
+    assert!(!out.exists());
+    assert!(fake.seen().is_empty(), "{:?}", fake.seen());
 }

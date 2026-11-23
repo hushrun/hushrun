@@ -210,6 +210,23 @@ fn own_store_refusal(held: Option<&crate::cmd::build_session::CommandStore>) -> 
     })
 }
 
+/// B-25, B-63: why `--from store` reads nothing in a CI job with no backend: no run of the job
+/// kept anything, so the store holds nothing to bake ([`build_session::ci_without_backend`]),
+/// and what works there instead.
+///
+/// [`build_session::ci_without_backend`]: crate::cmd::build_session::ci_without_backend
+fn no_backend_refusal(in_ci: bool, folder: &std::path::Path) -> Option<String> {
+    let named = matches!(
+        crate::results::Backend::select(Some(folder)),
+        Ok(crate::results::Selection::On(ref backend)) if backend.build_access().is_some()
+    );
+    crate::cmd::build_session::ci_without_backend(in_ci, named).map(|why| {
+        format!(
+            "{why}, so no run of this job kept anything to bake: `--deps-only -- COMMAND` bakes the third-party crates from a build of its own; with a backend that shares build blocks, `--from store` bakes what the job's runs kept, and `--from backend` what CI shared"
+        )
+    })
+}
+
 /// What a bake bakes, the one decision the refusal of a command's own store and the bake itself
 /// read: with `--deps-only`, the store its dependencies-only build fills (B-72), whatever
 /// `--from` says (it takes no `--from backend`); else `--from`'s, this machine's (or the CI
@@ -328,7 +345,8 @@ fn bake(global: &GlobalOpts, place: &Place, args: &BuildBakeArgs) -> CmdResult {
         run_store(place, in_ci).ok_or_else(|| failed("there is no store here".into()))?;
     let source = BakeSource::of(args);
     if source == BakeSource::Store
-        && let Some(why) = own_store_refusal(held.as_ref())
+        && let Some(why) =
+            own_store_refusal(held.as_ref()).or_else(|| no_backend_refusal(in_ci, &folder))
     {
         return Err(refused(why));
     }
@@ -2088,7 +2106,8 @@ fn manifest(global: &GlobalOpts, place: &Place, args: &BuildManifestArgs) -> Cmd
     let (store, held) =
         run_store(place, in_ci).ok_or_else(|| failed("there is no store here".into()))?;
     if args.from == BakeFrom::Store
-        && let Some(why) = own_store_refusal(held.as_ref())
+        && let Some(why) =
+            own_store_refusal(held.as_ref()).or_else(|| no_backend_refusal(in_ci, &folder))
     {
         return Err(Failure::new(Exit::Usage, anyhow!("build manifest: {why}")));
     }
@@ -2384,6 +2403,10 @@ fn run_here(
 fn ci_here(place: &Place, effective: &settings::Settings) -> String {
     use hushrun_build::share::{Off, Sharing};
     let (does, access) = run_here(place, effective);
+    let in_ci = crate::gitlab_job::in_ci(&hushrun_ci::Env::from_process());
+    if let Some(why) = crate::cmd::build_session::ci_without_backend(in_ci, access.is_some()) {
+        return format!("this is CI, where `hushrun run` reuses nothing here: {why}");
+    }
     match (does.local, does.sharing) {
         (Mode::Off, Sharing::Off(off)) => {
             let hint = match off {

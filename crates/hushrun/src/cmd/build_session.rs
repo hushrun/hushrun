@@ -24,6 +24,18 @@ const CHECK_BUDGET: Duration = Duration::from_secs(2);
 /// What every line that says why a run has no session starts with.
 const OFF: &str = "build reuse is off for this run";
 
+/// B-25, B-31: why a CI job with no backend to share through keeps no compiled code, in the job's
+/// store or anywhere: the one text `hushrun run`, `hushrun build status`, a bake and `hushrun
+/// build manifest` say it with ([`ci_without_backend`]).
+pub(crate) const CI_NO_BACKEND: &str = "in CI hushrun keeps compiled code only in the job's own store, for a backend that shares it, and nothing names one here (hushrun.yaml's `backend`, or HUSHRUN_BACKEND)";
+
+/// B-25's "CI otherwise" row as far as it is known before anything is asked: in CI (`in_ci`)
+/// with no backend named, a run keeps nothing, so a later command of the job finds nothing a run
+/// kept. Its reason, else `None` (a backend is named: whether the org shares is its to say).
+pub(crate) fn ci_without_backend(in_ci: bool, backend_named: bool) -> Option<&'static str> {
+    (in_ci && !backend_named).then_some(CI_NO_BACKEND)
+}
+
 /// The variable that names the store instead of the cache directory (B-13).
 const STORE_DIR: &str = "HUSHRUN_BUILD_DIR";
 
@@ -1173,7 +1185,15 @@ fn begin_in_ci(
 ) -> Result<Session, Option<String>> {
     use hushrun_build::share::{Org, Sharing, what_a_run_does};
     let Some(start) = share else {
-        return Err(None);
+        // B-25, B-31: with no backend to share through, the job keeps nothing; said in one line
+        // when the job asked for reuse (HUSHRUN_BUILD on or observe), and otherwise not at all.
+        let asked = hushrun_build::settings::Overrides::from(here.env)
+            .ok()
+            .and_then(|o| o.mode)
+            .is_some_and(|mode| mode != hushrun_build::model::Mode::Off);
+        return Err(ci_without_backend(here.in_ci, place().is_some())
+            .filter(|_| asked)
+            .map(|why| format!("{OFF}: {why}")));
     };
     // B-48: a GitLab job's HUSHRUN_ID_TOKEN that can't be sent, said whatever the org does: the
     // job asked to share by declaring it.
