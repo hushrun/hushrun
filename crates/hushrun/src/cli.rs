@@ -771,6 +771,10 @@ impl InitArgs {
 pub struct DoctorArgs {
     #[command(flatten)]
     pub registry: RegistryOpts,
+    /// Checks the hosts hushrun needs from here, and what an allowlist must hold, also outside
+    /// a coding agent's sandbox, where doctor checks them anyway.
+    #[arg(long)]
+    pub hosts: bool,
 }
 
 #[derive(Debug, Subcommand)]

@@ -20,6 +20,7 @@ mod measure;
 mod notice;
 mod output;
 mod planfile;
+mod reach;
 mod releases;
 mod results;
 mod signing;
