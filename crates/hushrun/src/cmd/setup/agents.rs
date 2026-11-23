@@ -106,8 +106,8 @@ pub fn parse_clouds(words: &[String]) -> Result<Vec<Cloud>, String> {
     Ok(clouds)
 }
 
-/// \[ADR 0106\] The clouds init writes files for: `--agent-clouds`; else what the repository has
-/// files for. A person at a terminal (no `--yes`, `--dry-run` or JSON) who named none is told how,
+/// \[ADR 0106\] The clouds init writes files for: `--agent-clouds`, and none without it (a
+/// repository's own `.claude/settings.json` is no sign the team wants hooks there). A person at a terminal (no `--yes`, `--dry-run` or JSON) who named none is told how,
 /// in one line: init asks nothing more of the terminal, whose answers its other questions read.
 pub fn chosen(
     args: &crate::cli::InitArgs,
@@ -128,7 +128,7 @@ pub fn chosen(
                 String::new()
             } else {
                 format!(
-                    "; this run writes {}'s, which this repository has files for",
+                    "; this repository has files for {}",
                     found
                         .iter()
                         .map(|c| c.word())
@@ -138,7 +138,7 @@ pub fn chosen(
             }
         );
     }
-    Ok(found)
+    Ok(Vec::new())
 }
 
 /// What differs from the repository at `root`. \[ADR 0065\] A copy a newer hushrun wrote stays:
@@ -194,7 +194,7 @@ fn runner(npm: bool) -> &'static str {
 /// a workflow or a dev container's file that exists is left as it is.
 fn cloud_files(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
     let run = runner(npm);
-    let flush = format!("{run} flush -q");
+    let flush = format!("{run} flush -q || true");
     let mut files = Vec::new();
     let read = |path: &str| std::fs::read_to_string(root.join(path)).ok();
     let json_hook =
@@ -338,7 +338,7 @@ const DEVCONTAINER: &str = r#"{
 /// Copilot's setup steps: install, a session for the agent (C-52) and the baked store (B-77).
 fn copilot_steps(npm: bool) -> String {
     let (install, run) = if npm {
-        ("      - run: npm ci\n", "npx --no-install hushrun")
+        ("      - run: npm ci || true\n", "npx --no-install hushrun")
     } else {
         ("      - uses: hushrun/hushrun/action/setup@v0\n", "hushrun")
     };
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(claude["permissions"]["allow"][0], "Bash(npm test)");
         assert_eq!(
             claude["hooks"]["Stop"][0]["hooks"][0]["command"],
-            "npx --no-install hushrun flush -q"
+            "npx --no-install hushrun flush -q || true"
         );
         assert!(
             claude["hooks"]["SessionStart"][0]["hooks"][0]["command"]
@@ -597,12 +597,12 @@ mod tests {
         let cursor: serde_json::Value = serde_json::from_str(&files[1].text).unwrap();
         assert_eq!(
             cursor["hooks"]["stop"][0]["command"],
-            "npx --no-install hushrun flush -q"
+            "npx --no-install hushrun flush -q || true"
         );
         let copilot: serde_json::Value = serde_json::from_str(&files[2].text).unwrap();
         assert_eq!(
             copilot["hooks"]["sessionEnd"][0]["bash"],
-            "npx --no-install hushrun flush -q"
+            "npx --no-install hushrun flush -q || true"
         );
         assert!(files[3].text.contains("id-token: write"));
         assert!(files[3].text.contains("login --session"));
@@ -619,7 +619,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = cloud_files(dir.path(), &[Cloud::Cursor], false);
         assert!(
-            files[0].text.contains("\"hushrun flush -q\""),
+            files[0].text.contains("\"hushrun flush -q || true\""),
             "{}",
             files[0].text
         );

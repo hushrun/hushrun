@@ -6691,3 +6691,46 @@ fn init_says_no_cache_step_where_the_backend_keeps_hints_nor_with_local_or_a_dry
     assert_eq!(asked_for_hints(&fake), 0, "{:?}", fake.requests());
     assert!(!out.stdout.contains("actions/cache"), "{}", out.stdout);
 }
+
+// covers: C-55 (ADR 0106: init writes an agent cloud's hooks only for the clouds --agent-clouds
+// names; a repository's own Claude Code settings get none without it)
+#[cfg(unix)]
+#[test]
+fn init_writes_agent_cloud_hooks_only_for_the_clouds_named() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    let settings = "{\"permissions\": {\"allow\": [\"Bash(npm test)\"]}}\n";
+    r.write(".claude/settings.json", settings);
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--yes", "--no-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(
+        r.read(".claude/settings.json"),
+        settings,
+        "no flag, no hooks"
+    );
+    assert!(!r.repo.join(".cursor/hooks.json").exists());
+
+    let out = ran(
+        r.hushrun(&fake),
+        &[
+            "init",
+            "--local",
+            "--yes",
+            "--no-run",
+            "--agent-clouds",
+            "cursor",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    let hooks = r.read(".cursor/hooks.json");
+    // package.json holds hushrun now, so the hook starts it through npx, and never fails the stop.
+    assert!(
+        hooks.contains("\"npx --no-install hushrun flush -q || true\""),
+        "{hooks}"
+    );
+    assert_eq!(
+        r.read(".claude/settings.json"),
+        settings,
+        "only the named cloud"
+    );
+}

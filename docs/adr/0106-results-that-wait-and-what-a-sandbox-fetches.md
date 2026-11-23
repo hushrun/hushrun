@@ -32,12 +32,13 @@ a sandbox that was about to go.
 5. **`hushrun fetch`** looks up every check of the worktree as `hushrun ready` does, keeps each
    answer, sealed by its SHA-256 over the server, the key and the result, for 24 hours, then
    fetches compiled code as `hushrun build fetch` does. `build fetch` stays as it was.
-6. **Hooks at a session's end.** `hushrun init --agent-clouds <list>` (else the clouds the
-   repository already has files for, and a person at a terminal is told how to name others) writes, for each cloud named: Claude Code's `Stop`
+6. **Hooks at a session's end.** `hushrun init --agent-clouds <list>` (and nothing without it: a
+   person at a terminal is told how to name them; a repository's own `.claude/settings.json` is no
+   sign the team wants hooks) writes, for each cloud named: Claude Code's `Stop`
    hook in `.claude/settings.json`, with a `SessionStart` hook that pulls the baked store in Claude
    Code on the web; Cursor's `stop` in `.cursor/hooks.json`; Copilot's `sessionEnd` in
    `.github/hooks/hushrun.json` and its setup steps; and a dev container with hushrun's feature.
-   Each hook runs `hushrun flush`. JSON files keep what they have. The AGENTS.md block says to run
+   Each hook runs `hushrun flush -q || true`, through npx only when package.json holds hushrun. JSON files keep what they have. The AGENTS.md block says to run
    `hushrun flush` before finishing.
 
 ## Consequences

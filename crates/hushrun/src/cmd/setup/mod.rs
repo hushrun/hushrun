@@ -974,6 +974,15 @@ impl Look {
 }
 
 impl Package {
+    /// \[ADR 0106\] Its package.json holds hushrun's npm package, so hooks start it through npx.
+    fn holds_hushrun(&self) -> bool {
+        let (name, _) = name_and_range(&npm_package());
+        json::value(self.doc.text()).is_ok_and(|value| {
+            ["dependencies", "devDependencies"]
+                .iter()
+                .any(|key| value[key].get(&name).is_some())
+        })
+    }
     /// \[ADR 0051\] Whether a script of it runs through hushrun once init is done.
     fn wraps(&self) -> bool {
         self.checks
@@ -1181,7 +1190,11 @@ impl AgentTools {
             (json::value(&text).ok()? == expected).then_some((text, change))
         });
         AgentTools {
-            files: agents::plan(&look.root, &look.clouds, look.package.is_some()),
+            files: agents::plan(
+                &look.root,
+                &look.clouds,
+                look.package.as_ref().is_some_and(Package::holds_hushrun),
+            ),
             hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
             prepare,
             binary: look.binary_directory(),

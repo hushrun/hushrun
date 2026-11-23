@@ -31,8 +31,8 @@ There, a store can only arrive by being downloaded. And each platform puts its s
    `ghcr.io/hushrun/features/hushrun`: it installs a release with its own installer, and its
    `onCreateCommand` runs `hushrun fetch` (and `hushrun build pull` when asked). It holds no secret
    and recommends the container's own.
-4. **`hushrun init` names the agent clouds the team uses** (C-55: `--agent-clouds`, else what the
-   repository has files for, and a person at a terminal is told how) and writes only those files.
+4. **`hushrun init` names the agent clouds the team uses** (C-55: `--agent-clouds` only; a person at
+   a terminal who named none is told how) and writes only those files.
    It reads no answer for it: init's other questions read the terminal, and scripted answers to them
    must keep working.
 
