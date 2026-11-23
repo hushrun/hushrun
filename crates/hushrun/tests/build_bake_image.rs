@@ -459,12 +459,12 @@ fn a_keyless_signature_counts_only_for_the_identity_hushrun_yaml_names() {
     let target = w.root.join("target");
     let first = laptop.cargo_build(&target, None);
     assert_eq!(first.code, 0, "{}", first.stderr);
-    // Signed keylessly with the ID token at hand, a certificate and a timestamp, no key.
+    // Signed keylessly with the ID token at hand, a certificate and a timestamp, no key: this
+    // isn't CI, so only because HUSHRUN_SIGNING=sigstore asks.
     let layout = w.root.join("layout");
     let bake = ran(laptop
         .hushrun()
         .envs(fake.env(&w.root))
-        .env_remove("HUSHRUN_SIGNING")
         .current_dir(w.repo.join("ws"))
         .args([
             "build",
@@ -544,7 +544,6 @@ fn a_keyless_signature_counts_only_for_the_identity_hushrun_yaml_names() {
     let bake = ran(laptop
         .hushrun()
         .envs(fake.env(&w.root))
-        .env_remove("HUSHRUN_SIGNING")
         .current_dir(w.repo.join("ws"))
         .args([
             "build",
@@ -1243,4 +1242,64 @@ fn the_fixed_tag_shortcut_still_signs_the_folder_and_its_archives() {
         reused.stderr
     );
     assert!(erofs.is_file());
+}
+
+// covers: B-67
+// A bake outside CI (a GitHub Actions job told it is a person's machine, HUSHRUN_PROVIDER=local)
+// signs only with a key, as its own line says: the job's ID token at hand signs nothing there
+// unless HUSHRUN_SIGNING=sigstore asks for it. It said it ran outside CI and moved no `-latest`,
+// and signed as the workflow all the same: the signer took any ID token, whatever "in CI" said.
+#[test]
+fn a_bake_outside_ci_signs_with_an_id_token_at_hand_only_when_asked() {
+    let fake = FakeSigstore::start();
+    fake.set_claims(github_claims(
+        "Acme/api",
+        "123456",
+        "refs/heads/main",
+        ".github/workflows/bake.yml",
+        None,
+    ));
+    let w = World::new("acme-api.yaml");
+    workspace(&w);
+    let laptop = Machine::new(&w, "laptop");
+    let first = laptop.cargo_build(&w.root.join("target"), None);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let bake = |layout: &Path, signing: Option<&str>| {
+        let mut cmd = laptop.hushrun();
+        cmd.envs(fake.env(&w.root))
+            .env_remove("HUSHRUN_SIGNING")
+            .env("CI", "true")
+            .env("GITHUB_ACTIONS", "true")
+            .env("HUSHRUN_PROVIDER", "local");
+        if let Some(signing) = signing {
+            cmd.env("HUSHRUN_SIGNING", signing);
+        }
+        let bake = ran(cmd
+            .current_dir(w.repo.join("ws"))
+            .args([
+                "build",
+                "bake",
+                "--check",
+                "build",
+                "--branch-tag",
+                "--oci-dir",
+            ])
+            .arg(layout)
+            .args(["--format", "json"]));
+        assert_eq!(bake.code, 0, "{}", bake.stderr);
+        let said: Value = serde_json::from_str(&bake.stdout).unwrap();
+        (said, bake.stderr)
+    };
+    let (said, stderr) = bake(&w.root.join("unasked"), None);
+    assert!(said["image"]["signed"].is_null(), "{said}\n{stderr}");
+    assert!(
+        stderr
+            .contains("the store is published unsigned: outside CI hushrun signs only with a key"),
+        "{stderr}"
+    );
+    assert_eq!(fake.count("/api/v2/signingCert"), 0, "{stderr}");
+    // Asked, it signs keylessly with the token at hand.
+    let (said, stderr) = bake(&w.root.join("asked"), Some("sigstore"));
+    assert!(said["image"]["signed"].is_string(), "{said}\n{stderr}");
+    assert_eq!(fake.count("/api/v2/signingCert"), 1, "{stderr}");
 }

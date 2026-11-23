@@ -152,6 +152,13 @@ impl Signing {
     }
 }
 
+/// B-67: what signs what a bake publishes ([`App::bake_signing`]): a signer, or why nothing does.
+pub enum BakeSigning {
+    Signed(Signing),
+    /// Published unsigned, for this reason, as a line ends with it.
+    Unsigned(&'static str),
+}
+
 /// What `HUSHRUN_SIGNING` and the signing variables choose.
 enum Source {
     Key,
@@ -321,22 +328,39 @@ impl App<'_> {
         })
     }
 
-    /// B-67: how `hushrun build bake` signs what it publishes: the key file `key_file` names; else
-    /// the key `HUSHRUN_SIGNING_KEY` or `HUSHRUN_SIGNING_KEY_FILE` holds; else, with an ID token at
-    /// hand (a CI job's, GitHub Actions' or `SIGSTORE_ID_TOKEN`), keylessly as its identity; else
-    /// nothing (`None`): a person's machine key and a browser sign-in are never used for an image.
-    pub fn bake_signing(&self, key_file: Option<&Path>) -> Result<Option<Signing>, Failure> {
+    /// B-67: how `hushrun build bake` signs what it publishes, decided here alone, the reason
+    /// for publishing unsigned included: the key file `key_file` names; else the key
+    /// `HUSHRUN_SIGNING_KEY` or `HUSHRUN_SIGNING_KEY_FILE` holds; else, with an ID token at hand
+    /// (a CI job's, GitHub Actions' or `SIGSTORE_ID_TOKEN`), keylessly as its identity, in CI
+    /// (`in_ci`, the one answer the bake reads for its tags and its lines) or where
+    /// `HUSHRUN_SIGNING=sigstore` asks for it; else nothing. A person's machine key and a browser
+    /// sign-in are never used for an image.
+    pub fn bake_signing(
+        &self,
+        key_file: Option<&Path>,
+        in_ci: bool,
+    ) -> Result<BakeSigning, Failure> {
         if let Some(path) = key_file {
             let pem = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", path.display()))
                 .map_err(Failure::usage)?;
             let key = SigningKey::from_pem(&pem).map_err(Failure::usage)?;
-            return self.bake_signing_by_key(key).map(Some);
+            return self.bake_signing_by_key(key).map(BakeSigning::Signed);
         }
         if self.var("HUSHRUN_SIGNING_KEY").is_some()
             || self.var("HUSHRUN_SIGNING_KEY_FILE").is_some()
         {
-            return self.bake_signing_by_key(self.signing_key()?).map(Some);
+            return self
+                .bake_signing_by_key(self.signing_key()?)
+                .map(BakeSigning::Signed);
+        }
+        let asked = self
+            .var("HUSHRUN_SIGNING")
+            .is_some_and(|choice| choice.eq_ignore_ascii_case("sigstore"));
+        if !in_ci && !asked {
+            return Ok(BakeSigning::Unsigned(
+                "outside CI hushrun signs only with a key (--signing-key FILE, or HUSHRUN_SIGNING_KEY_FILE), or keylessly with an ID token at hand where HUSHRUN_SIGNING=sigstore asks; a run trusts an unsigned store only with HUSHRUN_BUILD_LOWER_UNTRUSTED=1",
+            ));
         }
         if self.has_id_token() {
             // B-67: a run `workflow_run` started signs only after a push to this repository's
@@ -350,9 +374,13 @@ impl App<'_> {
                 })?;
             return self
                 .signing_from(Source::Sigstore, self.sigstore_root()?)
-                .map(Some);
+                .map(BakeSigning::Signed);
         }
-        Ok(None)
+        Ok(BakeSigning::Unsigned(if in_ci {
+            "this job has no ID token to sign with (give it `permissions: id-token: write`, or on GitLab `id_tokens: SIGSTORE_ID_TOKEN: {aud: sigstore}`), and no signing key is set"
+        } else {
+            "HUSHRUN_SIGNING=sigstore asks for keyless signing, and there is no ID token at hand (GitHub Actions' or SIGSTORE_ID_TOKEN)"
+        }))
     }
 
     /// B-67: a bake signed with a key contacts no outside service unless asked: no timestamp

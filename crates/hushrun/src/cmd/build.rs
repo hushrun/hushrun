@@ -292,21 +292,20 @@ fn bake(global: &GlobalOpts, place: &Place, args: &BuildBakeArgs) -> CmdResult {
     // B-67, B-71: what signs what this bake publishes, decided before it bakes: an image, an
     // archive or a disk image carries the folder's signature, made once.
     let publishes = args.oci.is_some() || args.oci_dir.is_some() || !archives.is_empty();
+    // One decision, with the same `in_ci` the tags and the lines below read (B-66).
     let signing = if publishes && !args.no_sign {
-        crate::app::App::new(global)?.bake_signing(args.signing_key.as_deref())?
+        match crate::app::App::new(global)?.bake_signing(args.signing_key.as_deref(), in_ci)? {
+            crate::signing::BakeSigning::Signed(signing) => Some(signing),
+            crate::signing::BakeSigning::Unsigned(why) => {
+                if global.quiet == 0 {
+                    eprintln!("hushrun: the store is published unsigned: {why}");
+                }
+                None
+            }
+        }
     } else {
         None
     };
-    if publishes && signing.is_none() && !args.no_sign && global.quiet == 0 {
-        eprintln!(
-            "hushrun: the store is published unsigned: {}",
-            if in_ci {
-                "this job has no ID token to sign with (give it `permissions: id-token: write`, or on GitLab `id_tokens: SIGSTORE_ID_TOKEN: {aud: sigstore}`), and no signing key is set"
-            } else {
-                "outside CI hushrun signs only with a key (--signing-key FILE, or HUSHRUN_SIGNING_KEY_FILE); a run trusts an unsigned store only with HUSHRUN_BUILD_LOWER_UNTRUSTED=1"
-            }
-        );
-    }
     let facts = Facts {
         repository: repository.clone(),
         checks: backend_checks(repository.as_deref(), &named, &content),
