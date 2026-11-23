@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-23
+
 Baked stores ([ADR 0098](docs/adr/0098-baked-stores.md), B-63 and B-64): a repository's compiled
 crates, Go packages and C and C++ objects, written once into a folder an image or a read-only
 volume carries, and read underneath a run's own store, so a sandbox starts with them on its own
