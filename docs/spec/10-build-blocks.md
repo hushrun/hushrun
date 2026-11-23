@@ -2712,7 +2712,7 @@ prints a compile's output again only from its own cache); and the bytes say so
 Go object, `_go_.o` or an object the assembler made for a standard library package (flags
 `ObjFlagFromAssembly` and `ObjFlagStd`, read after the object's text header, whose end `\n!\n` is
 looked for over the whole member: the runtime's header on macOS runs past 4096 bytes): a cgo object or a `.syso` is `native`, assembly of any
-other package `assembly` (F1: its includes are outside Go's id); its build ID, read where Go's
+other package `assembly` (F1: its includes are outside Go's id; Go 1.24's assembler sets `ObjFlagStd` on no object, so there the standard library's assembly is `assembly` too, and stays: Go 1.25 and later mark it); its build ID, read where Go's
 `buildid.ReadFile` reads it, is `<action>/<content>` with `<action>` Go's `HashToString` of the
 action id it is put under (`build-id`); and `<content>` is the SHA-256 of the bytes with every
 occurrence of the build ID zeroed, as Go's `FindAndHash` computes it (`content-id`, F2). A

@@ -248,6 +248,42 @@ fn go_line(stderr: &str) -> String {
         .to_string()
 }
 
+/// Whether the standard library's assembly can leave the machine: from Go 1.25, whose assembler
+/// marks the standard library's objects (`ObjFlagStd`); Go 1.24's marks none, so they stay (B-42).
+fn std_assembly_travels() -> bool {
+    let version = Command::new("go")
+        .args(["env", "GOVERSION"])
+        .env("GOTOOLCHAIN", "local")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    !version.starts_with("go1.24")
+}
+
+/// How many packages the run says it compiled here and keeps on this machine, each for its
+/// assembly outside the standard library: 0 when it says none.
+fn assembly_kept_here(stderr: &str) -> usize {
+    let Some(line) = stderr.lines().find(|l| l.contains("stay on this machine")) else {
+        return 0;
+    };
+    assert!(
+        line.contains("assembly outside the standard library") && !line.contains(", "),
+        "{line}"
+    );
+    let rest = line.split_once("build: go: ").map_or("", |(_, r)| r);
+    rest.split(' ').next().unwrap_or("").parse().unwrap_or(0)
+}
+
+/// How many packages `line` says were built: 0 when it says none.
+fn built(line: &str) -> usize {
+    let words: Vec<&str> = line.split([' ', ',', ':']).collect();
+    words
+        .windows(2)
+        .find(|w| w[1] == "built")
+        .and_then(|w| w[0].parse().ok())
+        .unwrap_or(0)
+}
+
 /// The `go/1` blocks the fake holds.
 fn go_blocks(fake: &FakeBuild) -> usize {
     fake.begins()
@@ -635,14 +671,18 @@ fn every_package_of_a_pure_go_command_is_reused_on_the_other_machine_runtime_too
     let a = Machine::new(dir.path(), "a", None, &[]);
     let (code, _, stderr) = a.run(&fake, "go build -o /dev/null ./cmd/app");
     assert_eq!(code, 0, "{stderr}");
-    assert!(!stderr.contains("stay on this machine"), "{stderr}");
+    // Every package travels; on Go 1.24 but the standard library's assembly, which stays.
+    let kept = assembly_kept_here(&stderr);
+    if std_assembly_travels() {
+        assert_eq!(kept, 0, "{stderr}");
+    }
     let b = Machine::new(dir.path(), "b", Some(&a.repo), &[]);
     let (code, _, stderr) = b.run(&fake, "go build -o /dev/null ./cmd/app");
     assert_eq!(code, 0, "{stderr}");
     // On macOS the runtime's header runs past 4096 bytes of `cgo_import_dynamic` lines.
     let line = go_line(&stderr);
     assert!(line.contains("from the shared store"), "{stderr}");
-    assert!(!line.contains("built"), "{stderr}");
+    assert_eq!(built(&line), kept, "{stderr}");
 }
 
 // covers: B-44
@@ -681,10 +721,12 @@ fn a_toolexec_build_in_gos_own_cache_reports_and_suspends_nothing() {
     let (code, _, stderr) = b.run(&fake, "go build -o /dev/null ./cmd/app");
     assert_eq!(code, 0, "{stderr}");
     let line = go_line(&stderr);
-    assert!(
-        line.contains("reused") && !line.contains("built"),
-        "{stderr}"
-    );
+    // Nothing built but, on Go 1.24, the standard library's assembly, which stays here.
+    assert!(line.contains("reused"), "{stderr}");
+    assert_eq!(built(&line), assembly_kept_here(&stderr), "{stderr}");
+    if std_assembly_travels() {
+        assert_eq!(built(&line), 0, "{stderr}");
+    }
 }
 
 // covers: B-42
@@ -796,7 +838,12 @@ fn a_forged_archive_in_the_store_is_reported_suspended_and_compiled() {
     assert!(plain(&b, "go clean -cache").status.success());
     let (code, _, stderr) = b.run(&fake, "go build -o ../app ./cmd/app && ../app");
     assert_eq!(code, 0, "{stderr}");
-    assert!(go_line(&stderr).contains("1 built"), "{stderr}");
+    // `lib`, and on Go 1.24 the standard library's assembly, which stays here.
+    let kept = assembly_kept_here(&stderr);
+    if std_assembly_travels() {
+        assert_eq!(kept, 0, "{stderr}");
+    }
+    assert_eq!(built(&go_line(&stderr)), 1 + kept, "{stderr}");
 }
 
 // covers: B-41
