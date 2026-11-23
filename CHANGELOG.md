@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-23
+
 What the first real bake found ([ADR 0103](docs/adr/0103-what-the-first-real-bake-found.md)): a
 bake of unchanged code repeats (its dependencies layer, store identity and fixed tag), one answer
 to "in CI" decides what signs a bake, and a CI job with no backend says why it keeps nothing.
