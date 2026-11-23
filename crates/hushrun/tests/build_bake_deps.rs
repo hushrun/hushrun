@@ -584,3 +584,42 @@ fn two_dependencies_only_bakes_of_the_same_lockfile_give_the_same_image() {
     assert_eq!(one["image"]["tags"][0], two["image"]["tags"][0]);
     assert_eq!(one["manifest"], two["manifest"]);
 }
+
+// covers: B-72
+// A dependencies-only image has no workspace layer, so its bake says nothing of one: it said
+// the workspace layer was written again, as there was no previous image.
+#[test]
+fn a_dependencies_only_bake_says_nothing_of_a_workspace_layer_it_has_none_of() {
+    let w = World::new("acme-api.yaml");
+    workspace(&w);
+    let m = Machine::new(&w, "m");
+    let layout = w.root.join("layout");
+    let bake = |format: &str| {
+        let said = ran(m
+            .hushrun()
+            .args([
+                "build",
+                "bake",
+                "--check",
+                "build",
+                "--deps-only",
+                "--no-sign",
+                "--force",
+                "--oci-dir",
+            ])
+            .arg(&layout)
+            .args(["--format", format, "--", "cargo", "build", "--offline"]));
+        assert_eq!(said.code, 0, "{}\n{}", said.stdout, said.stderr);
+        said
+    };
+    let json: Value = serde_json::from_str(&bake("json").stdout).unwrap();
+    assert!(
+        layers(&json).iter().all(|(role, _)| role != "workspace"),
+        "{json}"
+    );
+    assert!(json["image"]["compacted"].is_null(), "{json}");
+    std::fs::remove_dir_all(&layout).unwrap();
+    let text = bake("text");
+    assert!(text.stdout.contains("Published "), "{}", text.stdout);
+    assert!(!text.stdout.contains("workspace layer"), "{}", text.stdout);
+}

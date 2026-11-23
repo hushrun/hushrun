@@ -953,7 +953,7 @@ pub(crate) fn publish(
         tags: named,
         layers: layer_words(image),
         stale: assembled.plan.stale.len(),
-        compacted: assembled.plan.compacted.clone(),
+        compacted: rewritten(image, &assembled.plan),
         pushed,
         signed: signer_words,
         registry,
@@ -989,6 +989,14 @@ fn target_name(target: &Target) -> String {
         Target::Hosted(hosted) => hosted.repository.to_string(),
         Target::Layout(dir) => dir.display().to_string(),
     }
+}
+
+/// B-65, B-72: why the image's workspace layer was written again, when it has one: a
+/// dependencies-only image has none, so nothing is said of it.
+fn rewritten(image: &oci::Image, plan: &oci::Plan) -> Option<String> {
+    plan.compacted
+        .clone()
+        .filter(|_| image.layers.iter().any(|l| l.role == oci::Role::Workspace))
 }
 
 /// Each layer of `image` as a bake says it: role, digest, size, files, kept.
@@ -1292,7 +1300,7 @@ fn publish_hosted(
         pushed: oci::Pushed::default(),
         layers: layer_words(&assembled.image),
         stale: assembled.plan.stale.len(),
-        compacted: assembled.plan.compacted.clone(),
+        compacted: rewritten(&assembled.image, &assembled.plan),
         signed: signer_words,
         registry: true,
         notes,
