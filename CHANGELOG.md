@@ -6,6 +6,25 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+hushrun in agent clouds ([ADR 0104](docs/adr/0104-hosted-agents-sandboxes-are-local.md)): a
+hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says what it needs.
+
+### Changed
+
+- **A hosted platform's own variable makes a sandbox** (C-50): `CLAUDE_CODE_REMOTE` (Claude Code on
+  the web), `CURSOR_AGENT_SOCKET` (Cursor's cloud agents), `COPILOT_AGENT_SESSION_ID` (Copilot's
+  cloud agent, unconfirmed) and `CODEX_PROXY_CERT` (Codex cloud, unconfirmed) make a run local
+  beside `CI=true` and beside a named CI's variable, such as `GITHUB_ACTIONS`. An explicit
+  `HUSHRUN_PROVIDER` still wins. A coding agent's own variable, such as `CLAUDECODE`, makes a run
+  local beside a bare `CI=true` only. In such a sandbox, GitHub's ID-token variables read as unset:
+  a sandbox never records as CI.
+
+### Added
+
+- **`hushrun doctor` in a sandbox** (C-50), or with `--hosts`: the platform, where the credential
+  comes from, whether each host answers over TLS, the allowlist's exact entry and what is shared.
+- **`scripts/agent-cloud-probe.sh`**: what a sandbox looks like to hushrun, with variable names only.
+
 ## [0.19.1] - 2026-11-23
 
 What the first real bake found ([ADR 0103](docs/adr/0103-what-the-first-real-bake-found.md)): a
