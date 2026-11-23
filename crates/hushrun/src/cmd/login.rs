@@ -149,7 +149,18 @@ pub fn logout(global: &GlobalOpts, args: &LogoutArgs) -> CmdResult {
 /// session of one repository at the org's backend, and saves it for the backend's origin. It needs
 /// an org's URL, and prints no token.
 fn session(global: &GlobalOpts, args: &LoginArgs) -> CmdResult {
-    let (url, _) = target(global, args.url.as_deref())?;
+    let (url, named) = target(global, args.url.as_deref())?;
+    // C-13: the sandbox's credential goes to hushrun's host, or to a backend the command line or
+    // the environment names, never to one a repository's file chose.
+    let from_a_file = matches!(
+        named,
+        Some(source) if source.starts_with("which this repository's")
+    );
+    if from_a_file && credentials::origin(&url) != hosted::origin() {
+        return Err(Failure::usage(anyhow!(
+            "{url} is named by this repository's files, and isn't on hushrun's host: a session takes this sandbox's credential there only when you name it, as hushrun login --session {url}, or with HUSHRUN_BACKEND"
+        )));
+    }
     if hosted::org_of(&url.to_string()).is_none() {
         return Err(Failure::usage(anyhow!(
             "a session is an org's: name its URL, such as {}/o/<org>",

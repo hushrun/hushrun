@@ -1,9 +1,13 @@
 //! \[ADR 0105\] Session tokens (C-52): a short credential for one repository that a sandbox's agent
 //! gets for a longer one, at `POST {base}/v0/sessions`, and keeps in `sessions.json` beside the
 //! credentials file, by origin. `hushrun login --session` makes one with what the environment
-//! holds: an agent token (`HUSHRUN_TOKEN`, or `HUSHRUN_AGENT`'s), a Cursor cloud agent's ID token
+//! holds: a bearer agent token (`HUSHRUN_TOKEN`), a Cursor cloud agent's ID token
 //! (minted over `CURSOR_AGENT_SOCKET`), or a GitHub Actions job's ID token (Copilot's setup steps).
 //! Runs read the file, and in a Cursor cloud agent's sandbox get a session by themselves.
+//!
+//! A credential goes only where it may (C-13): to hushrun's host, or to a backend the environment
+//! or the command line names, never to one a repository's file chose. `HUSHRUN_AGENT` is never
+//! swapped: it holds a key, and signs as it is.
 //!
 //! The file is written whole (a temporary file and a rename, readable by its owner only) while a
 //! lock is held, so two sessions made at once keep each other's origins. A session past its expiry
@@ -185,6 +189,11 @@ pub fn obtain(
     repository: Option<&str>,
     hours: Option<u32>,
 ) -> anyhow::Result<Session> {
+    if env.agent().is_some() {
+        return Err(anyhow!(
+            "HUSHRUN_AGENT holds the agent's key, and records as it is: a session is for a sandbox with a bearer token, Cursor's or GitHub's ID token"
+        ));
+    }
     let parent = parent(env, base)?;
     let source = parent.source();
     let options = match parent {

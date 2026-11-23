@@ -39,24 +39,30 @@ None of these can hold a key, and none should need an org admin to copy a secret
    network replaces: it goes where an agent token goes (hushrun's host, or the backend
    `HUSHRUN_BACKEND` names), with no key. Outside such a sandbox it is a token like any other, and
    a repository's file never gets it (C-13).
-4. **Session tokens.** `POST {base}/v0/sessions` swaps an agent token, a Cursor cloud agent's ID
+4. **Session tokens.** `POST {base}/v0/sessions` swaps a bearer agent token (never a machine
+   token, whose secret alone would then record without its key), a Cursor cloud agent's ID
    token or a GitHub Actions ID token for a session token (`hrs_`): one repository's results, read
    and recorded, for 4 hours by default and 12 at most, never past its agent token, as
    `agent:<name>` (`agent:cursor`, `agent:copilot` for a job GitHub runs for Copilot, else
    `agent:github-actions`). A session reaches neither the shared store nor the registry, and never
    records as CI. It ends when its agent token is revoked or expires, when its Cursor link is
-   removed or lapses, or when its repository is disconnected: the server reads that, with its own
-   clock, at every request, and also revokes the sessions in the transaction that revokes a token or
-   removes a link.
+   removed or lapses, or, for an ID token's session, when its repository is no longer connected as it
+   was when the session was made: the server reads that, with its own clock, at every request, and
+   also revokes the sessions in the transaction that revokes a token or removes a link, and a lapsed
+   link's when it is linked again, so nothing that ended comes back.
 5. **`hushrun login --session`** makes one with what the environment holds, in that order, and
-   writes it whole to `sessions.json` beside the credentials file (a temporary file and a rename,
+   only for hushrun's host or a backend the command line or the environment names, never for one a
+   repository's file chose (C-13): that server would get the sandbox's credential. It writes it
+   whole to `sessions.json` beside the credentials file (a temporary file and a rename,
    mode 0600, under a lock), by origin. It prints no token. Runs outside CI read it when nothing
-   else is set for that origin; with an agent token or `HUSHRUN_AGENT` in the environment, those
-   win. It is for agents: it never registers a machine, so `HUSHRUN_AGENT` doesn't refuse it.
+   else is set for that origin, and a person's login there comes first. It never registers a
+   machine. `HUSHRUN_AGENT` is never swapped: it holds a key, and records as it is.
 6. **Cursor.** An org's owner or admin links a Cursor `team_id` on the dashboard, audited and
-   revocable; a team links to one org at a time, and the link holds only while the person it rests
-   on is an owner or admin of the org. `repo_url` must name a repository the org connected. In a
-   Cursor cloud agent's sandbox, a run with no session gets one by itself, minting Cursor's ID token
+   revocable; several orgs may link one team, since linking proves nothing and a first link must
+   not keep the team's own org out, and a link holds only while the person it rests on is an owner
+   or admin of the org. `repo_url` must name a repository the org connected. In a
+   Cursor cloud agent's sandbox, a run with no session gets one by itself, from hushrun's host or a
+   backend the environment names, minting Cursor's ID token
    for the backend's origin and caching it until it expires, and saves the session.
 7. **Copilot.** Its setup steps run `hushrun login --session` with the job's ID token (`permissions:
    id-token: write`). In the agent's own job, hushrun knows (C-50), the job's ID token is set aside
@@ -70,8 +76,8 @@ None of these can hold a key, and none should need an org admin to copy a secret
 - A bearer token is a weaker credential than a machine token: whoever holds it records as the agent
   until it is revoked or expires. That is why it is off by default and why a session, one
   repository's for hours, is the form to hand a sandbox where one can be minted.
-- Cursor's token format, signing algorithm and socket protocol are taken from the plan's research
-  and not tried against Cursor: the server takes RS256 only, and the CLI reads the answer's
+- Cursor's token format, signing algorithm and socket protocol are taken from what Cursor
+  documents, as we read it, and not tried against Cursor: the server takes RS256 only, and the CLI reads the answer's
   `token`, `id_token`, `idToken` or `value`. Copilot's job is told by `copilot` in its
   `job_workflow_ref` or `actor`, also unconfirmed. Both need verifying on the platforms.
 - Sessions don't use the shared store of build blocks yet: a sandbox that wants compiled code still
