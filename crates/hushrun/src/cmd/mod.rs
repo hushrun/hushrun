@@ -10,6 +10,7 @@ pub(crate) mod build_session;
 pub(crate) mod common;
 pub mod digest;
 pub mod doctor;
+pub mod flush;
 pub mod guard;
 pub mod guide;
 pub mod hook;

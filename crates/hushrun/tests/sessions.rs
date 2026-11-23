@@ -352,7 +352,13 @@ fn a_cursor_cloud_agent_gets_a_session_by_itself_and_keeps_it() {
     let r = Repo::new(&fake);
     let (socket, asked) = cursor_socket(&r.root, ID_TOKEN);
     let socket = socket.to_str().unwrap().to_string();
-    let vars = [("CURSOR_AGENT_SOCKET", socket.as_str()), ("CI", "true")];
+    let origin = r.origin();
+    // The repository names a backend on hushrun's host.
+    let vars = [
+        ("CURSOR_AGENT_SOCKET", socket.as_str()),
+        ("CI", "true"),
+        ("HUSHRUN_HOST", origin.as_str()),
+    ];
     let run = r.run(&vars);
     assert!(run.status.success(), "{}", stderr(&run));
     let request = asked.recv().unwrap();
@@ -442,4 +448,165 @@ fn copilots_setup_step_and_its_sandbox_swap_the_jobs_id_token_for_a_session() {
         "{}",
         stderr(&run)
     );
+}
+
+// covers: C-53
+#[test]
+fn a_result_the_backend_couldnt_take_waits_skips_here_and_goes_with_the_next_run() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake);
+    let vars = [
+        ("HUSHRUN_BACKEND", r.backend.as_str()),
+        ("HUSHRUN_TOKEN", FakeResults::SESSION_TOKEN),
+    ];
+    let unit = ["run", "unit", "--", "git", "--version"];
+    // The server fails the record: the result waits on this machine.
+    fake.answer("POST", "v0/results", 503, serde_json::json!({}), 4);
+    let run = r.hushrun(&unit, &vars);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(
+        stderr(&run).contains("the result waits on this machine"),
+        "{}",
+        stderr(&run)
+    );
+    let outbox = r.root.join("cache/outbox");
+    let entries: Vec<Value> = std::fs::read_dir(&outbox)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["state"], "pending");
+    assert!(fake.recorded().is_empty());
+
+    // The next run sends it first; with the server failing its lookup, this machine's pass skips.
+    fake.answer("GET", "v0/results", 503, serde_json::json!({}), 4);
+    let run = r.hushrun(&unit, &vars);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(
+        stderr(&run).contains("sent 1 result that waited on this machine"),
+        "{}",
+        stderr(&run)
+    );
+    assert!(stderr(&run).contains("skipped"), "{}", stderr(&run));
+    let passes = fake
+        .recorded()
+        .iter()
+        .filter(|r| r["result"] == "pass")
+        .count();
+    assert_eq!(passes, 1, "{:?}", fake.recorded());
+    let entry: Value = serde_json::from_slice(
+        &std::fs::read(outbox.join(format!("{}.json", entries[0]["key"].as_str().unwrap())))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(entry["state"], "sent");
+
+    // Nothing waits now; and in CI nothing is kept at all.
+    let flush = r.hushrun(&["flush", "--format", "json"], &vars);
+    let json: Value = serde_json::from_slice(&flush.stdout).unwrap();
+    assert_eq!(json["waiting"], 0, "{json}");
+    assert_eq!(json["sent"], 0, "{json}");
+    fake.answer("POST", "v0/results", 503, serde_json::json!({}), 10);
+    let ci = r.hushrun(
+        &["run", "unit", "--force", "--", "git", "--version"],
+        &[
+            ("HUSHRUN_BACKEND", r.backend.as_str()),
+            ("HUSHRUN_TOKEN", FakeResults::TOKEN),
+            ("CI", "true"),
+        ],
+    );
+    assert!(
+        !stderr(&ci).contains("waits on this machine"),
+        "{}",
+        stderr(&ci)
+    );
+}
+
+// covers: C-13, C-52
+#[cfg(unix)]
+#[test]
+fn a_backend_a_repositorys_file_chose_gets_no_sandbox_credential_for_a_session() {
+    const ID_TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjQwNzA5MDg4MDB9.signature";
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake);
+    let (socket, asked) = cursor_socket(&r.root, ID_TOKEN);
+    let socket = socket.to_str().unwrap().to_string();
+    // package.json names a server that isn't hushrun's host, nor named by the environment.
+    let vars = [
+        ("CURSOR_AGENT_SOCKET", socket.as_str()),
+        ("CI", "true"),
+        ("HUSHRUN_TOKEN", FakeResults::BEARER_TOKEN),
+    ];
+    let run = r.run(&vars);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(fake.sessions().is_empty(), "{:?}", fake.sessions());
+    assert!(asked.try_recv().is_err(), "Cursor's socket wasn't asked");
+    assert!(
+        fake.requests().iter().all(|seen| !seen
+            .authorization
+            .as_deref()
+            .is_some_and(|a| a.contains(FakeResults::BEARER_TOKEN) || a.contains(ID_TOKEN))),
+        "{:?}",
+        fake.requests()
+    );
+    // Nor does login --session take it there unless someone names it.
+    let login = r.hushrun(&["login", "--session"], &vars);
+    assert_eq!(login.status.code(), Some(2), "{}", stderr(&login));
+    assert!(
+        stderr(&login).contains("isn't on hushrun's host"),
+        "{}",
+        stderr(&login)
+    );
+    assert!(fake.sessions().is_empty());
+    // HUSHRUN_AGENT, which holds a key, is never swapped.
+    let login = r.hushrun(
+        &["login", "--session", &r.backend],
+        &[("HUSHRUN_AGENT", "hushrun_agent_v1_not-a-real-string")],
+    );
+    assert!(!login.status.success());
+    assert!(fake.sessions().is_empty());
+}
+
+// covers: C-54
+#[test]
+fn what_fetch_kept_skips_a_check_once_the_backend_is_out_of_reach() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake);
+    std::fs::write(
+        r.repo.join("package.json"),
+        format!(
+            r#"{{"name": "shop", "scripts": {{"test": "hushrun run unit -- git --version"}}, "hushrun": {{"backend": "{}"}}}}"#,
+            r.backend
+        ),
+    )
+    .unwrap();
+    git::commit_all(&r.repo, "scripts");
+    let vars = [
+        ("HUSHRUN_BACKEND", r.backend.as_str()),
+        ("HUSHRUN_TOKEN", FakeResults::SESSION_TOKEN),
+    ];
+    // Another machine passed it.
+    let other = r.root.join("other-cache");
+    let unit = ["run", "unit", "--", "git", "--version"];
+    let mut with_other: Vec<(&str, &str)> = vars.to_vec();
+    with_other.push(("HUSHRUN_CACHE_DIR", other.to_str().unwrap()));
+    let run = r.hushrun(&unit, &with_other);
+    assert!(run.status.success(), "{}", stderr(&run));
+    // Setup fetches, then the network goes.
+    let fetch = r.hushrun(&["fetch"], &vars);
+    assert!(fetch.status.success(), "{}", stderr(&fetch));
+    assert!(
+        stderr(&fetch).contains("1 of 1 checks have a newest result"),
+        "{}",
+        stderr(&fetch)
+    );
+    fake.answer("GET", "v0/results", 503, serde_json::json!({}), 4);
+    let run = r.hushrun(&unit, &vars);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(stderr(&run).contains("skipped"), "{}", stderr(&run));
+    // `build fetch` still works as it did.
+    let build = r.hushrun(&["build", "fetch", "--help"], &vars);
+    assert!(build.status.success());
 }

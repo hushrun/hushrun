@@ -184,6 +184,19 @@ pub enum Command {
     /// Show where `hushrun run` records results, with which credential, and who the backend
     /// says you are.
     Whoami,
+    /// Fetch what a sandbox whose network goes after setup needs: the newest result of each
+    /// check of this tree, and the compiled code of the checks named.
+    ///
+    /// For a setup script, which has the network and a credential that later phases may lack.
+    /// What it fetches is kept for 24 hours, and later runs use it while the backend is out of
+    /// reach. `hushrun build fetch` fetches only the compiled code.
+    Fetch(FetchArgs),
+    /// Send the results that waited on this machine while the backend was out of reach.
+    ///
+    /// A result `hushrun run` couldn't record waits in the outbox, in hushrun's cache directory,
+    /// for 7 days. The next run and `hushrun ready` send it; so does this, at the end of an
+    /// agent's session.
+    Flush,
     /// Agent tokens: let agents in sandboxes, and CI outside GitHub, record results without a
     /// browser (an org admin's).
     ///
@@ -504,6 +517,14 @@ pub enum BakeFrom {
     Store,
     /// The org's backend, as `hushrun build fetch` reads it.
     Backend,
+}
+
+/// `hushrun fetch [CHECK]...` (C-54).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct FetchArgs {
+    /// The checks whose newest builds to fetch, by the names `hushrun run` runs them under. Every
+    /// check of the tree has its newest result fetched whatever is named.
+    pub checks: Vec<String>,
 }
 
 /// `hushrun build fetch [CHECK]...` (B-36).

@@ -47,6 +47,12 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
     }
 }
 
+/// \[ADR 0106\] What `hushrun fetch` asks of build reuse: `build fetch`'s, for `checks`.
+pub(crate) fn fetch_blocks(global: &GlobalOpts, checks: &[String]) -> CmdResult {
+    let place = Place::read()?;
+    fetch(global, &place, checks)
+}
+
 /// `hushrun build fetch [CHECK]...` (B-36): for a sandbox's setup phase, which has the network
 /// and a token that later phases don't. The relay sends `open` for this repository and platform,
 /// once for each check named (by its id, as `hushrun run` names it), or once naming none, which
