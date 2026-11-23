@@ -1570,18 +1570,21 @@ fn a_package_managers_install_keeps_the_mode_someone_chose() {
 fn a_clone_that_cant_take_the_hook_runs_as_if_nothing_happened() {
     let fake = FakeResults::start();
     let r = Repo::new(&fake.url());
+    // A file where the hooks folder goes: no hook can be written there, even by root, whom a
+    // read-only folder doesn't stop.
     let hooks = r.repo.join(".git/hooks");
-    std::fs::create_dir_all(&hooks).expect("mkdir");
-    std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    if hooks.exists() {
+        std::fs::remove_dir_all(&hooks).expect("rm");
+    }
+    std::fs::write(&hooks, "").expect("write");
 
     let report = r.ready_here();
     let run = r.hushrun(&["run", "unit", "--", "sh", "checks/test.sh"]);
-    std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     assert_eq!(report.status.code(), Some(10), "{}", stderr(&report));
     assert_eq!(stderr(&report), "");
     assert!(run.status.success(), "{}", stderr(&run));
     assert!(!stderr(&run).contains("pre-push"), "{}", stderr(&run));
-    assert!(!r.hook().exists());
+    assert!(hooks.is_file());
 }
 
 // covers: C-23
