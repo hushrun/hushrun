@@ -2580,6 +2580,27 @@ fn a_filter_ctest_drops_is_caught_by_listing_again() {
         // user's -E joined to hushrun's names is dropped too, so its listing gives every test:
         // -R with the names kept is used instead.
         let groups = "(n0)|(n1)|(n2)|(n3)|(n4)|(n5)|(n6)|(n7)|(n8)|(n9)";
+        // Which CMakes take ten groups isn't a version this test can name: ask this one. An
+        // expression that matches every test leaves none listed, unless it is dropped.
+        let probe = p
+            .tool("ctest")
+            .args(["--test-dir", "build", "-N", "-E", &format!("{groups}|(.)")])
+            .output()
+            .expect("ctest");
+        let listed = String::from_utf8_lossy(&probe.stdout).into_owned();
+        if listed.contains("Total Tests: 0") {
+            // It takes ten: the user's -E stays, and leaves the test out as it asked.
+            let shim = p.shim(
+                &["--test-dir", "build", "-E", groups],
+                json!({"unit": "test", "reuse": ["t_greet"]}),
+                Some(shop_plan(&["t_greet"])),
+                &[],
+            );
+            assert_eq!(shim.code, 0, "{}", shim.stdout);
+            assert_eq!(shim.selection(), "-E", "CMake {:?}", cmake.version);
+            assert_eq!(shim.left_out(), ["t_greet::greet"]);
+            continue;
+        }
         let shim = p.shim(
             &["--test-dir", "build", "-E", groups],
             json!({"unit": "test", "reuse": ["t_greet"]}),
@@ -3075,8 +3096,10 @@ fn each_preset_field_that_chooses_tests_is_kept_when_tests_are_left_out() {
                     shim.stdout
                 );
             }
-            // Where CTest honours the preset, the unit reused was left out.
-            if !(preset == "union" && cmake.version < (3, 25)) {
+            // Where CTest honours the preset, the unit reused was left out. Some CMakes list
+            // every test for `useUnion` (3.28 does), and no version names them all: ask this one.
+            let ignores_union = preset == "union" && chosen.len() == 7;
+            if !ignores_union {
                 assert!(
                     left.iter().all(|t| !ran.contains(&t.to_string())),
                     "{at} {preset}\n{}",
