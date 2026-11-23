@@ -106,33 +106,39 @@ pub fn parse_clouds(words: &[String]) -> Result<Vec<Cloud>, String> {
     Ok(clouds)
 }
 
-/// The question init asks a person at a terminal.
-const CLOUDS_QUESTION: &str = "Which agent clouds does your team use? claude-code, cursor, copilot, codex, jules, devin, devcontainer (comma-separated; Enter for the ones this repository has files for, none for none): ";
-
-/// \[ADR 0106\] The clouds init writes files for: `--agent-clouds`; else, at a terminal, with no
-/// `--yes`, `--dry-run` or JSON, what the person answers; else what the repository has files for.
+/// \[ADR 0106\] The clouds init writes files for: `--agent-clouds`; else what the repository has
+/// files for. A person at a terminal (no `--yes`, `--dry-run` or JSON) who named none is told how,
+/// in one line: init asks nothing more of the terminal, whose answers its other questions read.
 pub fn chosen(
     args: &crate::cli::InitArgs,
     root: &Path,
     json: bool,
 ) -> Result<Vec<Cloud>, crate::exit::Failure> {
-    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    use std::io::IsTerminal as _;
     if let Some(words) = &args.agent_clouds {
         return parse_clouds(words).map_err(|e| crate::exit::Failure::usage(anyhow::anyhow!(e)));
     }
     let found = clouds_in(root);
-    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if !terminal || args.yes || args.dry_run || json {
-        return Ok(found);
+    let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if terminal && !args.yes && !args.dry_run && !json {
+        eprintln!(
+            "hushrun: which agent clouds does your team use? hushrun init --agent-clouds {} adds their hooks{}",
+            Cloud::ALL.map(Cloud::word).join(","),
+            if found.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; this run writes {}'s, which this repository has files for",
+                    found
+                        .iter()
+                        .map(|c| c.word())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        );
     }
-    print!("{CLOUDS_QUESTION}");
-    let _ = std::io::stdout().flush();
-    let mut answer = String::new();
-    if std::io::stdin().lock().read_line(&mut answer).is_err() || answer.trim().is_empty() {
-        return Ok(found);
-    }
-    let words: Vec<String> = answer.split([',', ' ']).map(str::to_string).collect();
-    parse_clouds(&words).map_err(|e| crate::exit::Failure::usage(anyhow::anyhow!(e)))
+    Ok(found)
 }
 
 /// What differs from the repository at `root`. \[ADR 0065\] A copy a newer hushrun wrote stays:

@@ -146,10 +146,9 @@ fn image_and_credential(
             hushrun_artifact::Repository::parse(image.trim()).map_err(|e| e.to_string())?
         }
         None => {
-            let base = backend
-                .as_ref()
-                .and_then(|b| b.build_place())
-                .ok_or("no backend names this repository's registry: pass --image <host>/<org>/<name>")?;
+            let base = backend.as_ref().and_then(|b| b.build_place()).ok_or(
+                "no backend names this repository's registry: pass --image <host>/<org>/<name>",
+            )?;
             let repository = root
                 .and_then(crate::cmd::setup::repository_id)
                 .ok_or("this repository has no name the registry takes: pass --image")?;
@@ -164,15 +163,18 @@ fn image_and_credential(
         return Ok((image, basic(token)));
     }
     // The backend's own credential goes only to its own registry.
-    let token = backend.as_ref().and_then(|b| b.build_access()).and_then(|access| {
-        let registry = crate::hosted::registry_host(&access.host);
-        match access.credential {
-            Some(crate::results::BuildCredential::Token(token)) if registry == image.host => {
-                Some(token)
+    let token = backend
+        .as_ref()
+        .and_then(|b| b.build_access())
+        .and_then(|access| {
+            let registry = crate::hosted::registry_host(&access.host);
+            match access.credential {
+                Some(crate::results::BuildCredential::Token(token)) if registry == image.host => {
+                    Some(token)
+                }
+                _ => None,
             }
-            _ => None,
-        }
-    });
+        });
     Ok((image, token.map_or(Credential::Anonymous, basic)))
 }
 

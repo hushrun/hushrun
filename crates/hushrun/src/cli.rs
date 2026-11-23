@@ -787,7 +787,7 @@ pub struct InitArgs {
     /// The agent clouds your team uses, comma-separated: claude-code, cursor, copilot, codex,
     /// jules, devin, devcontainer, or none. init writes their files: hooks that send what a
     /// session passed before it ends, Copilot's setup steps, a dev container's feature
-    /// [default: asked at a terminal, else the ones the repository already has files for].
+    /// [default: the ones the repository already has files for].
     #[arg(
         long,
         value_name = "LIST",
