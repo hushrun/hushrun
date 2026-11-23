@@ -1473,7 +1473,11 @@ impl Plan {
             ledger: ledger::Preview::Unknown,
             promotion: Vec::new(),
             tools: AgentTools {
-                files: agents::plan(&look.root, &look.clouds, look.package.is_some()),
+                files: agents::plan(
+                    &look.root,
+                    &look.clouds,
+                    look.package.as_ref().is_some_and(Package::holds_hushrun),
+                ),
                 hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
                 prepare: None,
                 binary: look.binary_directory(),
@@ -1795,6 +1799,8 @@ impl Plan {
                     json::quote(&range)
                 ));
                 self.dependency = Some(spec);
+                // \[ADR 0106\] package.json gets hushrun: its hooks start it through npx.
+                self.tools.files = agents::plan(&look.root, &look.clouds, true);
             }
         }
         let script = package.manager.after_install();

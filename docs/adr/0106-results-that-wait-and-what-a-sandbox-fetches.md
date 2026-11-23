@@ -22,9 +22,9 @@ a sandbox that was about to go.
    stay for 7 days, then a flush removes them. A newer result of the same key replaces one still pending: the server answers the newest.
 2. **Sent by the next run.** `hushrun run` and `hushrun ready` send what waits for their backend
    before anything else, and so does `hushrun flush`. Only to the server an entry was for, and only
-   with the credential that wrote it: its kind and whose (a login's email, else a digest of the
-   token), so an agent's credential never sends a person's results. Lookups out of reach never
-   answer a lookup of CI's results. One flush at a time; a server out of reach is
+   with the credential that wrote it: its kind and whose (a login's email, nothing more for a
+   session, which is renewed, else a digest of the token), so an agent's credential never sends a person's results. Lookups out of reach never
+   answer what CI would find. One flush at a time; a server out of reach is
    tried once a flush. Sending again is safe: the server keeps one result per caller, key and body.
 3. **Read while the server is out of reach.** A lookup that can't reach its server, or that the
    server fails, answers from the outbox (pending or sent), then from what `hushrun fetch` saved:

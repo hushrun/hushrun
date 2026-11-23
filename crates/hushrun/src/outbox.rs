@@ -212,6 +212,8 @@ pub fn keep(
     let _lock = Lock::take(dir)?;
     if let Some(existing) = read(dir, &key.hex(), base)
         && existing.id == id
+        && existing.credential == credential
+        && existing.state == State::Pending
     {
         return Ok(());
     }

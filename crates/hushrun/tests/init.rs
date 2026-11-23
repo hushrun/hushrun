@@ -6734,3 +6734,34 @@ fn init_writes_agent_cloud_hooks_only_for_the_clouds_named() {
         "only the named cloud"
     );
 }
+
+// covers: C-55 (ADR 0106: a hook starts hushrun through npx only when package.json holds it)
+#[cfg(unix)]
+#[test]
+fn a_package_json_without_hushrun_gets_hooks_that_run_hushrun_from_path() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    r.write("package.json", "{\"name\": \"demo\"}\n");
+    let out = ran(
+        r.hushrun(&fake),
+        &[
+            "init",
+            "--local",
+            "--yes",
+            "--no-run",
+            "--agent-clouds",
+            "cursor",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    let hooks = r.read(".cursor/hooks.json");
+    let runner = if r.read("package.json").contains("\"hushrun\"") {
+        "npx --no-install hushrun"
+    } else {
+        "hushrun"
+    };
+    assert!(
+        hooks.contains(&format!("\"{runner} flush -q || true\"")),
+        "{hooks}"
+    );
+}

@@ -1237,14 +1237,14 @@ impl Backend {
         if let Some(variant) = variant {
             query.push_str(&format!("&variant={}", query_value(variant)));
         }
-        self.lookup(key, Some(query), true, &|result| {
+        self.lookup(key, Some(query), true, false, &|result| {
             result.counts_in(Some(job), variant)
         })
     }
 
     /// The newest result recorded for `key` that this hushrun can read, whatever job recorded it.
     pub fn latest(&self, key: &Digest) -> anyhow::Result<Latest> {
-        self.lookup(key, None, false, &|_| true)
+        self.lookup(key, None, false, false, &|_| true)
     }
 
     /// \[ADR 0037\] What `repository`'s CI would find for `key`, asked from anywhere: a server
@@ -1253,16 +1253,18 @@ impl Backend {
     pub fn latest_for_ci(&self, key: &Digest, repository: Option<&str>) -> anyhow::Result<Latest> {
         let query =
             repository.map(|repository| format!("as=ci&repository={}", query_value(repository)));
-        self.lookup(key, query, false, &|_| true)
+        self.lookup(key, query, false, true, &|_| true)
     }
 
     /// The newest result for `key`, asked with `query`; in a directory, the newest of those that
-    /// `counts` takes, as a server answers the query, `for_job` when it asks for a job's.
+    /// `counts` takes, as a server answers the query, `for_job` when it asks for a job's;
+    /// `for_ci` when it asks what CI would find, which nothing this machine keeps answers.
     fn lookup(
         &self,
         key: &Digest,
         query: Option<String>,
         for_job: bool,
+        for_ci: bool,
         counts: &dyn Fn(&RunResult) -> bool,
     ) -> anyhow::Result<Latest> {
         let ledger = match &self.store {
@@ -1300,6 +1302,7 @@ impl Backend {
                 };
                 // \[ADR 0106\] What this machine keeps answers no lookup of CI's results (C-53).
                 let offline = !server.in_ci
+                    && !for_ci
                     && server.reads_as.is_none()
                     && !query
                         .as_deref()
@@ -2167,11 +2170,14 @@ impl Server {
     }
 
     /// \[ADR 0106\] Who an outbox entry is written and sent as (C-53): the credential's kind and
-    /// whose it is (a login's email, else a digest of the token), so another account's or an
-    /// agent's credential never sends a person's results, nor the other way round.
+    /// whose it is (a login's email, else a digest of the token; nothing more for a session, which
+    /// is renewed), so another account's or an agent's credential never sends a person's results,
+    /// nor the other way round.
     fn outbox_credential(&self) -> String {
         let whose = match (&self.credential, &self.token) {
             (Credential::Login { email }, _) => email.clone(),
+            // A session is renewed (C-52): any session at this server sends what another wrote.
+            (Credential::Session { .. }, _) => String::new(),
             (_, Some(token)) => Digest::of(token.as_bytes()).hex()[..16].to_string(),
             (_, None) => String::new(),
         };
