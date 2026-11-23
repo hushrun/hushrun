@@ -1,5 +1,5 @@
 //! \[ADR 0106\] The results outbox (C-53): a result a server couldn't be reached to record waits in
-//! `<cache dir>/outbox/<key>.json` until a later run, `hushrun ready` or `hushrun flush` reaches it,
+//! `<cache dir>/outbox/<key>-<server>.json` until a later run, `hushrun ready` or `hushrun flush` reaches it,
 //! and while the server is out of reach, lookups read it, so a check this machine passed skips.
 //!
 //! Each entry has one state, decided by [`decide`] and nowhere else:
@@ -20,7 +20,9 @@
 //!
 //! Never in CI: a runner's cache is shared with no one, and whoever could write a cache CI restores
 //! could have a job send what they wrote with its own credential (ADR 0067). An entry is sent only
-//! to the server it was for, with the same kind of credential that wrote it.
+//! to the server it was for, with the credential that wrote it: the same kind, and the same
+//! account's or token's. A settled entry goes 7 days after it settled; a sent one answers lookups
+//! for as long as a pending one would.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write as _};
@@ -81,7 +83,8 @@ pub struct Entry {
     pub id: String,
     /// The server's org URL it is for.
     pub base: String,
-    /// How the credential that wrote it is named (`Credential::named`): only the same kind sends it.
+    /// Who wrote it: the credential's kind and whose it is (a login's email, else a digest of the
+    /// token). Only the same sends it.
     pub credential: String,
     pub result: RunResult,
     /// When it was written, in milliseconds since the epoch.
@@ -145,28 +148,49 @@ impl Lock {
     }
 }
 
-fn path_of(dir: &Path, key: &str) -> PathBuf {
-    dir.join(format!("{key}.json"))
+/// An entry's file name, without `.json`: its key and the first 16 hex digits of its server's
+/// SHA-256, so one server's entry never replaces another's.
+fn stem(key: &str, base: &str) -> String {
+    format!("{key}-{}", &Digest::of(base.as_bytes()).hex()[..16])
 }
 
-/// The entry of `key`, when there is one that reads.
-pub fn read(dir: &Path, key: &str) -> Option<Entry> {
-    let bytes = std::fs::read(path_of(dir, key)).ok()?;
+fn path_of(dir: &Path, key: &str, base: &str) -> PathBuf {
+    dir.join(format!("{}.json", stem(key, base)))
+}
+
+/// The entry in the file named `stem`, when it reads and is the one its name says.
+fn read_stem(dir: &Path, name: &str) -> Option<Entry> {
+    let bytes = std::fs::read(dir.join(format!("{name}.json"))).ok()?;
     serde_json::from_slice::<Entry>(&bytes)
         .ok()
-        .filter(|entry| entry.schema == SCHEMA && entry.key == key)
+        .filter(|entry| entry.schema == SCHEMA && stem(&entry.key, &entry.base) == name)
+}
+
+/// The entry of `key` for `base`, when there is one that reads.
+pub fn read(dir: &Path, key: &str, base: &str) -> Option<Entry> {
+    read_stem(dir, &stem(key, base))
+}
+
+/// A temporary file's name in `dir` no other writer, here or in another process, picks.
+pub(crate) fn temp_in(dir: &Path, name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    dir.join(format!(".{name}-{}-{n}-{nanos}.tmp", std::process::id()))
 }
 
 /// Writes `entry` whole: a temporary file and a rename. The caller holds the lock.
 pub fn write(dir: &Path, entry: &Entry) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let temp = dir.join(format!(".{}-{}.tmp", entry.key, std::process::id()));
+    let temp = temp_in(dir, &entry.key);
     let written = (|| -> io::Result<()> {
         let mut file = crate::credentials::create_private(&temp)?;
         file.write_all(&serde_json::to_vec_pretty(entry)?)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        std::fs::rename(&temp, path_of(dir, &entry.key))
+        std::fs::rename(&temp, path_of(dir, &entry.key, &entry.base))
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -186,9 +210,8 @@ pub fn keep(
     let body = serde_json::to_vec(result)?;
     let id = Digest::of(&body).hex();
     let _lock = Lock::take(dir)?;
-    if let Some(existing) = read(dir, &key.hex())
+    if let Some(existing) = read(dir, &key.hex(), base)
         && existing.id == id
-        && existing.base == base
     {
         return Ok(());
     }
@@ -219,8 +242,10 @@ pub fn entries(dir: &Path) -> Vec<Entry> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let key = name.strip_suffix(".json")?.to_string();
-            (!key.starts_with('.')).then(|| read(dir, &key)).flatten()
+            let name = name.strip_suffix(".json")?;
+            (!name.starts_with('.'))
+                .then(|| read_stem(dir, name))
+                .flatten()
         })
         .collect()
 }
@@ -233,9 +258,12 @@ pub fn local(
     base: &str,
     counts: &dyn Fn(&RunResult) -> bool,
 ) -> Option<RunResult> {
-    let entry = read(dir, &key.hex())?;
-    let state = decide(entry.state, entry.created_at, now_ms(), None);
-    (entry.base == base && matches!(state, State::Pending | State::Sent) && counts(&entry.result))
+    let entry = read(dir, &key.hex(), base)?;
+    let now = now_ms();
+    let state = decide(entry.state, entry.created_at, now, None);
+    // A sent entry answers as long as a pending one would: then the server's answer is the one.
+    let fresh = now - entry.created_at < KEPT_MS;
+    (fresh && matches!(state, State::Pending | State::Sent) && counts(&entry.result))
         .then_some(entry.result)
 }
 
@@ -292,7 +320,38 @@ pub fn flush(
             _ => {}
         }
     }
+    prune(dir, now);
     Ok(Some(flushed))
+}
+
+/// How long a settled entry, or a temporary file a writer left, stays: 7 days.
+const SETTLED_MS: i64 = KEPT_MS;
+
+/// Removes what no run needs any more, with the lock held: an entry settled 7 days ago, and a
+/// temporary file a writer that stopped left a day ago.
+fn prune(dir: &Path, now: i64) {
+    for entry in entries(dir) {
+        if entry.state != State::Pending
+            && entry.settled_at.is_some_and(|at| now - at >= SETTLED_MS)
+        {
+            let _ = std::fs::remove_file(path_of(dir, &entry.key, &entry.base));
+        }
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in read_dir.filter_map(|e| e.ok()) {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() >= 24 * 60 * 60);
+        if name.starts_with('.') && name.ends_with(".tmp") && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -374,7 +433,12 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(flushed.pending, 1);
-        assert_eq!(read(dir.path(), &key.hex()).unwrap().attempts, 1);
+        assert_eq!(
+            read(dir.path(), &key.hex(), "https://a/o/acme")
+                .unwrap()
+                .attempts,
+            1
+        );
 
         let mut sent = Vec::new();
         let flushed = flush(dir.path(), "https://a/o/acme", "token", &mut |entry| {
@@ -385,7 +449,12 @@ mod tests {
         .unwrap();
         assert_eq!(sent, [key.hex()]);
         assert_eq!(flushed.sent, 1);
-        assert_eq!(read(dir.path(), &key.hex()).unwrap().state, State::Sent);
+        assert_eq!(
+            read(dir.path(), &key.hex(), "https://a/o/acme")
+                .unwrap()
+                .state,
+            State::Sent
+        );
         // Sent once: a later flush doesn't send it again; the other server's entry waits.
         let mut again = 0;
         flush(dir.path(), "https://a/o/acme", "token", &mut |_| {
@@ -395,7 +464,9 @@ mod tests {
         .unwrap();
         assert_eq!(again, 0);
         assert_eq!(
-            read(dir.path(), &other.hex()).unwrap().state,
+            read(dir.path(), &other.hex(), "https://b/o/acme")
+                .unwrap()
+                .state,
             State::Pending
         );
         // A lookup out of reach answers it.
@@ -409,7 +480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = Digest::of(b"old");
         keep(dir.path(), &key, "https://a/o/acme", "token", &result()).unwrap();
-        let mut entry = read(dir.path(), &key.hex()).unwrap();
+        let mut entry = read(dir.path(), &key.hex(), "https://a/o/acme").unwrap();
         entry.created_at -= KEPT_MS;
         write(dir.path(), &entry).unwrap();
         let mut tries = 0;
@@ -420,7 +491,12 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!((tries, flushed.expired), (0, 1));
-        assert_eq!(read(dir.path(), &key.hex()).unwrap().state, State::Expired);
+        assert_eq!(
+            read(dir.path(), &key.hex(), "https://a/o/acme")
+                .unwrap()
+                .state,
+            State::Expired
+        );
         assert!(local(dir.path(), &key, "https://a/o/acme", &|_| true).is_none());
     }
 
@@ -441,6 +517,79 @@ mod tests {
             thread.join().unwrap();
         }
         assert_eq!(entries(dir.path()).len(), 16);
+    }
+
+    // covers: C-53
+    #[test]
+    fn one_key_waits_for_two_servers_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = Digest::of(b"one");
+        keep(dir.path(), &key, "https://a/o/acme", "token: 1", &result()).unwrap();
+        keep(dir.path(), &key, "https://b/o/acme", "token: 1", &result()).unwrap();
+        assert_eq!(entries(dir.path()).len(), 2);
+        assert!(read(dir.path(), &key.hex(), "https://a/o/acme").is_some());
+        assert!(read(dir.path(), &key.hex(), "https://b/o/acme").is_some());
+    }
+
+    // covers: C-53
+    #[test]
+    fn another_accounts_credential_of_the_same_kind_sends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = Digest::of(b"one");
+        keep(
+            dir.path(),
+            &key,
+            "https://a/o/acme",
+            "your login: a@x",
+            &result(),
+        )
+        .unwrap();
+        let mut tries = 0;
+        flush(
+            dir.path(),
+            "https://a/o/acme",
+            "your login: b@x",
+            &mut |_| {
+                tries += 1;
+                (Outcome::Accepted, None)
+            },
+        )
+        .unwrap();
+        assert_eq!(tries, 0);
+    }
+
+    // covers: C-53
+    #[test]
+    fn a_settled_entry_and_a_left_temporary_file_go_after_a_while() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = Digest::of(b"one");
+        keep(dir.path(), &key, "https://a/o/acme", "token", &result()).unwrap();
+        flush(dir.path(), "https://a/o/acme", "token", &mut |_| {
+            (Outcome::Accepted, None)
+        })
+        .unwrap();
+        let mut entry = read(dir.path(), &key.hex(), "https://a/o/acme").unwrap();
+        assert_eq!(entry.state, State::Sent);
+        // A sent entry a week old answers no lookup, and goes at the next flush.
+        entry.created_at -= KEPT_MS;
+        entry.settled_at = Some(now_ms() - KEPT_MS);
+        write(dir.path(), &entry).unwrap();
+        assert!(local(dir.path(), &key, "https://a/o/acme", &|_| true).is_none());
+        let temp = dir.path().join(".left-1-0-0.tmp");
+        std::fs::write(&temp, b"{").unwrap();
+        let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&temp)
+            .unwrap()
+            .set_modified(day_ago)
+            .unwrap();
+        flush(dir.path(), "https://a/o/acme", "token", &mut |_| {
+            (Outcome::Accepted, None)
+        })
+        .unwrap();
+        assert!(entries(dir.path()).is_empty());
+        assert!(!temp.exists());
     }
 }
 
@@ -485,12 +634,12 @@ pub fn save_fetched(dir: &Path, base: &str, key: &Digest, result: &RunResult) ->
         fetched_at: now_ms(),
         seal: seal(base, &key.hex(), result),
     };
-    let temp = dir.join(format!(".{}-{}.tmp", key.hex(), std::process::id()));
+    let temp = temp_in(dir, &key.hex());
     let written = (|| -> io::Result<()> {
         let mut file = crate::credentials::create_private(&temp)?;
         file.write_all(&serde_json::to_vec_pretty(&entry)?)?;
         file.sync_all()?;
-        std::fs::rename(&temp, dir.join(format!("{}.json", key.hex())))
+        std::fs::rename(&temp, path_of(dir, &key.hex(), base))
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -506,7 +655,7 @@ pub fn fetched(
     base: &str,
     counts: &dyn Fn(&RunResult) -> bool,
 ) -> Option<RunResult> {
-    let bytes = std::fs::read(dir.join(format!("{}.json", key.hex()))).ok()?;
+    let bytes = std::fs::read(path_of(dir, &key.hex(), base)).ok()?;
     let entry: Fetched = serde_json::from_slice(&bytes).ok()?;
     let good = entry.schema == FETCHED_SCHEMA
         && entry.base == base
@@ -538,7 +687,7 @@ mod fetched_tests {
         assert!(fetched(dir.path(), &key, "https://a/o/acme", &|_| true).is_some());
         assert!(fetched(dir.path(), &key, "https://b/o/acme", &|_| true).is_none());
         // Edited, it doesn't read.
-        let path = dir.path().join(format!("{}.json", key.hex()));
+        let path = path_of(dir.path(), &key.hex(), "https://a/o/acme");
         let mut entry: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         entry["result"]["result"] = serde_json::json!("pass ");

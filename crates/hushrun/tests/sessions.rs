@@ -496,11 +496,20 @@ fn a_result_the_backend_couldnt_take_waits_skips_here_and_goes_with_the_next_run
         .filter(|r| r["result"] == "pass")
         .count();
     assert_eq!(passes, 1, "{:?}", fake.recorded());
-    let entry: Value = serde_json::from_slice(
-        &std::fs::read(outbox.join(format!("{}.json", entries[0]["key"].as_str().unwrap())))
-            .unwrap(),
-    )
-    .unwrap();
+    // One file a key and server: `<key>-<server>.json`.
+    let key = entries[0]["key"].as_str().unwrap();
+    let file = std::fs::read_dir(&outbox)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{key}-"))
+        })
+        .unwrap();
+    let entry: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
     assert_eq!(entry["state"], "sent");
 
     // Nothing waits now; and in CI nothing is kept at all.

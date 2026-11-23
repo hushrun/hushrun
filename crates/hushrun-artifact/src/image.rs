@@ -23,6 +23,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::registry::{ArtifactError, BlobStream, Manifest, OCI_INDEX, OCI_MANIFEST, Repository};
 
+/// \[B-77\] A pulled image: its manifest's digest and each layer's bytes.
+pub type PulledLayers = (Digest, Vec<Vec<u8>>);
+
 /// The image config's media type.
 pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 /// The config label that says what each layer holds, as JSON ([`Label`]).
@@ -882,7 +885,7 @@ impl crate::Artifacts {
         repository: &Repository,
         tag: &str,
         most: u64,
-    ) -> Result<Option<(Digest, Vec<Vec<u8>>)>, ArtifactError> {
+    ) -> Result<Option<PulledLayers>, ArtifactError> {
         self.runtime.block_on(async {
             let manifest = match self.registry.manifest(repository, tag).await {
                 Ok(manifest) => manifest,

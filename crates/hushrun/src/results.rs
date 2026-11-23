@@ -1298,6 +1298,12 @@ impl Backend {
                     }
                     (_, query) => query,
                 };
+                // \[ADR 0106\] What this machine keeps answers no lookup of CI's results (C-53).
+                let offline = !server.in_ci
+                    && server.reads_as.is_none()
+                    && !query
+                        .as_deref()
+                        .is_some_and(|q| q.split('&').any(|p| p == "as=ci"));
                 let mut headers = Vec::new();
                 if says_ci {
                     headers.push((hushrun_core::blocks::CI_HEADER, "1".to_string()));
@@ -1314,7 +1320,7 @@ impl Backend {
                     {
                         Ok(answer) => answer,
                         // \[ADR 0106\] Out of reach: what this machine passed and keeps for it (C-53).
-                        Err(LedgerError::Unavailable(why)) if !server.in_ci => {
+                        Err(LedgerError::Unavailable(why)) if offline => {
                             let kept = kept_here(key, &server.base, counts);
                             match kept {
                                 Some(result) => {
@@ -1333,7 +1339,7 @@ impl Backend {
                 // \[ADR 0106\] A server that fails is as out of reach (C-53).
                 if retryable(status)
                     && status != 429
-                    && !server.in_ci
+                    && offline
                     && let Some(result) = kept_here(key, &server.base, counts)
                 {
                     return Ok(Latest {
@@ -1530,7 +1536,7 @@ impl Backend {
         let Some(dir) = crate::outbox::directory() else {
             return err;
         };
-        match crate::outbox::keep(&dir, key, &server.base, server.credential.named(), result) {
+        match crate::outbox::keep(&dir, key, &server.base, &server.outbox_credential(), result) {
             Ok(()) => anyhow!(
                 "{}: {err:#}; the result waits on this machine, and the next run, hushrun ready or hushrun flush sends it",
                 server.base
@@ -1581,7 +1587,7 @@ impl Backend {
                 Err(err) => (Outcome::Unreachable, Some(format!("{err:#}"))),
             }
         };
-        match crate::outbox::flush(&dir, &server.base, server.credential.named(), &mut send) {
+        match crate::outbox::flush(&dir, &server.base, &server.outbox_credential(), &mut send) {
             Ok(flushed) => flushed,
             Err(err) => {
                 tracing::debug!("flushing the outbox: {err}");
@@ -2158,6 +2164,18 @@ impl Server {
             Some(crate::gitlab_job::Token::Usable(job)) => Some(&job.token),
             _ => None,
         }
+    }
+
+    /// \[ADR 0106\] Who an outbox entry is written and sent as (C-53): the credential's kind and
+    /// whose it is (a login's email, else a digest of the token), so another account's or an
+    /// agent's credential never sends a person's results, nor the other way round.
+    fn outbox_credential(&self) -> String {
+        let whose = match (&self.credential, &self.token) {
+            (Credential::Login { email }, _) => email.clone(),
+            (_, Some(token)) => Digest::of(token.as_bytes()).hex()[..16].to_string(),
+            (_, None) => String::new(),
+        };
+        format!("{}: {whose}", self.credential.named())
     }
 
     fn says_ci(&self) -> bool {

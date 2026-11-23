@@ -16,13 +16,15 @@ a sandbox that was about to go.
 ## Decision
 
 1. **An outbox.** A result whose request didn't reach its server, or that the server failed (5xx,
-   408), is kept in `<cache dir>/outbox/<key>.json`, written whole under `outbox.lock`. Its one
+   408), is kept in `<cache dir>/outbox/<key>-<server>.json`, written whole under `outbox.lock`. Its one
    state, decided by one function, is `pending`, `sent` (2xx), `refused` (any other 4xx but 429),
    or `expired` (7 days after it was written, by this machine's clock when read). Settled states
-   stay. A newer result of the same key replaces one still pending: the server answers the newest.
+   stay for 7 days, then a flush removes them. A newer result of the same key replaces one still pending: the server answers the newest.
 2. **Sent by the next run.** `hushrun run` and `hushrun ready` send what waits for their backend
    before anything else, and so does `hushrun flush`. Only to the server an entry was for, and only
-   with the same kind of credential that wrote it. One flush at a time; a server out of reach is
+   with the credential that wrote it: its kind and whose (a login's email, else a digest of the
+   token), so an agent's credential never sends a person's results. Lookups out of reach never
+   answer a lookup of CI's results. One flush at a time; a server out of reach is
    tried once a flush. Sending again is safe: the server keeps one result per caller, key and body.
 3. **Read while the server is out of reach.** A lookup that can't reach its server, or that the
    server fails, answers from the outbox (pending or sent), then from what `hushrun fetch` saved:
