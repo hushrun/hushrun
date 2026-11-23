@@ -22,6 +22,15 @@ hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says 
 
 ### Added
 
+- **A results outbox** (C-53, [ADR 0106](docs/adr/0106-results-that-wait-and-what-a-sandbox-fetches.md)):
+  outside CI, a result whose backend couldn't be reached waits in `<cache dir>/outbox/` for 7 days,
+  and the next run, `hushrun ready` or the new `hushrun flush` sends it. While the backend is out of
+  reach, lookups read it, so a check this machine passed still skips.
+- **`hushrun fetch`** (C-54): for a setup script, the newest result of every check of the tree, kept
+  for 24 hours, and the compiled code `hushrun build fetch` fetches.
+- **`hushrun init --agent-clouds`** (C-55): end-of-session hooks that run `hushrun flush` for Claude
+  Code, Cursor and Copilot, Copilot's setup steps and a dev container's feature, for the clouds the
+  team uses. The AGENTS.md block says to run `hushrun flush` before finishing.
 - **Sessions** (C-52, [ADR 0105](docs/adr/0105-credentials-a-sandboxs-network-adds-and-sessions.md)):
   `hushrun login --session` swaps an agent token, a Cursor cloud agent's ID token (minted over
   `CURSOR_AGENT_SOCKET`) or a GitHub Actions job's ID token for a session of one repository, saved

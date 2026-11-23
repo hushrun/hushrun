@@ -85,6 +85,9 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
     // A dry run's plan as one JSON document (C-15), in place of all of its text.
     let json = args.dry_run && global.format == Format::Json;
     let mut look = Look::at(&root)?;
+    // \[ADR 0106\] Which agent clouds the team uses: what the flag says, else what a person at a
+    // terminal answers, else what the repository already has (C-55).
+    look.clouds = agents::chosen(args, &root, json)?;
     if !json {
         look.print();
     }
@@ -387,6 +390,8 @@ struct Look {
     /// B-69: the long-lived branches hushrun.yaml's `build: baked: branches:` names, which the
     /// bake job bakes into their own tags.
     bake_branches: Vec<String>,
+    /// \[ADR 0106\] The agent clouds the team uses, whose files init writes (C-55).
+    clouds: Vec<agents::Cloud>,
     /// The backend package.json or hushrun.yaml names.
     backend: Option<String>,
     /// \[ADR 0047\] The checks hushrun.yaml lets CI skip when a later step reads their reports
@@ -572,6 +577,7 @@ impl Look {
             &placing,
         );
         let mut look = Look {
+            clouds: agents::clouds_in(root),
             root: root.to_path_buf(),
             repository: repository_id(root),
             workspace: placing.workspace,
@@ -1175,7 +1181,7 @@ impl AgentTools {
             (json::value(&text).ok()? == expected).then_some((text, change))
         });
         AgentTools {
-            files: agents::plan(&look.root),
+            files: agents::plan(&look.root, &look.clouds, look.package.is_some()),
             hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
             prepare,
             binary: look.binary_directory(),
@@ -1454,7 +1460,7 @@ impl Plan {
             ledger: ledger::Preview::Unknown,
             promotion: Vec::new(),
             tools: AgentTools {
-                files: agents::plan(&look.root),
+                files: agents::plan(&look.root, &look.clouds, look.package.is_some()),
                 hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
                 prepare: None,
                 binary: look.binary_directory(),
@@ -3885,6 +3891,7 @@ mod tests {
             org: None,
             local: false,
             bake: false,
+            agent_clouds: None,
             pipeline: false,
             force: false,
             repository: None,

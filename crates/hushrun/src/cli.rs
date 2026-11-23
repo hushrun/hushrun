@@ -756,6 +756,18 @@ pub struct InitArgs {
     #[arg(long, conflicts_with_all = ["local", "pipeline_flags"])]
     pub bake: bool,
 
+    /// The agent clouds your team uses, comma-separated: claude-code, cursor, copilot, codex,
+    /// jules, devin, devcontainer, or none. init writes their files: hooks that send what a
+    /// session passed before it ends, Copilot's setup steps, a dev container's feature
+    /// [default: asked at a terminal, else the ones the repository already has files for].
+    #[arg(
+        long,
+        value_name = "LIST",
+        value_delimiter = ',',
+        conflicts_with = "pipeline_flags"
+    )]
+    pub agent_clouds: Option<Vec<String>>,
+
     /// Write a starter hushrun.yaml for a deploy pipeline instead. The flags below imply it.
     #[arg(long, help_heading = "Pipeline")]
     pub pipeline: bool,
