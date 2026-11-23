@@ -669,3 +669,66 @@ fn a_bake_with_no_check_named_holds_every_check_and_each_pack_once() {
         "{status}"
     );
 }
+
+// covers: B-63, B-66, B-68
+// Cargo builds in parallel, so the order compiles end in, and so the order a run's manifest
+// holds its pairs in, changes from one build of the same code to the next. A store's identity,
+// its image's fixed tag and its `baked.json` are the blocks a build names, never the order
+// they ended in: the same build in another order bakes the same bytes. Before, the identity
+// hashed the pairs in order, and the fixed tag moved with no change to the code.
+#[test]
+fn the_same_build_in_another_compile_order_bakes_the_same_identity_and_baked_json() {
+    let w = World::new("acme-api.yaml");
+    workspace(&w);
+    let laptop = Machine::new(&w, "laptop");
+    let built = laptop.cargo_build(&w.root.join("target"), &[]);
+    assert_eq!(built.code, 0, "{}", built.stderr);
+    let bake = |out: &Path| {
+        let ran = ran(laptop
+            .hushrun()
+            .current_dir(w.repo.join("ws"))
+            .env("SOURCE_DATE_EPOCH", "1700000000")
+            .args(["build", "bake", "--format", "json", "--out"])
+            .arg(out));
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        let said = serde_json::from_str::<Value>(&ran.stdout).unwrap();
+        let json = std::fs::read(out.join("baked.json")).unwrap();
+        (said, json)
+    };
+    let manifest = || {
+        let manifest = ran(laptop
+            .hushrun()
+            .current_dir(w.repo.join("ws"))
+            .args(["build", "manifest", "--json"]));
+        assert_eq!(manifest.code, 0, "{}", manifest.stderr);
+        serde_json::from_str::<Value>(&manifest.stdout).unwrap()["manifest"].clone()
+    };
+    let (one, one_json) = bake(&w.root.join("one"));
+    assert_eq!(manifest(), one["manifest"]);
+    // The same pairs, as a build whose compiles ended in the other order leaves them.
+    let folder = laptop.store().join("manifests");
+    let mut reordered = 0;
+    for entry in std::fs::read_dir(&folder).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let mut saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for part in saved["parts"].as_array_mut().unwrap() {
+            let pairs = part["pairs"].as_array_mut().unwrap();
+            assert!(pairs.len() > 1, "{part}");
+            pairs.reverse();
+            reordered += 1;
+        }
+        std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    }
+    assert!(reordered > 0);
+    let (two, two_json) = bake(&w.root.join("two"));
+    assert_eq!(two["manifest"], one["manifest"]);
+    assert_eq!(two["checks"], one["checks"]);
+    assert_eq!(manifest(), one["manifest"]);
+    assert_eq!(
+        String::from_utf8_lossy(&two_json),
+        String::from_utf8_lossy(&one_json)
+    );
+}

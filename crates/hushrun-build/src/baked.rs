@@ -81,7 +81,7 @@ pub const HINTS: &str = "hints";
 /// The file, in a run's session folder, of the rows the run may open ([`write_index`]).
 pub const INDEX: &str = "baked-rows";
 /// What a manifest's identity is the digest of, before its pairs.
-const MANIFEST_SCHEMA: &str = "hushrun.block-manifest/v1";
+const MANIFEST_SCHEMA: &str = "hushrun.block-manifest/v2";
 /// What a baked store's identity is the digest of, before its checks' parts.
 const STORE_SCHEMA: &str = "hushrun.baked-manifests/v2";
 /// Where a run's relay records, in the run's own store, that a baked store's manifest was
@@ -448,16 +448,21 @@ impl Baked {
     }
 }
 
-/// The identity of a manifest: the SHA-256 of `hushrun.block-manifest/v1`, the kind and each
-/// pair's two addresses in order. A backend's manifest and the one a machine saves for the same
-/// run have the same identity.
+/// The identity of a manifest: the SHA-256 of `hushrun.block-manifest/v2`, the kind and each
+/// distinct pair's two addresses, sorted. A backend's manifest and the one a machine saves for the
+/// same run have the same identity, and so do two builds of the same code whose compiles ended in
+/// another order (cargo builds in parallel): the order is the prefetch's, never the identity's.
 pub fn manifest_id(kind: &str, pairs: &[Pair]) -> Hex32 {
-    let mut bytes = Vec::with_capacity(64 * pairs.len() + 64);
+    let mut sorted: Vec<(Hex32, Hex32)> =
+        pairs.iter().map(|Pair(step, key)| (*step, *key)).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut bytes = Vec::with_capacity(64 * sorted.len() + 64);
     bytes.extend_from_slice(MANIFEST_SCHEMA.as_bytes());
     bytes.push(b'\n');
     bytes.extend_from_slice(kind.as_bytes());
     bytes.push(b'\n');
-    for Pair(step, key) in pairs {
+    for (step, key) in &sorted {
         bytes.extend_from_slice(&step.0);
         bytes.extend_from_slice(&key.0);
     }
@@ -2015,14 +2020,22 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_s_identity_is_its_kind_and_its_pairs_in_order() {
+    fn a_manifest_s_identity_is_its_kind_and_its_pairs_in_any_order() {
         let a = Pair(Hex32([1; 32]), Hex32([2; 32]));
         let b = Pair(Hex32([3; 32]), Hex32([4; 32]));
         let one = manifest_id("rustc/1", &[a, b]);
         assert_eq!(one, manifest_id("rustc/1", &[a, b]));
-        assert_ne!(one, manifest_id("rustc/1", &[b, a]));
+        // Cargo's parallel build ends compiles in another order each time: the same pairs, the
+        // same identity, and a pair named twice counts once.
+        assert_eq!(one, manifest_id("rustc/1", &[b, a]));
+        assert_eq!(one, manifest_id("rustc/1", &[b, a, b]));
         assert_ne!(one, manifest_id("go/1", &[a, b]));
         assert_ne!(one, manifest_id("rustc/1", &[a]));
+        // A block under another first key is another pair.
+        assert_ne!(
+            one,
+            manifest_id("rustc/1", &[a, Pair(Hex32([5; 32]), Hex32([4; 32]))])
+        );
         // A store's identity is its checks' parts, in any order; another check's part is
         // another identity, and so is the same part under another check.
         let checks = sample().checks;

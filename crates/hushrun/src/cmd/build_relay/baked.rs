@@ -590,7 +590,11 @@ pub(crate) fn write_whole(
     let filled = fs::create_dir_all(new.join(baked::PACKS))
         .map_err(|err| at(err, &new))
         .and_then(|()| fill(&new))
-        .and_then(|baked| {
+        .and_then(|mut baked| {
+            // B-63: the rows in one order (kind, then address), never the order the build's
+            // compiles ended in, which cargo's parallel build changes: the same store, the same
+            // bytes.
+            sort_rows(&mut baked.packs);
             let json = serde_json::to_vec_pretty(&baked).map_err(|err| err.to_string())?;
             let path = new.join(BAKED_JSON);
             fs::write(&path, json).map_err(|err| at(err, &path))?;
@@ -620,6 +624,11 @@ pub(crate) fn write_whole(
         let _ = sync_dir(parent);
     }
     Ok((baked, held))
+}
+
+/// B-63: a store's rows in the one order its `baked.json` holds them: by kind, then address.
+pub(crate) fn sort_rows(rows: &mut [PackRow]) {
+    rows.sort_by(|a, b| (a.kind.as_str(), a.address).cmp(&(b.kind.as_str(), b.address)));
 }
 
 /// Every file and folder under `dir`, and `dir` itself, written through to the disk.

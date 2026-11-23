@@ -456,3 +456,131 @@ fn a_dependencies_only_bake_of_cargo_test_survives_a_doctest() {
     ]);
     assert_eq!(said.code, 0, "{}\n{}", said.stdout, said.stderr);
 }
+
+/// A git repository holding one proc macro, `name`, whose `seven!()` is `7u32`: a third-party
+/// crate cargo links as a library for the compiler to load.
+fn proc_macro_remote(root: &Path, name: &str) -> PathBuf {
+    let repo = root.join(format!("remote-{name}"));
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn seven(_: TokenStream) -> TokenStream {\n    \"7u32\".parse().unwrap()\n}\n",
+    )
+    .unwrap();
+    git::init(&repo, "sha1");
+    git::commit_all(&repo, name);
+    repo
+}
+
+/// [`workspace`], with `app` also on the git proc macro `seven`: a third-party build script's
+/// program and a proc macro, the two linked outputs a dependency gives.
+fn workspace_with_macro(w: &World) {
+    workspace(w);
+    let seven = proc_macro_remote(&w.root, "seven");
+    let ws = w.repo.join("ws");
+    let manifest = std::fs::read_to_string(ws.join("app/Cargo.toml")).unwrap();
+    std::fs::write(
+        ws.join("app/Cargo.toml"),
+        format!(
+            "{manifest}seven = {{ git = \"file://{}\" }}\n",
+            seven.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("app/src/main.rs"),
+        "fn main() {\n    assert!(scripty::made());\n    println!(\"{}\", core_lib::value() + seven::seven!());\n}\n",
+    )
+    .unwrap();
+    let lock = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "-q"])
+        .current_dir(&ws)
+        .env("CARGO_HOME", w.root.join("cargo-home"))
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    w.commit("a proc macro");
+}
+
+/// Each layer of the image a bake said it published: its role and digest.
+fn layers(said: &Value) -> Vec<(String, String)> {
+    said["image"]["layers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no layers: {said}"))
+        .iter()
+        .map(|l| {
+            (
+                l["role"].as_str().unwrap().to_string(),
+                l["digest"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+// covers: B-7, B-65, B-66, B-72
+// Two machines bake the same lockfile from nothing, each building it in parallel: the image's
+// dependencies layer, its fixed tag and the store's identity are the same. A build script's and a proc
+// macro's hint named the folder rustc links in (`rustcXXXXXX`, new at every link), so their
+// hints, and with them the dependencies layer, never repeated, and every bake uploaded it again.
+#[test]
+fn two_dependencies_only_bakes_of_the_same_lockfile_give_the_same_image() {
+    let w = World::new("acme-api.yaml");
+    workspace_with_macro(&w);
+    let bake = |name: &str| -> Value {
+        let m = Machine::new(&w, name);
+        let layout = w.root.join(format!("{name}-layout"));
+        let said = ran(m
+            .hushrun()
+            .env("SOURCE_DATE_EPOCH", "1700000000")
+            .env("CARGO_BUILD_JOBS", "4")
+            .args([
+                "build",
+                "bake",
+                "--check",
+                "build",
+                "--deps-only",
+                "--no-sign",
+                "--oci-dir",
+            ])
+            .arg(&layout)
+            // Release, as the bake that found it: a debug build's program and proc macro hold
+            // the toolchain's folder in their debug info, and stay on the machine (B-24).
+            .args([
+                "--format",
+                "json",
+                "--",
+                "cargo",
+                "build",
+                "--offline",
+                "--release",
+            ]));
+        assert_eq!(said.code, 0, "{}\n{}", said.stdout, said.stderr);
+        serde_json::from_str(&said.stdout).unwrap()
+    };
+    let one = bake("one");
+    let two = bake("two");
+    // remote, scripty, scripty's build script and seven, the proc macro.
+    assert_eq!(one["blocks"], 4, "{one}");
+    assert_eq!(one["hints"], 4, "{one}");
+    // Every layer but `recent`, which holds `baked.json`: it changes with every bake (B-65), and
+    // its rows hold what each build's compiles took.
+    let kept = |said: &Value| {
+        let all = layers(said);
+        assert!(all.iter().any(|(role, _)| role == "recent"), "{said}");
+        all.into_iter()
+            .filter(|(role, _)| role != "recent")
+            .collect::<Vec<_>>()
+    };
+    assert!(!kept(&one).is_empty(), "{one}");
+    assert_eq!(kept(&one), kept(&two), "{one}\n{two}");
+    assert_eq!(one["image"]["tags"][0], two["image"]["tags"][0]);
+    assert_eq!(one["manifest"], two["manifest"]);
+}

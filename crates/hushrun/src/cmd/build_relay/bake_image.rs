@@ -390,6 +390,7 @@ fn image_baked(baked: &Baked, carried: &[PackRow]) -> Option<Baked> {
     }
     let mut out = baked.clone();
     out.packs.extend(carried.iter().cloned());
+    crate::cmd::build_relay::baked::sort_rows(&mut out.packs);
     Baked::parse(&serde_json::to_vec_pretty(&out).ok()?).ok()
 }
 

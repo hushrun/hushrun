@@ -2392,10 +2392,12 @@ impl Call<'_> {
                 .collect(),
             ld_sysroot: query.ld_sysroot.as_deref().map(placeholders),
             name: placeholders(&args.linker),
+            // B-7: rustc's temporary folder named the one way E reads it, so the hint is the
+            // same for every build of the same code.
             dry_args: Some(
                 dry_args
                     .iter()
-                    .map(|arg| link::flag_with_paths(arg, placeholders))
+                    .map(|arg| link::fixed_rustc_temp(&link::flag_with_paths(arg, placeholders)))
                     .collect(),
             ),
             env: set

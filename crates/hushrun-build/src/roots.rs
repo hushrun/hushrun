@@ -32,6 +32,11 @@ use crate::model::{Folder, Located, RootName, Rooted};
 /// the text `{hushrun:` itself, so text that already looks like a placeholder stays distinct.
 const OPEN: &str = "{hushrun:";
 
+/// The placeholder [`Roots::to_placeholders`] writes for the root `name`.
+pub fn placeholder(name: RootName) -> String {
+    format!("{OPEN}{}}}", name.as_string())
+}
+
 /// The stand-in `--remap-path-prefix` writes for a root (B-9), in one table: a measurement may
 /// change the recipe. The workspace becomes `.`, as cargo's own `trim-paths` does. The others
 /// are absolute paths under `/hushrun`, which no real checkout uses, one per root; the build

@@ -1469,6 +1469,39 @@ pub fn in_rustc_temp(path: &Path) -> bool {
         .is_some_and(|rest| rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
+/// B-7, B-37: `arg`, its roots already written as placeholders, with each of rustc's temporary
+/// folders in the output folder (`{hushrun:out-dir}/rustcXXXXXX`: the symbol list it hands the
+/// linker, and on Linux its `raw-dylibs` stubs) named `rustcXXXXXX`. The name is new at every
+/// link, and E already reads it fixed ([`crate::linkenv::normalize`]): a hint that kept it would
+/// change with every build of the same code, and a baked store's hints with it. The folder is
+/// gone once rustc ends, so a lookup's dry run never found it under either name. Only a folder
+/// directly in the output folder counts, as for [`under_rustc_temp`].
+pub fn fixed_rustc_temp(arg: &str) -> String {
+    let start = format!(
+        "{}/rustc",
+        crate::roots::placeholder(crate::model::RootName::OutDir)
+    );
+    let mut out = String::with_capacity(arg.len());
+    let mut rest = arg;
+    while let Some(at) = rest.find(&start) {
+        let after = &rest[at + start.len()..];
+        let name = after
+            .get(..6)
+            .filter(|name| name.bytes().all(|b| b.is_ascii_alphanumeric()));
+        let ends = after.get(6..).and_then(|tail| tail.chars().next());
+        out.push_str(&rest[..at + start.len()]);
+        match name {
+            Some(_) if ends.is_none_or(|c| !c.is_ascii_alphanumeric()) => {
+                out.push_str("XXXXXX");
+                rest = &after[6..];
+            }
+            _ => rest = after,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Whether `path` lies in one of rustc's own temporary folders in the output folder `out_dir`,
 /// at any depth: on Linux rustc hands the linker `-L <out_dir>/rustcXXXXXX/raw-dylibs`, a
 /// folder of stubs it writes from the compile itself and removes after the link, under a name
@@ -1721,6 +1754,28 @@ mod tests {
             Path::new("/w/target/debug/deps/rustcfoobarbaz/libc.so"),
             out
         ));
+        // B-7: what a hint keeps of such a folder, after the roots: one name for every link.
+        assert_eq!(
+            fixed_rustc_temp("-Wl,{hushrun:out-dir}/rustcnRixn4/list"),
+            "-Wl,{hushrun:out-dir}/rustcXXXXXX/list"
+        );
+        assert_eq!(
+            fixed_rustc_temp("{hushrun:out-dir}/rustcT5XijC/raw-dylibs"),
+            "{hushrun:out-dir}/rustcXXXXXX/raw-dylibs"
+        );
+        assert_eq!(
+            fixed_rustc_temp("-Wl,--version-script={hushrun:out-dir}/rustcAb12Cd"),
+            "-Wl,--version-script={hushrun:out-dir}/rustcXXXXXX"
+        );
+        for kept in [
+            "{hushrun:out-dir}/rustcfoobarbaz/list",
+            "{hushrun:out-dir}/rustc12/list",
+            "{hushrun:workspace}/rustcnRixn4/list",
+            "/tmp/rustcnRixn4/list",
+            "-lSystem",
+        ] {
+            assert_eq!(fixed_rustc_temp(kept), kept);
+        }
 
         let libraries = library_places(&inputs);
         assert_eq!(libraries[0], PathBuf::from("/w/out/libfoo.a"));
