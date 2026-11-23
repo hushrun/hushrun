@@ -47,22 +47,27 @@ system store. With the environment's default network, hushrun's hosts were refus
    free, with no account. `detect` answers the provider, as before.
 4. **Order.** An explicit `HUSHRUN_PROVIDER` first, a person's decision. Then a platform's marker,
    which beats `CI=true` and a named CI's variable alike (this amends ADR 0046 item 3 for platform
-   markers only). Then a named CI. Then bare `CI=true`: a sandbox beside an agent row's marker, local
-   beside `HUSHRUN_AGENT` (ADR 0046), else generic CI. Else a person's machine. `HUSHRUN_AGENT` alone
-   still doesn't override a named CI.
+   markers only), or `HUSHRUN_SANDBOX` naming a platform row, for a sandbox whose marker is missing.
+   Then a named CI. Then bare `CI=true`: a sandbox beside an agent row's marker, local
+   beside `HUSHRUN_AGENT` (ADR 0046), else generic CI. Else a person's machine, where an agent row's marker alone
+   changes nothing. `HUSHRUN_AGENT` alone still doesn't override a named CI.
 5. **A sandbox in GitHub Actions never gets CI's ID token.** `Env` sets
    `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` aside in a platform's sandbox,
    so no result, ledger write or build request carries it as CI's credential. Only
    `hushrun login --session` reads them (ADR 0105), to get a session as an agent.
 6. **`hushrun doctor`** says, in a sandbox or with `--hosts`: the platform and its marker; where the
    credential comes from, by name; whether each host answers over TLS that verifies with the
-   system's store (the backend, its registry, and for hushrun's own backend
-   `*.r2.cloudflarestorage.com`); the exact entry for that platform's allowlist; and what will be
+   system's store (the backend and its registry; 403 and 407 count as the proxy refusing), and, for
+   hushrun's own backend, that `*.r2.cloudflarestorage.com` is needed, which it can't ask, since
+   the org's host there is a subdomain only a run that uses the store learns; the exact entry for that platform's allowlist; and what will be
    shared. It never prints a value.
 7. **Unconfirmed markers say so.** `COPILOT_AGENT_SESSION_ID` was reported by a third party and
    isn't in GitHub's documentation; `CODEX_PROXY_CERT` likewise for Codex cloud. Their rows are
-   marked unconfirmed, doctor warns in their sandbox, and the fix for a wrong guess is
-   `HUSHRUN_PROVIDER`. Jules and Devin have no row: nothing documents a marker, and neither sets
+   marked unconfirmed, doctor warns in their sandbox, and the fix for a missing marker is
+   `HUSHRUN_SANDBOX=<the platform's id>`, which makes the same sandbox, the ID token set aside
+   included. `HUSHRUN_PROVIDER=local` doesn't set it aside: it is the escape ADR 0046 gave an
+   agent's step in a CI job, which ADR 0103's keyless signing with `HUSHRUN_SIGNING=sigstore`
+   relies on. Jules and Devin have no row: nothing documents a marker, and neither sets
    `CI`, so they are local already.
 
 ## Consequences
@@ -70,8 +75,14 @@ system store. With the environment's default network, hushrun's hosts were refus
 - A hosted sandbox reuses passes within its session with no setup, and shares them once a credential
   is set (ADR 0105). Results of a sandbox count in CI jobs without variants as any agent's pass does
   (ADR 0044): no new guard.
-- A workflow that sets a platform's marker by hand makes its job a sandbox. Only someone who writes
-  the workflow can, and they could set `HUSHRUN_PROVIDER=local` as well.
+- A job where a platform's marker is set makes itself a sandbox. The workflow can set it, and so can
+  any earlier step through `$GITHUB_ENV`, a pull request's install script included, as it could
+  already set `HUSHRUN_PROVIDER=local`. What such a job gains is a local run's results: an agent's
+  word, which CI-only repositories (T-16) never reuse.
+- `CURSOR_AGENT_SOCKET` and `CODEX_PROXY_CERT` also make C-23 take whoever runs for an agent. Should
+  either appear in a person's own terminal, the hook would refuse their push until they ran
+  `hushrun ready`, or push with `--no-verify`; the probe on those platforms (left to people who use
+  them) settles it.
 - The table is a contract with the docs' per-platform pages: a row's id names its page.
 - A vendor that renames its marker breaks detection until a release follows; the sandbox runs as
   before this ADR meanwhile, which costs reuse, never a wrong skip.

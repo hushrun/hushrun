@@ -55,15 +55,20 @@ pub fn probe(url: &str, timeout: Duration) -> Reach {
         Err(err) => return Reach::Unreachable(err.to_string()),
     };
     match runtime.block_on(async { client.get(url).send().await }) {
+        // A proxy that re-signs TLS with a CA the system trusts answers for hosts it refuses.
+        Ok(response) if matches!(response.status().as_u16(), 403 | 407) => {
+            Reach::Blocked(format!("HTTP {}", response.status().as_u16()))
+        }
         Ok(response) => Reach::Answered(response.status().as_u16()),
-        Err(err) => classify(&chain(&err)),
+        // Without the URL, which a host's name could make look like any kind of failure.
+        Err(err) => classify(&chain(&err.without_url())),
     }
 }
 
 /// Which kind of failure an error's chain of messages is.
 fn classify(text: &str) -> Reach {
     let lower = text.to_ascii_lowercase();
-    if lower.contains("certificate") || lower.contains("tls") || lower.contains("handshake") {
+    if lower.contains("certificate") || lower.contains("unknownissuer") {
         Reach::Tls(short(text))
     } else if lower.contains("403")
         || lower.contains("407")

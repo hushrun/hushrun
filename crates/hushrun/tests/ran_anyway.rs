@@ -14,6 +14,11 @@ use hushrun_testkit::{git, schema};
 const CLEARED: &[&str] = &[
     "CI",
     "GITHUB_ACTIONS",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
     "GITHUB_JOB",
     "GITHUB_REPOSITORY",
     "GITHUB_WORKFLOW_REF",

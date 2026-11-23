@@ -9,6 +9,10 @@
 //! run a sandbox beside bare `CI=true` only, as `HUSHRUN_AGENT` does (ADR 0046), and never beside
 //! a named CI, where an agent's step in a job keeps ADR 0044's guards.
 
+/// \[ADR 0104\] Names a platform row by its id, such as `copilot-cloud`, for a sandbox whose own
+/// marker is missing or wrong: it is that platform's sandbox, with everything that follows.
+pub const SANDBOX_VARIABLE: &str = "HUSHRUN_SANDBOX";
+
 /// What a row's marker needs of a variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Marker {

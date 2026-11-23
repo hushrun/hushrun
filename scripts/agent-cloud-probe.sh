@@ -23,8 +23,7 @@ section() { printf '\n## %s\n' "$1"; }
 # Whether a variable is set, and whether it reads as true, without its value.
 marker() {
   name=$1
-  if env | grep -q "^$name="; then
-    value=$(printenv "$name")
+  if value=$(printenv "$name"); then
     case $(printf '%s' "$value" | tr '[:upper:]' '[:lower:]') in
       1|true|yes) state="set, reads true" ;;
       "") state="set, empty" ;;
@@ -53,12 +52,14 @@ for name in CI GITHUB_ACTIONS GITLAB_CI BUILDKITE CIRCLECI CODESPACES REMOTE_CON
   DEVCONTAINER IS_SANDBOX AI_AGENT CLAUDECODE CLAUDE_CODE_REMOTE CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE \
   CODEX_SANDBOX CODEX_CI CODEX_THREAD_ID CODEX_PROXY_CERT CURSOR_AGENT CURSOR_AGENT_SOCKET \
   COPILOT_AGENT_SESSION_ID COPILOT_AGENT_ACTION GITHUB_COPILOT_API_TOKEN JULES_SESSION_ID \
-  DEVIN_ID HUSHRUN_AGENT HUSHRUN_TOKEN HUSHRUN_AUTH HUSHRUN_BACKEND HUSHRUN_PROVIDER; do
+  DEVIN_ID HUSHRUN_AGENT HUSHRUN_TOKEN HUSHRUN_AUTH HUSHRUN_BACKEND HUSHRUN_PROVIDER HUSHRUN_SANDBOX; do
   marker "$name"
 done
 
 section "Variable names (no values)"
-env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort -u | tr '\n' ' '
+# From awk's ENVIRON, never from `env`, whose lines of a value that spans several could pass for
+# names.
+awk 'BEGIN { for (name in ENVIRON) print name }' | sort -u | tr '\n' ' '
 echo
 
 section "System"
@@ -117,12 +118,13 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
   git config user.name probe
   git config user.email probe@example.invalid
   git config commit.gpgsign false
-  git commit -q --allow-empty -m probe
+  git -c core.hooksPath=/dev/null commit -q --allow-empty -m probe
   git remote add origin ../remote.git
   mkdir -p .git/hooks
   printf '#!/bin/sh\ntouch "%s/fired"\n' "$tmp" > .git/hooks/pre-push
   chmod +x .git/hooks/pre-push
-  git push -q origin HEAD:refs/heads/probe >/dev/null 2>&1
+  # This clone's own hooks, whatever a global core.hooksPath says.
+  git -c core.hooksPath=.git/hooks push -q origin HEAD:refs/heads/probe >/dev/null 2>&1
 )
 if [ -f "$tmp/fired" ]; then
   echo "pre-push hook:           fires on git push (local bare remote)"
@@ -166,6 +168,7 @@ else
   echo "system CA file: ${system_ca:-none}"
   probe api.hushrun.com https://api.hushrun.com/healthz
   probe registry.hushrun.com https://registry.hushrun.com/v2/
+  # Your organization's store is a subdomain of it, which only a run that uses the store learns.
   probe r2.cloudflarestorage.com https://r2.cloudflarestorage.com/
-  echo "any HTTP status means the host answered; a refusal from the proxy shows as 403 or a failure."
+  echo "an HTTP status means the host answered, but 403 or 407 may be a proxy refusing it."
 fi

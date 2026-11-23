@@ -244,7 +244,7 @@ const OTHER_CI: &[&[&str]] = &[
 fn stood_in(name: &str) -> Option<Option<String>> {
     if GITHUB_ID_TOKEN.contains(&name) {
         let env = Env::from_process();
-        return env.set_aside.is_some().then_some(None);
+        return sets_aside_github_id_token(&env).then_some(None);
     }
     if !name.starts_with(OWN) {
         return None;
@@ -334,11 +334,13 @@ fn sets_aside_github_id_token(env: &Env) -> bool {
 }
 
 /// \[ADR 0104\] What runs this command (C-50), decided here and nowhere else: an explicit
-/// `HUSHRUN_PROVIDER` first, a person's decision; then a hosted platform's own marker
+/// `HUSHRUN_PROVIDER` that parses first, a person's decision; then `HUSHRUN_SANDBOX` naming a
+/// platform row by its id, the same decision for a sandbox; then a hosted platform's own marker
 /// ([`platforms::Kind::Platform`]), which beats `CI=true` and a named CI's variable alike, since
 /// only that vendor's sandbox sets it and one, Copilot's, runs inside GitHub Actions; then a named
 /// CI; then bare `CI=true`, unless `HUSHRUN_AGENT` or a coding agent's marker
-/// ([`platforms::Kind::Agent`]) stands beside it, which makes a sandbox; else a person's machine.
+/// ([`platforms::Kind::Agent`]) stands beside it, which makes a sandbox; else a person's machine,
+/// where an agent's marker alone changes nothing.
 pub fn detection(env: &Env) -> Detected {
     if let Some(provider) = env
         .get("HUSHRUN_PROVIDER")
@@ -348,6 +350,14 @@ pub fn detection(env: &Env) -> Detected {
             Provider::Local => Detected::Local,
             provider => Detected::Ci(provider),
         };
+    }
+    // A person who knows the platform names it, where its marker is missing or wrong.
+    if let Some(platform) = env
+        .get(platforms::SANDBOX_VARIABLE)
+        .and_then(|id| platforms::by_id(id.trim()))
+        .filter(|platform| platform.kind == platforms::Kind::Platform)
+    {
+        return Detected::Sandbox(platform);
     }
     if let Some(platform) = platforms::hosted(env) {
         return Detected::Sandbox(platform);
@@ -372,10 +382,8 @@ pub fn detection(env: &Env) -> Detected {
             None => Detected::Ci(Provider::Generic),
         }
     } else {
-        match platforms::of(env) {
-            Some(agent) => Detected::Sandbox(agent),
-            None => Detected::Local,
-        }
+        // Without CI, a coding agent's marker is an agent on someone's machine: local, as ever.
+        Detected::Local
     }
 }
 
@@ -996,6 +1004,27 @@ mod tests {
             Detected::Local
         );
         assert!(sandbox(&Env::from_pairs([("CLAUDE_CODE_REMOTE", "1")])).is_some());
+        // HUSHRUN_SANDBOX names a platform whose marker is missing, with the same consequences.
+        let named = Env::from_pairs([
+            ("HUSHRUN_SANDBOX", "copilot-cloud"),
+            ("GITHUB_ACTIONS", "true"),
+            ("ACTIONS_ID_TOKEN_REQUEST_URL", "https://t/x"),
+            ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "r"),
+        ]);
+        assert!(matches!(detection(&named), Detected::Sandbox(p) if p.id == "copilot-cloud"));
+        assert_eq!(named.get("ACTIONS_ID_TOKEN_REQUEST_URL"), None);
+        // Only a platform row's id, and not an agent's.
+        assert_eq!(
+            of(&[
+                ("HUSHRUN_SANDBOX", "claude-code"),
+                ("GITHUB_ACTIONS", "true")
+            ]),
+            Detected::Ci(Provider::Github)
+        );
+        assert_eq!(
+            of(&[("HUSHRUN_SANDBOX", "nope"), ("CI", "true")]),
+            Detected::Ci(Provider::Generic)
+        );
         assert!(sandbox(&Env::from_pairs([("CLAUDE_CODE_REMOTE", "0")])).is_none());
     }
 
@@ -1068,8 +1097,8 @@ mod tests {
             of(&[("GITHUB_ACTIONS", "true"), ("HUSHRUN_AGENT", "x")]),
             Detected::Ci(Provider::Github)
         );
-        // Without CI, an agent on a person's machine is a sandbox only in name: local either way.
-        assert_eq!(of(&[("CLAUDECODE", "1")]).provider(), Provider::Local);
+        // Without CI, an agent on a person's machine is just local.
+        assert_eq!(of(&[("CLAUDECODE", "1")]), Detected::Local);
         assert_eq!(of(&[]), Detected::Local);
         assert_eq!(
             of(&[("CI", "true"), ("HUSHRUN_AGENT", "x")]),

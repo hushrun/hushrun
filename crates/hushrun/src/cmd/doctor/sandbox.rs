@@ -19,9 +19,11 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 /// whose presigned URLs name the account's host and can't use a domain of ours.
 pub const STORE_HOSTS: &str = "*.r2.cloudflarestorage.com";
 
-/// The hosts hushrun needs from here, each with what it is for and the URL that asks it: the
-/// backend's, its registry's, and, for hushrun's own backend, the shared store's.
-pub fn hosts(backend: Option<&str>) -> Vec<(String, &'static str, String)> {
+/// The hosts hushrun needs from here, each with what it is for and the URL that asks it (`None`
+/// for one that can't be asked from here): the backend's, its registry's, and, for hushrun's own
+/// backend, the shared store's, whose exact host is the org's own subdomain, which only a run that
+/// uses the store learns.
+pub fn hosts(backend: Option<&str>) -> Vec<(String, &'static str, Option<String>)> {
     let origin = backend
         .and_then(|base| hushrun_core::ledger_url::LedgerUrl::parse(base).ok())
         .map(|url| crate::credentials::origin(&url))
@@ -30,21 +32,21 @@ pub fn hosts(backend: Option<&str>) -> Vec<(String, &'static str, String)> {
     let mut hosts = vec![(
         host.clone(),
         "results, and what the store holds",
-        format!("{origin}/healthz"),
+        Some(format!("{origin}/healthz")),
     )];
     let registry = hosted::registry_host(&origin);
     if registry != host {
         hosts.push((
             registry.clone(),
             "baked stores (hushrun build pull)",
-            format!("https://{registry}/v2/"),
+            Some(format!("https://{registry}/v2/")),
         ));
     }
     if origin.eq_ignore_ascii_case(hosted::HOSTED_ORIGIN) {
         hosts.push((
             STORE_HOSTS.to_string(),
             "compiled code other machines built",
-            "https://r2.cloudflarestorage.com/".to_string(),
+            None,
         ));
     }
     hosts
@@ -89,6 +91,14 @@ pub(super) fn check(
     let hosts = hosts(backend);
     let mut blocked = Vec::new();
     for (host, what, url) in &hosts {
+        let Some(url) = url else {
+            report.add(
+                "hosts",
+                Level::Ok,
+                format!("{host}, for {what}: your organization's own host there can't be checked from here; a run that can't reach it names it"),
+            );
+            continue;
+        };
         let reach = probe(url, TIMEOUT);
         if !reach.answered() {
             blocked.push(host.clone());
@@ -147,7 +157,7 @@ pub fn sandbox_line(platform: &Platform) -> String {
         .join(" or ");
     let kind = match platform.kind {
         Kind::Platform => "a hosted sandbox",
-        Kind::Agent => "a coding agent's sandbox, as CI=true beside it says",
+        Kind::Agent => "a coding agent's sandbox, as CI=true beside its marker says",
     };
     let mut line = format!(
         "{}: {kind}, as {marker} says; runs are local",

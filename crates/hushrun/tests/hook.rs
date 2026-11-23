@@ -42,6 +42,11 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
 ];
 
 const PACKAGE: &str = r#"{
@@ -932,7 +937,7 @@ fn a_failure_here_outranks_an_earlier_pass_nothing_recorded() {
     assert!(!r.push("feature", AGENT).status.success());
 }
 
-// covers: C-23
+// covers: C-23, C-50
 #[test]
 fn a_push_of_something_else_is_left_alone() {
     let fake = FakeResults::start();
@@ -966,9 +971,23 @@ fn a_push_of_something_else_is_left_alone() {
     let refused = r.push("feature", AGENT);
     assert!(!refused.status.success());
 
-    // A CI job pushes for its own reasons, and a sandbox that says it isn't one doesn't.
+    // A CI job pushes for its own reasons, an agent's step in one included.
     assert!(
-        r.push("feature", &[("CI", "true"), ("CLAUDECODE", "1")])
+        r.push(
+            "feature",
+            &[("CI", "true"), ("GITHUB_ACTIONS", "true"), ("CLAUDECODE", "1")]
+        )
+        .status
+        .success()
+    );
+    // ADR 0104: an agent's sandbox that sets only CI=true isn't CI, and is refused.
+    assert!(
+        !r.push("feature", &[("CI", "true"), ("CLAUDECODE", "1")])
+            .status
+            .success()
+    );
+    assert!(
+        !r.push("feature", &[("CLAUDE_CODE_REMOTE", "true"), ("CI", "true")])
             .status
             .success()
     );

@@ -56,6 +56,11 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
     // B-1, B-2: the developer's build mode, store and wrapper stay out: a test run that cargo
     // itself compiles through the wrapper doesn't pass its session on to a fixture's cargo.
     "HUSHRUN_BUILD",
