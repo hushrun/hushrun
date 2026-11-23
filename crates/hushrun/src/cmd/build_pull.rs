@@ -159,8 +159,25 @@ fn image_and_credential(
                 .map_err(|e| e.to_string())?
         }
     };
+    // C-13: the environment's secret goes where someone named, never to a registry a
+    // repository's file chose: `--image`, hushrun's own registry, or the registry of a backend the
+    // environment names.
+    let env_named = matches!(
+        backend.as_ref().map(|b| b.place()),
+        Some(crate::results::Place::Server {
+            named_by: crate::results::NamedBy::Environment | crate::results::NamedBy::Agent,
+            ..
+        })
+    );
+    let hushruns = image.host == crate::hosted::registry_host(&crate::hosted::origin());
     if let Some(token) = pull_token {
-        return Ok((image, basic(token)));
+        if args.image.is_some() || hushruns || env_named {
+            return Ok((image, basic(token)));
+        }
+        return Err(format!(
+            "HUSHRUN_REGISTRY_TOKEN goes only to a registry someone named, and {} is named by this repository's files: pass --image {image}, or set HUSHRUN_BACKEND",
+            image.host
+        ));
     }
     // The backend's own credential goes only to its own registry.
     let token = backend
@@ -289,14 +306,42 @@ fn untar(bytes: &[u8], into: &Path) -> io::Result<()> {
         match kind {
             b'0' | 0 => {
                 if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
+                    make_dirs(parent)?;
                 }
                 fs::write(&path, data)?;
+                // Whatever the umask: a baked store others could write isn't one (B-63).
+                set_mode(&path, 0o644)?;
             }
-            b'5' => fs::create_dir_all(&path)?,
+            b'5' => make_dirs(&path)?,
             _ => return Err(bad("an entry that is neither a file nor a folder")),
         }
     }
+    Ok(())
+}
+
+/// `path` and its missing parents, each `0755` whatever the umask.
+fn make_dirs(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        make_dirs(parent)?;
+    }
+    match fs::create_dir(path) {
+        Ok(()) => set_mode(path, 0o755),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 

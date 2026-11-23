@@ -31,9 +31,9 @@ case "$VERSION" in
 esac
 
 mkdir -p "$DIR/bin"
+# The installer's flat layout: the binary straight into the folder, no receipt, no PATH edits.
 curl --proto '=https' --tlsv1.2 -LsSf "$URL" \
-  | env CARGO_HOME="$DIR" HUSHRUN_INSTALL_DIR="$DIR/bin" INSTALLER_NO_MODIFY_PATH=1 sh
-# The installer puts the binary in $CARGO_HOME/bin.
+  | env HUSHRUN_UNMANAGED_INSTALL="$DIR/bin" INSTALLER_NO_MODIFY_PATH=1 sh
 test -x "$DIR/bin/hushrun" || { echo "hushrun feature: the installer didn't install hushrun" >&2; exit 1; }
 
 cat > "$DIR/on-create.sh" <<SCRIPT

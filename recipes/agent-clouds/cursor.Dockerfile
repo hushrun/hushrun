@@ -6,7 +6,7 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu
 
 RUN curl --proto '=https' --tlsv1.2 -LsSf \
       https://github.com/hushrun/hushrun/releases/latest/download/hushrun-installer.sh \
-    | env HUSHRUN_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh
+    | env HUSHRUN_UNMANAGED_INSTALL=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh
 
 RUN --mount=type=secret,id=HUSHRUN_REGISTRY_TOKEN,env=HUSHRUN_REGISTRY_TOKEN \
     hushrun build pull --image registry.hushrun.com/acme/shop --to /hushrun || true
