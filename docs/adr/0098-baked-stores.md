@@ -342,6 +342,14 @@ it as follows (B-63, B-64, B-16, B-39):
   measurement with `/cargo` baked 38; 0.18.0 had the same false positive and kept those crates off
   the shared store. A folder's text found only inside a stand-in is now the stand-in.
 
+## Amendment: what the first real bake found (ADR 0103)
+
+[ADR 0103](0103-what-the-first-real-bake-found.md): a manifest's identity is its distinct pairs
+sorted (`hushrun.block-manifest/v2`), never the order cargo's parallel build ended its compiles in,
+and `baked.json`'s rows are sorted, so the same build bakes the same identity and bytes; a linked
+output's hint names rustc's temporary folder `rustcXXXXXX`, as E does; and a `--from store` bake
+in a CI job with no backend, whose runs kept nothing, says so and what works there.
+
 ## Open decisions
 
 - The variable names `HUSHRUN_BUILD_LOWER` and `HUSHRUN_BUILD_LOWER_UNTRUSTED`, the command name

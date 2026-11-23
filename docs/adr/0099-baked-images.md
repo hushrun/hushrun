@@ -349,6 +349,12 @@ whose fixed tag is published already signed nothing. The bake decides its signer
 re-bake limit (B-73), branch bakes in the job init writes (B-69) and dependencies-only images
 (B-72), whose label says `deps_only`.
 
+## Amendment: cosign at the timestamp's time (ADR 0103)
+
+The keyless cosign commands take `--use-signed-timestamps`: without it cosign checks the Fulcio
+certificate against the time now, and it fails ten minutes after the bake. The fixed tag repeats
+for the same build now (ADR 0103).
+
 ## Open decisions
 
 - `--bake` is opt-in, and init prints, rather than writes, the `build: baked: signers:` lines.

@@ -6,8 +6,35 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+What the first real bake found ([ADR 0103](docs/adr/0103-what-the-first-real-bake-found.md)): a
+bake of unchanged code repeats (its dependencies layer, store identity and fixed tag), one answer
+to "in CI" decides what signs a bake, and a CI job with no backend says why it keeps nothing.
+
+### Changed
+
+- **A manifest's identity is its set of pairs** (B-63, ADR 0103): the SHA-256 of
+  `hushrun.block-manifest/v2`, the kind and each distinct pair sorted, never the order cargo's
+  parallel build ended its compiles in, so a store's identity and its image's fixed tag
+  `hushrun-<platform>-<16 hex>` repeat for the same build. Every identity, and so every fixed tag,
+  changes once with this version. `baked.json` holds its rows sorted by kind, then address.
+- **A bake outside CI signs with an ID token at hand only where `HUSHRUN_SIGNING=sigstore` asks**
+  (B-67): a job told it runs outside CI (`HUSHRUN_PROVIDER=local`) said it did and signed as the
+  workflow all the same. The key file and the key variables sign anywhere, as before.
+
 ### Fixed
 
+- **A bake of unchanged code uploads no dependencies layer again** (B-37, B-65): a build script's
+  or a proc macro's hint named the folder rustc linked it in (`rustcXXXXXX`, new at every link),
+  so the hints, and the dependencies layer that holds them, had new bytes at every bake. The hint
+  names that folder `rustcXXXXXX`, as the link environment always read it.
+- **A CI job with no backend says why it keeps no compiled code** (B-2, B-63): a run whose job
+  asks for reuse (`HUSHRUN_BUILD=on`) says it in one line, `hushrun build status` says it on its
+  `ci` line, and `hushrun build bake --from store` and `hushrun build manifest` there refuse with
+  it (exit 2) and name `--deps-only -- COMMAND`, where they said to run the build through
+  `hushrun run` first, which the job had just done.
+- **The keyless cosign commands in the spec work after ten minutes** (B-67): they take
+  `--use-signed-timestamps`, or cosign checks the Fulcio certificate against the time now.
+- **A dependencies-only bake says nothing of a workspace layer** (B-72): its image has none.
 - **The vendored Sigstore TUF root is current again** (T-12): version 15, which
   `hushrun sigstore refresh` starts from, expired on 2026-11-20; the binary now carries version 16,
   which version 15 signed and which expires on 2027-04-22. A refresh walked to it already when

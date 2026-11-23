@@ -53,7 +53,14 @@ that serves the run (B-36), it sets it too, and the run reads that fetch only. W
 the results lookup or to `open` in time otherwise, COMMAND runs unwrapped and the run says one
 line, `build reuse is off for this run: the backend didn't answer in time`; a job
 whose org doesn't share runs exactly as it would without any of this, and says nothing, but for
-`open`'s reason `contract`, which it says in B-25's one line. A binary called by that name is the
+`open`'s reason `contract`, which it says in B-25's one line. A job with no backend named
+(B-25's "CI otherwise"; `HUSHRUN_BACKEND=""`, or nothing names one) keeps no compiled code in
+any store, and when the job asked for reuse (`HUSHRUN_BUILD` is `on` or `observe`) the run says
+so in one line, `build reuse is off for this run: in CI hushrun keeps compiled code only in the
+job's own store, for a backend that shares it, and nothing names one here (hushrun.yaml's
+`backend`, or HUSHRUN_BACKEND)`; `hushrun build status` says the same reason on its `ci` line,
+and a bake of the job's store refuses with it (B-63); a job that asked nothing hears nothing
+(`build_session::ci_without_backend`, the one test and the one text). A binary called by that name is the
 wrapper and does nothing else; it MUST decide that from its own name, before reading any setting. A
 build outside `hushrun run` neither reads nor fills the store. Cargo's own fingerprints don't count
 the wrapper, so changing the mode never forces a rebuild.
@@ -699,7 +706,13 @@ outside rustc's own command line, decides the link's bytes. One function compute
 link's own command (rustc's `--print=link-args` line) and this machine's files, at the link and
 again before every lookup, from the question the hint keeps (the driver as rustc named it, the
 line without its inputs and output, the variables the line set, roots replaced), never from an
-answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** of entries, each
+answer a hint or an earlier link gave. The line the hint keeps names rustc's temporary folder in
+the output folder (`{hushrun:out-dir}/rustcXXXXXX`, new at every link: the symbol list a proc
+macro's link hands the linker, and on Linux the `raw-dylibs` stubs every link searches) by that
+fixed name (`link::fixed_rustc_temp`), as E reads it, so that two builds of the same code leave
+the same hint: the folder is gone once rustc ends, and a lookup's dry run never found it under
+either name. A hint that named the folder it linked in made a baked store's hints, and the
+dependencies layer of its image (B-65), new bytes at every bake. E is the SHA-256 of an **ordered list** of entries, each
 (role, name asked for, digest), so which file answered which request is part of it:
 
 1. the C driver's dry run: the line without its inputs (each object and library given by path)
@@ -1794,8 +1807,12 @@ or `--from backend --trusted`) exits **11**, never a registry's 7. A failure pas
   In a CI job whose commands each get a store of their own (no job folder to share, as in GitLab
   CI, B-31), no run's blocks are in the bake's: a bake that reads that store (`--from store`, the
   default, but with `--deps-only`, which bakes its own build's store, B-72; and `build manifest`'s)
-  is refused, exit 2, naming `--from backend`. What a bake bakes is one decision
-  (`build::BakeSource`), which the refusal and the bake both read.
+  is refused, exit 2, naming `--from backend`. So is one in a CI job with no backend named
+  (`build_session::ci_without_backend`), whose runs kept nothing (B-2, B-25): the refusal says
+  why and what works there, `--deps-only -- COMMAND` (B-72), which bakes the third-party crates
+  from a build of its own, or, with a backend that shares build blocks, `--from store` or
+  `--from backend`. What a bake bakes is one decision (`build::BakeSource`), which the refusal
+  and the bake both read.
 - **A backend** (`--from backend`, with the credentials `hushrun build fetch` takes): for each
   check `--check` names, else each check hushrun.yaml names and each check CI's files run through
   `hushrun run NAME -- …` for a push to the default branch (read as B-75 reads them), else none (the
@@ -1808,9 +1825,13 @@ or `--from backend --trusted`) exits **11**, never a registry's 7. A failure pas
   otherwise it is untrusted, unless `--trusted`, which leaves every other pack out.
 - **A team's own bucket** is no source yet: hushrun has no bucket protocol for blocks.
 
-A manifest's **identity** is the SHA-256 of `hushrun.block-manifest/v1`, a newline, the kind, a
-newline and each pair's two addresses in order (`baked::manifest_id`): a backend's manifest and
-the one a machine saves for the same run have the same identity. A source keeps one newest
+A manifest's **identity** is the SHA-256 of `hushrun.block-manifest/v2`, a newline, the kind, a
+newline and each distinct pair's two addresses, the pairs sorted (`baked::manifest_id`): a
+backend's manifest and the one a machine saves for the same run have the same identity, and so do
+two builds of the same code whose compiles ended in another order, as cargo's parallel build
+makes them. The order is the prefetch's (B-30), never the identity's: hashed in order (`v1`), the
+identity, and the fixed tag a store's identity names (B-66), moved with no change to the code.
+`baked.json` holds its rows sorted by kind, then address, never in the order compiles ended. A source keeps one newest
 manifest per repository, check, kind and platform, so a manifest it names now for a check's part
 whose identity isn't the part's, and that names any pair, is **newer**: it replaced the store, and
 any one check's newer manifest replaces it. An empty one replaces nothing. The store's identity
@@ -2097,7 +2118,11 @@ else `HUSHRUN_SIGNING_KEY` or `HUSHRUN_SIGNING_KEY_FILE`, gives (asking no times
 unless `HUSHRUN_TSA` names one: a key's signature is checked against the key, so a bake signed
 with a key contacts no outside service unless configured), else keylessly with an ID token at
 hand (a CI job's, GitHub Actions' or `SIGSTORE_ID_TOKEN`, through Fulcio, with an RFC 3161 timestamp,
-T-12, E-10); else, or with `--no-sign`, it publishes unsigned and says so. A bake that GitHub's
+T-12, E-10) in CI, or outside CI where `HUSHRUN_SIGNING=sigstore` asks for it; else, or with
+`--no-sign`, it publishes unsigned and says why. "In CI" is the one answer the bake reads for its
+tags and its lines too (`gitlab_job::in_ci`), handed to the one function that decides what signs
+(`App::bake_signing`, which gives the reason it doesn't with it): a bake told it runs outside CI
+(`HUSHRUN_PROVIDER=local` in a job) signs with no ID token unasked, as it says. A bake that GitHub's
 `workflow_run` started signs keylessly only when the event the job was given (`GITHUB_EVENT_PATH`)
 shows the run it follows was a successful push of this repository to its default branch, at the
 commit the job checked out (`GITHUB_SHA`), else it fails with exit 9
@@ -2125,9 +2150,20 @@ DSSE envelope of an in-toto statement (`application/vnd.in-toto+json`):
   the SHA-256 of its `baked.json`, the tags, and what B-65's check of an image reads: `baked_ms`,
   `source` and `trust` as `baked.json` has them. Anyone can verify it with cosign, for a key
   `cosign verify-attestation --new-bundle-format --insecure-ignore-tlog --key cosign.pub --type
-  https://hushrun.com/attestations/baked-image/v1 <repository>@<digest>`, keylessly with
-  `--certificate-identity` and `--certificate-oidc-issuer` instead of `--key` (the bundle holds a
-  timestamp, not a transparency log entry).
+  https://hushrun.com/attestations/baked-image/v1 <repository>@<digest>`; keylessly
+  `cosign verify-attestation --new-bundle-format --insecure-ignore-tlog --use-signed-timestamps
+  --type https://hushrun.com/attestations/baked-image/v1 --certificate-identity-regexp
+  '^https://github\.com/<owner>/<repo>/\.github/workflows/' --certificate-oidc-issuer
+  https://token.actions.githubusercontent.com <repository>@<digest>` (or `--certificate-identity`
+  with the workflow's exact identity), and the store's `baked.sigstore.json` over `baked.json`
+  with `cosign verify-blob-attestation --new-bundle-format --insecure-ignore-tlog
+  --use-signed-timestamps --type https://hushrun.com/attestations/baked-store/v1 --bundle
+  baked.sigstore.json` and the same identity flags, `baked.json` last. The bundle holds an RFC 3161
+  timestamp, not a transparency log entry: `--insecure-ignore-tlog` says there is none, and
+  `--use-signed-timestamps` checks the certificate at the timestamp's time. Without it cosign
+  checks the certificate now, and Fulcio's lasts 10 minutes: `failed to verify leaf
+  certificate` after that. A key's signature holds no timestamp unless `HUSHRUN_TSA` names an
+  authority, so its command takes no `--use-signed-timestamps`.
 
 **A run's evidence.** As a run begins, before COMMAND starts, with a store named and hushrun.yaml
 naming signers under `build: baked: signers:` (each either `issuer` and `subject`, a keyless
@@ -2397,7 +2433,8 @@ blocks it kept and how many crates it stubbed (`--format json`: `deps_only`).
 
 A dependencies-only store is complete for its own manifest, which names the dependencies alone,
 so it takes its fixed tag (B-66: that tag can never name a full store missing blocks). Its image's
-label says `deps_only`. It **never sets a full image back**: before building anything, the bake
+label says `deps_only`, and it has no workspace layer, so its bake says nothing of one being
+written again (`bake_image::rewritten`; `compacted` is `null` in `--format json`). It **never sets a full image back**: before building anything, the bake
 reads each tag it would move (`-latest` from CI on the default branch, the branch's with
 `--branch-tag`), and when one names an image whose label doesn't say `deps_only` it builds and
 publishes nothing and exits 0 with a line (`bake_image::deps_only_waits`; an image whose tag can't

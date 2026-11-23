@@ -276,3 +276,10 @@ are those. Neither is in this change.
 So cosign verifies a key-signed bake only with `--insecure-ignore-tlog=true`: hushrun writes nothing
 to a transparency log, and without `HUSHRUN_TSA` there is no timestamp either. A run verifies it
 with the key alone, as B-67 says.
+
+## Amendment: the job that signs is CI's (ADR 0103)
+
+What signs a bake is decided once, with the same "in CI" the bake reads for its tags and lines
+(`App::bake_signing`): outside CI an ID token at hand signs only where `HUSHRUN_SIGNING=sigstore`
+asks. The cosign table above is a key's, whose bundle holds no timestamp; a keyless bundle is
+verified with `--use-signed-timestamps` (B-67).
