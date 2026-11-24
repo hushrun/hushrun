@@ -52,7 +52,6 @@ module HushrunRuby
   MOST_ERRORS = 20
   GEM_DIR = %r{(\A|/)(vendor/bundle|\.bundle)/|(\A|/)gems/[^/]+-\d[^/]*/}.freeze
   GLOB_META = /[*?\[{]/.freeze
-  RUNNER_DIRS = %r{/(rspec-core|minitest|rake|railties)-\d[^/]*/}.freeze
 
   # [C-32] A small JSON reader and writer, so that no gem is loaded before Bundler's choice.
   module Json
@@ -305,6 +304,7 @@ module HushrunRuby
       @ambient = []                    # [seq, rel, :ran | :opened]
       @edges = Hash.new { |h, k| h[k] = {} }       # rel -> {rel => true}: requires
       @open_edges = Hash.new { |h, k| h[k] = {} }  # rel -> {rel => true}: opens
+      @list_edges = Hash.new { |h, k| h[k] = {} }  # rel -> {dir => true}: listings
       @autoloads = {}
       @tracepoints = {}                # rel -> [tp, iseq]
       @fired = []
@@ -633,9 +633,19 @@ module HushrunRuby
       end
     end
 
+    # [C-83] A directory listed by code of the repository, read by the window open then and, by an
+    # edge from that file, by every test file that runs it. One a gem's code lists (Zeitwerk
+    # setting up its autoloads, Active Record finding fixtures, the runner finding its test files)
+    # is no read: what of it a test uses, it loads or opens.
     def listed(path, glob)
       return unless live?
-      return if runner_listing?
+
+      loc = caller_locations(2, 8)&.find do |l|
+        p = l.absolute_path || l.path
+        p != THIS_FILE && !p.start_with?("<internal:")
+      end
+      from = loc && rel(loc.absolute_path || loc.path)
+      return if from.nil?
 
       path = path.to_path if path.respond_to?(:to_path)
       return unless path.is_a?(String)
@@ -657,18 +667,7 @@ module HushrunRuby
       return if r.nil?
 
       current.dirs[r] = true
-    end
-
-    # [C-83] The runner finding its test files (RSpec's pattern, Rake's and Rails' test tasks):
-    # what it lists are the test files, which are units, not what a test read.
-    def runner_listing?
-      return false unless @stack.empty? || (@stack.size == 1 && @stack[0].equal?(@main))
-
-      loc = caller_locations(3)&.find { |l| (l.absolute_path || l.path) != THIS_FILE }
-      path = loc && (loc.absolute_path || loc.path)
-      return false unless path
-
-      path.match?(RUNNER_DIRS)
+      @list_edges[from][r] = true
     end
 
     def not_followed(why, detail)
@@ -858,6 +857,7 @@ module HushrunRuby
         @ambient.each { |seq, r, _| roots[r] = true if seq <= last }
         roots.merge!(@loaded) unless @watching
         reads = closure(roots.keys, edges)
+        reads.each_key { |f| @list_edges[f]&.each_key { |d| dirs[d] = true } if @list_edges.key?(f) }
         entry = {
           "unit" => unit,
           "selected" => info[:selected],

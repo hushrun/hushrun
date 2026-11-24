@@ -276,8 +276,9 @@ fn rspec_shop(tests: &str) -> Vec<(String, String)> {
         file("data/hello.yml", "hi\n"),
         file(
             "spec/spec_helper.rb",
-            "$LOAD_PATH.unshift File.expand_path(\"../lib\", __dir__)\nrequire \"shop\"\n",
+            "$LOAD_PATH.unshift File.expand_path(\"../lib\", __dir__)\nrequire \"shop\"\nDir[File.join(__dir__, \"support/*.rb\")].sort.each { |f| require f }\n",
         ),
+        file("spec/support/money.rb", "MONEY = 1\n"),
         file(
             "spec/cart_spec.rb",
             "RSpec.describe Shop::Cart do\n  it(\"totals\") { expect(Shop::Cart.new.total([1, 2])).to eq 6 }\n  context \"empty\" do\n    it(\"is zero\") { expect(Shop::Cart.new.total([])).to eq 0 }\n  end\nend\n",
@@ -317,7 +318,8 @@ fn rspec_test_files_are_observed_from_what_ran_and_what_it_required() {
                 "lib/shop/cart.rb",
                 "lib/shop/pricing.rb",
                 "spec/cart_spec.rb",
-                "spec/spec_helper.rb"
+                "spec/spec_helper.rb",
+                "spec/support/money.rb"
             ]
         );
         // The autoload it ran, and the file that code opened.
@@ -338,6 +340,17 @@ fn rspec_test_files_are_observed_from_what_ran_and_what_it_required() {
             ),
             "{}",
             changed.stderr
+        );
+        // A file added where spec_helper's code lists: every spec file read that directory.
+        r.write("spec/support/tax.rb", "TAX = 1\n");
+        let added = r.run(RSPEC_RUN);
+        assert_eq!(added.code, 0, "{}", added.out());
+        assert!(
+            added
+                .line("hushrun: unit: with")
+                .starts_with("hushrun: unit: with `tests: reuse`, all 7 test files would have run"),
+            "{}",
+            added.stderr
         );
     }
 }
