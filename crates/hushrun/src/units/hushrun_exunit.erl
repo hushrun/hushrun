@@ -338,7 +338,13 @@ started_for(Pid, Pids, N) ->
 
 test_module_of({erlang, apply, [Fun | _]}) when is_function(Fun) ->
     {env, Env} = erlang:fun_info(Fun, env),
-    Files = lists:usort([F || A <- Env, is_atom(A), [{_, F}] <- [ets:lookup(?TABLE, {defined, A})],
+    %% The module alone, or with its parameters (`{Module, Params}`, from Elixir 1.18).
+    Atoms = [A || X <- Env, A <- case X of
+                                     _ when is_atom(X) -> [X];
+                                     {M, _} when is_atom(M) -> [M];
+                                     _ -> []
+                                 end],
+    Files = lists:usort([F || A <- Atoms, [{_, F}] <- [ets:lookup(?TABLE, {defined, A})],
                               is_test_file(F)]),
     case Files of
         [File] -> File;

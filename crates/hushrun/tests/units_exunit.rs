@@ -306,7 +306,7 @@ fn shop(tests: &str) -> Vec<(String, String)> {
 
 const MIX_TEST: &[&str] = &["run", "unit", "--", "mix", "test", "--trace", "--seed", "0"];
 
-// covers: C-114, C-115
+// covers: C-114, C-115, C-116
 #[test]
 fn test_files_read_what_their_code_references_and_what_ran() {
     if !has_mix() {
@@ -355,7 +355,7 @@ fn test_files_read_what_their_code_references_and_what_ran() {
     assert!(map["rest"][".gitignore"].is_string(), "{map:#}");
 }
 
-// covers: C-114, C-116
+// covers: C-114, C-116, C-117
 #[test]
 fn mix_test_reuses_what_already_passed_and_runs_what_changed() {
     if !has_mix() {
@@ -441,7 +441,7 @@ fn mix_test_reuses_what_already_passed_and_runs_what_changed() {
     assert!(sixth.ran().len() <= 1, "{:?}", sixth.ran());
 }
 
-// covers: C-114, C-115
+// covers: C-115, C-117
 #[test]
 fn an_umbrella_app_reads_the_apps_it_depends_on() {
     if !has_mix() {
