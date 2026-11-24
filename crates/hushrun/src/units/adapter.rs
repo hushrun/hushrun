@@ -60,9 +60,9 @@ pub const RECOGNIZED: &[Recognize] = &[
     maven::recognized,
     gradle::recognized,
     exunit::recognized,
-    unittest::recognized,
     // \[ADR 0114\] RSpec and Minitest, by `rspec`, `rails test`, `rake` or `ruby`.
     ruby::recognized,
+    unittest::recognized,
     ctest::recognized,
     swift::recognized,
 ];
