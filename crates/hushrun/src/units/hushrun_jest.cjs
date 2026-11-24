@@ -311,6 +311,25 @@ function install(S) {
       if (!filename.startsWith('file:') && !path.isAbsolute(filename)) return; // '@jest/globals'
       const r = rel(filename);
       if (r) S.session.load(r);
+      if (r && r.endsWith('.vue')) guard('vue', () => vueBlocks(S.session, r, filename));
+    };
+    // [ADR 0108] A Vue component Jest compiled (@vue/vue3-jest, @vue/vue2-jest) is made from the
+    // files its blocks name with `src=` too, which the transformer reads only when Jest's cache
+    // doesn't hold the component, and whose change that cache doesn't see: the component's text
+    // says them, so they are read with it, every time. A `src=` read where there is none (an
+    // image's in a template) only widens the list.
+    const vueBlocks = (session, r, filename) => {
+      const file = filename.startsWith('file:') ? fileURLToPath(filename) : filename;
+      const text = own.readFileSync(file, 'utf8');
+      for (const m of text.matchAll(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+        const src = m[1] ?? m[2];
+        if (!src || /^[a-z][a-z0-9+.-]*:/i.test(src)) continue;
+        const to = rel(path.resolve(path.dirname(file), src));
+        if (!to || to === r || !own.existsSync(path.join(root, to))) continue;
+        session.reads.add(to);
+        session.edge(r, to);
+        session.reexport(r, to);
+      }
     };
     if (!WRAPPED.has(vm.Script)) {
       const OriginalScript = vm.Script;
