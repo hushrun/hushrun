@@ -22,11 +22,10 @@ project's new branch starts from what main's CI already ran.
   compiler starting. `--watch`, `--extendedDiagnostics`, traces and `tsc -b --verbose` run as
   usual; `--build` over earlier `.tsbuildinfo` files isn't stored; TypeScript 7's native `tsc`
   gets nothing yet. The summary says `build: typescript: N compiles: …`.
-- **Test reuse with TypeScript** (C-50 to C-52): a Jest or Vitest adapter's `NODE_OPTIONS` goes
+- **Test reuse with TypeScript** (C-50, C-51): a Jest or Vitest adapter's `NODE_OPTIONS` goes
   after the build's hook instead of over it; the folders TypeScript lists for tsconfig's
   `include` while ts-jest resolves it are no longer read by the first test file of each Jest
-  process, which ran every test file again with `isolatedModules`; and `node --test`, `tsx
-  --test` and Mocha say that their test files aren't observed instead of waiting for pytest.
+  process, which ran every test file again with `isolatedModules`.
 - **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
   in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
   `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to

@@ -2,7 +2,7 @@
 
 - **Status:** proposed; local reuse and sharing through the relay are built
 - **Date:** 2026-11-24
-- **Rules:** B-100 to B-109 (draft), C-50 to C-52; B-13, B-14, B-16, B-22, B-25 to B-34 read for
+- **Rules:** B-100 to B-109 (draft), C-50, C-51; B-13, B-14, B-16, B-22, B-25 to B-34 read for
   TypeScript
 
 ## Context
@@ -92,13 +92,14 @@ Go code that `bin/tsc` `execve`s: none of that passes through Node.
   reuses its first build. TypeScript's own incrementality covers that case.
 - A `node_modules` linked in from outside the checkout, or a global `tsc`, ties every block to the
   checkout: it reuses there, never elsewhere.
-- Test reuse (C-50 to C-52): the audit that went with this found no stale reuse in TypeScript
+- Test reuse (C-50, C-51): the audit that went with this found no stale reuse in TypeScript
   tests with Vitest 4.1 (vite-tsconfig-paths and Vite's own tsconfig paths) and Jest 30 (ts-jest
   with and without `isolatedModules`, @swc/jest, babel-jest). Every `tsconfig*.json` is a rest file,
   so a change to one runs every test file; erased imports are no read. One needless re-run was
   fixed (ts-jest listing `include` read every file for the first test file of each process), Jest's
-  `NODE_OPTIONS` now goes after the build's hook, and `node --test`, `tsx --test` and Mocha, which
-  have no adapter, say so.
+  `NODE_OPTIONS` now goes after the build's hook. `node --test` (and TypeScript through its type
+  stripping) and Mocha have no units adapter here; another change adds them, and `.ts` under
+  `node --test` is a follow-up for it.
 
 ## Alternatives
 

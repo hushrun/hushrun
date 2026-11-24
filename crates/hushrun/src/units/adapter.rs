@@ -91,35 +91,9 @@ pub fn choose_kept(
             return found;
         }
     }
-    if let Some(why) = without_adapter(command) {
-        return Err(why);
-    }
     pytest::any_other(command)
 }
 
-/// \[C-52\] A runner of JavaScript or TypeScript tests that no adapter observes yet, started by
-/// name: Node's own (`node --test`, TypeScript through type stripping or a loader such as
-/// `--import tsx`), `tsx --test` and Mocha. Its test files aren't observed, and the run says so,
-/// rather than leaving them to the pytest adapter, which would wait for a pytest that never
-/// reports. The check is still skipped whole when nothing changed.
-fn without_adapter(command: &[String]) -> Option<String> {
-    let program = command.first()?;
-    let name = Path::new(program).file_name()?.to_str()?;
-    let name = name
-        .strip_suffix(".exe")
-        .or_else(|| name.strip_suffix(".cmd"))
-        .unwrap_or(name)
-        .to_ascii_lowercase();
-    let test = command[1..].iter().any(|a| a == "--test");
-    let runner = match name.as_str() {
-        "node" | "tsx" if test => "node --test",
-        "mocha" | "_mocha" => "Mocha",
-        _ => return None,
-    };
-    Some(format!(
-        "{runner}'s test files can't be reused one by one yet: the check is skipped whole when nothing it reads changed"
-    ))
-}
 
 /// \[C-39\] What an adapter knows of tests one by one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
