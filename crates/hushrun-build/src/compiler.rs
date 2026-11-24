@@ -432,6 +432,8 @@ pub fn identity(
 
 /// Names the form of a memo of what `-C target-cpu=native` means (B-5).
 const NATIVE_SCHEMA: &str = "hushrun.build.native-cpu/1";
+/// The schema of a driver's identity joined to a compiler's (B-161).
+const DRIVER_SCHEMA: &str = "hushrun.build.driver/1";
 
 /// What `-C target-cpu=native` means for one compiler and target on this machine (B-5): the
 /// CPU rustc picks for `native` and the target features that follow from it, as rustc prints
@@ -503,6 +505,57 @@ pub fn native_cpu(
     .ok()?;
     let _ = write_whole_in(memo_dir, &memo, &bytes);
     Some(found)
+}
+
+/// \[ADR 0112\] B-161: the identity of the driver `cargo clippy` runs rustc through
+/// (`clippy-driver`), joined to the compiler's: the SHA-256 of the JCS form of the compiler's
+/// identity and the driver's name and content. A driver links the toolchain's `rustc_driver`,
+/// which the compiler's identity already holds, and lints with code of its own, which its bytes
+/// are. Its digest is kept in `memo_dir`, by the driver's path, size and dates, so a driver is
+/// read once per install. `Err` when the driver can't be read: the call then passes through.
+pub fn with_driver(identity: &Digest, driver: &Path, memo_dir: &Path) -> Result<Digest, Unknown> {
+    let resolved = fs::canonicalize(driver).map_err(|source| Unknown::Unreadable {
+        path: driver.to_path_buf(),
+        source,
+    })?;
+    let meta = fs::metadata(&resolved).map_err(|source| Unknown::Unreadable {
+        path: resolved.clone(),
+        source,
+    })?;
+    let name = resolved
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| Unknown::NotUtf8(resolved.to_string_lossy().into_owned()))?
+        .to_string();
+    let memo_key = jcs::digest(&json!({
+        "schema": DRIVER_SCHEMA,
+        "driver": stat_value(&resolved, &meta)?,
+    }))?;
+    let memo = memo_dir.join(format!("driver-{}.json", memo_key.hex()));
+    let kept = fs::read(&memo)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|value| value.get("key").and_then(Value::as_str) == Some(&memo_key.to_string()))
+        .and_then(|value| value.get("sha256")?.as_str()?.parse::<Digest>().ok());
+    let content = match kept {
+        Some(content) => content,
+        None => {
+            let content = sha256(&resolved)?;
+            if let Ok(bytes) = serde_json::to_vec(&json!({
+                "key": memo_key.to_string(),
+                "sha256": content.to_string(),
+            })) {
+                // A memo not written only means the driver is read again next time.
+                let _ = write_whole_in(memo_dir, &memo, &bytes);
+            }
+            content
+        }
+    };
+    Ok(jcs::digest(&json!({
+        "schema": DRIVER_SCHEMA,
+        "compiler": identity.to_string(),
+        "driver": { "name": name, "sha256": content.to_string() },
+    }))?)
 }
 
 /// What `native` is in `rustc --print target-cpus` (its line says `(currently <cpu>)`) and the
@@ -1232,7 +1285,7 @@ fn write_memo(dir: &Path, memo: &Path, key: &Digest, found: &Memo, newest: i64) 
 
 #[cfg(test)]
 mod tests {
-    use super::{Identity, Unknown};
+    use super::{Identity, Unknown, with_driver};
     use hushrun_core::Digest;
     use std::cell::Cell;
     use std::collections::HashMap;
@@ -1546,6 +1599,35 @@ mod tests {
         // And it was written whole again.
         setup.identity(&setup.rustc, &fake).unwrap();
         assert_eq!(fake.calls.get(), 4);
+    }
+
+    // covers: B-161
+    #[test]
+    fn a_driver_is_known_by_its_bytes_joined_to_the_compiler() {
+        let dir = tempfile::tempdir().unwrap();
+        let memos = dir.path().join("memos");
+        let one = dir.path().join("a/bin/clippy-driver");
+        let two = dir.path().join("b/bin/clippy-driver");
+        for path in [&one, &two] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"driver 1.94.0").unwrap();
+        }
+        let rustc = Digest::of(b"rustc");
+        let first = with_driver(&rustc, &one, &memos).unwrap();
+        // The same driver installed elsewhere is the same driver; asked again, from its memo.
+        assert_eq!(with_driver(&rustc, &two, &memos).unwrap(), first);
+        assert_eq!(with_driver(&rustc, &one, &memos).unwrap(), first);
+        assert!(fs::read_dir(&memos).unwrap().count() >= 2);
+        // Another compiler, or another driver, is another identity.
+        assert_ne!(
+            with_driver(&Digest::of(b"rustc 2"), &one, &memos).unwrap(),
+            first
+        );
+        assert_ne!(first, rustc);
+        fs::write(&two, b"driver 1.95.0, longer").unwrap();
+        assert_ne!(with_driver(&rustc, &two, &memos).unwrap(), first);
+        // One that can't be read is unknown: the call passes through.
+        assert!(with_driver(&rustc, &dir.path().join("none"), &memos).is_err());
     }
 
     // covers: B-17
