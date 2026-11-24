@@ -304,6 +304,7 @@ fn files<'a>(list: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)>
 #[test]
 fn a_test_runs_again_only_when_a_file_its_bash_ran_from_changed() {
     for bats in bats_dirs() {
+        hook_writes_facts(&bats);
         let shop = shop("{mode: reuse, unit: test, reads: test}");
         let p = Project::new(&bats, &files(&shop));
         let first = p.run(&["bats", "test"]);
@@ -352,6 +353,7 @@ fn a_test_runs_again_only_when_a_file_its_bash_ran_from_changed() {
 #[test]
 fn a_script_bash_doesnt_run_is_in_the_rest_and_runs_everything() {
     for bats in bats_dirs() {
+        hook_writes_facts(&bats);
         let shop = shop("{mode: reuse, unit: test, reads: test}");
         let p = Project::new(&bats, &files(&shop));
         assert_eq!(p.run(&["bats", "test"]).code, 0);
@@ -367,6 +369,7 @@ fn a_script_bash_doesnt_run_is_in_the_rest_and_runs_everything() {
 #[test]
 fn a_test_file_reused_whole_runs_neither_its_tests_nor_its_setup_file() {
     for bats in bats_dirs() {
+        hook_writes_facts(&bats);
         let mut shop = shop("{mode: reuse}");
         // setup_file leaves a mark outside the repository, which teardown_file needs.
         shop.push((
@@ -426,6 +429,7 @@ fn a_test_file_reused_whole_runs_neither_its_tests_nor_its_setup_file() {
 #[test]
 fn a_failing_test_is_never_reused_and_bats_says_what_it_says_without_hushrun() {
     for bats in bats_dirs() {
+        hook_writes_facts(&bats);
         let mut shop = shop("{mode: reuse, unit: test, reads: test}");
         shop.push((
             "test/broken.bats",
@@ -488,8 +492,17 @@ fn listing(dir: &Path) -> String {
 #[test]
 fn the_hook_writes_one_facts_file_for_each_start_of_bats() {
     for bats in bats_dirs() {
+        hook_writes_facts(&bats);
+    }
+}
+
+/// Runs bats with the hook alone and checks that it wrote one facts file in which every test
+/// finished; otherwise it fails with bash's version and the hook's notes. The other tests call it
+/// first, so a machine where the hook can't work says why in whichever test fails first.
+fn hook_writes_facts(bats: &Path) {
+    {
         let shop = shop("{mode: reuse, unit: test, reads: test}");
-        let p = Project::new(&bats, &files(&shop));
+        let p = Project::new(bats, &files(&shop));
         let units = p.root.join("units");
         std::fs::create_dir_all(&units).unwrap();
         std::fs::write(
