@@ -26,6 +26,17 @@ project's new branch starts from what main's CI already ran.
   after the build's hook instead of over it; the folders TypeScript lists for tsconfig's
   `include` while ts-jest resolves it are no longer read by the first test file of each Jest
   process, which ran every test file again with `isolatedModules`.
+- **Rust: doctests as units, and `cargo check` and `cargo clippy` as build blocks** ([ADR
+  0112](docs/adr/0112-rust-doctests-checks-and-clippy.md), C-74 to C-77, B-160, B-161). `cargo test
+  --doc` with `tests: reuse` runs only the doctests of the libraries whose files changed: hushrun
+  stands in for rustdoc (`RUSTDOC`), and a library whose doctests already passed on what they read
+  isn't handed to it. A compile that links nothing (`cargo check`, `--all-targets`'s tests,
+  programs and proc macros) is stored as a library's check, where it was `built, not stored`; and
+  `cargo clippy`'s workspace compiles, through clippy's driver, are blocks of their own, keyed by
+  the driver's bytes, its `CLIPPY_` variables and where it looks for `clippy.toml`, their lints
+  replayed. `cargo nextest run --archive-file`, and a `--partition` other than `hash:`, now say why
+  their test files aren't observed instead of building the workspace or shifting tests between
+  jobs.
 - **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
   in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
   `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to

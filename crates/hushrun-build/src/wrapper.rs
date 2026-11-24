@@ -723,8 +723,9 @@ impl Call<'_> {
         self.forget_unit();
         sidecar::mark_as_asked(&self.out_dir(), &self.invocation.file_stem());
         self.log(entry(outcome, Some(self.invocation.class())));
-        let rustc = OsString::from(self.invocation.rustc());
-        let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
+        let (rustc, args) = self
+            .invocation
+            .launch(self.invocation.args().iter().map(OsString::from).collect());
         self.ports.exec(&rustc, &args)
     }
 
@@ -839,8 +840,9 @@ impl Call<'_> {
         self.forget_unit();
         sidecar::mark_as_asked(&self.out_dir(), &self.invocation.file_stem());
         let since = self.ports.now();
-        let rustc = OsString::from(self.invocation.rustc());
-        let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
+        let (rustc, args) = self
+            .invocation
+            .launch(self.invocation.args().iter().map(OsString::from).collect());
         let mut recorder = Recorder::new(&mut *self.err, self.invocation.form().clone());
         let ran = self.ports.compile(
             &Run {
@@ -901,9 +903,20 @@ impl Call<'_> {
                 &|path| ports.rustc_targets(path),
             )
         };
-        let Ok(identity) = identity else {
+        let Ok(mut identity) = identity else {
             return self.pass(PassedThrough::Compiler);
         };
+        // B-161: a compile through clippy's driver is the driver's as much as the compiler's.
+        if let Some(driver) = inv.driver() {
+            match compiler::with_driver(
+                &identity.digest,
+                Path::new(driver),
+                &store.root().join(compiler::MEMOS),
+            ) {
+                Ok(joined) => identity.digest = joined,
+                Err(_) => return self.pass(PassedThrough::Compiler),
+            }
+        }
         self.sysroot = identity.sysroot.clone();
         // Every compile sees the toolchain as one without sources does (B-9, B-17). `hushrun
         // run` made the view as it began; a toolchain it couldn't foresee gets one here.
@@ -1648,8 +1661,7 @@ impl Call<'_> {
     ) -> i32 {
         let inv = self.invocation;
         let linked = inv.class() != Class::Library;
-        let args = inv.command(&self.added(roots));
-        let rustc = OsString::from(inv.rustc());
+        let (rustc, args) = inv.launch(inv.command(&self.added(roots)));
         let before = if inv.class() == Class::Program && !self.bundle {
             debug_objects(&self.out_dir(), &inv.file_stem())
         } else {
@@ -2251,8 +2263,7 @@ impl Call<'_> {
             )));
             env.push((OsString::from(name), OsString::from(alias_text)));
         }
-        let args = inv.command_in(&extra, &scratch_out);
-        let rustc = OsString::from(inv.rustc());
+        let (rustc, args) = inv.launch(inv.command_in(&extra, &scratch_out));
         let ran = self
             .ports
             .compile(
