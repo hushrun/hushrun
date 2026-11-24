@@ -1319,3 +1319,32 @@ fn the_plans_reason_never_calls_a_file_on_disk_gone() {
         "gone.py is gone, which can change what tests load"
     );
 }
+
+// covers: C-50
+#[test]
+fn an_adapter_s_node_options_go_after_the_build_s_hook() {
+    use std::ffi::OsString;
+    let os = OsString::from;
+    // The build's hook and the adapter's each added to what the environment had.
+    assert_eq!(
+        super::beside(
+            Some(os("--max-old-space-size=4096 --require /s/tsc.cjs")),
+            Some(os("--max-old-space-size=4096")),
+            &os("--max-old-space-size=4096 --require /c/jest.cjs"),
+        ),
+        os("--max-old-space-size=4096 --require /s/tsc.cjs --require /c/jest.cjs")
+    );
+    assert_eq!(
+        super::beside(
+            Some(os("--require /s/tsc.cjs")),
+            None,
+            &os("--require /c/jest.cjs")
+        ),
+        os("--require /s/tsc.cjs --require /c/jest.cjs")
+    );
+    // Without the build's, the adapter's alone.
+    assert_eq!(
+        super::beside(None, None, &os("--require /c/jest.cjs")),
+        os("--require /c/jest.cjs")
+    );
+}

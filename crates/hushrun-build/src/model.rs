@@ -114,6 +114,8 @@ pub enum Kind {
     /// Gradle's task outputs, served to Gradle as its remote build cache, kind `gradle/1`
     /// (B-77), with a manifest of their own per check.
     Gradle,
+    /// The TypeScript helper's compiles, kind `tsc/1` (B-108).
+    Tsc,
 }
 
 impl Kind {
@@ -125,6 +127,7 @@ impl Kind {
             Kind::Cc => crate::cc::KIND,
             Kind::Xcode => crate::xcode::KIND,
             Kind::Gradle => crate::gradle::KIND,
+            Kind::Tsc => crate::tsc::KIND,
         }
     }
 
@@ -136,6 +139,7 @@ impl Kind {
             Some(word) if word == Kind::Cc.word() => Kind::Cc,
             Some(word) if word == Kind::Xcode.word() => Kind::Xcode,
             Some(word) if word == Kind::Gradle.word() => Kind::Gradle,
+            Some(word) if word == Kind::Tsc.word() => Kind::Tsc,
             _ => Kind::Rustc,
         }
     }
