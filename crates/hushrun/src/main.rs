@@ -90,6 +90,10 @@ fn main() -> ExitCode {
     if let Some(code) = units::program::from_args(&args) {
         return code;
     }
+    // \[ADR 0118\] As a step of the VSTest target hushrun gave `dotnet test`, likewise.
+    if let Some(code) = units::dotnet::from_args(&args) {
+        return code;
+    }
     hushrun_core::set_release(env!("CARGO_PKG_VERSION"));
     // \[ADR 0046\] Before clap, which quotes what it can't read, and before a run, which records
     // its command: a string on the command line goes no further than this.

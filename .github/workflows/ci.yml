@@ -214,6 +214,14 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
           echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
+      # C# (.NET): the runner's own .NET SDK for the tests of the dotnet test adapter (ADR 0118),
+      # whose fixtures target its major version and restore their pinned NuGet packages from
+      # nuget.org into a folder of their own.
+      - name: Name .NET for the test-project tests
+        run: |
+          dotnet --info | head -n 20
+          echo "HUSHRUN_TEST_DOTNET=$(command -v dotnet)" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_DOTNET_PACKAGES=$RUNNER_TEMP/nuget" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked

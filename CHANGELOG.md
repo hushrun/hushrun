@@ -115,6 +115,14 @@ project's new branch starts from what main's CI already ran.
   replayed. `cargo nextest run --archive-file`, and a `--partition` other than `hash:`, now say why
   their test files aren't observed instead of building the workspace or shifting tests between
   jobs.
+- **`dotnet test` reuses test projects, and test methods one by one** (C-98 to C-101,
+  [ADR 0118](docs/adr/0118-dotnet-test.md)). With `tests: reuse`, a C#, F# or Visual Basic test
+  project (xUnit, NUnit, MSTest, through VSTest) that already passed on the files it and the
+  projects it references compile is neither built nor tested again, and with `unit: test` only its
+  tests that didn't pass run. hushrun names its own VSTest targets through `VSTestTargets`, so
+  COMMAND, its `--filter` and its loggers stay as written. Microsoft.Testing.Platform projects and
+  `dotnet test` of an assembly run unobserved, and the run says so. Compiles aren't reused: the
+  SDK writes the commit into every assembly (ADR 0118, decision 11).
 - **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
   in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
   `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to
