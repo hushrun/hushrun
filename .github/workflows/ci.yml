@@ -177,6 +177,11 @@ jobs:
             echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems"
             echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5"
           } >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -331,6 +336,11 @@ jobs:
             echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems"
             echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5"
           } >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass

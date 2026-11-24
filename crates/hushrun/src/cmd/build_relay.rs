@@ -951,13 +951,16 @@ impl Relay {
                 step,
                 platform,
                 local_ms,
-            } => self.cc_hints(step, platform, local_ms).await,
+            } => self.cc_hints(Kind::Cc, step, platform, local_ms).await,
             Request::CcFetch {
                 step,
                 keys,
                 platform,
                 local_ms,
-            } => self.cc_fetch(step, keys, platform, local_ms).await,
+            } => {
+                self.cc_fetch(Kind::Cc, step, keys, platform, local_ms)
+                    .await
+            }
             Request::CcVouch { key, outputs } => self.vouch(Kind::Cc, key, outputs).await,
             Request::CcBuilt { .. } => {
                 self.built(request);
@@ -993,6 +996,31 @@ impl Relay {
             Request::GradleReport { key, problem } => {
                 // As Go's: answered once the record is read, so the cache may discard it.
                 self.report_problem_soon(Kind::Gradle, key, problem);
+                Answer::Ok
+            }
+            // B-108: the TypeScript helper's, as the C and C++ launcher's, by its own kind and
+            // manifest.
+            Request::TscHints {
+                step,
+                platform,
+                local_ms,
+            } => self.cc_hints(Kind::Tsc, step, platform, local_ms).await,
+            Request::TscFetch {
+                step,
+                keys,
+                platform,
+                local_ms,
+            } => {
+                self.cc_fetch(Kind::Tsc, step, keys, platform, local_ms)
+                    .await
+            }
+            Request::TscVouch { key, outputs } => self.vouch(Kind::Tsc, key, outputs).await,
+            Request::TscBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::TscReport { key, problem } => {
+                self.report_problem_soon(Kind::Tsc, key, problem);
                 Answer::Ok
             }
         }
@@ -1363,17 +1391,15 @@ impl Relay {
     /// manifest for the compile's platform names it.
     async fn cc_hints(
         self: Arc<Relay>,
+        kind: Kind,
         step: Digest,
         platform: String,
         local_ms: Option<u64>,
     ) -> Answer {
-        if !self
-            .platform_names(Kind::Cc, &step, &platform, local_ms)
-            .await
-        {
+        if !self.platform_names(kind, &step, &platform, local_ms).await {
             return Answer::None;
         }
-        self.hints_in(Kind::Cc, step).await
+        self.hints_in(kind, step).await
     }
 
     /// B-60: one of `keys`, the second keys a launcher's downloaded hints led to, as a `rustc`
@@ -1382,32 +1408,30 @@ impl Relay {
     /// would have, beside every portable one's) asks the server nothing.
     async fn cc_fetch(
         self: Arc<Relay>,
+        kind: Kind,
         step: Digest,
         keys: Vec<Digest>,
         platform: String,
         local_ms: Option<u64>,
     ) -> Answer {
-        if !self
-            .platform_names(Kind::Cc, &step, &platform, local_ms)
-            .await
-        {
+        if !self.platform_names(kind, &step, &platform, local_ms).await {
             return Answer::None;
         }
         let keys: Vec<Digest> = {
             let state = self.state();
-            let Some(CcManifest::Got { named, .. }) = state.cc_manifests.get(&(Kind::Cc, platform))
+            let Some(CcManifest::Got { named, .. }) = state.cc_manifests.get(&(kind, platform))
             else {
                 return Answer::None;
             };
-            let blocks = named.get(&Relay::address_in(Kind::Cc, &step));
+            let blocks = named.get(&Relay::address_in(kind, &step));
             keys.into_iter()
-                .filter(|key| blocks.is_some_and(|b| b.contains(&Relay::address_in(Kind::Cc, key))))
+                .filter(|key| blocks.is_some_and(|b| b.contains(&Relay::address_in(kind, key))))
                 .collect()
         };
         if keys.is_empty() {
             return Answer::None;
         }
-        self.fetch_in(Kind::Cc, step, keys, local_ms).await
+        self.fetch_in(kind, step, keys, local_ms).await
     }
 
     /// B-90: the block of an Xcode value the service asks for, only when the check's `xcode/1`
@@ -2333,7 +2357,14 @@ impl Relay {
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        for kind in [Kind::Rustc, Kind::Go, Kind::Cc, Kind::Gradle, Kind::Xcode] {
+        for kind in [
+            Kind::Rustc,
+            Kind::Go,
+            Kind::Cc,
+            Kind::Gradle,
+            Kind::Xcode,
+            Kind::Tsc,
+        ] {
             let keys: Vec<Digest> = keys
                 .iter()
                 .filter(|(k, _)| *k == kind)
@@ -2595,6 +2626,17 @@ impl Relay {
                 Kind::Xcode,
                 *key,
                 *key,
+                LocalClass::Library,
+                true,
+                false,
+                *cost_ms,
+            ),
+            // B-108: a TypeScript block is a library, and the helper tells only of those that
+            // may leave the machine.
+            Request::TscBuilt { key, step, cost_ms } => (
+                Kind::Tsc,
+                *key,
+                *step,
                 LocalClass::Library,
                 true,
                 false,
@@ -3007,6 +3049,12 @@ impl Relay {
                 .into_iter()
                 .map(|platform| self.close_platform(Kind::Cc, check, entries, &platform))
                 .collect();
+            // B-108: and its TypeScript compiles, once for each Node platform.
+            cc.extend(
+                tsc_platforms(entries)
+                    .into_iter()
+                    .map(|platform| self.close_platform(Kind::Tsc, check, entries, &platform)),
+            );
             // B-90: and its Xcode values, once for each Xcode build they were compiled with.
             cc.extend(
                 xcode_platforms(entries)
@@ -3170,6 +3218,7 @@ impl Relay {
             .iter()
             .filter(|e| match kind {
                 Kind::Xcode => e.xcode.as_ref().is_some_and(|x| x.platform == platform),
+                Kind::Tsc => e.tsc.as_ref().is_some_and(|t| t.platform == platform),
                 _ => e.cc.as_ref().is_some_and(|cc| cc.platform == platform),
             })
             .cloned()
@@ -3217,6 +3266,7 @@ impl Relay {
                 && e.cc.is_none()
                 && e.xcode.is_none()
                 && e.gradle.is_none()
+                && e.tsc.is_none()
                 && e.portable
                     .as_ref()
                     .is_some_and(|p| !(p.portable || (from_a_job && p.bound_only())))
@@ -3226,6 +3276,7 @@ impl Relay {
                 || e.xcode.as_ref().is_some_and(|x| x.local.is_some())
                 || e.gradle.as_ref().is_some_and(|g| g.local.is_some())
                 || e.cc.as_ref().is_some_and(|cc| !goes_up(&cc.local))
+                || e.tsc.as_ref().is_some_and(|t| !t.local.is_empty())
                 || rust_stays(e)
         };
         for entry in entries.iter().filter(|e| e.kind() == kind) {
@@ -3256,7 +3307,7 @@ impl Relay {
             counts.saved_ms = counts.saved_ms.saturating_add(entry.saved_ms);
         }
         let state = self.state();
-        if matches!(kind, Kind::Cc | Kind::Xcode) {
+        if matches!(kind, Kind::Cc | Kind::Xcode | Kind::Tsc) {
             return CloseRequest {
                 kind: kind.word().to_string(),
                 run: check.run,
@@ -3327,6 +3378,21 @@ fn cc_platforms(entries: &[Entry]) -> Vec<String> {
             && platforms.len() < MOST_CC_PLATFORMS
         {
             platforms.push(cc.platform.clone());
+        }
+    }
+    platforms
+}
+
+/// The Node platforms of a check's TypeScript compiles (B-108), in the order first logged: one
+/// `close` each.
+fn tsc_platforms(entries: &[Entry]) -> Vec<String> {
+    let mut platforms: Vec<String> = Vec::new();
+    for tsc in entries.iter().filter_map(|e| e.tsc.as_ref()) {
+        if blocks::is_platform(&tsc.platform)
+            && !platforms.contains(&tsc.platform)
+            && platforms.len() < MOST_CC_PLATFORMS
+        {
+            platforms.push(tsc.platform.clone());
         }
     }
     platforms
