@@ -779,6 +779,34 @@ hushrun says why in one line, and runs the check anyway:
 | ``not recorded: set `HUSHRUN_MACHINE_KEY` to the key `hushrun token create --agent` printed`` | The sandbox has no key, or one that isn't its token's: set `HUSHRUN_MACHINE_KEY` to the key shown with the token, or make a new token if nobody kept it |
 | `HUSHRUN_TOKEN isn't sent to …` | The backend isn't on hushrun's host: use `HUSHRUN_AGENT`, or set `HUSHRUN_BACKEND` or `HUSHRUN_HOST` (above) |
 
+## Tests with Node's test runner and Mocha
+
+With `tests: {mode: reuse}` on a check, `node --test` and Mocha reuse test files, and with
+`unit: test` single tests, that already passed on the files they read, as Vitest and Jest do. No
+file changes: hushrun adds its adapter to `NODE_OPTIONS` (keep what a script's `NODE_OPTIONS=` had,
+`NODE_OPTIONS="$NODE_OPTIONS …"`, or the adapter is dropped and the run says so).
+
+```yaml
+checks:
+  unit:
+    tests: {mode: reuse, unit: test}
+```
+
+```text
+$ hushrun run unit -- node --test
+hushrun: unit: 3 of 41 tests run, in 2 of 12 test files; 38 already passed on the files they read
+```
+
+- **Node's test runner** needs Node 22.15 or later. Each test file's process is watched from its
+  start to its exit, so what a test file read is exact; a left-out test shows as skipped with
+  `hushrun: passed before on the files it read`. `--watch`, `--test-isolation=none` and coverage
+  run everything; `--test-shard` leaves single tests out but no whole test file.
+- **Mocha** 10 or 11, on Node 22.15 or later. Every spec file still loads, so its root hooks and
+  what its top level does are as without hushrun; the tests that passed are taken out before the
+  run starts, and a suite left with none runs no hook. A spec file that defines a root hook is
+  read by every spec file and always runs. `--parallel` and `--watch` run as written.
+- What a test reads is its test file's list (`reads: test` runs as `reads: file`).
+
 ## Compiled code
 
 A check that runs can still skip compiling what this machine already compiled from the same
@@ -970,6 +998,15 @@ hushrun leaves tests out through the framework's own variables (`GTEST_FILTER`, 
 wrote it; GoogleTest or Catch2 says it is filtering. A `--gtest_filter` of your own, or sharding,
 keeps every test running and records each. doctest and Catch2 2 read nothing from the
 environment: run them through `ctest` with `doctest_discover_tests` or `catch_discover_tests`.
+### Python
+
+Pure Python compiles nothing to reuse, and a C extension a package builds as it installs
+(setuptools, meson-python) doesn't go through hushrun's C and C++ launcher: setuptools takes its
+compiler only from `CC`, which hushrun never sets because CMake, Meson and the Rust `cc` crate read
+it too; Meson has no launcher; and pip's isolated builds compile against headers in a new
+temporary folder each time. pip's wheel cache keeps what it built already
+([ADR 0110](../adr/0110-unittest.md)). Python's tests are reused one by one under `tests: reuse`,
+with pytest, unittest (`python -m unittest`) and Django's `manage.py test`.
 
 ### Rust: clippy, checks and doctests
 
@@ -1072,6 +1109,70 @@ This is new and its rules are a draft ([ADR 0106](../adr/0106-typescript-build-b
 
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
+
+### Vue
+
+Vue's compiles get no build blocks: `vue-tsc --noEmit` is a check that a whole run already skips
+on code that passed, and `vite build` compiles each component inside one bundler process, with no
+per-file compile or cache protocol for hushrun to stand in for. What hushrun does for a Vue project
+is its tests: with `tests` on, a component (`.vue`) is a source like a `.ts` file, under Vitest
+(`@vitejs/plugin-vue`) and Jest (`@vue/vue3-jest`), so a change to one component runs only the
+test files that mounted it.
+
+```text
+$ hushrun run unit -- vitest run        # after editing src/Badge.vue
+hushrun: unit: 1 of 40 test files run; 39 already passed on the files they read
+```
+
+- **What a component is made of** counts as read with it: its `src=` blocks, and, under Vitest,
+  the files the types of `defineProps<Props>()` and the other macros came from, whose code never
+  runs. A type change that breaks a component runs its tests.
+- **`jsdom` and `happy-dom`** environments work: hushrun lets Vite serve its setup file.
+- **Rest.** A CSS, HTML or image file a component names, and `tsconfig.json`, run every test file
+  when they change. Under Jest, a run whose cache is cold with ts-jest or `lang="ts"` components
+  reads everything below the directories `tsconfig.json` includes, so its test files reuse only
+  after a run with Jest's cache warm.
+- **Not followed.** Nuxt's `@nuxt/test-utils` environment makes modules from no file: its test
+  files always run. `@vitejs/plugin-vue-jsx` with `resolveType` reads types hushrun doesn't see.
+
+The rules are C-58 to C-61 ([ADR 0108](../adr/0108-vue-components.md)).
+
+### Kotlin
+
+Kotlin's tests and builds go through Gradle, with the same line in the settings file. Beside
+`test`, `jvmTest` and Android's `testDebugUnitTest`, hushrun follows Kotlin Multiplatform's own
+test tasks, `jsNodeTest`, `jsBrowserTest`, `wasmJsNodeTest` and native ones such as
+`linuxX64Test`: a test class is the file that declares it, so a `commonTest` class is one test
+file for every platform it runs on, and a class or test that already passed on the files it read
+is left out on all of them, through Gradle's own test filter. Kotest's specs are test files too,
+left out whole; their tests, which have no method to name, always run when their spec does.
+
+```text
+$ hushrun run unit -- ./gradlew allTests
+hushrun: unit: 3 of 12 tests run, in 2 of 5 test classes; 9 already passed on the files they read
+```
+
+For compiled code, Kotlin's compile tasks, KSP's and kapt's annotation processing are cacheable and
+relocatable, and are shared like any other Gradle task. kapt's stub generation writes its
+sources' absolute paths into its output, so it stays on the machine, and the summary names it:
+
+```text
+hushrun: build: gradle: 1 task run here stays on this machine (1: its outputs hold the checkout's folder): :app:kaptGenerateStubsDebugKotlin
+```
+
+KSP has no such step. A Kotlin/JS or native task leaves out at most 250 tests one by one, and no
+class of the default package.
+
+### .NET
+
+`dotnet build`'s compiles aren't reused: since .NET 8 the SDK writes the commit into every
+assembly, so no compile could be reused across commits ([ADR 0118](../adr/0118-dotnet-test.md),
+decision 11). hushrun reuses .NET's tests, not its assemblies. With
+`tests: reuse`, `hushrun run unit -- dotnet test` leaves out each test project that already passed
+on the files it and the projects it references compile, unbuilt, and with `unit: test` the tests
+that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on
+Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
+when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
 
 ## When hushrun runs anyway
 

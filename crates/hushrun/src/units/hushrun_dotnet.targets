@@ -1,0 +1,51 @@
+<!--
+  [ADR 0118] hushrun's stand-in for the .NET SDK's Microsoft.TestPlatform.targets, which the SDK
+  imports by the VSTestTargets property, here set from the environment for one run of `dotnet test`.
+  It imports the targets it stands in for first, so that every project builds and tests as before,
+  and adds:
+
+  - HushrunSources: the files a project and the projects it references, to the end, compile (their
+    Compile items) and the project files themselves, for what a test project read;
+  - in hushrun's own call of the SDK's VSTest target, the loggers and the filter hushrun wrote;
+  - in a run of hushrun's (HUSHRUN_UNITS set), and not inside its own call, a VSTest target that
+    replaces the SDK's (hushrun_dotnet_vstest.targets).
+-->
+<Project>
+  <PropertyGroup>
+    <_HushrunTestPlatformTargets Condition="'$(HUSHRUN_DOTNET_VSTEST_TARGETS)' != ''">$(HUSHRUN_DOTNET_VSTEST_TARGETS)</_HushrunTestPlatformTargets>
+    <_HushrunTestPlatformTargets Condition="'$(_HushrunTestPlatformTargets)' == ''">$(MSBuildExtensionsPath)\Microsoft.TestPlatform.targets</_HushrunTestPlatformTargets>
+  </PropertyGroup>
+  <Import Project="$(_HushrunTestPlatformTargets)" Condition="Exists('$(_HushrunTestPlatformTargets)')" />
+
+  <!-- hushrun's own call of the SDK's VSTest target, which its VSTest target makes without
+       COMMAND's VSTestLogger and VSTestTestCaseFilter: both from the files `__hushrun-dotnet before`
+       wrote, one logger a line and the filter on one, as plain text. -->
+  <Target Name="_HushrunInnerSettings" BeforeTargets="VSTest" Condition="'$(_HushrunInner)' == 'true' and '$(_HushrunFile)' != ''">
+    <ReadLinesFromFile File="$(_HushrunFile).loggers"><Output TaskParameter="Lines" ItemName="_HushrunLogger" /></ReadLinesFromFile>
+    <ReadLinesFromFile File="$(_HushrunFile).filter"><Output TaskParameter="Lines" ItemName="_HushrunFilterLine" /></ReadLinesFromFile>
+    <PropertyGroup>
+      <VSTestLogger>@(_HushrunLogger)</VSTestLogger>
+      <VSTestTestCaseFilter>@(_HushrunFilterLine)</VSTestTestCaseFilter>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="HushrunSources" DependsOnTargets="_HushrunReferencedSources" Returns="@(_HushrunSource)">
+    <ItemGroup>
+      <_HushrunSource Include="@(Compile->'%(FullPath)')" />
+      <_HushrunSource Include="$(MSBuildProjectFullPath)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="_HushrunReferencedSources" DependsOnTargets="AssignProjectConfiguration;_SplitProjectReferencesByFileExistence;_GetProjectReferenceTargetFrameworkProperties">
+    <MSBuild Projects="@(_MSBuildProjectReferenceExistent)"
+             Targets="HushrunSources"
+             Properties="%(_MSBuildProjectReferenceExistent.SetConfiguration);%(_MSBuildProjectReferenceExistent.SetPlatform);%(_MSBuildProjectReferenceExistent.SetTargetFramework)"
+             RemoveProperties="%(_MSBuildProjectReferenceExistent.GlobalPropertiesToRemove)$(_GlobalPropertiesToRemoveFromProjectReferences)"
+             SkipNonexistentTargets="true"
+             Condition="'@(_MSBuildProjectReferenceExistent)' != ''">
+      <Output TaskParameter="TargetOutputs" ItemName="_HushrunSource" />
+    </MSBuild>
+  </Target>
+
+  <Import Project="$(MSBuildThisFileDirectory)hushrun_dotnet_vstest.targets" Condition="'$(_HushrunInner)' != 'true' and '$(HUSHRUN_UNITS)' != '' and '$(HUSHRUN_DOTNET)' != ''" />
+</Project>
