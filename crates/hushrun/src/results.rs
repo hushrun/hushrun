@@ -605,6 +605,16 @@ pub enum Credential {
     Login { email: String },
     /// A GitHub Actions ID token whose audience is the backend.
     GithubOidc,
+    /// \[ADR 0141\] A session token (C-142): `HUSHRUN_TOKEN`'s, or the one `hushrun login --session`
+    /// saved (`saved`). Its results carry no machine's signature.
+    Session { saved: bool },
+    /// \[ADR 0141\] `HUSHRUN_TOKEN` sent with no key: `HUSHRUN_AUTH=bearer` says it is a bearer
+    /// agent token, or it isn't hushrun's shape in a hosted sandbox, as a placeholder the
+    /// platform's network replaces is (C-141).
+    Bearer,
+    /// \[ADR 0141\] `HUSHRUN_AUTH=proxy`: requests carry no token, and the sandbox's network adds
+    /// the credential for the backend's host (C-141).
+    Proxy,
     /// No token at all.
     Nothing,
 }
@@ -617,6 +627,10 @@ impl Credential {
             Credential::Agent => hushrun_core::agent::VARIABLE,
             Credential::Login { .. } => "your login",
             Credential::GithubOidc => "this job's ID token",
+            Credential::Session { saved: true } => "the session hushrun login --session saved",
+            Credential::Session { saved: false } => "HUSHRUN_TOKEN, a session token",
+            Credential::Bearer => "HUSHRUN_TOKEN, sent with no key",
+            Credential::Proxy => "the credential this network adds (HUSHRUN_AUTH=proxy)",
             Credential::Nothing => "a request without a token",
         }
     }
@@ -755,6 +769,81 @@ pub enum Selection {
     Off(Off),
 }
 
+/// \[ADR 0142\] Whether this command is `hushrun fetch`, whose lookups keep their answers (C-144).
+static FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// How many answers it kept.
+static FETCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// \[ADR 0142\] Makes this command's lookups keep their answers, as `hushrun fetch` does.
+pub fn keep_fetched() {
+    FETCHING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many answers this command kept.
+pub fn fetched_count() -> usize {
+    FETCHED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// \[ADR 0142\] What this machine has for `key` from `base` while the server is out of reach:
+/// a result it passed and keeps in the outbox, else what `hushrun fetch` saved (C-143, C-144).
+fn kept_here(key: &Digest, base: &str, counts: &dyn Fn(&RunResult) -> bool) -> Option<RunResult> {
+    crate::outbox::directory()
+        .and_then(|dir| crate::outbox::local(&dir, key, base, counts))
+        .or_else(|| {
+            crate::outbox::fetched_directory()
+                .and_then(|dir| crate::outbox::fetched(&dir, key, base, counts))
+        })
+}
+
+/// \[ADR 0141\] `HUSHRUN_AUTH` (C-141): unset, `proxy` or `bearer`. A value hushrun doesn't know
+/// is ignored (§10.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Auth {
+    Default,
+    /// The network adds the credential: requests carry none.
+    Proxy,
+    /// `HUSHRUN_TOKEN` is a bearer agent token, sent with no key.
+    Bearer,
+}
+
+impl Auth {
+    fn of(value: Option<&str>) -> Auth {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("proxy") => Auth::Proxy,
+            Some("bearer") => Auth::Bearer,
+            _ => Auth::Default,
+        }
+    }
+}
+
+/// Whether `token` has the shape of one of hushrun's own: a personal, an agent, a session or a
+/// repository API token. Anything else in a hosted sandbox is a placeholder the platform's network
+/// replaces (C-141).
+fn hushrun_shaped(token: &str) -> bool {
+    [
+        USER_TOKEN_PREFIX,
+        AGENT_TOKEN_PREFIX,
+        crate::session::PREFIX,
+        "hrl_",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+}
+
+/// \[ADR 0141\] The saved session for `url`'s origin, good now; in a Cursor cloud agent's sandbox,
+/// one it gets now, with Cursor's ID token, when none is saved and `trusted`: the backend is on
+/// hushrun's host or the environment named it (C-142).
+fn saved_session(env: &Env, url: &LedgerUrl, trusted: bool) -> Option<crate::session::Session> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    crate::session::load_for(&crate::credentials::origin(url), now).or_else(|| {
+        trusted
+            .then(|| crate::session::for_cursor(env, url, now))
+            .flatten()
+    })
+}
+
 /// Where this machine keeps its results, `<cache dir>/results` (C-11), whether or not a backend
 /// sends them elsewhere; `None` without a cache directory.
 pub fn local_directory() -> Option<PathBuf> {
@@ -868,9 +957,22 @@ impl Backend {
         // doesn't speak for it, as no login does (`Credentials::login_at`).
         let given = var("HUSHRUN_TOKEN")
             .filter(|token| !(env.agent_unreadable() && token.starts_with(USER_TOKEN_PREFIX)));
-        let agent = given.as_deref().is_some_and(is_agent_token);
+        // \[ADR 0141\] How the sandbox authenticates (C-141): HUSHRUN_AUTH, and what the token is.
+        let auth = Auth::of(var("HUSHRUN_AUTH").as_deref());
+        let in_sandbox = hushrun_ci::sandbox(&env).is_some();
+        let bearer = given.as_deref().is_some_and(|token| {
+            crate::session::is_session_token(token)
+                || (auth == Auth::Bearer
+                    && env.agent().is_none()
+                    && !token.starts_with(USER_TOKEN_PREFIX))
+                || (in_sandbox && !hushrun_shaped(token))
+        });
+        let agent = given.as_deref().is_some_and(is_agent_token) && !bearer;
+        // An agent token, a session or a bearer token goes to hushrun's host, as C-13 says of
+        // agent tokens, whoever named the backend.
         let sends = named_by == NamedBy::Environment
-            || (agent && hosted::agent_token_goes_to(&env, &crate::credentials::origin(&url)));
+            || ((agent || bearer)
+                && hosted::agent_token_goes_to(&env, &crate::credentials::origin(&url)));
         // \[ADR 0060\] CI takes no person's login, as the repository's ledger doesn't (C-13): on a
         // runner where someone signed in, a job's results aren't that person's.
         let in_ci = hushrun_ci::is_ci(hushrun_ci::detect(&env));
@@ -892,7 +994,12 @@ impl Backend {
         let mut signed_in_machine = None;
         let (token, mut credential) = match given.filter(|_| sends && !id_token_first) {
             Some(token) if env.agent().is_some() => (Some(token), Credential::Agent),
+            Some(token) if crate::session::is_session_token(&token) => {
+                (Some(token), Credential::Session { saved: false })
+            }
+            Some(token) if bearer => (Some(token), Credential::Bearer),
             Some(token) => (Some(token), Credential::Token { agent }),
+            None if auth == Auth::Proxy && !id_token_first => (None, Credential::Proxy),
             None if in_ci => (None, Credential::Nothing),
             None => match Credentials::load()?.login_for(&url) {
                 Some(login) => {
@@ -909,7 +1016,18 @@ impl Backend {
                         },
                     )
                 }
-                None => (None, Credential::Nothing),
+                // \[ADR 0141\] The session `hushrun login --session` saved for this origin (C-142);
+                // in a Cursor cloud agent's sandbox, one got now, but only from hushrun's host or
+                // a backend the environment names: never one a repository's file chose, which
+                // would get the sandbox's credential or Cursor's ID token.
+                None => {
+                    let trusted = matches!(named_by, NamedBy::Environment | NamedBy::Agent)
+                        || crate::credentials::origin(&url) == hosted::origin();
+                    match saved_session(&env, &url, trusted) {
+                        Some(session) => (Some(session.token), Credential::Session { saved: true }),
+                        None => (None, Credential::Nothing),
+                    }
+                }
             },
         };
         // B-48: in GitLab CI the job's ID token, read from its variable alone, for this backend
@@ -1119,14 +1237,14 @@ impl Backend {
         if let Some(variant) = variant {
             query.push_str(&format!("&variant={}", query_value(variant)));
         }
-        self.lookup(key, Some(query), true, &|result| {
+        self.lookup(key, Some(query), true, false, &|result| {
             result.counts_in(Some(job), variant)
         })
     }
 
     /// The newest result recorded for `key` that this hushrun can read, whatever job recorded it.
     pub fn latest(&self, key: &Digest) -> anyhow::Result<Latest> {
-        self.lookup(key, None, false, &|_| true)
+        self.lookup(key, None, false, false, &|_| true)
     }
 
     /// \[ADR 0037\] What `repository`'s CI would find for `key`, asked from anywhere: a server
@@ -1135,16 +1253,18 @@ impl Backend {
     pub fn latest_for_ci(&self, key: &Digest, repository: Option<&str>) -> anyhow::Result<Latest> {
         let query =
             repository.map(|repository| format!("as=ci&repository={}", query_value(repository)));
-        self.lookup(key, query, false, &|_| true)
+        self.lookup(key, query, false, true, &|_| true)
     }
 
     /// The newest result for `key`, asked with `query`; in a directory, the newest of those that
-    /// `counts` takes, as a server answers the query, `for_job` when it asks for a job's.
+    /// `counts` takes, as a server answers the query, `for_job` when it asks for a job's;
+    /// `for_ci` when it asks what CI would find, which nothing this machine keeps answers.
     fn lookup(
         &self,
         key: &Digest,
         query: Option<String>,
         for_job: bool,
+        for_ci: bool,
         counts: &dyn Fn(&RunResult) -> bool,
     ) -> anyhow::Result<Latest> {
         let ledger = match &self.store {
@@ -1180,6 +1300,13 @@ impl Backend {
                     }
                     (_, query) => query,
                 };
+                // \[ADR 0142\] What this machine keeps answers no lookup of CI's results (C-143).
+                let offline = !server.in_ci
+                    && !for_ci
+                    && server.reads_as.is_none()
+                    && !query
+                        .as_deref()
+                        .is_some_and(|q| q.split('&').any(|p| p == "as=ci"));
                 let mut headers = Vec::new();
                 if says_ci {
                     headers.push((hushrun_core::blocks::CI_HEADER, "1".to_string()));
@@ -1189,10 +1316,42 @@ impl Backend {
                 if let (Some(_), Some(token)) = (&server.token, server.gitlab_id_token()) {
                     headers.push((hushrun_core::blocks::ID_TOKEN_HEADER, token.text().into()));
                 }
-                let (status, body) = server
-                    .ledger
-                    .json_get_with(&path, query.as_deref(), &headers)
-                    .map_err(plain)?;
+                let (status, body) =
+                    match server
+                        .ledger
+                        .json_get_with(&path, query.as_deref(), &headers)
+                    {
+                        Ok(answer) => answer,
+                        // \[ADR 0142\] Out of reach: what this machine passed and keeps for it (C-143).
+                        Err(LedgerError::Unavailable(why)) if offline => {
+                            let kept = kept_here(key, &server.base, counts);
+                            match kept {
+                                Some(result) => {
+                                    return Ok(Latest {
+                                        result: Some(result),
+                                        ci_only: false,
+                                        recorded_by: Some("this machine".into()),
+                                        for_job,
+                                    });
+                                }
+                                None => return Err(plain(LedgerError::Unavailable(why))),
+                            }
+                        }
+                        Err(err) => return Err(plain(err)),
+                    };
+                // \[ADR 0142\] A server that fails is as out of reach (C-143).
+                if retryable(status)
+                    && status != 429
+                    && offline
+                    && let Some(result) = kept_here(key, &server.base, counts)
+                {
+                    return Ok(Latest {
+                        result: Some(result),
+                        ci_only: false,
+                        recorded_by: Some("this machine".into()),
+                        for_job,
+                    });
+                }
                 if status != 200 {
                     return Err(server.refused(status, &body, "reading the newest result"));
                 }
@@ -1211,13 +1370,27 @@ impl Backend {
                 }
                 let newest: Newest = serde_json::from_slice(&body)
                     .map_err(|e| anyhow!("{}: the answer isn't a result: {e}", server.base))?;
+                let result = newest
+                    .result
+                    .and_then(|value| serde_json::from_value::<RunResult>(value).ok())
+                    .filter(|result| {
+                        result.schema == RESULT_SCHEMA && result.result != Verdict::Skip
+                    });
+                // \[ADR 0142\] `hushrun fetch` keeps the answers, for a sandbox whose network goes
+                // (C-144). Never in CI.
+                if FETCHING.load(std::sync::atomic::Ordering::Relaxed)
+                    && !server.in_ci
+                    && let (Some(result), Some(dir)) = (&result, crate::outbox::fetched_directory())
+                {
+                    match crate::outbox::save_fetched(&dir, &server.base, key, result) {
+                        Ok(()) => {
+                            FETCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(err) => tracing::debug!("keeping a fetched result: {err}"),
+                    }
+                }
                 return Ok(Latest {
-                    result: newest
-                        .result
-                        .and_then(|value| serde_json::from_value::<RunResult>(value).ok())
-                        .filter(|result| {
-                            result.schema == RESULT_SCHEMA && result.result != Verdict::Skip
-                        }),
+                    result,
                     ci_only: newest.ci_only,
                     recorded_by: newest.recorded_by,
                     for_job: newest.for_job,
@@ -1286,9 +1459,17 @@ impl Backend {
                 // reused: the result goes again without it, so that it is never lost to that.
                 let mut result = std::borrow::Cow::Borrowed(result);
                 loop {
-                    let (status, answer) = self.post_result(server, key, &path, &result)?;
+                    let (status, answer) = match self.post_result(server, key, &path, &result) {
+                        Ok(answer) => answer,
+                        Err(err) => return Err(self.kept_for_later(key, &result, err)),
+                    };
                     if (200..300).contains(&status) {
                         return Ok(());
+                    }
+                    if retryable(status) && status != 429 {
+                        let err = server.refused(status, &answer, "recording the result");
+                        let err = anyhow::Error::new(Unreachable(format!("{err:#}")));
+                        return Err(self.kept_for_later(key, &result, err));
                     }
                     if refuses_saved(status, &answer)
                         && let Some(without) = without_saved(&result)
@@ -1335,7 +1516,85 @@ impl Backend {
                 server
                     .ledger
                     .json_request_with("POST", path, Some(&body), signature)
-                    .map_err(plain)
+                    .map_err(plain_or_unreachable)
+            }
+        }
+    }
+
+    /// \[ADR 0142\] Keeps `result` of `key` in the outbox when `err` says the server was out of
+    /// reach (C-143), outside CI: the error the run then says, which tells where it waits.
+    fn kept_for_later(
+        &self,
+        key: &Digest,
+        result: &RunResult,
+        err: anyhow::Error,
+    ) -> anyhow::Error {
+        let Store::Server(server) = &self.store else {
+            return err;
+        };
+        if err.downcast_ref::<Unreachable>().is_none() || server.in_ci || server.reads_as.is_some()
+        {
+            return err;
+        }
+        let Some(dir) = crate::outbox::directory() else {
+            return err;
+        };
+        match crate::outbox::keep(&dir, key, &server.base, &server.outbox_credential(), result) {
+            Ok(()) => anyhow!(
+                "{}: {err:#}; the result waits on this machine, and the next run, hushrun ready or hushrun flush sends it",
+                server.base
+            ),
+            Err(io) => {
+                tracing::debug!("keeping the result in the outbox: {io}");
+                err
+            }
+        }
+    }
+
+    /// \[ADR 0142\] Sends what the outbox holds for this server (C-143): a server, outside CI, with
+    /// a credential. `None` otherwise, or when another flush is under way.
+    pub fn flush(&self) -> Option<crate::outbox::Flushed> {
+        let Store::Server(server) = &self.store else {
+            return None;
+        };
+        if server.in_ci || server.reads_as.is_some() || server.credential == Credential::Nothing {
+            return None;
+        }
+        let dir = crate::outbox::directory()?;
+        if crate::outbox::entries(&dir).is_empty() {
+            return None;
+        }
+        let mut send = |entry: &crate::outbox::Entry| -> (crate::outbox::Outcome, Option<String>) {
+            use crate::outbox::Outcome;
+            let Ok(key) = Digest::from_hex(&entry.key) else {
+                return (
+                    Outcome::Refused,
+                    Some("the entry's key doesn't read".into()),
+                );
+            };
+            let path = format!("v0/results/{}", key.hex());
+            match self.post_result(server, &key, &path, &entry.result) {
+                Ok((status, _)) if (200..300).contains(&status) => (Outcome::Accepted, None),
+                Ok((status, answer)) if retryable(status) => (
+                    Outcome::Unreachable,
+                    Some(error_message(&answer).unwrap_or_else(|| format!("{status}"))),
+                ),
+                Ok((status, answer)) => (
+                    Outcome::Refused,
+                    Some(error_message(&answer).unwrap_or_else(|| format!("{status}"))),
+                ),
+                Err(err) if err.downcast_ref::<Unreachable>().is_some() => {
+                    (Outcome::Unreachable, Some(format!("{err:#}")))
+                }
+                // No key to sign with, and the like: nothing changes until someone fixes it.
+                Err(err) => (Outcome::Unreachable, Some(format!("{err:#}"))),
+            }
+        };
+        match crate::outbox::flush(&dir, &server.base, &server.outbox_credential(), &mut send) {
+            Ok(flushed) => flushed,
+            Err(err) => {
+                tracing::debug!("flushing the outbox: {err}");
+                None
             }
         }
     }
@@ -1717,7 +1976,11 @@ impl Backend {
         let mut sent = fitting(result, units, MOST_RUN_BYTES);
         let mut result = std::borrow::Cow::Borrowed(result);
         loop {
-            let (status, answer) = self.post_units(server, key, &result, &units[..sent])?;
+            let (status, answer) = match self.post_units(server, key, &result, &units[..sent]) {
+                Ok(answer) => answer,
+                // \[ADR 0142\] The result waits, without its test files' results.
+                Err(err) => return Err(self.kept_for_later(key, &result, err)),
+            };
             if status == 404 || status == 405 {
                 return self.record(key, &result).map(|()| UnitsKept {
                     kept: false,
@@ -1784,7 +2047,7 @@ impl Backend {
                 Some(&body),
                 signature,
             )
-            .map_err(plain)
+            .map_err(plain_or_unreachable)
     }
 }
 
@@ -1904,6 +2167,21 @@ impl Server {
             Some(crate::gitlab_job::Token::Usable(job)) => Some(&job.token),
             _ => None,
         }
+    }
+
+    /// \[ADR 0142\] Who an outbox entry is written and sent as (C-143): the credential's kind and
+    /// whose it is (a login's email, else a digest of the token; nothing more for a session, which
+    /// is renewed), so another account's or an agent's credential never sends a person's results,
+    /// nor the other way round.
+    fn outbox_credential(&self) -> String {
+        let whose = match (&self.credential, &self.token) {
+            (Credential::Login { email }, _) => email.clone(),
+            // A session is renewed (C-142): any session at this server sends what another wrote.
+            (Credential::Session { .. }, _) => String::new(),
+            (_, Some(token)) => Digest::of(token.as_bytes()).hex()[..16].to_string(),
+            (_, None) => String::new(),
+        };
+        format!("{}: {whose}", self.credential.named())
     }
 
     fn says_ci(&self) -> bool {
@@ -2055,6 +2333,15 @@ impl Server {
         );
         let kind = match status {
             401 if self.credential == Credential::Nothing => Some(Refusal::NoToken(why())),
+            // \[ADR 0141\] The network was to add the credential, and didn't: not set up (C-141).
+            401 if self.credential == Credential::Proxy => Some(Refusal::NoToken(format!(
+                "this network added no credential for {}: with HUSHRUN_AUTH=proxy the platform's secrets add it to requests for that host",
+                self.base
+                    .split("://")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .unwrap_or(&self.base)
+            ))),
             // ADR 0028: the result needs a machine's signature that counts, which the person or
             // the agent fixes as when they have no key.
             401 if machine => Some(Refusal::Machine(
@@ -2162,6 +2449,32 @@ pub fn is_agent_token(token: &str) -> bool {
 }
 
 /// A backend's error without the ledger's wording around it.
+/// \[ADR 0142\] A request that didn't reach its server, or that the server failed (C-143): what
+/// the outbox keeps a result for.
+#[derive(Debug)]
+pub struct Unreachable(pub String);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// [`plain`], but a server out of reach is an [`Unreachable`], which the outbox reads.
+pub fn plain_or_unreachable(err: LedgerError) -> anyhow::Error {
+    match err {
+        LedgerError::Unavailable(m) => anyhow::Error::new(Unreachable(m)),
+        err => plain(err),
+    }
+}
+
+/// Whether a server's status is a failure a later try may get past: 5xx, 408 and 429.
+fn retryable(status: u16) -> bool {
+    status >= 500 || status == 408 || status == 429
+}
+
 pub fn plain(err: LedgerError) -> anyhow::Error {
     match err {
         LedgerError::NotFound(m)

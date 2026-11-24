@@ -352,6 +352,11 @@ fn ls_in(dir: &std::path::Path) -> std::process::Output {
     for var in [
         "CI",
         "GITHUB_ACTIONS",
+        "CLAUDE_CODE_REMOTE",
+        "CURSOR_AGENT_SOCKET",
+        "COPILOT_AGENT_SESSION_ID",
+        "CODEX_PROXY_CERT",
+        "HUSHRUN_SANDBOX",
         "GITLAB_CI",
         "BUILDKITE",
         "CIRCLECI",
