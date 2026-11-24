@@ -985,6 +985,16 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### Python
+
+Pure Python compiles nothing to reuse, and a C extension a package builds as it installs
+(setuptools, meson-python) doesn't go through hushrun's C and C++ launcher: setuptools takes its
+compiler only from `CC`, which hushrun never sets because CMake, Meson and the Rust `cc` crate read
+it too; Meson has no launcher; and pip's isolated builds compile against headers in a new
+temporary folder each time. pip's wheel cache keeps what it built already
+([ADR 0110](../adr/0110-unittest.md)). Python's tests are reused one by one under `tests: reuse`,
+with pytest, unittest (`python -m unittest`) and Django's `manage.py test`.
+
 ### Rust: clippy, checks and doctests
 
 `cargo check` and `cargo clippy` go through the same store as `cargo build`: every target's
