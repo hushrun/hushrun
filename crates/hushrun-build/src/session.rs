@@ -97,6 +97,8 @@ pub struct Session {
     gradle_env: Vec<(OsString, OsString)>,
     /// hushrun's Gradle cache while it serves (B-77): it stops with the session.
     gradle_cache: Option<crate::gradle::cache::Running>,
+    /// What COMMAND gets for TypeScript (B-100): `NODE_OPTIONS` with the hook, and `HUSHRUN_TSC`.
+    tsc_env: Vec<(OsString, OsString)>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -168,6 +170,9 @@ pub struct Current {
     /// What hushrun's Gradle cache reads (B-79): absent, the run serves Gradle nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradle: Option<crate::gradle::GradleRun>,
+    /// What the TypeScript helper reads (B-100): absent, it passes every call through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsc: Option<crate::tsc::TscRun>,
     /// The baked store the run reads underneath its store (B-63, B-64), as its state said when
     /// the run began. Absent: none, or one the run ignores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -511,6 +516,9 @@ pub struct Entry {
     /// others'. Its task is in `crate_name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradle: Option<GradleEntry>,
+    /// A TypeScript compile's line, logged by the helper (B-109): absent for the others'.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsc: Option<crate::tsc::helper::TscEntry>,
 }
 
 /// What a Gradle entry's line says beside the rest (B-83).
@@ -566,6 +574,8 @@ impl Entry {
             crate::model::Kind::Cc
         } else if self.gradle.is_some() {
             crate::model::Kind::Gradle
+        } else if self.tsc.is_some() {
+            crate::model::Kind::Tsc
         } else {
             crate::model::Kind::Rustc
         }
@@ -705,6 +715,8 @@ pub struct Counts {
     pub go: GoCounts,
     /// What the C and C++ launcher's lines came to (B-61), counted apart from the crates.
     pub cc: CcCounts,
+    /// What the TypeScript helper's lines came to (B-109), counted apart from the crates.
+    pub tsc: TscCounts,
     /// What hushrun's Gradle cache's lines came to (B-83), counted apart from the crates.
     pub gradle: GradleCounts,
 }
@@ -788,6 +800,112 @@ impl GradleCounts {
                 tasks(kept),
                 if kept == 1 { "stays" } else { "stay" },
                 why.join(", ")
+            ));
+        }
+        lines
+    }
+}
+
+/// What a run's TypeScript compiles came to (B-109).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TscCounts {
+    /// Compiler calls the helper saw.
+    pub calls: u64,
+    /// Put in place without a compile.
+    pub reused: u64,
+    /// Compiles that ran, stored or not, passed through or not.
+    pub built: u64,
+    /// Compiles compared with a block found for them (an audit, `observe`).
+    pub compared: u64,
+    /// Of those, the ones that wrote other files: the key is suspended.
+    pub differed: u64,
+    /// Compiles that found a block: in `observe`, the ones that would have been reused.
+    pub found: u64,
+    /// Milliseconds reuse saved.
+    pub saved_ms: u64,
+    /// Passed through or not stored, by the helper's reason, in the order first seen.
+    pub reasons: Vec<(String, u64)>,
+}
+
+impl TscCounts {
+    fn add(&mut self, entry: &Entry) {
+        let Some(tsc) = &entry.tsc else {
+            return;
+        };
+        self.calls += 1;
+        match entry.outcome {
+            Outcome::Reused => {
+                self.reused += 1;
+                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
+            }
+            _ => self.built += 1,
+        }
+        self.found += u64::from(entry.found);
+        if entry.found && entry.outcome != Outcome::Reused {
+            self.compared += 1;
+        }
+        self.differed += u64::from(entry.differed);
+        let counted = matches!(
+            entry.outcome,
+            Outcome::PassedThrough(_) | Outcome::BuiltNotStored(_)
+        );
+        if let Some(why) = tsc.why.as_deref().filter(|_| counted) {
+            match self.reasons.iter_mut().find(|(seen, _)| seen == why) {
+                Some((_, n)) => *n += 1,
+                None => self.reasons.push((why.to_string(), 1)),
+            }
+        }
+    }
+
+    /// B-109's lines for TypeScript, without a prefix. Empty when the helper logged nothing.
+    pub fn lines(&self, mode: Mode) -> Vec<String> {
+        if self.calls == 0 {
+            return Vec::new();
+        }
+        let compiles = |n: u64| {
+            if n == 1 {
+                "1 compile".to_string()
+            } else {
+                format!("{n} compiles")
+            }
+        };
+        let mut first = if mode == Mode::Observe {
+            format!(
+                "build: typescript: observing: {} of {} would have been reused",
+                self.found,
+                compiles(self.calls)
+            )
+        } else {
+            format!(
+                "build: typescript: {}: {} reused, {} built",
+                compiles(self.calls),
+                self.reused,
+                self.built
+            )
+        };
+        if mode != Mode::Observe && self.saved_ms >= 1_000 {
+            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
+        }
+        if self.compared > 0 {
+            first.push_str(&format!(
+                ", {} compared with their blocks, {} differed",
+                self.compared, self.differed
+            ));
+        }
+        let mut lines = vec![first];
+        if !self.reasons.is_empty() {
+            let shown: Vec<String> = self
+                .reasons
+                .iter()
+                .take(3)
+                .map(|(why, n)| format!("{n} {why}"))
+                .collect();
+            let all: u64 = self.reasons.iter().map(|(_, n)| n).sum();
+            let more = if self.reasons.len() > 3 { ", …" } else { "" };
+            lines.push(format!(
+                "build: typescript: {} run as asked or not stored ({}{more})",
+                compiles(all),
+                shown.join(", ")
             ));
         }
         lines
@@ -1101,6 +1219,10 @@ impl Counts {
                 counts.gradle.add(entry);
                 continue;
             }
+            if entry.tsc.is_some() {
+                counts.tsc.add(entry);
+                continue;
+            }
             counts.compiles += 1;
             match entry.outcome {
                 Outcome::Reused => {
@@ -1209,6 +1331,7 @@ fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
     lines.extend(counts.go.lines());
     lines.extend(counts.cc.lines(counts.mode));
     lines.extend(counts.gradle.lines());
+    lines.extend(counts.tsc.lines(counts.mode));
     lines
 }
 
@@ -1437,6 +1560,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         share_setting: settings.share,
         cc: None,
         gradle: None,
+        tsc: None,
         lower: None,
         stub: None,
     };
@@ -1456,6 +1580,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         slot: None,
         gradle_env: Vec::new(),
         gradle_cache: None,
+        tsc_env: Vec::new(),
     })
 }
 
@@ -1592,6 +1717,7 @@ impl Session {
         }
         env.extend(self.cc_env.iter().cloned());
         env.extend(self.gradle_env.iter().cloned());
+        env.extend(self.tsc_env.iter().cloned());
         if let Some(xcconfig) = &self.xcode {
             env.push((
                 crate::xcode::XCCONFIG_VAR.into(),
@@ -1683,6 +1809,44 @@ impl Session {
             .collect();
         cc_env.push((crate::cc::HUSHRUN_CC.into(), link.into_os_string()));
         self.cc_env = cc_env;
+        Ok(())
+    }
+
+    /// Gives COMMAND the TypeScript hook (B-100): `checkout` is the repository's folder as the
+    /// run found it (its given form; the resolved one is added), `env` the run's environment,
+    /// where COMMAND's `NODE_OPTIONS` would be. The hook is written into the store's folder,
+    /// `NODE_OPTIONS` gets `--require <hook>` after what it had, and `HUSHRUN_TSC` the link
+    /// `hushrun-tsc`. Written into `session.json` before COMMAND starts. Nothing on Windows.
+    pub fn set_tsc(
+        &mut self,
+        checkout: &Path,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> std::io::Result<()> {
+        if cfg!(windows) {
+            return Ok(());
+        }
+        let link = self.sibling_link(crate::tsc::PROGRAM_NAME)?;
+        let hook = crate::tsc::install_preload(&self.current.store)?;
+        let options = crate::tsc::node_options(env("NODE_OPTIONS").as_deref(), &hook)
+            .ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "the hook's path, {}, has a quote, which NODE_OPTIONS can't hold",
+                    hook.display()
+                ))
+            })?;
+        let given = checkout.to_string_lossy().into_owned();
+        let mut roots = vec![given.clone()];
+        if let Some(resolved) = crate::roots::resolve_on_disk(&given)
+            && resolved != given
+        {
+            roots.push(resolved);
+        }
+        self.current.tsc = Some(crate::tsc::TscRun { roots });
+        write_current(&self.current)?;
+        self.tsc_env = vec![
+            ("NODE_OPTIONS".into(), options),
+            (crate::tsc::HUSHRUN_TSC.into(), link.into_os_string()),
+        ];
         Ok(())
     }
 
@@ -1890,7 +2054,11 @@ fn remove_dangling_links(store: &Path) {
         if is_link && dangling {
             let _ = fs::remove_file(&link);
             // Go's cache program's link and the C launcher's point at the same binary.
-            for name in [crate::go::PROGRAM_NAME, crate::cc::LAUNCHER_NAME] {
+            for name in [
+                crate::go::PROGRAM_NAME,
+                crate::cc::LAUNCHER_NAME,
+                crate::tsc::PROGRAM_NAME,
+            ] {
                 let program = folder.join(name);
                 if fs::symlink_metadata(&program).is_ok_and(|meta| meta.file_type().is_symlink()) {
                     let _ = fs::remove_file(&program);
@@ -2089,6 +2257,7 @@ mod tests {
             xcode: None,
             cc: None,
             gradle: None,
+            tsc: None,
         };
         found.log(&entry);
         found.log(&entry);
@@ -2205,6 +2374,7 @@ mod tests {
             xcode: None,
             cc: None,
             gradle: None,
+            tsc: None,
         }
     }
 

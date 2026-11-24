@@ -192,6 +192,8 @@ pub fn parts_of(entries: &[Entry], slot: &Slot) -> Vec<SavedPart> {
             }
             // Gradle's entries aren't baked yet (B-82): their manifest goes with `close` alone.
             Kind::Gradle => continue,
+            // TypeScript blocks stay on the machine that built them (B-108).
+            Kind::Tsc => continue,
         };
         if !seen.insert((kind, platform.clone(), step, key)) {
             continue;
@@ -532,6 +534,7 @@ mod tests {
             xcode: None,
             cc: None,
             gradle: None,
+            tsc: None,
         }
     }
 
@@ -790,6 +793,7 @@ mod leftovers {
             xcode: None,
             cc: None,
             gradle: None,
+            tsc: None,
         }
     }
 
