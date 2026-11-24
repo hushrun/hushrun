@@ -1012,12 +1012,43 @@ hushrun leaves tests out through the framework's own variables (`GTEST_FILTER`, 
 wrote it; GoogleTest or Catch2 says it is filtering. A `--gtest_filter` of your own, or sharding,
 keeps every test running and records each. doctest and Catch2 2 read nothing from the
 environment: run them through `ctest` with `doctest_discover_tests` or `catch_discover_tests`.
+
+### C and C++ without CMake
+
+Make, autotools, Meson and a handwritten `build.ninja` get the same launcher as CMake, with nothing
+to set ([ADR 0119](../adr/0119-c-without-cmake-and-meson-test.md)):
+
+```text
+$ hushrun run build -- make -j8                          # in a second worktree
+hushrun: build: c/c++: 41 objects: 40 reused, 1 built
+```
+
+- **Make and autotools.** Inside `hushrun run`, GNU Make's commands find hushrun's `cc`, `gcc`,
+  `clang` (and their C++ names) first on `PATH`, through `MAKEFILES`; each starts the next compiler
+  of its name through the launcher. A Makefile that names its compiler by a path, or sets `PATH`
+  itself, compiles as before. `./configure` writes the compiler's name, not a path, so a plain
+  `make` afterwards is the compiler's own, and has nothing to do. BSD make reads no `MAKEFILES` and
+  gets nothing.
+- **Meson.** In a repository with a `meson.build`, a `meson setup` inside `hushrun run` names its
+  compilers through the same one-line indirection CMake keeps in its cache: outside a run it is the
+  compiler. A build folder set up before keeps its compilers, and the run says so: set it up again
+  inside `hushrun run` with `meson setup --wipe <folder>`. Its `compile_commands.json` then starts
+  with `/bin/sh`, which some editors' language servers can't follow.
+- **Ninja.** `hushrun run … -- ninja` on a `build.ninja` you wrote gets the compilers it names on
+  `PATH`; `build.ninja` isn't touched, so `ninja -n` has no work after.
+- **Configure checks** (autoconf's `conftest.c`, Meson's in `meson-private`) compile as asked and
+  are never stored.
+- **`meson test`.** With `tests: reuse`, `hushrun run test -- meson test -C build` reuses each test
+  program whose files didn't change, as with CTest: hushrun's `meson` on `PATH` names the tests that
+  still need to run, after checking that their programs are built from what the plan keyed.
+
 ### Python
 
 Pure Python compiles nothing to reuse, and a C extension a package builds as it installs
 (setuptools, meson-python) doesn't go through hushrun's C and C++ launcher: setuptools takes its
 compiler only from `CC`, which hushrun never sets because CMake, Meson and the Rust `cc` crate read
-it too; Meson has no launcher; and pip's isolated builds compile against headers in a new
+it too; meson-python starts its own Meson, not the `meson setup` on COMMAND's `PATH` that
+hushrun gives the launcher (ADR 0119); and pip's isolated builds compile against headers in a new
 temporary folder each time. pip's wheel cache keeps what it built already
 ([ADR 0110](../adr/0110-unittest.md)). Python's tests are reused one by one under `tests: reuse`,
 with pytest, unittest (`python -m unittest`) and Django's `manage.py test`.

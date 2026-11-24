@@ -60,6 +60,7 @@ pub trait Program: Sync {
 /// \[ADR 0080\] The programs adapters put on `PATH`, by name. A new one is one entry here.
 pub const PROGRAMS: &[&dyn Program] = &[
     &super::ctest::Ctest,
+    &super::mesontest::Meson,
     &super::swift::SWIFT,
     &super::swift::SWIFT_TEST,
     // \[ADR 0112\] Not on `PATH`: Cargo starts it as `RUSTDOC`.
@@ -716,6 +717,19 @@ fn run_with(
         None => {}
     }
     command.env_remove(DIR_VAR).env_remove(PATH_WAS);
+    // B-236: `meson setup` inside a run names its compilers through the launcher's indirection.
+    if name == "meson" {
+        command.envs(hushrun_build::cc::meson::setup_vars(args, &|var| {
+            if var == "PATH" {
+                match &was {
+                    Some(path) => path.clone(),
+                    None => std::env::var_os("PATH"),
+                }
+            } else {
+                std::env::var_os(var)
+            }
+        }));
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {

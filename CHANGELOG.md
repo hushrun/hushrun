@@ -26,6 +26,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **C and C++ without CMake, and `meson test`** (B-230 to B-238, C-102 to C-105, ADR 0119). Inside
+  `hushrun run`, GNU Make's commands (plain Makefiles and autotools ones) find hushrun's compiler
+  programs first on `PATH` through `MAKEFILES`, a `ninja` COMMAND on a handwritten `build.ninja`
+  gets them too, and `meson setup` in a Meson repository names its compilers through CMake's
+  launcher indirection: their objects are reused and shared as `cc/1` blocks. `cmake` and `meson`
+  started from make's commands, and the Rust linker, never see the programs; autoconf's and
+  Meson's configure checks aren't stored. With `tests: reuse`, `meson test` reuses test programs
+  and tests one by one, as CTest does. New variables COMMAND gets: `MAKEFILES` (the hook first,
+  the person's after it) and, in a Meson repository, `PATH` with hushrun's `meson` first.
 - **C++ test programs started directly, test by test** (C-106 to C-108, ADR 0120). `hushrun run
   NAME -- build/tests/t_calc` with a GoogleTest or Catch2 3 program of a CMake build directory
   reuses each test that passed on the files the program is built from, leaving tests out through
