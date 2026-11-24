@@ -2386,9 +2386,16 @@ fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside
         a.extend(extra.iter().map(|s| s.to_string()));
         a
     };
+    // Kotlin/JS installs its npm packages with yarn, `--offline` under Gradle's: yarn's cache sits
+    // beside the Gradle user home, where the online run that fills that home fills it too.
+    let yarn = gradle_user_home()
+        .map(|home| format!("{home}/hushrun-yarn-cache"))
+        .unwrap_or_default();
     let run = |env: &[(&str, &str)]| {
         let a = args(&[]);
-        r.run(&a.iter().map(String::as_str).collect::<Vec<_>>(), env)
+        let mut env = env.to_vec();
+        env.push(("YARN_CACHE_FOLDER", yarn.as_str()));
+        r.run(&a.iter().map(String::as_str).collect::<Vec<_>>(), &env)
     };
     let first = run(&[("FAIL", "1")]);
     assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
