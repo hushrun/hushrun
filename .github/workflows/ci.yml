@@ -168,6 +168,24 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # JavaScript: Node 22 and 24, pinned, from nodejs.org beside the Node 20 above, and Mocha 10
+      # and 11, for the tests of the adapters for Node's test runner and Mocha (ADR 0107).
+      - name: Install Node 22 and 24 and Mocha for the test-file tests
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) platform=linux-x64 ;;
+            macOS-ARM64) platform=darwin-arm64 ;;
+            *) platform=darwin-x64 ;;
+          esac
+          for version in 22.20.0 24.11.0; do
+            curl -fsSL --retry 3 "https://nodejs.org/dist/v$version/node-v$version-$platform.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          done
+          echo "HUSHRUN_TEST_NODE22=$RUNNER_TEMP/node-v22.20.0-$platform/bin" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_NODE24=$RUNNER_TEMP/node-v24.11.0-$platform/bin" >> "$GITHUB_ENV"
+          npm install --prefix "$RUNNER_TEMP/mocha10" --no-audit --no-fund --ignore-scripts mocha@10.8.2
+          npm install --prefix "$RUNNER_TEMP/mocha11" --no-audit --no-fund --ignore-scripts mocha@11.7.5
+          echo "HUSHRUN_TEST_MOCHA10=$RUNNER_TEMP/mocha10/node_modules" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_MOCHA11=$RUNNER_TEMP/mocha11/node_modules" >> "$GITHUB_ENV"
       # Elixir: Erlang/OTP and Elixir, pinned, for the tests of the ExUnit adapter (ADR 0122), which
       # fail rather than pass without them once HUSHRUN_TEST_MIX names the mix to use.
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
@@ -321,6 +339,24 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # JavaScript: Node 22 and 24, pinned, from nodejs.org beside the Node 20 above, and Mocha 10
+      # and 11, for the tests of the adapters for Node's test runner and Mocha (ADR 0107).
+      - name: Install Node 22 and 24 and Mocha for the test-file tests
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) platform=linux-x64 ;;
+            macOS-ARM64) platform=darwin-arm64 ;;
+            *) platform=darwin-x64 ;;
+          esac
+          for version in 22.20.0 24.11.0; do
+            curl -fsSL --retry 3 "https://nodejs.org/dist/v$version/node-v$version-$platform.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          done
+          echo "HUSHRUN_TEST_NODE22=$RUNNER_TEMP/node-v22.20.0-$platform/bin" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_NODE24=$RUNNER_TEMP/node-v24.11.0-$platform/bin" >> "$GITHUB_ENV"
+          npm install --prefix "$RUNNER_TEMP/mocha10" --no-audit --no-fund --ignore-scripts mocha@10.8.2
+          npm install --prefix "$RUNNER_TEMP/mocha11" --no-audit --no-fund --ignore-scripts mocha@11.7.5
+          echo "HUSHRUN_TEST_MOCHA10=$RUNNER_TEMP/mocha10/node_modules" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_MOCHA11=$RUNNER_TEMP/mocha11/node_modules" >> "$GITHUB_ENV"
       # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
       - name: Install TypeScript for the tsc build-block tests
         run: |

@@ -779,6 +779,34 @@ hushrun says why in one line, and runs the check anyway:
 | ``not recorded: set `HUSHRUN_MACHINE_KEY` to the key `hushrun token create --agent` printed`` | The sandbox has no key, or one that isn't its token's: set `HUSHRUN_MACHINE_KEY` to the key shown with the token, or make a new token if nobody kept it |
 | `HUSHRUN_TOKEN isn't sent to …` | The backend isn't on hushrun's host: use `HUSHRUN_AGENT`, or set `HUSHRUN_BACKEND` or `HUSHRUN_HOST` (above) |
 
+## Tests with Node's test runner and Mocha
+
+With `tests: {mode: reuse}` on a check, `node --test` and Mocha reuse test files, and with
+`unit: test` single tests, that already passed on the files they read, as Vitest and Jest do. No
+file changes: hushrun adds its adapter to `NODE_OPTIONS` (keep what a script's `NODE_OPTIONS=` had,
+`NODE_OPTIONS="$NODE_OPTIONS …"`, or the adapter is dropped and the run says so).
+
+```yaml
+checks:
+  unit:
+    tests: {mode: reuse, unit: test}
+```
+
+```text
+$ hushrun run unit -- node --test
+hushrun: unit: 3 of 41 tests run, in 2 of 12 test files; 38 already passed on the files they read
+```
+
+- **Node's test runner** needs Node 22.15 or later. Each test file's process is watched from its
+  start to its exit, so what a test file read is exact; a left-out test shows as skipped with
+  `hushrun: passed before on the files it read`. `--watch`, `--test-isolation=none` and coverage
+  run everything; `--test-shard` leaves single tests out but no whole test file.
+- **Mocha** 10 or 11, on Node 22.15 or later. Every spec file still loads, so its root hooks and
+  what its top level does are as without hushrun; the tests that passed are taken out before the
+  run starts, and a suite left with none runs no hook. A spec file that defines a root hook is
+  read by every spec file and always runs. `--parallel` and `--watch` run as written.
+- What a test reads is its test file's list (`reads: test` runs as `reads: file`).
+
 ## Compiled code
 
 A check that runs can still skip compiling what this machine already compiled from the same
