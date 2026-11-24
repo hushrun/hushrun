@@ -39,6 +39,10 @@ const BY_NAME: &[(&str, &str)] = &[
     ("npx vitest run", "vitest"),
     ("npx jest", "jest"),
     ("node node_modules/jest/bin/jest.js --ci", "jest"),
+    ("node --test", "node-test"),
+    ("node --test-reporter=dot --test test/", "node-test"),
+    ("npx mocha", "mocha"),
+    ("mocha --recursive", "mocha"),
     ("mvn test", "maven"),
     ("./mvnw verify", "maven"),
     ("gradle test", "gradle"),
@@ -47,12 +51,16 @@ const BY_NAME: &[(&str, &str)] = &[
     ("php vendor/bin/pest --ci", "phpunit"),
     ("ctest --test-dir build", "ctest"),
     ("swift test", "swift"),
+    ("mix test", "exunit"),
+    ("mix test --trace test/a_test.exs", "exunit"),
+    ("python -m unittest", "unittest"),
+    ("python manage.py test", "unittest"),
     ("pytest -q", "pytest"),
 ];
 
 #[test]
 fn each_adapter_gets_the_command_that_names_its_program() {
-    assert_eq!(RECOGNIZED.len(), 9);
+    assert_eq!(RECOGNIZED.len(), 13);
     let dir = loads_all();
     for (command, adapter) in BY_NAME {
         assert_eq!(
@@ -114,6 +122,8 @@ fn a_command_pytest_reported_for_stays_pytests_where_ctest_or_swift_would_claim_
         "make test",
         "swift test",
         "/usr/bin/ctest",
+        // [ADR 0110] A Django TEST_RUNNER of pytest's, which pytest's adapter observed.
+        "python manage.py test",
     ] {
         assert_eq!(kept(command, Some("pytest")), Ok("pytest"), "{command}");
     }
@@ -200,6 +210,7 @@ fn a_program_is_known_by_its_name_whatever_its_directory_and_windows_extension()
         ("gradlew.BAT test", "gradle"),
         ("vendor\\bin\\phpunit.bat", "phpunit"),
         ("ctest.bat --test-dir build", "ctest"),
+        ("C:\\elixir\\bin\\mix.bat test", "exunit"),
     ] {
         assert_eq!(
             chosen(&words(command), dir.path()),
@@ -240,6 +251,7 @@ fn each_runner_is_named_as_people_write_it() {
         ("ctest", "CTest"),
         ("npx vitest run", "Vitest"),
         ("npx jest", "Jest"),
+        ("mix test", "ExUnit"),
     ] {
         let adapter = choose(&words(command), dir.path()).unwrap();
         assert_eq!(adapter.runner(), runner, "{command}");
