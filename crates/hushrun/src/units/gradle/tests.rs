@@ -1076,3 +1076,45 @@ fn a_junit4_task_leaves_out_its_first_tests_by_id_and_none_its_patterns_cant_nam
         ["a::shop.A.t3", "b::Bare.t1", "c::Shop.C.t1"]
     );
 }
+
+// covers: C-94, C-95, C-96
+#[test]
+fn a_kotlin_js_tasks_classes_are_their_declaring_files_and_its_tests_are_left_out_by_pattern() {
+    // A real `jsNodeTest` of Kotlin 2.3.21 on Gradle 9.3.1, whose plan left out `p.CalcTest.adds`:
+    // its classes named by the files that declare them, two of one file one unit, its suites
+    // named after the task (`jsNodeTest.p.CalcTest`), no hook events.
+    let t = tree(&[
+        "build.gradle.kts",
+        "settings.gradle.kts",
+        "src/commonMain/kotlin/p/Calc.kt",
+        "src/commonTest/kotlin/p/CalcTest.kt",
+        "src/commonTest/kotlin/p/FileX.kt",
+        "src/commonTest/kotlin/p/MoreTest.kt",
+        "src/jsTest/kotlin/p/F.kt",
+        "src/jvmTest/kotlin/p/F.kt",
+    ]);
+    let observed = observe(&[captured(include_str!("kotlin-js.json"))], &t)
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.left_out, None);
+    let calc = &observed.units["src/commonTest/kotlin/p/CalcTest.kt"];
+    let states = test_states(calc, &["p.CalcTest.adds"]);
+    // The suite named after the task is the class's own: the method keeps its name.
+    assert_eq!(states["p.CalcTest.zero"], units::State::Passed);
+    assert_eq!(states["p.OtherTest.one"], units::State::Passed);
+    assert_eq!(states["p.CalcTest.adds"], units::State::Reused);
+    let more = test_states(&observed.units["src/commonTest/kotlin/p/MoreTest.kt"], &[]);
+    assert_eq!(more["p.MoreTest.flips"], units::State::Failed);
+    assert_eq!(more["p.MoreTest.more"], units::State::Passed);
+    // What it read: its project's source sets, as a JVM task's.
+    assert!(calc.reads.contains("src/commonMain/kotlin/p/Calc.kt"));
+    assert!(calc.reads.contains("src/jsTest/kotlin/p/F.kt"));
+}
+
+#[test]
+fn a_kotlin_js_suite_named_after_its_task_is_its_classs() {
+    assert!(is_class_suite("jsNodeTest.p.CalcTest", "p.CalcTest"));
+    assert!(is_class_suite("wasmJsNodeTest.p.CalcTest", "p.CalcTest"));
+    assert!(!is_class_suite(".p.CalcTest", "p.CalcTest"));
+    assert!(!is_class_suite("xp.CalcTest", "p.CalcTest"));
+}

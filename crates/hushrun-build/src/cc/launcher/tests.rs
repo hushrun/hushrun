@@ -262,6 +262,46 @@ fn cmake_s_own_configure_checks_are_probes() {
     assert!(!cmake_probe(Path::new("/b"), "CMakeFiles/lib.dir/a.c.o"));
 }
 
+// covers: B-238
+#[test]
+fn autoconf_s_and_meson_s_own_checks_are_probes() {
+    assert!(configure_probe(
+        Path::new("/w/p"),
+        "conftest.c",
+        "conftest.o"
+    ));
+    assert!(configure_probe(
+        Path::new("/w/p"),
+        "conftest.cpp",
+        "conftest.o"
+    ));
+    assert!(configure_probe(
+        Path::new("/w/p"),
+        "conftest.c",
+        "conftest2.o"
+    ));
+    assert!(configure_probe(
+        Path::new("/w/b/meson-private/tmpa1b2c3"),
+        "testfile.c",
+        "output.obj"
+    ));
+    assert!(configure_probe(
+        Path::new("/w/b"),
+        "../src/a.c",
+        "meson-private/sanitycheckc.exe"
+    ));
+    assert!(!configure_probe(
+        Path::new("/w/b"),
+        "../src/a.c",
+        "a.p/a.c.o"
+    ));
+    assert!(!configure_probe(
+        Path::new("/w"),
+        "src/conftest_util.c",
+        "src/conftest_util.o"
+    ));
+}
+
 // covers: B-57, B-58
 #[test]
 fn what_a_killed_launcher_left_is_replaced_and_a_gone_session_is_not_made_again() {
@@ -294,6 +334,7 @@ fn a_downloaded_hint_naming_a_folder_outside_the_roots_and_bases_is_passed_over(
     let identity = Identity {
         digest: Digest::of(b"x"),
         clang: true,
+        graph: true,
         target: String::new(),
         sdk: Some("/sdk".into()),
         sdk_resolved: None,

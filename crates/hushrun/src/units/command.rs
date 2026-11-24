@@ -106,9 +106,16 @@ pub enum Runner {
     Ctest,
     /// `swift test` or `swift-test`.
     SwiftTest,
+    /// \[ADR 0119\] `meson test`.
+    MesonTest,
 }
 
-const RUNNERS: [Runner; 3] = [Runner::Pytest, Runner::Ctest, Runner::SwiftTest];
+const RUNNERS: [Runner; 4] = [
+    Runner::Pytest,
+    Runner::Ctest,
+    Runner::SwiftTest,
+    Runner::MesonTest,
+];
 
 impl Runner {
     /// Whether `words` name this runner: pytest's in any form, a program on `PATH` by its name
@@ -122,6 +129,7 @@ impl Runner {
             Runner::SwiftTest => {
                 words.contains(&"swift-test") || words.windows(2).any(|w| w == ["swift", "test"])
             }
+            Runner::MesonTest => words.windows(2).any(|w| w == ["meson", "test"]),
         }
     }
 }
@@ -208,6 +216,7 @@ pub fn wrapper_starts_by_path(command: &[String], cwd: &Path, runner: Runner) ->
             (Runner::Ctest, Some("ctest")) => true,
             (Runner::SwiftTest, Some("swift")) => words.get(at + 1) == Some(&"test"),
             (Runner::SwiftTest, Some("swift-test")) => true,
+            (Runner::MesonTest, Some("meson")) => words.get(at + 1) == Some(&"test"),
             _ => false,
         })
         .map(|at| words[at].to_string())

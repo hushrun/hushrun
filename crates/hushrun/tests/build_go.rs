@@ -15,6 +15,11 @@ use hushrun_testkit::git;
 const CLEARED: &[&str] = &[
     "CI",
     "GITHUB_ACTIONS",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
     "GITLAB_CI",
     "BUILDKITE",
     "CIRCLECI",
@@ -44,6 +49,22 @@ const CLEARED: &[&str] = &[
     "GOWORK",
     "GOCACHE",
     "GOENV",
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE",
+    "CODEX_SANDBOX",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "CURSOR_AGENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "GEMINI_CLI",
+    "AUGMENT_AGENT",
+    "ANTIGRAVITY_AGENT",
+    "COPILOT_MODEL",
+    "COPILOT_ALLOW_ALL",
+    "COPILOT_GITHUB_TOKEN",
 ];
 
 /// Whether Go 1.24 or later is here; else the test passes with a note, unless
@@ -603,7 +624,7 @@ fn executable(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-// covers: B-42
+// covers: B-42, B-150
 #[test]
 fn every_package_of_a_pure_go_command_is_reused_on_the_other_machine_runtime_too() {
     if !have_go() {

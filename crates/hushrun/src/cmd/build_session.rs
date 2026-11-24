@@ -280,13 +280,25 @@ fn go_beside_another_wrapper(here: &Here<'_>) -> bool {
 }
 
 /// Whether `folder` or a folder above it, up to its checkout, holds a `CMakeLists.txt`, or
-/// `folder` is a CMake build folder: where COMMAND may build C or C++ with CMake (B-50).
+/// `folder` is a CMake build folder: where COMMAND may build C or C++ with CMake (B-50); \[B-230\]
+/// or holds what builds C and C++ without it: a `meson.build`, a `configure` or `configure.ac`, a
+/// Makefile, a `build.ninja`.
 fn cmake_project(folder: &Path) -> bool {
     if folder.join("CMakeCache.txt").is_file() {
         return true;
     }
     for dir in folder.ancestors() {
-        if dir.join("CMakeLists.txt").is_file() {
+        let builds = [
+            "CMakeLists.txt",
+            "meson.build",
+            "configure",
+            "configure.ac",
+            "GNUmakefile",
+            "makefile",
+            "Makefile",
+            "build.ninja",
+        ];
+        if builds.iter().any(|name| dir.join(name).is_file()) {
             return true;
         }
         if dir.join(".git").exists() {
@@ -542,6 +554,32 @@ fn give_cc(session: &mut Session, here: &Here<'_>) {
         session.add_line(format!(
             "build: C and C++ objects aren't reused in this run: {err}"
         ));
+        return;
+    }
+    give_meson(session, &root, here.env);
+}
+
+/// B-236: in a Meson repository (a `meson.build` at the checkout's root), hushrun's own `meson`
+/// first on COMMAND's `PATH`, which gives `meson setup` the launcher's indirection in `CC` and
+/// `CXX` and starts the real `meson`. Elsewhere `PATH` stays as it is.
+fn give_meson(session: &mut Session, root: &Path, env: &dyn Fn(&str) -> Option<OsString>) {
+    if cfg!(windows) || !root.join("meson.build").is_file() {
+        return;
+    }
+    let made = std::env::current_exe()
+        .and_then(|exe| crate::units::program::make(&session.current().folder, &exe, &["meson"]));
+    let vars = made
+        .map_err(|err| err.to_string())
+        .and_then(|dir| crate::units::program::variables(&dir, env("PATH")));
+    match vars {
+        Ok(vars) => {
+            for (name, value) in vars {
+                session.add_cc_env(name.into(), value);
+            }
+        }
+        Err(err) => session.add_line(format!(
+            "build: C and C++ objects of Meson builds set up in this run aren't reused: can't put hushrun's meson on PATH: {err}"
+        )),
     }
 }
 

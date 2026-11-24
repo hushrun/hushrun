@@ -8,6 +8,7 @@
 
 pub mod github;
 pub mod gitlab;
+pub mod platforms;
 
 use std::collections::BTreeMap;
 use std::env::VarError;
@@ -28,6 +29,14 @@ const BACKEND: &str = "HUSHRUN_BACKEND";
 const STOOD_IN_FOR: [&str; 4] = [TOKEN, MACHINE_KEY, MACHINE_KEY_FILE, BACKEND];
 /// hushrun's own variables, of which any but `HUSHRUN_AGENT` that holds a string is dropped.
 const OWN: &str = "HUSHRUN_";
+/// \[ADR 0140\] GitHub's ID-token variables, which make a job the repository's CI (L-10, B-31).
+/// In a hosted sandbox that runs in GitHub Actions, Copilot's, they are the platform's job's, not
+/// a CI run of the repository: [`Env`] sets them aside, where only `hushrun login --session` asks
+/// for them ([`Env::sandbox_github_id_token`]), so the sandbox records as an agent, never as CI.
+const GITHUB_ID_TOKEN: [&str; 2] = [
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+];
 
 /// A snapshot of the environment variables hushrun reads.
 ///
@@ -45,6 +54,8 @@ pub struct Env {
     overridden: Vec<&'static str>,
     /// hushrun's variables that held a `HUSHRUN_AGENT` string, and were dropped.
     misplaced: Vec<String>,
+    /// \[ADR 0140\] GitHub's ID-token endpoint and request token, set aside in a hosted sandbox.
+    set_aside: Option<(String, String)>,
 }
 
 /// Names only: the values hold tokens and keys.
@@ -130,12 +141,28 @@ impl Env {
             vars.insert(MACHINE_KEY.to_string(), agent.key().to_string());
             vars.remove(MACHINE_KEY_FILE);
         }
-        Env {
+        let mut env = Env {
             vars,
             agent,
             overridden,
             misplaced,
+            set_aside: None,
+        };
+        if sets_aside_github_id_token(&env) {
+            let url = env.vars.remove(GITHUB_ID_TOKEN[0]);
+            let token = env.vars.remove(GITHUB_ID_TOKEN[1]);
+            env.set_aside = url.zip(token);
         }
+        env
+    }
+
+    /// \[ADR 0140\] In a hosted sandbox inside GitHub Actions, the job's ID-token endpoint and
+    /// request token, which nothing but `hushrun login --session` reads: there they buy a session
+    /// as an agent (C-142), never CI's standing.
+    pub fn sandbox_github_id_token(&self) -> Option<(&str, &str)> {
+        self.set_aside
+            .as_ref()
+            .map(|(url, token)| (url.as_str(), token.as_str()))
     }
 
     /// \[ADR 0046\] The `HUSHRUN_AGENT` in effect, when one is set and hushrun can read it.
@@ -215,6 +242,10 @@ const OTHER_CI: &[&[&str]] = &[
 /// What `name` reads as where [`Env`] differs from the process: nothing for a variable the process
 /// answers, and for one a string stands in for or was dropped from, its value or that it's unset.
 fn stood_in(name: &str) -> Option<Option<String>> {
+    if GITHUB_ID_TOKEN.contains(&name) {
+        let env = Env::from_process();
+        return sets_aside_github_id_token(&env).then_some(None);
+    }
     if !name.starts_with(OWN) {
         return None;
     }
@@ -263,36 +294,104 @@ pub enum CiError {
 #[error("{0}")]
 pub struct ApiError(pub String);
 
+/// What [`detection`] finds: a CI provider, a person's machine, or \[ADR 0140\] a coding agent's
+/// sandbox, which is local too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detected {
+    /// A CI system, T-4's rules apply.
+    Ci(Provider),
+    /// A person's machine, or `HUSHRUN_PROVIDER=local`.
+    Local,
+    /// \[ADR 0140\] A coding agent's sandbox (C-140): local, with the platform or agent that says so.
+    Sandbox(&'static platforms::Platform),
+}
+
+impl Detected {
+    /// The provider runs record: a sandbox is `local`.
+    pub fn provider(self) -> Provider {
+        match self {
+            Detected::Ci(provider) => provider,
+            Detected::Local | Detected::Sandbox(_) => Provider::Local,
+        }
+    }
+}
+
 /// Which provider runs this command (§11.2, detection column). `HUSHRUN_PROVIDER` overrides
 /// detection; agent sandboxes that export `CI=true` set it to `local`, or \[ADR 0046\] say so with
 /// `HUSHRUN_AGENT`. One hushrun doesn't know leaves the provider to detection ([`ignored`] says
 /// so). \[ADR 0046\] `HUSHRUN_AGENT` overrides bare `CI=true` and nothing else: it can reach a named
 /// CI's job, in a job-level secret or a project variable, and a job that took itself for a sandbox
-/// would lose ADR 0044's guards and skip wrongly. Nothing else tells a sandbox from CI: real CI
-/// outside GitHub sets `CI=true` with `HUSHRUN_TOKEN` and `HUSHRUN_MACHINE_KEY`, as a sandbox can.
+/// would lose ADR 0044's guards and skip wrongly. \[ADR 0140\] [`detection`] says more: which
+/// sandbox, when one is.
 pub fn detect(env: &Env) -> Provider {
+    detection(env).provider()
+}
+
+/// \[ADR 0140\] Whether [`Env`] sets GitHub's ID-token variables aside: [`detection`] finds a hosted
+/// platform's sandbox, which no explicit `HUSHRUN_PROVIDER` overrode to a CI provider.
+fn sets_aside_github_id_token(env: &Env) -> bool {
+    matches!(detection(env), Detected::Sandbox(platform) if platform.kind == platforms::Kind::Platform)
+}
+
+/// \[ADR 0140\] What runs this command (C-140), decided here and nowhere else: an explicit
+/// `HUSHRUN_PROVIDER` that parses first, a person's decision; then `HUSHRUN_SANDBOX` naming a
+/// platform row by its id, the same decision for a sandbox; then a hosted platform's own marker
+/// ([`platforms::Kind::Platform`]), which beats `CI=true` and a named CI's variable alike, since
+/// only that vendor's sandbox sets it and one, Copilot's, runs inside GitHub Actions; then a named
+/// CI; then bare `CI=true`, unless `HUSHRUN_AGENT` or a coding agent's marker
+/// ([`platforms::Kind::Agent`]) stands beside it, which makes a sandbox; else a person's machine,
+/// where an agent's marker alone changes nothing.
+pub fn detection(env: &Env) -> Detected {
     if let Some(provider) = env
         .get("HUSHRUN_PROVIDER")
-        .and_then(|name| name.trim().parse().ok())
+        .and_then(|name| name.trim().parse::<Provider>().ok())
     {
-        return provider;
+        return match provider {
+            Provider::Local => Detected::Local,
+            provider => Detected::Ci(provider),
+        };
+    }
+    // A person who knows the platform names it, where its marker is missing or wrong.
+    if let Some(platform) = env
+        .get(platforms::SANDBOX_VARIABLE)
+        .and_then(|id| platforms::by_id(id.trim()))
+        .filter(|platform| platform.kind == platforms::Kind::Platform)
+    {
+        return Detected::Sandbox(platform);
+    }
+    if let Some(platform) = platforms::hosted(env) {
+        return Detected::Sandbox(platform);
     }
     if env.is_true("GITHUB_ACTIONS") {
-        Provider::Github
+        Detected::Ci(Provider::Github)
     } else if env.is_true("GITLAB_CI") {
-        Provider::Gitlab
+        Detected::Ci(Provider::Gitlab)
     } else if env.is_true("BUILDKITE") {
-        Provider::Buildkite
+        Detected::Ci(Provider::Buildkite)
     } else if env.is_true("CIRCLECI") {
-        Provider::Circleci
+        Detected::Ci(Provider::Circleci)
     } else if OTHER_CI
         .iter()
         .any(|names| names.iter().all(|name| env.says_yes(name)))
-        || (env.is_true("CI") && !env.agent_set())
     {
-        Provider::Generic
+        Detected::Ci(Provider::Generic)
+    } else if env.is_true("CI") {
+        match platforms::of(env) {
+            Some(agent) => Detected::Sandbox(agent),
+            None if env.agent_set() => Detected::Local,
+            None => Detected::Ci(Provider::Generic),
+        }
     } else {
-        Provider::Local
+        // Without CI, a coding agent's marker is an agent on someone's machine: local, as ever.
+        Detected::Local
+    }
+}
+
+/// \[ADR 0140\] The sandbox this runs in, when [`detection`] finds one.
+pub fn sandbox(env: &Env) -> Option<&'static platforms::Platform> {
+    match detection(env) {
+        Detected::Sandbox(platform) => Some(platform),
+        _ => None,
     }
 }
 
@@ -862,6 +961,148 @@ mod tests {
         assert_eq!(
             detect_with(&[("HUSHRUN_PROVIDER", "jenkins")]),
             Provider::Local
+        );
+    }
+
+    // covers: C-140
+    #[test]
+    fn a_hosted_platforms_marker_makes_a_sandbox_beside_any_ci() {
+        let of = |pairs: &[(&str, &str)]| detection(&Env::from_pairs(pairs.iter().copied()));
+        // Claude Code on the web, as the probe found it, with and without CI.
+        let web = of(&[("CLAUDE_CODE_REMOTE", "true"), ("CLAUDECODE", "1")]);
+        assert!(matches!(web, Detected::Sandbox(p) if p.id == "claude-code-web"));
+        assert_eq!(web.provider(), Provider::Local);
+        let with_ci = of(&[("CLAUDE_CODE_REMOTE", "true"), ("CI", "true")]);
+        assert!(matches!(with_ci, Detected::Sandbox(p) if p.id == "claude-code-web"));
+        // D1: a vendor's marker beats a named CI's variable too: Copilot runs in GitHub Actions.
+        let copilot = of(&[
+            ("COPILOT_AGENT_SESSION_ID", "s-1"),
+            ("GITHUB_ACTIONS", "true"),
+            ("CI", "true"),
+        ]);
+        assert!(matches!(copilot, Detected::Sandbox(p) if p.id == "copilot-cloud"));
+        for ci in ["GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD"] {
+            let cursor = of(&[("CURSOR_AGENT_SOCKET", "/tmp/c.sock"), (ci, "true")]);
+            assert!(
+                matches!(cursor, Detected::Sandbox(p) if p.id == "cursor-cloud"),
+                "{ci}"
+            );
+        }
+        // An explicit provider is a person's decision, and wins.
+        assert_eq!(
+            of(&[
+                ("CLAUDE_CODE_REMOTE", "true"),
+                ("HUSHRUN_PROVIDER", "github")
+            ]),
+            Detected::Ci(Provider::Github)
+        );
+        assert_eq!(
+            of(&[
+                ("CLAUDE_CODE_REMOTE", "true"),
+                ("HUSHRUN_PROVIDER", "local")
+            ]),
+            Detected::Local
+        );
+        assert!(sandbox(&Env::from_pairs([("CLAUDE_CODE_REMOTE", "1")])).is_some());
+        // HUSHRUN_SANDBOX names a platform whose marker is missing, with the same consequences.
+        let named = Env::from_pairs([
+            ("HUSHRUN_SANDBOX", "copilot-cloud"),
+            ("GITHUB_ACTIONS", "true"),
+            ("ACTIONS_ID_TOKEN_REQUEST_URL", "https://t/x"),
+            ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "r"),
+        ]);
+        assert!(matches!(detection(&named), Detected::Sandbox(p) if p.id == "copilot-cloud"));
+        assert_eq!(named.get("ACTIONS_ID_TOKEN_REQUEST_URL"), None);
+        // Only a platform row's id, and not an agent's.
+        assert_eq!(
+            of(&[
+                ("HUSHRUN_SANDBOX", "claude-code"),
+                ("GITHUB_ACTIONS", "true")
+            ]),
+            Detected::Ci(Provider::Github)
+        );
+        assert_eq!(
+            of(&[("HUSHRUN_SANDBOX", "nope"), ("CI", "true")]),
+            Detected::Ci(Provider::Generic)
+        );
+        assert!(sandbox(&Env::from_pairs([("CLAUDE_CODE_REMOTE", "0")])).is_none());
+    }
+
+    // covers: C-140
+    #[test]
+    fn a_hosted_sandbox_in_github_actions_never_gets_ci_s_id_token() {
+        let pairs = [
+            ("COPILOT_AGENT_SESSION_ID", "s-1"),
+            ("GITHUB_ACTIONS", "true"),
+            ("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/x"),
+            ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request"),
+        ];
+        let env = Env::from_pairs(pairs);
+        assert_eq!(env.get("ACTIONS_ID_TOKEN_REQUEST_URL"), None);
+        assert_eq!(env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN"), None);
+        assert_eq!(
+            env.sandbox_github_id_token(),
+            Some(("https://token.example/x", "request"))
+        );
+        // A real job keeps them, and so does a sandbox someone said is CI.
+        let job = Env::from_pairs(pairs[1..].iter().copied());
+        assert!(job.get("ACTIONS_ID_TOKEN_REQUEST_URL").is_some());
+        assert_eq!(job.sandbox_github_id_token(), None);
+        let said = Env::from_pairs(
+            pairs
+                .iter()
+                .copied()
+                .chain([("HUSHRUN_PROVIDER", "github")]),
+        );
+        assert!(said.get("ACTIONS_ID_TOKEN_REQUEST_URL").is_some());
+        // An agent's step in a job is CI: it keeps them.
+        let step = Env::from_pairs(
+            [("CLAUDECODE", "1")]
+                .into_iter()
+                .chain(pairs[1..].iter().copied()),
+        );
+        assert!(step.get("ACTIONS_ID_TOKEN_REQUEST_URL").is_some());
+    }
+
+    // covers: C-140
+    #[test]
+    fn a_coding_agents_marker_beats_bare_ci_and_nothing_else() {
+        let of = |pairs: &[(&str, &str)]| detection(&Env::from_pairs(pairs.iter().copied()));
+        // G3: an agent's sandbox that exports CI=true is local, as HUSHRUN_AGENT made it.
+        let codex = of(&[("CI", "true"), ("CODEX_SANDBOX", "seatbelt")]);
+        assert!(matches!(codex, Detected::Sandbox(p) if p.id == "codex"));
+        assert!(!in_ci(&Env::from_pairs([
+            ("CI", "true"),
+            ("CLAUDECODE", "1")
+        ])));
+        // An agent's step in a named CI's job stays CI, with ADR 0044's guards (ADR 0046 item 3).
+        assert_eq!(
+            of(&[
+                ("CI", "true"),
+                ("GITHUB_ACTIONS", "true"),
+                ("CLAUDECODE", "1")
+            ]),
+            Detected::Ci(Provider::Github)
+        );
+        assert_eq!(
+            of(&[
+                ("JENKINS_URL", "https://ci/"),
+                ("BUILD_ID", "4"),
+                ("CLAUDECODE", "1")
+            ]),
+            Detected::Ci(Provider::Generic)
+        );
+        // HUSHRUN_AGENT alone still doesn't override a named CI (D1).
+        assert_eq!(
+            of(&[("GITHUB_ACTIONS", "true"), ("HUSHRUN_AGENT", "x")]),
+            Detected::Ci(Provider::Github)
+        );
+        // Without CI, an agent on a person's machine is just local.
+        assert_eq!(of(&[("CLAUDECODE", "1")]), Detected::Local);
+        assert_eq!(of(&[]), Detected::Local);
+        assert_eq!(
+            of(&[("CI", "true"), ("HUSHRUN_AGENT", "x")]),
+            Detected::Local
         );
     }
 

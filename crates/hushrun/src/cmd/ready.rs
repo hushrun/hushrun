@@ -641,7 +641,11 @@ fn runs(content: &Content, branch: Option<&str>, files_here: bool, report: &mut 
     // \[ADR 0040\] A pass here does nothing for a check CI runs outside hushrun.
     let outside = setup::outside_hushrun(package.as_deref(), &pipelines, branch, hushrun());
     let backend = match Backend::select(Some(root)) {
-        Ok(Selection::On(backend)) => backend,
+        Ok(Selection::On(backend)) => {
+            // \[ADR 0142\] What waited while the backend was out of reach (C-143).
+            let _ = backend.flush();
+            backend
+        }
         Ok(Selection::Off(off)) => {
             report.results = Some(Results::Off);
             report.runs_outside = !outside.is_empty();
