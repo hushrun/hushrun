@@ -245,6 +245,26 @@ const TAKES_VALUE: &[&str] = &[
     "--config",
 ];
 
+/// What a response file (`@file`) holds, for B-241.
+#[derive(Debug, PartialEq, Eq)]
+enum Response {
+    /// Nothing but white space: it adds no argument.
+    Empty,
+    /// CMake's module map (`.modmap`) naming a module: the compile reads a module's interface.
+    ModuleMap,
+    /// Anything else, or a file that can't be read.
+    Other,
+}
+
+/// \[B-241\] What the response file `file`, from the compile's folder, holds.
+fn response_file(file: &str) -> Response {
+    match std::fs::read(file) {
+        Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Response::Empty,
+        Ok(_) if file.ends_with(".modmap") => Response::ModuleMap,
+        _ => Response::Other,
+    }
+}
+
 /// The reason a flag passes the call through, or `None` (B-51).
 fn refused(arg: &str) -> Option<Why> {
     let exact: &[(&str, Why)] = &[
@@ -462,8 +482,27 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        if arg.starts_with('@') {
-            return PassThrough("response-file");
+        if let Some(file) = arg.strip_prefix('@') {
+            // \[B-241\] CMake's module map of a source that imports no module and is none
+            // (CMake 3.28 and later scan every C++20 source): empty, so the compile is the
+            // same one without it. Any other response file passes through.
+            match response_file(file) {
+                Response::Empty => {
+                    i += 1;
+                    continue;
+                }
+                Response::ModuleMap => return PassThrough("modules"),
+                Response::Other => return PassThrough("response-file"),
+            }
+        }
+        // \[B-242\] `-Xclang -include-pch`: CMake's precompiled header on Clang.
+        if arg == "-Xclang"
+            && let Some(why) = args
+                .get(i + 1)
+                .and_then(|next| refused(next))
+                .filter(|why| matches!(*why, "pch" | "modules"))
+        {
+            return PassThrough(why);
         }
         if let Some(why) = refused(arg) {
             return PassThrough(why);
@@ -784,6 +823,58 @@ mod tests {
         assert_eq!(compile(&["-c", "a.C", "-o", "a.o"]).lang, Lang::Cxx);
         let d = compile(&["-MMD", "-c", "src/a.c", "-o", "out/a.o"]);
         assert_eq!(d.dep.path(&d.output).as_deref(), Some("out/a.d"));
+    }
+
+    // covers: B-241, B-242
+    #[test]
+    fn an_empty_module_map_adds_nothing_and_a_full_one_is_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("a.cpp.o.modmap");
+        std::fs::write(&empty, "\n").unwrap();
+        let full = dir.path().join("m.cpp.o.modmap");
+        std::fs::write(
+            &full,
+            "-fmodule-file=greet=CMakeFiles/greet.dir/greet.pcm\n",
+        )
+        .unwrap();
+        let other = dir.path().join("args.rsp");
+        std::fs::write(&other, "-DX\n").unwrap();
+        let at = |p: &std::path::Path| format!("@{}", p.display());
+        let with = compile(&["-std=gnu++20", "-c", "a.cpp", "-o", "a.o", &at(&empty)]);
+        let without = compile(&["-std=gnu++20", "-c", "a.cpp", "-o", "a.o"]);
+        assert_eq!(with.keyed, without.keyed);
+        assert_eq!(
+            call(&["-c", "m.cpp", "-o", "m.o", &at(&full)]),
+            Classified::PassThrough("modules")
+        );
+        assert_eq!(
+            call(&["-c", "a.cpp", "-o", "a.o", &at(&other)]),
+            Classified::PassThrough("response-file")
+        );
+        assert_eq!(
+            call(&["-c", "a.cpp", "-o", "a.o", "@missing.modmap"]),
+            Classified::PassThrough("response-file")
+        );
+        // CMake's precompiled header on Clang, and modules through `-Xclang`.
+        assert_eq!(
+            call(&[
+                "-Xclang",
+                "-include-pch",
+                "-Xclang",
+                "p.pch",
+                "-c",
+                "a.cpp",
+                "-o",
+                "a.o"
+            ]),
+            Classified::PassThrough("pch")
+        );
+        assert_eq!(
+            call(&[
+                "-Xclang", "-load", "-Xclang", "p.so", "-c", "a.cpp", "-o", "a.o"
+            ]),
+            Classified::PassThrough("loads-code")
+        );
     }
 
     // covers: B-51

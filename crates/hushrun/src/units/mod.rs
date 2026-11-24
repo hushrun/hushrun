@@ -41,11 +41,13 @@ pub mod mocha;
 pub mod node_test;
 pub mod program;
 pub mod pytest;
+pub mod ruby;
 pub mod runner;
 pub mod rustdoc;
 pub mod shared;
 pub mod store;
 pub mod swift;
+pub mod testprogram;
 pub mod unittest;
 pub mod vitest;
 pub mod why;
@@ -817,6 +819,7 @@ impl Session {
     /// Gives COMMAND the variables that load the adapter.
     pub fn apply(&self, command: &mut Command) {
         apply_variables(&self.variables, command);
+        apply_start(command, &self.adapter.start_variables(&self.run_dir));
     }
 
     /// \[C-46\] Before COMMAND, in every mode: tells the adapter, in `hushrun.json`, the test files
@@ -1389,9 +1392,11 @@ impl Session {
                 *value = dir.clone().into_os_string();
             }
         }
+        let start = self.adapter.start_variables(&dir);
         Some(Again {
             dir,
             variables,
+            start,
             units: again.clone(),
         })
     }
@@ -1806,6 +1811,8 @@ fn beside(given: Option<OsString>, had: Option<OsString>, ours: &OsString) -> Os
 pub struct Again {
     dir: PathBuf,
     variables: Vec<(String, OsString)>,
+    /// \[ADR 0120\] What the adapter gives this start besides, from its `hushrun.json`.
+    start: Vec<(String, Option<OsString>)>,
     pub units: BTreeSet<String>,
 }
 
@@ -1813,6 +1820,17 @@ impl Again {
     /// Gives COMMAND the variables of the second run.
     pub fn apply(&self, command: &mut Command) {
         apply_variables(&self.variables, command);
+        apply_start(command, &self.start);
+    }
+}
+
+/// \[ADR 0120\] Gives a start of COMMAND what [`adapter::Adapter::start_variables`] made.
+fn apply_start(command: &mut Command, start: &[(String, Option<OsString>)]) {
+    for (name, value) in start {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
     }
 }
 
