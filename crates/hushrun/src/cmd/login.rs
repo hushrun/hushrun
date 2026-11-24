@@ -18,6 +18,9 @@ use crate::hosted::{self, open};
 use crate::results::{NamedBy, error_message, plain};
 
 pub fn login(global: &GlobalOpts, args: &LoginArgs) -> CmdResult {
+    if args.session {
+        return session(global, args);
+    }
     let (url, named) = target(global, args.url.as_deref())?;
     let origin = credentials::origin(&url);
     if let Some(named) = named {
@@ -142,6 +145,51 @@ pub fn logout(global: &GlobalOpts, args: &LogoutArgs) -> CmdResult {
 /// else `HUSHRUN_BACKEND`; else the backend the repository's package.json names; else the last
 /// one; else hushrun's hosted backend. The order is `hushrun run`'s (C-11), so that a login
 /// reaches the backend a run then uses.
+/// \[ADR 0141\] `hushrun login --session` (C-142): swaps the credential this sandbox holds for a
+/// session of one repository at the org's backend, and saves it for the backend's origin. It needs
+/// an org's URL, and prints no token.
+fn session(global: &GlobalOpts, args: &LoginArgs) -> CmdResult {
+    let (url, named) = target(global, args.url.as_deref())?;
+    // C-13: the sandbox's credential goes to hushrun's host, or to a backend the command line or
+    // the environment names, never to one a repository's file chose.
+    let from_a_file = matches!(
+        named,
+        Some(source) if source.starts_with("which this repository's")
+    );
+    if from_a_file && credentials::origin(&url) != hosted::origin() {
+        return Err(Failure::usage(anyhow!(
+            "{url} is named by this repository's files, and isn't on hushrun's host: a session takes this sandbox's credential there only when you name it, as hushrun login --session {url}, or with HUSHRUN_BACKEND"
+        )));
+    }
+    if hosted::org_of(&url.to_string()).is_none() {
+        return Err(Failure::usage(anyhow!(
+            "a session is an org's: name its URL, such as {}/o/<org>",
+            credentials::origin(&url)
+        )));
+    }
+    let env = hushrun_ci::Env::from_process();
+    // The repository a token of the whole org asks for: the one named, else this one.
+    let repository = args.repository.clone().or_else(|| {
+        hushrun_ci::context(&env).repository.or_else(|| {
+            repository_root(global).and_then(|root| crate::cmd::init::origin_repository(&root))
+        })
+    });
+    let session = crate::session::obtain(&env, &url, repository.as_deref(), args.hours)
+        .map_err(|err| Failure::new(Exit::Unexpected, err))?;
+    let path = crate::session::save(&session).map_err(|err| Failure::new(Exit::Unexpected, err))?;
+    let until = hushrun_core::time::Time::from_millis(session.expires_at)
+        .map(|t| t.to_string())
+        .unwrap_or_default();
+    println!(
+        "Session for {} as agent:{} until {until}, from the {}: saved in {}.",
+        session.repository,
+        session.agent,
+        session.source,
+        path.display()
+    );
+    Ok(Exit::Ok)
+}
+
 fn target(
     global: &GlobalOpts,
     given: Option<&str>,

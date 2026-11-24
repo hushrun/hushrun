@@ -697,12 +697,26 @@ In the environment's settings:
   HUSHRUN_AGENT=hushrun_agent_v1_…
   ```
 
-- network access that reaches `api.hushrun.com`, as an allowed domain or with full access,
-  and the npm registry;
+- network access that reaches `api.hushrun.com`, `registry.hushrun.com` and
+  `*.r2.cloudflarestorage.com`, as allowed domains or with full access, and the npm registry;
 - a setup script that installs the dependencies, which installs hushrun with them: `npm ci`.
 
 Each session's `npm test` then goes through `hushrun run`, and skips what another session, a
 teammate or CI already passed on the same files.
+
+### Hosted agent platforms
+
+hushrun knows the sandboxes vendors host for their agents by a variable only that platform sets,
+such as `CLAUDE_CODE_REMOTE` on Claude Code on the web or `CURSOR_AGENT_SOCKET` on Cursor's cloud
+agents. There a run is local, even beside `CI=true` or, for GitHub's Copilot cloud agent, inside a
+GitHub Actions job. With no credential set, results stay in the sandbox and skip checks for the rest
+of the session; with one, they are shared. An agent's own variable, such as `CLAUDECODE`, makes a
+sandbox only beside a bare `CI=true`: an agent's step in a named CI's job stays CI.
+
+In the sandbox, `hushrun doctor` names the platform, where the credential comes from, whether each
+host hushrun needs answers, and the exact entry that platform's allowlist needs. It never prints a
+value. `sh scripts/agent-cloud-probe.sh`, in this repository, shows what a new platform's sandbox
+looks like, with variable names only.
 
 ### A container
 
@@ -1135,6 +1149,17 @@ hushrun: build: gradle: 1 task run here stays on this machine (1: its outputs ho
 
 KSP has no such step. A Kotlin/JS or native task leaves out at most 250 tests one by one, and no
 class of the default package.
+
+### .NET
+
+`dotnet build`'s compiles aren't reused: since .NET 8 the SDK writes the commit into every
+assembly, so no compile could be reused across commits ([ADR 0118](../adr/0118-dotnet-test.md),
+decision 11). hushrun reuses .NET's tests, not its assemblies. With
+`tests: reuse`, `hushrun run unit -- dotnet test` leaves out each test project that already passed
+on the files it and the projects it references compile, unbuilt, and with `unit: test` the tests
+that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on
+Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
+when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
 
 ## When hushrun runs anyway
 

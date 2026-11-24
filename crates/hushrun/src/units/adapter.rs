@@ -33,8 +33,8 @@ use super::facts::FactsFile;
 use super::shared::{Asker, List, Shared};
 use super::store::Map;
 use super::{
-    Seen, cargo, ctest, exunit, gotest, gradle, jest, maven, mocha, node_test, pytest, swift,
-    unittest, vitest, xcodebuild,
+    Seen, cargo, ctest, dotnet, exunit, gotest, gradle, jest, maven, mocha, node_test, pytest,
+    swift, unittest, vitest, xcodebuild,
 };
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
@@ -59,6 +59,7 @@ pub const RECOGNIZED: &[Recognize] = &[
     mocha::recognized,
     maven::recognized,
     gradle::recognized,
+    dotnet::recognized,
     exunit::recognized,
     unittest::recognized,
     ctest::recognized,
