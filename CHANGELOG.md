@@ -12,6 +12,17 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Rust: doctests as units, and `cargo check` and `cargo clippy` as build blocks** ([ADR
+  0112](docs/adr/0112-rust-doctests-checks-and-clippy.md), C-74 to C-77, B-160, B-161). `cargo test
+  --doc` with `tests: reuse` runs only the doctests of the libraries whose files changed: hushrun
+  stands in for rustdoc (`RUSTDOC`), and a library whose doctests already passed on what they read
+  isn't handed to it. A compile that links nothing (`cargo check`, `--all-targets`'s tests,
+  programs and proc macros) is stored as a library's check, where it was `built, not stored`; and
+  `cargo clippy`'s workspace compiles, through clippy's driver, are blocks of their own, keyed by
+  the driver's bytes, its `CLIPPY_` variables and where it looks for `clippy.toml`, their lints
+  replayed. `cargo nextest run --archive-file`, and a `--partition` other than `hash:`, now say why
+  their test files aren't observed instead of building the workspace or shifting tests between
+  jobs.
 - **`dotnet test` reuses test projects, and test methods one by one** (C-98 to C-101,
   [ADR 0118](docs/adr/0118-dotnet-test.md)). With `tests: reuse`, a C#, F# or Visual Basic test
   project (xUnit, NUnit, MSTest, through VSTest) that already passed on the files it and the

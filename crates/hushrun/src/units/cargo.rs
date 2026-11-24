@@ -12,6 +12,11 @@
 //!   dep-info, the dep-info of every workspace library it may link, and, for an integration test,
 //!   of every target of its package, since it may run them (the package rule); \[ADR 0096\] and
 //!   of the build scripts of their packages, with what each build script's run gave the build.
+//! - \[ADR 0112\] With `--doc`, a unit is a library's doctests, named by its root file: hushrun
+//!   stands in for rustdoc instead ([`super::rustdoc`]), the build is `cargo test --doc` with a
+//!   rustdoc that runs nothing, and the file Cargo hands rustdoc for the library stands for the
+//!   unit's executable (C-74 to C-76). nextest's archives and partitions by count are refused,
+//!   with why (C-77).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -53,6 +58,12 @@ pub struct Recognized {
     pub targets: Vec<String>,
     /// COMMAND says something of ignored tests, which runs some that a list doesn't count.
     pub ignored: bool,
+    /// \[ADR 0112\] `cargo test --doc`: the units are libraries' doctests, which rustdoc runs
+    /// (C-74).
+    pub doc: bool,
+    /// \[ADR 0112\] Why hushrun can't load for this COMMAND, though it runs Cargo's tests (C-77):
+    /// nextest runs an archive's binaries, or splits the tests by their count.
+    pub refused: Option<String>,
 }
 
 /// Cargo's build options that take no value.
@@ -155,6 +166,8 @@ pub fn recognize(command: &[String]) -> Option<Recognized> {
     let mut build = Vec::new();
     let mut targets = Vec::new();
     let mut ignored = false;
+    let mut doc = false;
+    let mut refused = None;
     let mut words = rest.iter();
     while let Some(word) = words.next() {
         if word == "--" {
@@ -162,9 +175,17 @@ pub fn recognize(command: &[String]) -> Option<Recognized> {
             break;
         }
         ignored |= word.contains("ignored");
-        if word == "--doc" || word == "--no-run" {
-            // Doctests and builds run no test binary through a runner.
+        if word == "--no-run" {
+            // A build runs no test binary.
             return None;
+        }
+        if word == "--doc" {
+            // \[ADR 0112\] Doctests: nextest has none to run.
+            if nextest {
+                return None;
+            }
+            doc = true;
+            continue;
         }
         let (name, inline) = match word.split_once('=') {
             Some((name, value)) if name.starts_with('-') => (name, Some(value.to_string())),
@@ -190,11 +211,15 @@ pub fn recognize(command: &[String]) -> Option<Recognized> {
             }
             build.push(name.to_string());
             build.push(value);
-        } else if inline.is_none()
-            && (NEXTEST_VALUED.contains(&name) || name == "--nextest-profile")
-            && name != "--hide-progress-bar"
-        {
-            words.next();
+        } else if NEXTEST_VALUED.contains(&name) || name == "--nextest-profile" {
+            let value = match inline {
+                Some(value) => Some(value),
+                None if name != "--hide-progress-bar" => words.next().cloned(),
+                None => None,
+            };
+            if nextest && let Some(why) = nextest_refuses(name, value.as_deref()) {
+                refused.get_or_insert(why);
+            }
         }
     }
     Some(Recognized {
@@ -204,7 +229,30 @@ pub fn recognize(command: &[String]) -> Option<Recognized> {
         build,
         targets,
         ignored,
+        doc,
+        refused,
     })
+}
+
+/// \[ADR 0112\] C-77: what an option of `cargo nextest run` with its value leaves hushrun unable
+/// to do. An archive's binaries (`--archive-file`, or a build reused from `--binaries-metadata`
+/// and `--cargo-metadata`) were built elsewhere, so the build hushrun would ask Cargo for isn't
+/// theirs, and asking for it builds the workspace. A partition by count (`count:`, and any
+/// partition but `hash:`) gives each job tests by their place in the whole list: a binary hushrun
+/// leaves out lists no test, which moves every test after it to another job's share, so a job
+/// that left out other binaries than its neighbour's would run neither's share of some tests. A
+/// partition by hash gives each test its job by its own name, whatever else is listed.
+fn nextest_refuses(name: &str, value: Option<&str>) -> Option<String> {
+    match name {
+        "--archive-file" | "--binaries-metadata" | "--cargo-metadata" => Some(format!(
+            "cargo nextest runs binaries built elsewhere ({name}), not a build hushrun can read"
+        )),
+        "--partition" if !value.is_some_and(|v| v.starts_with("hash:")) => Some(format!(
+            "cargo nextest splits the tests by their place in the list (--partition {}), which a binary left out would move; --partition hash:M/N doesn't",
+            value.unwrap_or("")
+        )),
+        _ => None,
+    }
 }
 
 /// The variables that put hushrun's runner in front of every test binary of `recognized`, for
@@ -421,7 +469,13 @@ pub fn plan_build(
     let metadata = metadata(recognized, cwd, assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
     let keying = Keying::new(roots.as_ref(), assigned, Some(tree), &compiled.scripts);
-    Ok(read_build(&metadata, compiled, root, &keying))
+    Ok(read_build(
+        &metadata,
+        compiled,
+        root,
+        &keying,
+        recognized.doc,
+    ))
 }
 
 /// \[ADR 0095, 0096\] What a build's keys take from beyond its files: the checkout's roots
@@ -656,6 +710,9 @@ struct Target {
     src_path: PathBuf,
     #[serde(default)]
     test: bool,
+    /// \[ADR 0112\] `cargo test` runs its doctests (a library's, unless `doctest = false`).
+    #[serde(default)]
+    doctest: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -696,15 +753,24 @@ struct Artifact {
     test: bool,
     executable: Option<PathBuf>,
     depinfo: Option<PathBuf>,
+    /// \[ADR 0112\] For a library, the file its dependents link and rustdoc's doctests are
+    /// handed (`--extern`): its `.rlib`, or a proc macro's shared library; never its `.rmeta`.
+    linkable: Option<PathBuf>,
+}
+
+impl Target {
+    /// A library a binary may link: a `lib`, `rlib`, `proc-macro`, ….
+    fn is_lib(&self) -> bool {
+        self.kind
+            .iter()
+            .any(|k| k.contains("lib") || k == "proc-macro")
+    }
 }
 
 impl Artifact {
     /// A library a binary may link: a `lib`, `rlib`, `proc-macro`, ….
     fn is_lib(&self) -> bool {
-        self.target
-            .kind
-            .iter()
-            .any(|k| k.contains("lib") || k == "proc-macro")
+        self.target.is_lib()
     }
 
     /// \[ADR 0096\] A build script's compile.
@@ -751,7 +817,7 @@ pub fn observe(
     let compiled = build(recognized, cwd, false, &[], assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
     let keying = Keying::new(roots.as_ref(), assigned, Some(tree), &compiled.scripts);
-    let built = read_build(&metadata, compiled, root, &keying);
+    let built = read_build(&metadata, compiled, root, &keying, recognized.doc);
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
     let mut started: BTreeMap<PathBuf, Vec<&Invocation>> = BTreeMap::new();
@@ -816,7 +882,20 @@ fn deselected(starts: &[&Invocation]) -> bool {
 /// `scripts` ([`script_entry`], [`generated_entry`]). A dep-info, an output or a generated file
 /// that can't be read, or a library without dep-info, makes it `not observed`. The plan and the
 /// reading after COMMAND both call it, so both key a binary alike.
-fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Keying<'_>) -> Built {
+///
+/// \[ADR 0112\] With `doc` (`cargo test --doc`), the units are the libraries whose doctests Cargo
+/// runs, each named by its root file, with the file rustdoc is handed for it (its `.rlib`) in
+/// place of an executable: a library's doctests read what its own dep-info names, what the
+/// dep-info of every workspace library they may link names (its package's, whose dev-dependencies
+/// a doctest may use), and what those packages' build scripts were built from, as a unit test
+/// binary does (C-75); and their `env` holds the variables Cargo hands rustdoc its flags from.
+fn read_build(
+    metadata: &Metadata,
+    compiled: Compiled,
+    root: &Path,
+    keying: &Keying<'_>,
+    doc: bool,
+) -> Built {
     let Compiled { artifacts, scripts } = compiled;
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let root = real(root);
@@ -872,8 +951,15 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
 
     let mut unit_files = BTreeSet::new();
     for package in packages.values() {
-        for target in package.targets.iter().filter(|t| t.test) {
-            unit_files.extend(relative(&target.src_path));
+        for target in package.targets.iter() {
+            let unit = if doc {
+                target.doctest && target.is_lib()
+            } else {
+                target.test
+            };
+            if unit {
+                unit_files.extend(relative(&target.src_path));
+            }
         }
     }
 
@@ -937,10 +1023,22 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
     }
 
     let mut units = BTreeMap::new();
-    for artifact in artifacts.iter().filter(|a| a.test) {
-        let Some(executable) = &artifact.executable else {
-            continue;
-        };
+    // \[ADR 0112\] A library's doctests are handed its linkable file, which stands for their
+    // executable: they are built from it and the toolchain that made it.
+    let tested = artifacts.iter().filter_map(|a| {
+        if doc {
+            (!a.test && a.is_lib() && a.target.doctest)
+                .then_some(a.linkable.as_ref())
+                .flatten()
+                .map(|file| (a, file))
+        } else {
+            a.test
+                .then_some(a.executable.as_ref())
+                .flatten()
+                .map(|exe| (a, exe))
+        }
+    });
+    for (artifact, executable) in tested {
         let Some(unit) = relative(&artifact.target.src_path) else {
             continue;
         };
@@ -1016,6 +1114,13 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
         }
         let mut reads: BTreeSet<String> = BTreeSet::new();
         let mut env: BTreeSet<(String, Option<String>)> = BTreeSet::new();
+        if doc {
+            env.extend(
+                super::rustdoc::flags_env(&|name| keying.var(name))
+                    .into_iter()
+                    .map(|(name, value)| (name, value.map(|value| keying.text(&value)))),
+            );
+        }
         let mut given: BTreeSet<String> = BTreeSet::new();
         let mut declared: BTreeSet<String> = BTreeSet::new();
         for (d, files, sources) in depinfos
@@ -1371,7 +1476,15 @@ fn build(
 ) -> Result<Compiled, String> {
     let mut command = cargo(recognized, cwd, assigned);
     command.envs(env.iter().map(|(name, value)| (name, value)));
-    command.args(["test", "--no-run", "--message-format=json"]);
+    if recognized.doc {
+        // \[ADR 0112\] C-75: Cargo builds no doctest without running it (`--doc` refuses
+        // `--no-run`), so the build is COMMAND's own, `cargo test --doc`, with a rustdoc that
+        // runs nothing: `true`, which takes any argument and exits 0.
+        command.env("RUSTDOC", super::rustdoc::RUNS_NOTHING);
+        command.args(["test", "--doc", "--message-format=json"]);
+    } else {
+        command.args(["test", "--no-run", "--message-format=json"]);
+    }
     if !recognized
         .build
         .iter()
@@ -1389,7 +1502,7 @@ fn build(
             Stdio::null()
         })
         .spawn()
-        .map_err(|err| format!("can't run cargo test --no-run: {err}"))?;
+        .map_err(|err| format!("can't run {}: {err}", build_name(recognized)))?;
     let started = Instant::now();
     let stdout = child.stdout.take().expect("piped");
     let mut compiled = Compiled::default();
@@ -1429,7 +1542,13 @@ fn build(
             continue;
         };
         let depinfo = depinfo_of(&message.filenames, message.executable.as_deref(), &target);
+        let linkable = message
+            .filenames
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext != "rmeta"))
+            .cloned();
         compiled.artifacts.push(Artifact {
+            linkable,
             manifest: std::fs::canonicalize(&manifest).unwrap_or(manifest),
             package_id: message.package_id,
             target,
@@ -1449,10 +1568,19 @@ fn build(
         return Err(if plan {
             "the build failed".into()
         } else {
-            "cargo test --no-run failed".into()
+            format!("{} failed", build_name(recognized))
         });
     }
     Ok(compiled)
+}
+
+/// \[ADR 0112\] The build [`build`] asks Cargo for, as the run says it.
+fn build_name(recognized: &Recognized) -> &'static str {
+    if recognized.doc {
+        "cargo test --doc with a rustdoc that runs nothing"
+    } else {
+        "cargo test --no-run"
+    }
 }
 
 /// The rustc dep-info file of one artifact: beside a hashed file in `deps/`; for one Cargo copied
@@ -1728,7 +1856,12 @@ fn split_escaped(text: &str) -> Vec<String> {
 /// \[ADR 0068\] The Cargo adapter for `cargo test` and `cargo nextest run` (C-32); `None` for any
 /// other COMMAND.
 pub fn recognized(command: &[String], _: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
-    Some(Ok(Box::new(recognize(command)?)))
+    let recognized = recognize(command)?;
+    // \[ADR 0112\] C-77: Cargo's tests, run in a way hushrun can't read.
+    if let Some(why) = &recognized.refused {
+        return Some(Err(why.clone()));
+    }
+    Some(Ok(Box::new(recognized)))
 }
 
 impl Adapter for Recognized {
@@ -1741,7 +1874,12 @@ impl Adapter for Recognized {
     }
 
     fn test_file(&self) -> &'static str {
-        "test binary"
+        // \[ADR 0112\] A library whose doctests rustdoc runs (C-74).
+        if self.doc {
+            "doctest crate"
+        } else {
+            "test binary"
+        }
     }
 
     fn hints(&self) -> Hints {
@@ -1759,6 +1897,18 @@ impl Adapter for Recognized {
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
         let exe = at.exe()?;
         let env = |name: &str| (at.env)(name).and_then(|v| v.into_string().ok());
+        // \[ADR 0112\] Doctests: hushrun's rustdoc, which starts the toolchain's (C-74).
+        if self.doc {
+            let real = sysroot(self, at.cwd, &env, at.assigned)
+                .map(|root| {
+                    Path::new(&root)
+                        .join("bin")
+                        .join(super::rustdoc::NAME)
+                        .with_extension(std::env::consts::EXE_EXTENSION)
+                })
+                .filter(|real| real.is_file());
+            return super::rustdoc::variables(&exe, at.dir, at.cwd, at.env, real);
+        }
         runner_variables(self, &exe, at.cwd, &env, at.assigned).map(|vars| {
             vars.into_iter()
                 .map(|(name, value)| (name, OsString::from(value)))
@@ -1897,10 +2047,61 @@ mod tests {
         assert_eq!(r.toolchain.as_deref(), Some("nightly"));
         assert_eq!(r.targets, ["x86_64-unknown-linux-gnu"]);
         assert!(r.ignored);
-        assert!(recognize(&words("cargo test --doc")).is_none());
+        assert!(recognize(&words("cargo test --no-run")).is_none());
         assert!(recognize(&words("cargo build")).is_none());
         assert!(recognize(&words("make test")).is_none());
         assert!(recognize(&words("cargo nextest list")).is_none());
+    }
+
+    // covers: C-74
+    #[test]
+    fn cargo_test_doc_is_recognized_as_doctests() {
+        let r = recognize(&words("cargo test --workspace --doc --locked")).unwrap();
+        assert!(r.doc);
+        assert!(!r.nextest);
+        // `--doc` chooses the units; the build is asked for with it apart (C-75).
+        assert_eq!(r.build, words("--workspace --locked"));
+        assert!(!recognize(&words("cargo test --workspace")).unwrap().doc);
+        assert!(recognize(&words("cargo nextest run --doc")).is_none());
+    }
+
+    // covers: C-77
+    #[test]
+    fn nextest_archives_and_partitions_by_count_are_refused_with_why() {
+        let refused = |line: &str| {
+            let r = recognize(&words(line)).unwrap();
+            let why = r.refused.clone();
+            let loaded = recognized(&words(line), Path::new("."));
+            assert_eq!(loaded.map(|r| r.err()), Some(why.clone()), "{line}");
+            why
+        };
+        for line in [
+            "cargo nextest run --archive-file tests.tar.zst",
+            "cargo nextest run --archive-file=tests.tar.zst --workspace-remap .",
+            "cargo nextest run --binaries-metadata b.json --cargo-metadata c.json",
+        ] {
+            assert!(
+                refused(line).is_some_and(|why| why.contains("built elsewhere")),
+                "{line}"
+            );
+        }
+        for line in [
+            "cargo nextest run --partition count:1/3",
+            "cargo nextest run --partition=count:2/3",
+            "cargo nextest run --partition slice:1/2",
+        ] {
+            assert!(
+                refused(line).is_some_and(|why| why.contains("hash:M/N")),
+                "{line}"
+            );
+        }
+        assert_eq!(refused("cargo nextest run --partition hash:1/3"), None);
+        assert_eq!(
+            refused("cargo nextest run --partition=hash:2/3 --workspace"),
+            None
+        );
+        // Cargo's own test command has no such option: the word is only skipped there.
+        assert_eq!(refused("cargo test -- --partition count:1/2"), None);
     }
 
     // covers: C-32
@@ -2166,6 +2367,7 @@ mod tests {
             kind: vec![kind.to_string()],
             src_path: root.join(package).join(src),
             test: true,
+            doctest: kind == "lib",
         };
         let artifact =
             |package: &str, kind: &str, src: &str, test: bool, d: Option<PathBuf>| Artifact {
@@ -2175,6 +2377,7 @@ mod tests {
                 test,
                 executable: test.then(|| deps.join(format!("{package}-{kind}"))),
                 depinfo: d,
+                linkable: (!test).then(|| deps.join(format!("lib{package}-{kind}.rlib"))),
             };
         // A crate outside the workspace: its manifest is no member's.
         let outside = |package: &str, kind: &str, d: Option<PathBuf>| Artifact {
@@ -2247,6 +2450,7 @@ mod tests {
             compiled(artifacts()),
             &root,
             &keyed(Some(&roots)),
+            false,
         );
         let env = |entries: &[(&str, Option<&str>)]| units::env(entries.iter().copied());
         let a = ("CARGO_MANIFEST_DIR", Some("{hushrun:workspace}/a"));
@@ -2280,12 +2484,47 @@ mod tests {
             with(&[("IT", Some("1")), b, out, a, ("A_ONLY", None)])
         );
         assert!(built.units.values().all(|u| u.not_followed.is_empty()));
+        // \[ADR 0112\] C-75: with `--doc`, a library's doctests are the unit, known by the file
+        // rustdoc is handed: they read what its unit test binary reads, of the library's own
+        // compile, and what Cargo hands rustdoc its flags from.
+        let doc = read_build(
+            &metadata_with(graph.clone()),
+            compiled(artifacts()),
+            &root,
+            &keyed(Some(&roots)),
+            true,
+        );
+        assert_eq!(
+            doc.units.keys().collect::<Vec<_>>(),
+            ["a/src/lib.rs", "b/src/lib.rs"]
+        );
+        assert_eq!(
+            doc.units["b/src/lib.rs"].executable,
+            deps.join("libb-lib.rlib")
+        );
+        let flags: Vec<(String, Option<String>)> =
+            super::super::rustdoc::flags_env(&|name| super::super::command::variable(&[], name));
+        let with_flags = |entries: &[(&'static str, Option<&'static str>)]| {
+            let mut all: Vec<(&str, Option<&str>)> = entries.to_vec();
+            all.extend(outer);
+            all.extend(flags.iter().map(|(n, v)| (n.as_str(), v.as_deref())));
+            env(&all)
+        };
+        assert_eq!(
+            doc.units["b/src/lib.rs"].env,
+            with_flags(&[b, out, a, ("A_ONLY", None)])
+        );
+        assert_eq!(
+            doc.units["a/src/lib.rs"].env,
+            with_flags(&[a, ("A_ONLY", None)])
+        );
         // Without the graph, every crate outside the workspace counts for every binary.
         let built = read_build(
             &metadata_with(serde_json::Value::Null),
             compiled(artifacts()),
             &root,
             &keyed(Some(&roots)),
+            false,
         );
         let mut all = vec![a, ("A_ONLY", None), ("DEV", Some("1")), ("LONE", Some("1"))];
         all.extend(outer);
@@ -2300,6 +2539,7 @@ mod tests {
             compiled(broken),
             &root,
             &keyed(Some(&roots)),
+            false,
         );
         let whys = |unit: &str| -> BTreeSet<String> {
             built.units[unit]
@@ -2569,6 +2809,7 @@ mod tests {
             kind: vec![kind.to_string()],
             src_path: dir.path().join("build.rs"),
             test: false,
+            doctest: false,
         };
         let filenames = [build.join("build-script-build")];
         assert_eq!(depinfo_of(&filenames, None, &target("custom-build")), None);
@@ -2647,10 +2888,12 @@ mod tests {
                 kind: vec![kind.to_string()],
                 src_path: root.join(package).join(src),
                 test: true,
+                doctest: kind == "lib",
             },
             test,
             executable: test.then(|| deps.join(format!("{package}-test"))),
             depinfo: Some(d),
+            linkable: None,
         };
         let compiled = || Compiled {
             artifacts: vec![
@@ -2740,7 +2983,7 @@ mod tests {
             |_: &str| None,
         )
         .unwrap();
-        let built = read_build(&metadata, compiled(), &root, &keyed(Some(&roots)));
+        let built = read_build(&metadata, compiled(), &root, &keyed(Some(&roots)), false);
         let out =
             |package: &str| format!("output {{hushrun:target-dir}}/debug/build/{package}-1/out");
         let a_run = format!(
@@ -2792,7 +3035,7 @@ mod tests {
 
         // Another generated file moves the binaries that read it alone.
         std::fs::write(&made, "pub const G: &str = \"spicy\";\n").unwrap();
-        let again = read_build(&metadata, compiled(), &root, &keyed(Some(&roots)));
+        let again = read_build(&metadata, compiled(), &root, &keyed(Some(&roots)), false);
         assert_ne!(
             again.units["b/src/lib.rs"].scripts,
             built.units["b/src/lib.rs"].scripts
@@ -2806,7 +3049,7 @@ mod tests {
         let broken = compiled();
         std::fs::remove_file(root.join("target/debug/build/b-1/output")).unwrap();
         std::fs::remove_file(&made).unwrap();
-        let built = read_build(&metadata, broken, &root, &keyed(Some(&roots)));
+        let built = read_build(&metadata, broken, &root, &keyed(Some(&roots)), false);
         let whys: BTreeSet<String> = built.units["b/src/lib.rs"]
             .not_followed
             .iter()
