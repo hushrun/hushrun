@@ -1032,6 +1032,44 @@ hushrun: build: xcode: 412 compiles asked: 405 from this Mac's cache, 0 reused, 
 This is new and its rules are a draft ([ADR 0105](../adr/0105-xcode-compilation-cache.md)): the
 ADR lists what a first build on a real Mac should confirm.
 
+### TypeScript
+
+`tsc` reuses what it wrote and printed before, in another worktree, a new branch's clone or CI.
+Inside `hushrun run`, in a checkout with a `package.json`, hushrun adds a small hook to
+`NODE_OPTIONS`; in a Node process that runs TypeScript's `tsc`, the hook looks for a block before
+the compiler loads, and on a miss records what the compiler read, looked at, listed and wrote. A
+plain `tsc`, `tsc -p tsconfig.build.json`, `tsc --build` over project references and `tsc
+--noEmit` all work, through `npm run`, `npx` or a script:
+
+```text
+$ hushrun run build -- npm run build      # "build": "tsc -b", in a second worktree
+hushrun: build: typescript: 1 compile: 1 reused, 0 built, saving about 14s
+```
+
+- **Keyed by what it read.** The compiler's own file, its arguments and folder, and every file of
+  the program by its bytes: sources, declarations under `node_modules`, `lib.*.d.ts`, each
+  `tsconfig` of an `extends` chain, each `package.json` it looked at. A file appearing where the
+  compiler looked for one and found nothing (a `package.json` with `"type": "module"`, a
+  `paths` target) and a new file in a folder an `include` lists both make it compile again.
+- **Type checks too.** `tsc --noEmit` prints the same errors and ends with the same status
+  without starting, when nothing it read changed.
+- **Put in place as files dated now.** A plain `tsc --build` afterwards finds every project up to
+  date.
+- **`--build` stores only a build from scratch.** Over earlier `.tsbuildinfo` files the compiler
+  decides by file dates, which no key holds, so such a build runs as usual and isn't stored: the
+  first build of a fresh worktree or CI job is the one shared.
+- **Between machines and in CI,** an org that shares compiled code shares these blocks too, by
+  Node's platform. A compile whose output names your checkout's path (an absolute `sourceRoot`),
+  or that read a file outside the checkout (a `tsc` installed globally, a `node_modules` linked in
+  from elsewhere), stays on this machine.
+- **TypeScript 4 to 6.** TypeScript 7's `tsc` is native code whose reads hushrun can't see from
+  Node yet: it runs as usual. `--watch`, `--extendedDiagnostics`, `--generateTrace` and `tsc -b
+  --verbose` run as usual too, and the run's summary says why.
+- **A script that sets `NODE_OPTIONS` without what it had** (`NODE_OPTIONS=--max-old-space-size=8192
+  tsc`) drops the hook: keep it (`NODE_OPTIONS="$NODE_OPTIONS --max-old-space-size=8192"`).
+
+This is new and its rules are a draft ([ADR 0106](../adr/0106-typescript-build-blocks.md)).
+
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
 

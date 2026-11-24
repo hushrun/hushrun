@@ -163,6 +163,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       # Shell: bats-core 1.10 and 1.13 for the tests of the Bats adapter (ADR 0115), pinned.
       - name: Install Bats for the test-file tests
         run: |
@@ -309,6 +314,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       # Shell: bats-core 1.10 and 1.13 for the tests of the Bats adapter (ADR 0115), pinned.
       - name: Install Bats for the test-file tests
         run: |

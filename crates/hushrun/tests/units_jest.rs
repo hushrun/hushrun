@@ -1823,7 +1823,7 @@ fn what_every_test_file_reads_with_jest() {
     }
 }
 
-// covers: C-44
+// covers: C-44, C-50, C-51
 #[test]
 fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
     for jest in jests() {
@@ -1874,8 +1874,9 @@ fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
         assert_ne!(changed.code, 0);
         assert!(missed(&changed.stderr).is_empty(), "{}", changed.stderr);
         // With isolatedModules, ts-jest compiles each file alone: no type checker reads every
-        // file, and each test file reads what Jest compiled for it (and, for the first of each
-        // process, the directories ts-jest listed reading tsconfig.json).
+        // file, and each test file reads what Jest compiled for it. \[C-50\] The directories
+        // TypeScript lists for tsconfig.json's `include` while ts-jest resolves it are no test
+        // file's read.
         r.write("src/types.ts", "export interface P { x: number }\n");
         let every = listed(&r);
         let run = json!({"testFiles": every});
@@ -1894,6 +1895,17 @@ fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
             "Jest {}",
             jest.major
         );
+        for f in facts.iter().filter(|f| f["adapter"] == "jest") {
+            for unit in f["units"].as_array().into_iter().flatten() {
+                assert!(
+                    unit["dirs"].as_array().is_none_or(Vec::is_empty),
+                    "Jest {}: {} listed {}",
+                    jest.major,
+                    unit["unit"],
+                    unit["dirs"]
+                );
+            }
+        }
     }
 }
 
