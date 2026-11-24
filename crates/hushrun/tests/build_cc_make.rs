@@ -224,7 +224,7 @@ fn counts(out: &Output) -> (usize, usize) {
     let line = stderr
         .lines()
         .find(|l| l.contains("build: c/c++: ") && l.contains(" reused, "))
-        .unwrap_or_else(|| panic!("no C and C++ line in:\n{stderr}"));
+        .unwrap_or_else(|| panic!("no C and C++ line in:\n{}", text(out)));
     let number = |word: &str| -> usize {
         let before = line.split(word).next().unwrap();
         before

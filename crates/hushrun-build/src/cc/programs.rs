@@ -88,6 +88,13 @@ pub fn hook_text(dir: &Path) -> String {
          ifeq ($(filter {dir},$(subst :, ,$(PATH))),)\n\
          export PATH := {dir}:$(PATH)\n\
          endif\n\
+         # GNU Make 3 starts a command line with no shell metacharacters itself, finding the\n\
+         # program on its own PATH; it starts every line through the shell, which reads the PATH\n\
+         # above, when SHELL isn't the text /bin/sh. A Makefile's own SHELL replaces this one\n\
+         # (GNU Make 4 and later read the PATH above for every line).\n\
+         ifneq ($(filter 3.%,$(MAKE_VERSION)),)\n\
+         SHELL := /bin//sh\n\
+         endif\n\
          endif\n"
     )
 }

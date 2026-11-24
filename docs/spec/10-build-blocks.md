@@ -3186,7 +3186,12 @@ GNU Make builds aren't reused in this run: the run's folder, <folder>, has a spa
 path`. GNU Make reads it before any makefile, in every make COMMAND starts, a recursive one
 included; it puts the folder first on `PATH` for make's commands (`export PATH`), once however
 deep make starts make, and not where make runs in a folder holding a `CMakeCache.txt`, whose rules
-name their compilers by path. A Makefile that sets `CC` or `CXX` to a name reaches the programs as
+name their compilers by path. Under GNU Make 3 (macOS's 3.81), which starts a command line without a shell
+itself and finds its program on its own `PATH`, it also sets `SHELL` to `/bin//sh`, the same shell
+under another text, so that every line goes through a shell that reads the exported `PATH`. A
+Makefile's own `SHELL` replaces it: another shell does the same, and `SHELL = /bin/sh` again (as
+`configure` writes it) leaves the lines without metacharacters to make, whose compiles then pass by
+the programs under GNU Make 3. A Makefile that sets `CC` or `CXX` to a name reaches the programs as
 its default `cc` does; one that names a compiler by its path, or sets `PATH` itself, doesn't. Make
 compares times, not commands: a plain `make` after the run has nothing to do (`make -q`).
 
