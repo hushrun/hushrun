@@ -258,6 +258,13 @@ fn an_entry_that_holds_the_checkout_s_folder_stays_with_gradle() {
         "{:?}",
         summary.lines()
     );
+    // covers: B-210
+    // The line names the task, by Gradle's name, as kapt's stubs would be named.
+    assert!(
+        summary.lines()[1].ends_with("(1: its outputs hold the checkout's folder): :app:test"),
+        "{:?}",
+        summary.lines()
+    );
 }
 
 /// A tar with Gradle's METADATA for `key` and `files`.

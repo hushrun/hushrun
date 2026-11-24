@@ -353,7 +353,11 @@ fn outer_of(class: &str) -> &str {
 fn is_class_suite(name: &str, class: &str) -> bool {
     let simple = class.rsplit('.').next().unwrap_or(class);
     let inner = simple.rsplit('$').next().unwrap_or(simple);
-    name == class || name == simple || name == inner
+    // \[ADR 0117\] Kotlin/JS names a class's suite after its task too: `jsNodeTest.p.CalcTest`.
+    let after_task = name
+        .strip_suffix(class)
+        .is_some_and(|task| task.len() > 1 && task.ends_with('.'));
+    name == class || name == simple || name == inner || after_task
 }
 
 /// \[ADR 0087\] A test's id: `<its class as Gradle names it>.<its method>`, every invocation of a

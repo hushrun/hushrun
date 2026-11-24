@@ -29,12 +29,15 @@ pub mod cargo;
 pub mod command;
 pub mod ctest;
 pub mod db;
+pub mod exunit;
 pub mod facts;
 pub mod gotest;
 pub mod gradle;
 pub mod jest;
 pub mod jvm;
 pub mod maven;
+pub mod mocha;
+pub mod node_test;
 pub mod program;
 pub mod pytest;
 pub mod runner;
@@ -42,6 +45,7 @@ pub mod rustdoc;
 pub mod shared;
 pub mod store;
 pub mod swift;
+pub mod unittest;
 pub mod vitest;
 pub mod why;
 
@@ -3219,6 +3223,7 @@ fn describe(why: &str) -> String {
         "unreadable-build-output" => "a build script's output it couldn't read".into(),
         "unreadable-generated-file" => "a file a build script made that it couldn't read".into(),
         "python-files" => "pytest's python_files".into(),
+        "unittest-pattern" => "unittest's discovery pattern".into(),
         "adapter-error" => "an error of hushrun's adapter".into(),
         "outside-scope" => "a file outside the check's scope".into(),
         "test-main" => "a TestMain".into(),

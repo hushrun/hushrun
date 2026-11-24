@@ -27,6 +27,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as svelte from './hushrun-vitest-svelte.mjs';
 
+// [ADR 0108] Loaded beside this file; without it, a `vite:vue` is a plugin hushrun doesn't know.
+const vue = await import('./hushrun-vitest-vue.mjs').catch(() => ({
+  wrap: (plugins) => (plugins || []).filter((p) => p && p.name === 'vite:vue')
+    .map(() => 'vite:vue (a compiler hushrun could not wrap)'),
+  compiledFrom: () => [],
+}));
+
 const SCHEMA = 'hushrun.unit-facts/v0';
 const RUN_SCHEMA = 'hushrun.units/v0';
 const SETUP = path.join(path.dirname(fileURLToPath(import.meta.url)), 'hushrun-vitest-setup.mjs');
@@ -34,6 +41,8 @@ const STATE = Symbol.for('hushrun.vitest.main');
 
 // Plugins known to make each module from that module's own file: Vite's and Vitest's own, and
 // hushrun's. Any other may make a module from other files, which no test file's reads would hold.
+// [ADR 0108] `vite:vue` makes a component's modules from its file and its `src=` files, and reads
+// its imported types to compile it, which hushrun-vitest-vue.mjs follows.
 const KNOWN_PREFIXES = ['vite:', 'vitest', 'builtin:'];
 const KNOWN_NAMES = new Set(['alias', 'hushrun', 'vite-tsconfig-paths']);
 
@@ -221,6 +230,11 @@ export default function hushrun() {
         const allow = resolved.server && resolved.server.fs && resolved.server.fs.allow;
         if (Array.isArray(allow) && !allow.includes(path.dirname(SETUP))) allow.push(path.dirname(SETUP));
       });
+      // [ADR 0108] Vue's compiler, wrapped where @vitejs/plugin-vue holds it.
+      guard('vue', () => {
+        const unwrapped = vue.wrap(resolved.plugins, state);
+        if (unwrapped.length) state.projects.get(resolved.root)?.plugins.push(...unwrapped);
+      });
     },
     async transform(code, id) {
       if (id.includes('/node_modules/') || id.includes('\\node_modules\\')) return null;
@@ -243,9 +257,14 @@ export default function hushrun() {
         const seen = ids.length
           ? `;(globalThis.__hushrun_vitest_seen ||= []).push(${ids.map((i) => JSON.stringify(i)).join(', ')});`
           : '';
-        const told = reexports.length
+        let told = reexports.length
           ? `;(globalThis.__hushrun_vitest_reexports ||= {})[${JSON.stringify(id)}] = ${JSON.stringify(reexports)};`
           : '';
+        // [ADR 0108] The files a component's compile read besides itself (its imported types).
+        const compiled = vue.compiledFrom(state, id);
+        if (compiled.length) {
+          told += `;(globalThis.__hushrun_vitest_compiled ||= {})[${JSON.stringify(id)}] = ${JSON.stringify(compiled)};`;
+        }
         return {
           code: `${code}\n${seen}${told}`,
           map: null,
