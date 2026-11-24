@@ -104,6 +104,8 @@ function install(S) {
     typeAware: false,
     tsJest: false,
     tsCompilerSeen: false,
+    // Calls into ts-jest's ConfigSet resolving tsconfig, open now.
+    tsConfigParse: 0,
   });
 
   function note(what, err) {
@@ -243,6 +245,10 @@ function install(S) {
     if (to) to.open ? to.open(r) : to.opened.add(r);
   };
   const listed = (p) => {
+    // [ADR 0085] TypeScript listing tsconfig's `include` for ts-jest's ConfigSet: what it finds
+    // compiles nothing when ts-jest compiles each file alone, and a language service reads every
+    // file of code anyway (`typeAware`), so it is no test file's read.
+    if (S.tsConfigParse > 0) return;
     const r = rel(p);
     const to = r && sink();
     if (to) to.list ? to.list(r) : to.dirs.add(r);
@@ -1179,6 +1185,24 @@ function install(S) {
     proto._createLanguageService = typeof create === 'function' ? carry(wrapped, create) : wrapped;
   }
 
+  // [ADR 0085] ts-jest's ConfigSet: while it resolves tsconfig, TypeScript lists the directories
+  // of its `include` to find the project's files, which isn't a test file reading them.
+  const TS_CONFIG_DONE = Symbol.for('hushrun.jest.ts-config-set');
+  function patchTsConfigSet(C) {
+    const proto = C.prototype;
+    if (Object.prototype.hasOwnProperty.call(proto, TS_CONFIG_DONE)) return;
+    proto[TS_CONFIG_DONE] = true;
+    const resolve = proto._resolveTsConfig;
+    proto._resolveTsConfig = carry({ _resolveTsConfig(...args) {
+      S.tsConfigParse += 1;
+      try {
+        return resolve.apply(this, args);
+      } finally {
+        S.tsConfigParse -= 1;
+      }
+    } }._resolveTsConfig, resolve);
+  }
+
   // ---------------------------------------------------------------- the main process
   S.main = null;
   function claimMain() {
@@ -1494,7 +1518,7 @@ function install(S) {
     if (!exp || (typeof exp !== 'object' && typeof exp !== 'function') || seen.has(exp)) return;
     seen.add(exp);
     const candidates = [exp];
-    for (const k of ['default', 'TestEnvironment', 'TsCompiler']) {
+    for (const k of ['default', 'TestEnvironment', 'TsCompiler', 'ConfigSet']) {
       const d = Object.getOwnPropertyDescriptor(exp, k);
       if (d && 'value' in d && d.value) candidates.push(d.value);
     }
@@ -1509,6 +1533,8 @@ function install(S) {
         patchSequencer(c);
       } else if (typeof p._createLanguageService === 'function') {
         patchTsCompiler(c);
+      } else if (typeof p._resolveTsConfig === 'function') {
+        patchTsConfigSet(c);
       }
     }
     if (typeof exp === 'object') {

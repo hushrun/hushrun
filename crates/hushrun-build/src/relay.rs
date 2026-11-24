@@ -172,6 +172,38 @@ pub enum Request {
     GradleBuilt { key: Digest, cost_ms: u64 },
     /// Gradle's cache's [`Request::Report`].
     GradleReport { key: Digest, problem: Problem },
+    /// The TypeScript helper's [`Request::CcHints`] (B-108): the hints of first key `step`, a
+    /// compile for Node's platform `platform`, looked up only when the check's `tsc/1` manifest
+    /// for it names the first key.
+    TscHints {
+        step: Digest,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The helper's [`Request::CcFetch`]: one of `keys`, of a first key the check's `tsc/1`
+    /// manifest for `platform` names.
+    TscFetch {
+        step: Digest,
+        keys: Vec<Digest>,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The helper's [`Request::Vouch`].
+    TscVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// The helper's [`Request::Built`]: a compile this run stored under `key`, which may leave
+    /// the machine.
+    TscBuilt {
+        key: Digest,
+        step: Digest,
+        cost_ms: u64,
+    },
+    /// The helper's [`Request::Report`].
+    TscReport { key: Digest, problem: Problem },
 }
 
 impl Request {
@@ -187,6 +219,7 @@ impl Request {
                 | Request::CcBuilt { .. }
                 | Request::XcodeBuilt { .. }
                 | Request::GradleBuilt { .. }
+                | Request::TscBuilt { .. }
         )
     }
 }

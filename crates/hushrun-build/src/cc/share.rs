@@ -93,8 +93,13 @@ pub fn ask(
     }
     let answer = ask(&share.socket, request, wait);
     if answer.is_none() {
-        let slow = matches!(request, Request::CcHints { .. } | Request::CcFetch { .. })
-            && ask(&share.socket, &Request::Sharing, waits.quick).is_some();
+        let slow = matches!(
+            request,
+            Request::CcHints { .. }
+                | Request::CcFetch { .. }
+                | Request::TscHints { .. }
+                | Request::TscFetch { .. }
+        ) && ask(&share.socket, &Request::Sharing, waits.quick).is_some();
         if !slow {
             set_down(current);
         }
