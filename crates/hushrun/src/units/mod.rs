@@ -47,7 +47,7 @@ pub mod vitest;
 pub mod why;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -811,9 +811,7 @@ impl Session {
 
     /// Gives COMMAND the variables that load the adapter.
     pub fn apply(&self, command: &mut Command) {
-        for (name, value) in &self.variables {
-            command.env(name, value);
-        }
+        apply_variables(&self.variables, command);
     }
 
     /// \[C-46\] Before COMMAND, in every mode: tells the adapter, in `hushrun.json`, the test files
@@ -1758,6 +1756,46 @@ fn write_run_file(dir: &Path, root: &Path, listed: &Listed) -> std::io::Result<(
     facts::write_whole(&dir.join(facts::RUN_FILE), &bytes)
 }
 
+/// Sets `variables` on `command`. \[C-50\] `NODE_OPTIONS` keeps what the command was given
+/// already (the build's TypeScript hook, B-100): the adapter's addition goes after it, not over
+/// it.
+fn apply_variables(variables: &[(String, OsString)], command: &mut Command) {
+    for (name, value) in variables {
+        let value = if name == "NODE_OPTIONS" {
+            let given = command
+                .get_envs()
+                .find(|(n, _)| *n == "NODE_OPTIONS")
+                .and_then(|(_, v)| v.map(OsStr::to_os_string));
+            beside(given, std::env::var_os("NODE_OPTIONS"), value)
+        } else {
+            value.clone()
+        };
+        command.env(name, value);
+    }
+}
+
+/// \[C-50\] `ours`, the environment's `had` with an addition, given after `given`, which holds
+/// `had` with another addition: `given` then ours. Without `given`, ours.
+fn beside(given: Option<OsString>, had: Option<OsString>, ours: &OsString) -> OsString {
+    let Some(given) = given.filter(|g| !g.is_empty() && g != ours) else {
+        return ours.clone();
+    };
+    let had = had.unwrap_or_default();
+    let (Some(ours_text), Some(had_text)) = (ours.to_str(), had.to_str()) else {
+        return ours.clone();
+    };
+    let Some(added) = ours_text.strip_prefix(had_text) else {
+        return ours.clone();
+    };
+    let mut out = given;
+    let added = added.trim_start();
+    if !added.is_empty() {
+        out.push(" ");
+        out.push(added);
+    }
+    out
+}
+
 /// \[C-34\] The second run of an audit: its directory, the variables that point COMMAND at it,
 /// and the test files it runs.
 pub struct Again {
@@ -1769,9 +1807,7 @@ pub struct Again {
 impl Again {
     /// Gives COMMAND the variables of the second run.
     pub fn apply(&self, command: &mut Command) {
-        for (name, value) in &self.variables {
-            command.env(name, value);
-        }
+        apply_variables(&self.variables, command);
     }
 }
 
