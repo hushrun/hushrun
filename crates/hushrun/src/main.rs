@@ -90,6 +90,10 @@ fn main() -> ExitCode {
     if let Some(code) = units::program::from_args(&args) {
         return code;
     }
+    // \[ADR 0115\] As Bats' bash hook starts it, likewise: it writes the hook's files and exits.
+    if let Some(code) = units::bats::from_args(&args) {
+        return code;
+    }
     // \[ADR 0118\] As a step of the VSTest target hushrun gave `dotnet test`, likewise.
     if let Some(code) = units::dotnet::from_args(&args) {
         return code;
