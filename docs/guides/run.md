@@ -1219,6 +1219,34 @@ that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A proje
 Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
 when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
 
+### Ruby's tests
+
+With `tests: reuse` on a check that runs RSpec or Minitest, a spec or test file that already passed
+on the files it read doesn't run again:
+
+```yaml
+checks:
+  test:
+    tests: reuse
+```
+
+```text
+$ hushrun run test -- bundle exec rspec
+hushrun: test: 2 of 40 test files run; 38 already passed on the files they read
+Run options: exclude {:hushrun_reused=>"already passed on the files it read"}
+```
+
+`rspec`, `bin/rails test`, `rake test`, `rake spec` and `ruby -Itest …`, alone or after
+`bundle exec`, load hushrun's adapter through `RUBYLIB` and `RUBYOPT`; no file of the repository
+changes, and a script that sets `RUBYOPT` should add to what it had (`RUBYOPT="$RUBYOPT -W0"`).
+A test file read the repository's code that ran for it, what that code requires, `require_relative`s
+and opens, and what spec_helper or test_helper loaded. In a Rails app, what Zeitwerk, an
+initializer or a fixture loaded while one test file ran is read by every later one, since the app
+keeps it; with `config.eager_load` on in the test environment (Rails' default when `CI` is set)
+every file of `app/` is, and only changes to test files skip anything. `tests: {mode: reuse, unit:
+test}` reuses each RSpec example and Minitest test on its own. Ruby 3.1 or later; Spring and
+`rspec --only-failures` aren't observed, and say so.
+
 ## When hushrun runs anyway
 
 Whenever hushrun can't tell whether this code passed, it runs the command and says why:

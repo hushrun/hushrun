@@ -34,7 +34,7 @@ use super::shared::{Asker, List, Shared};
 use super::store::Map;
 use super::{
     Seen, cargo, ctest, dotnet, exunit, gotest, gradle, jest, maven, mesontest, mocha, node_test,
-    pytest, swift, testprogram, unittest, vitest,
+    pytest, ruby, swift, testprogram, unittest, vitest,
 };
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
@@ -61,6 +61,8 @@ pub const RECOGNIZED: &[Recognize] = &[
     gradle::recognized,
     dotnet::recognized,
     exunit::recognized,
+    // \[ADR 0114\] RSpec and Minitest, by `rspec`, `rails test`, `rake` or `ruby`.
+    ruby::recognized,
     testprogram::recognized,
     unittest::recognized,
     ctest::recognized,
