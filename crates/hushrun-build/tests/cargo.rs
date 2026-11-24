@@ -2206,3 +2206,145 @@ mod two_machines {
         assert_eq!(library_outputs(&ws_c), out_a);
     }
 }
+
+/// The outcomes of a run's lines for `name`, as the log wrote them.
+fn outcomes(entries: &[Entry], name: &str) -> Vec<Outcome> {
+    entries
+        .iter()
+        .filter(|e| e.crate_name == name)
+        .map(|e| e.outcome)
+        .collect()
+}
+
+// covers: B-160
+#[test]
+fn a_check_of_every_target_is_reused_at_a_second_checkout() {
+    use hushrun_build::model::NotStored;
+    let w = World::new();
+    let one = w.checkout("one");
+    let two = w.checkout("a-second-checkout");
+    let session = w.begin(Mode::On).unwrap();
+    let env = session.env();
+    let checked = cargo(&one, &["check", "--all-targets"], &env);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let first = entries(&session).len();
+    let checked = cargo(&two, &["check", "--all-targets"], &env);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let second = entries(&session)[first..].to_vec();
+    // `a`'s library and its unit tests, `--test`, are both metadata-only: both reused.
+    let a = outcomes(&second, "a");
+    assert_eq!(a.len(), 2, "{second:#?}");
+    assert!(
+        second
+            .iter()
+            .filter(|e| e.crate_name == "a")
+            .all(|e| e.class == Some(Class::Library) && reused(e)),
+        "{second:#?}"
+    );
+    // The program's check and the proc macro's own (its `--test`) link nothing: none of them is
+    // a linked output whose link inputs can't be read.
+    assert!(
+        !second
+            .iter()
+            .any(|e| e.outcome == Outcome::BuiltNotStored(NotStored::LinkInputs)),
+        "{second:#?}"
+    );
+    assert!(
+        second
+            .iter()
+            .filter(|e| e.crate_name == "m")
+            .any(|e| e.class == Some(Class::Library) && reused(e)),
+        "{second:#?}"
+    );
+}
+
+/// Whether this toolchain has clippy: CI's has it (`rust-toolchain.toml`), and then a missing one
+/// fails the test.
+fn has_clippy(ws: &Path) -> bool {
+    let found = cargo(ws, &["clippy", "--version"], &[]).status.success();
+    if !found {
+        assert!(
+            std::env::var("HUSHRUN_TEST_TOOLS").as_deref() != Ok("required"),
+            "cargo clippy is required"
+        );
+        eprintln!("skipped: no cargo clippy");
+    }
+    found
+}
+
+// covers: B-161
+#[test]
+fn clippys_checks_are_reused_with_their_lints_and_keyed_by_its_configuration() {
+    let w = World::new();
+    let one = w.checkout("one");
+    if !has_clippy(&one) {
+        return;
+    }
+    let two = w.checkout("a-second-checkout");
+    let three = w.checkout("third");
+    // `a` has an unused variable, which rustc warns of, and clippy's configuration lowers the
+    // limit of a lint, which a function of `x` then breaks.
+    for ws in [&one, &two, &three] {
+        fs::write(ws.join("clippy.toml"), "too-many-arguments-threshold = 2\n").unwrap();
+        fs::write(
+            ws.join("a/src/x.rs"),
+            "pub fn two() -> u32 {\n    2\n}\n\npub fn sum(a: u32, b: u32, c: u32) -> u32 {\n    a + b + c\n}\n",
+        )
+        .unwrap();
+    }
+    let session = w.begin(Mode::On).unwrap();
+    let env = session.env();
+    let clippy = |ws: &Path| {
+        let out = cargo(ws, &["clippy", "-p", "a"], &env);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let said = clippy(&one);
+    assert!(said.contains("too many arguments"), "{said}");
+    let first = entries(&session).len();
+    // The second checkout reuses `a`'s check through clippy's driver, and says its lints again.
+    let said = clippy(&two);
+    assert!(said.contains("too many arguments"), "{said}");
+    assert!(said.contains("unused variable"), "{said}");
+    let second = entries(&session)[first..].to_vec();
+    let a: Vec<&Entry> = second.iter().filter(|e| e.crate_name == "a").collect();
+    assert_eq!(a.len(), 1, "{second:#?}");
+    assert!(reused(a[0]), "{second:#?}");
+    // A configuration clippy would find first, in the package's folder, is another input.
+    fs::write(
+        three.join("a/clippy.toml"),
+        "too-many-arguments-threshold = 7\n",
+    )
+    .unwrap();
+    let before = entries(&session).len();
+    let said = clippy(&three);
+    assert!(!said.contains("too many arguments"), "{said}");
+    let third = entries(&session)[before..].to_vec();
+    assert_eq!(
+        outcomes(&third, "a"),
+        [Outcome::BuiltAndStored],
+        "{third:#?}"
+    );
+    // rustc's own check of the same crate is another block: the driver is in the key.
+    let before = entries(&session).len();
+    let checked = cargo(&two, &["check", "-p", "a"], &env);
+    assert!(checked.status.success());
+    let plain = entries(&session)[before..].to_vec();
+    assert_eq!(
+        outcomes(&plain, "a"),
+        [Outcome::BuiltAndStored],
+        "{plain:#?}"
+    );
+}
