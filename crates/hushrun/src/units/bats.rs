@@ -16,7 +16,7 @@
 //! hushrun` in bats' output, so the count bats checks stays whole.
 //!
 //! When bats' main process ends, hushrun again ([`SUBCOMMAND`]) turns the hook's notes into one
-//! facts file ([`facts`]); until then a `.started` file says the start didn't say what it ran.
+//! facts file ([`facts()`]); until then a `.started` file says the start didn't say what it ran.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
