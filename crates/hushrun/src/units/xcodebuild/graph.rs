@@ -189,8 +189,9 @@ pub fn graph_of(xcodeproj: &str, text: &str, tree: &Tree, root: &Path) -> Result
     graph_of_with(xcodeproj, text, tree, root, &[])
 }
 
-/// [`graph_of`] for a project of a workspace that holds the Swift packages at `local` (their
-/// folders, from the root): a package product the project names no package for is one of them.
+/// The graph of the project at `xcodeproj`, of a workspace that holds the Swift packages at
+/// `local` (their folders, from the root): a package product the project names no package for is
+/// one of them.
 pub fn graph_of_with(
     xcodeproj: &str,
     text: &str,
