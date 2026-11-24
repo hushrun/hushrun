@@ -903,6 +903,10 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
+    // A process group of its own: a hangup the system sends to a group holding a stopped process
+    // (one that becomes orphaned while hushrun is stopped) reaches hushrun and what it started,
+    // never this test (a macOS runner once killed it so, at 51 s).
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let child = cmd.spawn().unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     // Frozen, not gone: the relay is a thread of hushrun's own process.
