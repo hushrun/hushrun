@@ -287,6 +287,23 @@ impl<'a> Walker<'a> {
 
     /// The programs and modules the build in `build` makes in `dir` or under it, from the top of
     /// the build directory; `None` when the build can't be read.
+    /// \[ADR 0120\] Every C and C++ file of the repository the build directory `build` compiles
+    /// into any of its programs, as each program's walk says: the sources a test program run on
+    /// its own is told apart from. Empty where the build can't be read.
+    pub fn sources(&mut self, build: &Path) -> BTreeSet<String> {
+        let Some(programs) = self.programs_in(build, build) else {
+            return BTreeSet::new();
+        };
+        let mut out = BTreeSet::new();
+        for program in programs {
+            let built = self.program(&build.join(&program), build);
+            if !built.every_source && built.refused.is_none() {
+                out.extend(built.reads.into_iter().filter(|f| is_source(f)));
+            }
+        }
+        out
+    }
+
     fn programs_in(&mut self, dir: &Path, build: &Path) -> Option<Vec<String>> {
         if !self.dirs.contains_key(build) {
             let opened = self.open(build);

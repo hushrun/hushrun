@@ -294,6 +294,7 @@ fn a_downloaded_hint_naming_a_folder_outside_the_roots_and_bases_is_passed_over(
     let identity = Identity {
         digest: Digest::of(b"x"),
         clang: true,
+        graph: true,
         target: String::new(),
         sdk: Some("/sdk".into()),
         sdk_resolved: None,

@@ -61,7 +61,7 @@ const BY_NAME: &[(&str, &str)] = &[
 
 #[test]
 fn each_adapter_gets_the_command_that_names_its_program() {
-    assert_eq!(RECOGNIZED.len(), 14);
+    assert_eq!(RECOGNIZED.len(), 15);
     let dir = loads_all();
     for (command, adapter) in BY_NAME {
         assert_eq!(

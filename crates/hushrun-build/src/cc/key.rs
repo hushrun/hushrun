@@ -862,6 +862,7 @@ mod tests {
         let identity = Identity {
             digest: Digest::of(b"x"),
             clang: true,
+            graph: true,
             target: String::new(),
             sdk: None,
             sdk_resolved: None,

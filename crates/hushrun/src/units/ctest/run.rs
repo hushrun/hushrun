@@ -646,7 +646,7 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
 }
 
 /// The plan's file, in the run's directory, or for an audit's second run in the first run's.
-fn plan_file(units: &Path) -> Option<(PlanFile, SystemTime)> {
+pub(crate) fn plan_file(units: &Path) -> Option<(PlanFile, SystemTime)> {
     let mut places = vec![units.join(PLAN_FILE)];
     if units.file_name().is_some_and(|n| n == "again")
         && let Some(parent) = units.parent()
@@ -666,7 +666,7 @@ fn plan_file(units: &Path) -> Option<(PlanFile, SystemTime)> {
 /// was built again after the plan, and the C and C++ files of the scope it is built from now are
 /// exactly those of every list its key was made from: so the key held every file its code came
 /// from, and the build that passed made it from the same ones.
-fn verify(
+pub(crate) fn verify(
     unit: &str,
     tests: &[Test],
     built: &BTreeMap<String, Built>,
