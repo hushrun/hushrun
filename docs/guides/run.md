@@ -349,6 +349,34 @@ command's exit code, or 0 when it skips.
   same check in CI, and the other way round. Environment variables and the OS aren't part of it
   either: when a check depends on them, give each variant its own name, such as `unit-node22`.
 
+### Shell tests with Bats
+
+With `tests: reuse` (or `{mode: reuse, unit: test, reads: test}` for one test at a time), a Bats
+check skips the `.bats` files, or the tests, that already passed on the files they read. hushrun
+sees what each test read through bash itself: the helpers it `load`ed, the libraries it
+`source`d, the scripts it ran and what those sourced. A test it reuses shows in bats' own output
+as a skip, so the count and the exit code stay bats':
+
+```text
+$ hushrun run unit -- bats test
+hushrun: unit: 3 of 4 tests run, in 2 of 2 test files; 1 already passed on the files it read
+1..4
+ok 1 says hello
+ok 2 plain
+ok 3 adds # skip reused by hushrun
+ok 4 adds zero
+```
+
+- **bats-core 1.10 or later**, started as `bats`, by a path (`./test/bats/bin/bats`), or through
+  `npx`, `pnpm`, `yarn` or `bun`. A shell script or Makefile that runs bats isn't observed: run
+  bats itself after `--`.
+- **A file bash doesn't run runs every test when it changes**: a `#!/bin/sh` script, a Python
+  helper, a fixture. bash-run files are `.bash` and `.sh` files whose `#!` line names bash (or
+  that have none and aren't executable) and scripts like `bin/tool` with a bash `#!` line.
+- **What hushrun can't see**: a file read as data (`cat`, `grep`, `shellcheck`), a program that
+  isn't bash, and a process started without the environment (`env -i`, `sudo`). Put a test file
+  that depends on those in `tests.always`, so it always runs.
+
 ## Where results go
 
 hushrun takes the first of these:

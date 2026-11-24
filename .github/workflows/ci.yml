@@ -247,6 +247,12 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
           echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
+      # Shell: bats-core 1.10 and 1.13 for the tests of the Bats adapter (ADR 0115), pinned.
+      - name: Install Bats for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/bats110" --no-audit --no-fund --ignore-scripts bats@1.10.0
+          npm install --prefix "$RUNNER_TEMP/bats113" --no-audit --no-fund --ignore-scripts bats@1.13.0
+          echo "HUSHRUN_TEST_BATS=$RUNNER_TEMP/bats110/node_modules/.bin:$RUNNER_TEMP/bats113/node_modules/.bin" >> "$GITHUB_ENV"
       # C# (.NET): the runner's own .NET SDK for the tests of the dotnet test adapter (ADR 0118),
       # whose fixtures target its major version and restore their pinned NuGet packages from
       # nuget.org into a folder of their own.
@@ -458,6 +464,12 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
           echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
+      # Shell: bats-core 1.10 and 1.13 for the tests of the Bats adapter (ADR 0115), pinned.
+      - name: Install Bats for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/bats110" --no-audit --no-fund --ignore-scripts bats@1.10.0
+          npm install --prefix "$RUNNER_TEMP/bats113" --no-audit --no-fund --ignore-scripts bats@1.13.0
+          echo "HUSHRUN_TEST_BATS=$RUNNER_TEMP/bats110/node_modules/.bin:$RUNNER_TEMP/bats113/node_modules/.bin" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass

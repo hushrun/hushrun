@@ -170,6 +170,14 @@ project's new branch starts from what main's CI already ran.
   build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
   LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
   the ADR lists what the first build on a Mac checks.
+- **Bats test files and tests reused** (C-86 to C-89, [ADR 0115](docs/adr/0115-bats.md)): with
+  `tests: reuse`, `hushrun run NAME -- bats …` (by name, a path or `npx`) leaves out the `.bats`
+  files, or with `unit: test` the tests, that already passed on the files they read. A hook that
+  `BASH_ENV` loads into every bash process notes the files each test's commands ran from: helpers
+  it loaded, libraries it sourced, scripts it ran and what they sourced, so `reads: test` works. A
+  reused test shows as `# skip reused by hushrun`, and bats' output is otherwise unchanged. bats-core
+  1.10 or later, on Linux and macOS. `hushrun init` knows `bats` and `shellcheck`. Shell has no
+  compile step, so there are no build blocks for it.
 - **RSpec's and Minitest's test files and tests reused** (C-82 to C-85, [ADR 0114](docs/adr/0114-ruby.md)):
   with `tests: reuse`, `rspec`, `bin/rails test`, `rake test` and `ruby` (alone or after
   `bundle exec`) load hushrun's Ruby adapter through `RUBYLIB` and `RUBYOPT`, and a spec or test
