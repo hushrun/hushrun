@@ -63,6 +63,8 @@ pub const PROGRAMS: &[&dyn Program] = &[
     &super::mesontest::Meson,
     &super::swift::SWIFT,
     &super::swift::SWIFT_TEST,
+    // \[ADR 0112\] Not on `PATH`: Cargo starts it as `RUSTDOC`.
+    &super::rustdoc::RUSTDOC,
 ];
 
 /// \[ADR 0089\] A command that starts the real program `real` as a program on `PATH` starts it:

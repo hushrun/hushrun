@@ -3468,3 +3468,45 @@ with no session: it asks no backend and keeps no block. `off` unloads and remove
 unsets the variable only when it names hushrun's file, and removes the file. `status` says which
 of these hold. *Rests on:* apps opened after `launchctl setenv` getting the variable, and Xcode
 reading it for the app's builds. *Breaks if:* it doesn't: the spike says.
+
+## Rust's checks and clippy
+
+[ADR 0112] `cargo check` and `cargo clippy` ask rustc for metadata only, for every target, and
+`cargo clippy` runs each workspace member's compile through clippy's driver. These rules extend
+B-4 to B-6 for them; every other rule reads as it does for a library.
+
+**B-160 A compile that links nothing.** A compile whose `--emit` has no `link` (with `--emit`
+absent, rustc's default is `link`) writes what a library's check writes, `lib<crate name><extra
+filename>.rmeta` and the dep-info, whatever its crate type (`lib`, `rlib`, `proc-macro` or
+`bin`) and with `--test` too: it is class `library` (B-3's log, B-5's variables, B-6's native
+folders, B-24), never a linked output, and gets no `--print=link-args` (B-9). `cargo check
+--all-targets` and `cargo clippy --all-targets` ask this of every program, example, test, bench
+and proc macro's own crate, which were each `built, not stored` (`link-inputs`) before. A crate
+type B-4 passes through (`cdylib`, `dylib`, `staticlib`, or more than one) still does. *Rests on:*
+rustc writing no object and running no linker for `--emit=dep-info,metadata` (1.94.0: a program's
+and a test's check write the `.rmeta` and the `.d` alone). *Breaks if:* a rustc ran the linker for
+a metadata-only compile.
+
+**B-161 Clippy's driver.** A call whose first argument's file name is `clippy-driver` (or
+`clippy-driver.exe`) and whose second is rustc (B-4) is read as the rustc call after the driver
+when B-160 makes it a library; it passes through as `not-rustc` otherwise, as every call through a
+driver did before: a workspace member's build script and proc macro under `cargo clippy`. The
+wrapper starts the compile, and each audit, place check and comparison of it, as cargo did:
+the driver, then rustc's path, then the arguments. The compiler's identity in the first key is
+the SHA-256 of the JCS form of `{"schema": "hushrun.build.driver/1", "compiler": <B-17's
+identity>, "driver": {"name": <its file name>, "sha256": <its bytes'>}}`, the driver's bytes read
+once per install (a memo in the compiler memos, `driver-<digest>.json`, named by its path, size
+and dates); a driver that can't be read passes the call through (`compiler`). The first key's
+variables add every variable whose name starts with `CLIPPY_` or `__CLIPPY_` (`CLIPPY_ARGS`, the
+lints `cargo clippy -- …` gives; `CLIPPY_CONF_DIR`; `CLIPPY_DISABLE_DOCS_LINKS`), with roots
+replaced. The driver lists in the dep-info the configuration it read (`clippy.toml` or
+`.clippy.toml`), the package's `Cargo.toml`, and `CLIPPY_ARGS` and `CLIPPY_CONF_DIR` as
+`env-dep` lines, but not the places it looked for a configuration and found none: B-6's
+`declared` holds each of `.clippy.toml` and `clippy.toml` as an upward search, as a macro's
+`.env` is held, from `CLIPPY_CONF_DIR` when it is set and not empty, else from the package
+folder; so a configuration that appears where the driver would find it first changes the key.
+The diagnostics, clippy's lints among them, are stored and replayed as rustc's are (B-12).
+*Rests on:* the driver linking the toolchain's `rustc_driver` (in B-17's identity) and reading
+nothing else that changes its output than its arguments, those variables and the files above
+(clippy 0.1.94: `clippy_config::lookup_conf_file`, `clippy_driver::track_files`). *Breaks if:* a
+clippy read another file or variable without listing it.
