@@ -380,9 +380,12 @@ fn rspec_leaves_out_test_files_that_already_passed_and_never_a_failure() {
             "{}",
             second.out()
         );
-        // RSpec left them out before their hooks: 2 examples of the 8 ran.
+        // RSpec left them out before their hooks: the changed file's example and the audited
+        // file's (one or two, as the audit chooses by key and start) of the 8 ran.
         assert!(
-            second.stdout.contains("2 examples, 0 failures"),
+            ["2 examples, 0 failures", "3 examples, 0 failures"]
+                .iter()
+                .any(|line| second.stdout.contains(line)),
             "{}",
             second.out()
         );
@@ -516,8 +519,11 @@ fn minitest_test_files_are_observed_and_reused_under_rake() {
             ruby.name,
             second.out()
         );
+        // The changed file's test and the audited file's (one or two) of the 8 ran.
         assert!(
-            second.stdout.contains("2 runs,"),
+            ["2 runs,", "3 runs,"]
+                .iter()
+                .any(|line| second.stdout.contains(line)),
             "{}: {}",
             ruby.name,
             second.out()
