@@ -12,6 +12,20 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **TypeScript compiles reused and shared, kind `tsc/1`** (B-100 to B-109, ADR 0106, a draft):
+  inside `hushrun run`, in a checkout with a `package.json`, `NODE_OPTIONS` gets a hook
+  (`--require`, added to what it had) and `HUSHRUN_TSC` the helper `hushrun-tsc`. A `tsc`,
+  `tsc -p`, `tsc --build` or `tsc --noEmit` of TypeScript 4 to 6 is keyed by what it read through
+  Node's `fs` (every file by its bytes, every path it looked at, folder it listed and link it
+  resolved, the names it looked for above the checkout), and what it wrote, printed and exited
+  with is put in place in another worktree, or downloaded where the org shares, without the
+  compiler starting. `--watch`, `--extendedDiagnostics`, traces and `tsc -b --verbose` run as
+  usual; `--build` over earlier `.tsbuildinfo` files isn't stored; TypeScript 7's native `tsc`
+  gets nothing yet. The summary says `build: typescript: N compiles: …`.
+- **Test reuse with TypeScript** (C-50, C-51): a Jest or Vitest adapter's `NODE_OPTIONS` goes
+  after the build's hook instead of over it; the folders TypeScript lists for tsconfig's
+  `include` while ts-jest resolves it are no longer read by the first test file of each Jest
+  process, which ran every test file again with `isolatedModules`.
 - **PHPUnit and Pest test files and tests reused** (C-90 to C-93, ADR 0116). With `tests:
   reuse`, a check that runs PHPUnit 10, 11 or 12 or Pest 3 or 4 (by name or path, through `php`,
   or as a `composer` script that runs one of them) is observed with no file of the repository

@@ -163,6 +163,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       # PHP: PHPUnit 10, 11 and 12 and Pest 3 and 4 for the tests of the PHPUnit adapter (ADR
       # 0116), pinned, each in a Composer project of its own outside the repository, run by the
       # runner's own PHP 8.3 and Composer.
@@ -322,6 +327,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       # PHP: the PHPUnit adapter's tests (ADR 0116) run on Linux, whose runner has PHP and
       # Composer; this job opts out of them by name, since under `required` they fail without PHP.
       - name: Skip the PHPUnit and Pest tests here
