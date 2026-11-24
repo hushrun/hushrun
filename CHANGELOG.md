@@ -192,6 +192,9 @@ project's new branch starts from what main's CI already ran.
 
 ### Fixed
 
+- **A Go or Gradle fetch beside the one that starts the prefetch** (B-45, B-80): one that came
+  just as the first took the check's manifest found neither the manifest nor a prefetch to wait
+  for, and was a miss; taking the manifest and starting its prefetch are now one step.
 - **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
   find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
   holds; the plugin now adds its own directory there.

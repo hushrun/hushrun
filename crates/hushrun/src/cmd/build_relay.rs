@@ -1238,16 +1238,19 @@ impl Relay {
             }
             let got = matches!(state.named_manifest(kind), GoManifest::Got(_));
             if got && state.answering(now) {
-                match std::mem::replace(state.named_manifest(kind), GoManifest::Taken) {
+                // Taken and prefetching under one lock: a fetch that comes between them would
+                // find no manifest and no prefetch to wait for, and miss.
+                let taken = match std::mem::replace(state.named_manifest(kind), GoManifest::Taken) {
                     GoManifest::Got(manifest) => Some(manifest),
                     _ => None,
-                }
+                };
+                *state.named_prefetching(kind) = true;
+                taken
             } else {
                 None
             }
         };
         if let Some(manifest) = manifest {
-            *self.state().named_prefetching(kind) = true;
             self.clone().prefetch_in(kind, manifest).await;
             *self.state().named_prefetching(kind) = false;
         }
