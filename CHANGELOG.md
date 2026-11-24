@@ -12,6 +12,14 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **C++ test programs started directly, test by test** (C-106 to C-108, ADR 0120). `hushrun run
+  NAME -- build/tests/t_calc` with a GoogleTest or Catch2 3 program of a CMake build directory
+  reuses each test that passed on the files the program is built from, leaving tests out through
+  `GTEST_FILTER` or Catch2's `TESTBRIDGE_TEST_ONLY` and reading GoogleTest's XML or Catch2's
+  JUnit file, with COMMAND as written. doctest and Catch2 2 programs are said not to be observed.
+  C++20 sources that import no module are now stored and reused with clang (an empty CMake module
+  map adds nothing, B-240), clang's precompiled header is counted as `pch` (B-241), and clang 15
+  to 18, whose compiles all failed through the launcher, get no include-graph variables (B-242).
 - **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
   in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
   `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to

@@ -943,6 +943,34 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### C and C++
+
+The objects of a CMake build come from the store when their inputs match (ADR 0097). Some
+compiles always run as asked, and the summary's `compiled as asked` line counts each by its reason:
+
+- **C++20 modules.** CMake 3.28 and later scan every C++20 source. With clang, a source that
+  imports no module is stored and reused as any other; a module and the sources that import one
+  compile every time (`modules`). With GCC every scanned compile does, since GCC writes a second
+  file beside each object.
+- **Precompiled headers** (`target_precompile_headers`): the header and the sources that use it
+  compile every time (`pch`).
+- **clang 15 to 18** compile through the launcher as GCC does: without the include graph newer
+  clangs write, so a quoted include from another folder is keyed by the source's folder.
+
+Tests a CTest run starts are reused one by one (ADR 0090). So are the tests of a GoogleTest or
+Catch2 3 program you start yourself, by its path, with `tests: {mode: reuse, unit: test}`:
+
+```text
+$ hushrun run unit -- build/tests/t_calc
+hushrun: unit: 1 of 40 tests run, in 1 of 1 test program; 39 already passed on the files they read, and 1 more that already passed runs anyway, as a check
+```
+
+hushrun leaves tests out through the framework's own variables (`GTEST_FILTER`, Catch2's
+`TESTBRIDGE_TEST_ONLY`) and reads what each test came to from its XML, so the command stays as you
+wrote it; GoogleTest or Catch2 says it is filtering. A `--gtest_filter` of your own, or sharding,
+keeps every test running and records each. doctest and Catch2 2 read nothing from the
+environment: run them through `ctest` with `doctest_discover_tests` or `catch_discover_tests`.
+
 ### Xcode
 
 Xcode apps (iOS, iPadOS, macOS) reuse compiles through Xcode's own compilation cache, which hushrun

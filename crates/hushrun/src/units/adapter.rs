@@ -32,7 +32,7 @@ use super::db::{Edge, HintKnown};
 use super::facts::FactsFile;
 use super::shared::{Asker, List, Shared};
 use super::store::Map;
-use super::{Seen, cargo, ctest, gotest, gradle, jest, maven, pytest, swift, vitest};
+use super::{Seen, cargo, ctest, gotest, gradle, jest, maven, pytest, swift, testprogram, vitest};
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
 /// the adapter can't load safely, which the run says once.
@@ -52,6 +52,7 @@ pub const RECOGNIZED: &[Recognize] = &[
     jest::recognized,
     maven::recognized,
     gradle::recognized,
+    testprogram::recognized,
     ctest::recognized,
     swift::recognized,
 ];
@@ -338,6 +339,15 @@ pub trait Adapter: std::fmt::Debug {
     /// store an older hushrun wrote or a hint, keys nothing, and the unit runs.
     fn keys(&self) -> KeysOutside {
         KeysOutside::None
+    }
+
+    /// \[ADR 0120\] What one start of COMMAND gets besides [`Adapter::variables`], from what
+    /// `hushrun.json` in `run_dir` lists, made just before it starts: a variable to set, or with
+    /// `None` to remove. For a runner whose COMMAND is the test program itself, which takes what
+    /// to leave out only from its environment.
+    fn start_variables(&self, run_dir: &Path) -> Vec<(String, Option<OsString>)> {
+        let _ = run_dir;
+        Vec::new()
     }
 
     /// \[C-22\] The plan from the scope's files, the map and hints alone, starting no tool, which

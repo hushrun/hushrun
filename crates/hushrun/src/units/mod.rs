@@ -41,6 +41,7 @@ pub mod runner;
 pub mod shared;
 pub mod store;
 pub mod swift;
+pub mod testprogram;
 pub mod vitest;
 pub mod why;
 
@@ -812,6 +813,7 @@ impl Session {
         for (name, value) in &self.variables {
             command.env(name, value);
         }
+        apply_start(command, &self.adapter.start_variables(&self.run_dir));
     }
 
     /// \[C-46\] Before COMMAND, in every mode: tells the adapter, in `hushrun.json`, the test files
@@ -1384,9 +1386,11 @@ impl Session {
                 *value = dir.clone().into_os_string();
             }
         }
+        let start = self.adapter.start_variables(&dir);
         Some(Again {
             dir,
             variables,
+            start,
             units: again.clone(),
         })
     }
@@ -1761,6 +1765,8 @@ fn write_run_file(dir: &Path, root: &Path, listed: &Listed) -> std::io::Result<(
 pub struct Again {
     dir: PathBuf,
     variables: Vec<(String, OsString)>,
+    /// \[ADR 0120\] What the adapter gives this start besides, from its `hushrun.json`.
+    start: Vec<(String, Option<OsString>)>,
     pub units: BTreeSet<String>,
 }
 
@@ -1770,6 +1776,17 @@ impl Again {
         for (name, value) in &self.variables {
             command.env(name, value);
         }
+        apply_start(command, &self.start);
+    }
+}
+
+/// \[ADR 0120\] Gives a start of COMMAND what [`adapter::Adapter::start_variables`] made.
+fn apply_start(command: &mut Command, start: &[(String, Option<OsString>)]) {
+    for (name, value) in start {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
     }
 }
 
