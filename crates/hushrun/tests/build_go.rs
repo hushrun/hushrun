@@ -603,7 +603,7 @@ fn executable(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-// covers: B-42
+// covers: B-42, B-150
 #[test]
 fn every_package_of_a_pure_go_command_is_reused_on_the_other_machine_runtime_too() {
     if !have_go() {
