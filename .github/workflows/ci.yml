@@ -124,6 +124,14 @@ jobs:
       # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0090).
       - name: Name CMake for the test-program tests
         run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
+      # C++: GoogleTest, Catch2 3 and doctest for the tests of test programs started directly, and
+      # clang's module scanner for C++20 modules through the launcher (ADR 0120).
+      - name: Install GoogleTest, Catch2 and clang-tools for the C++ tests
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libgtest-dev catch2 doctest-dev clang clang-tools
+          echo "HUSHRUN_TEST_CXX_TESTS=1" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_CXX_MODULES=1" >> "$GITHUB_ENV"
       # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
