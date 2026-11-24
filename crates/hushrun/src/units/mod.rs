@@ -37,6 +37,7 @@ pub mod jvm;
 pub mod maven;
 pub mod program;
 pub mod pytest;
+pub mod ruby;
 pub mod runner;
 pub mod shared;
 pub mod store;

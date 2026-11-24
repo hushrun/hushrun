@@ -163,6 +163,18 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # Ruby: RSpec, Minitest 6 and Minitest 5 for the tests of the Ruby adapter (ADR 0114), each
+      # in a gem directory of its own, pinned.
+      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
+        with:
+          ruby-version: "3.3"
+      - name: Install RSpec and Minitest for the test-file tests
+        run: |
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems" rspec:3.13.2 minitest:6.1.0 rake:13.4.2
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems5" minitest:5.20.0 rake:13.4.2
+          echo "HUSHRUN_TEST_RUBY=$(command -v ruby)" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -303,6 +315,18 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # Ruby: RSpec, Minitest 6 and Minitest 5 for the tests of the Ruby adapter (ADR 0114), each
+      # in a gem directory of its own, pinned.
+      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
+        with:
+          ruby-version: "3.3"
+      - name: Install RSpec and Minitest for the test-file tests
+        run: |
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems" rspec:3.13.2 minitest:6.1.0 rake:13.4.2
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems5" minitest:5.20.0 rake:13.4.2
+          echo "HUSHRUN_TEST_RUBY=$(command -v ruby)" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
