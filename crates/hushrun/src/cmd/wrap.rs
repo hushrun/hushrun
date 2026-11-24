@@ -1172,9 +1172,20 @@ impl<'a> BuildRun<'a> {
         self.session.as_ref().map(Session::env).unwrap_or_default()
     }
 
-    /// Sets the wrapper and the session on a start of COMMAND, when there is a session.
+    /// Sets the wrapper and the session on a start of COMMAND, when there is a session, and
+    /// what COMMAND's own words get for C and C++ (B-235).
     fn apply(&self, command: &mut Command) {
-        command.envs(self.env());
+        let env = self.env();
+        let path = env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var_os("PATH"));
+        command.envs(env);
+        if let (Some(session), Some((words, dir))) = (&self.session, &self.command) {
+            command.envs(session.cc_command_env(words, dir, path.as_deref()));
+        }
     }
 
     /// B-50: after COMMAND, the build folders its words name that CMake configured before the

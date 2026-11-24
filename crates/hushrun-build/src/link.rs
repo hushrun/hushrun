@@ -773,8 +773,8 @@ fn push_once<T: PartialEq>(list: &mut Vec<T>, item: T) {
 
 /// Finds the linker the way the system would run it: a program with a `/` is a path (joined to
 /// `cwd` when relative); a bare name is looked up in each entry of `path` in order (an empty or
-/// relative entry is under `cwd`), taking the first executable file. `None` when nothing is
-/// found or it can't be read.
+/// relative entry is under `cwd`), taking the first executable file, past a folder of hushrun's
+/// compiler programs (B-233). `None` when nothing is found or it can't be read.
 pub fn linker(program: &str, path: Option<&OsStr>, cwd: &Path) -> Option<Linker> {
     if program.is_empty() {
         return None;
@@ -782,7 +782,11 @@ pub fn linker(program: &str, path: Option<&OsStr>, cwd: &Path) -> Option<Linker>
     if program.contains('/') || program.contains(std::path::MAIN_SEPARATOR) {
         return stat(cwd.join(program), false);
     }
-    std::env::split_paths(path?).find_map(|dir| stat(cwd.join(dir).join(program), true))
+    // B-233: a folder of hushrun's compiler programs (on PATH in make's commands) starts the
+    // next one on PATH, which is the linker that runs.
+    std::env::split_paths(path?)
+        .filter(|dir| !crate::cc::programs::is_programs_folder(&cwd.join(dir)))
+        .find_map(|dir| stat(cwd.join(dir).join(program), true))
 }
 
 /// The link command's `PATH` in two parts (B-18): the entries rustc put before the one it

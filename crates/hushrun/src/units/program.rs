@@ -714,6 +714,19 @@ fn run_with(
         None => {}
     }
     command.env_remove(DIR_VAR).env_remove(PATH_WAS);
+    // B-236: `meson setup` inside a run names its compilers through the launcher's indirection.
+    if name == "meson" {
+        command.envs(hushrun_build::cc::meson::setup_vars(args, &|var| {
+            if var == "PATH" {
+                match &was {
+                    Some(path) => path.clone(),
+                    None => std::env::var_os("PATH"),
+                }
+            } else {
+                std::env::var_os(var)
+            }
+        }));
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
