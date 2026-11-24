@@ -502,7 +502,8 @@ impl Context<'_> {
         let known = known::inputs(&names);
         let package = self.roots.given(RootName::Package).map(PathBuf::from);
         let local_script = self.script.filter(|_| package.is_some());
-        if local_script.is_none() && known == known::Known::default() {
+        let clippy = self.invocation.driver().is_some();
+        if local_script.is_none() && known == known::Known::default() && !clippy {
             return Ok(None);
         }
         let mut files: Vec<PathBuf> = Vec::new();
@@ -543,6 +544,25 @@ impl Context<'_> {
                 }
                 Where::Package(_) | Where::Workspace(_) => {
                     files.extend(places(place, manifest.as_deref(), &cwd));
+                }
+            }
+        }
+        // \[ADR 0112\] B-161: clippy's driver reads the first `.clippy.toml` or `clippy.toml`
+        // found walking up from `CLIPPY_CONF_DIR`, else from the package folder, and lists the
+        // one it found in the dep-info but not the places it looked: each name is searched for
+        // as a macro's upward file is, so one that appears where clippy would look changes the key.
+        if clippy {
+            let from = self
+                .env
+                .get(known::CLIPPY_CONF_DIR)
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| dir.to_str().map(|dir| self.absolute(dir)))
+                .map(|dir| dir.ok_or(NotStored::Unkeyable))
+                .transpose()?
+                .or_else(|| manifest.clone());
+            if let Some(from) = from {
+                for name in known::CLIPPY_CONFIG {
+                    self.upward(&from, name, &mut files, &mut above, watched)?;
                 }
             }
         }
