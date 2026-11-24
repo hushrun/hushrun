@@ -25,6 +25,7 @@
 //! on every outcome.
 
 pub mod adapter;
+pub mod bats;
 pub mod cargo;
 pub mod command;
 pub mod ctest;
