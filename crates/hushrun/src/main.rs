@@ -79,6 +79,10 @@ fn main() -> ExitCode {
     if let Some(code) = units::program::from_args(&args) {
         return code;
     }
+    // \[ADR 0115\] As Bats' bash hook starts it, likewise: it writes the hook's files and exits.
+    if let Some(code) = units::bats::from_args(&args) {
+        return code;
+    }
     hushrun_core::set_release(env!("CARGO_PKG_VERSION"));
     // \[ADR 0046\] Before clap, which quotes what it can't read, and before a run, which records
     // its command: a string on the command line goes no further than this.
