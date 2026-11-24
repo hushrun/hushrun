@@ -234,16 +234,11 @@ impl Ran {
             .unwrap_or_else(|| panic!("no line starting {start:?} in:\n{}", self.stderr))
     }
 
-    /// Whether XCTest ran `Class.method` of `target`, as xcodebuild's console says.
+    /// Whether XCTest ran `method` of the class `class`, which is also its target's name, as
+    /// xcodebuild's console says: `Test Case '-[LibTests.LibTests testLib]' started.`
     fn ran(&self, class: &str, method: &str) -> bool {
         self.stdout
-            .contains(&format!("Test Case '-[{class} {method}]' started"))
-            || self
-                .stdout
-                .contains(&format!("Test case '{class}.{method}()' passed"))
-            || self
-                .stdout
-                .contains(&format!("Test case '{class}.{method}()' failed"))
+            .contains(&format!("Test Case '-[{class}.{class} {method}]' started"))
     }
 }
 
