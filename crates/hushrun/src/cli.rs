@@ -527,7 +527,7 @@ pub enum BakeFrom {
     Backend,
 }
 
-/// `hushrun fetch [CHECK]...` (C-54).
+/// `hushrun fetch [CHECK]...` (C-144).
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct FetchArgs {
     /// The checks whose newest builds to fetch, by the names `hushrun run` runs them under. Every
@@ -535,7 +535,7 @@ pub struct FetchArgs {
     pub checks: Vec<String>,
 }
 
-/// `hushrun build pull` (B-77).
+/// `hushrun build pull` (B-240).
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct BuildPullArgs {
     /// The image, `<host>/<org>/<name>` [default: this repository's on its backend's registry].

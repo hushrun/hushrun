@@ -91,7 +91,7 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
     };
     let backend = match Backend::select(build_repo.as_ref().map(|repo| repo.root.as_path())) {
         Ok(Selection::On(backend)) => {
-            // \[ADR 0106\] What waited while the backend was out of reach goes first (C-53).
+            // \[ADR 0142\] What waited while the backend was out of reach goes first (C-143).
             if Env::from_process().get(variants::INSIDE_A_RUN).is_none()
                 && let Some(flushed) = backend.flush()
                 && flushed.sent > 0

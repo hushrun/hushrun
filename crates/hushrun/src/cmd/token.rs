@@ -227,7 +227,7 @@ fn create(global: &GlobalOpts, args: &TokenCreateArgs) -> CmdResult {
     Ok(Exit::Ok)
 }
 
-/// \[ADR 0105\] `token create --bearer` (C-51): a token with no key. Stdout is the token alone, as
+/// \[ADR 0141\] `token create --bearer` (C-141): a token with no key. Stdout is the token alone, as
 /// for any token; stderr says where it goes. With `--format json`, `hushrun.token/v1` with no
 /// `machine_key` or `hushrun_agent`.
 fn create_bearer(

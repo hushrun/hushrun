@@ -145,7 +145,7 @@ pub fn logout(global: &GlobalOpts, args: &LogoutArgs) -> CmdResult {
 /// else `HUSHRUN_BACKEND`; else the backend the repository's package.json names; else the last
 /// one; else hushrun's hosted backend. The order is `hushrun run`'s (C-11), so that a login
 /// reaches the backend a run then uses.
-/// \[ADR 0105\] `hushrun login --session` (C-52): swaps the credential this sandbox holds for a
+/// \[ADR 0141\] `hushrun login --session` (C-142): swaps the credential this sandbox holds for a
 /// session of one repository at the org's backend, and saves it for the backend's origin. It needs
 /// an org's URL, and prints no token.
 fn session(global: &GlobalOpts, args: &LoginArgs) -> CmdResult {

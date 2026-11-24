@@ -642,7 +642,7 @@ fn runs(content: &Content, branch: Option<&str>, files_here: bool, report: &mut 
     let outside = setup::outside_hushrun(package.as_deref(), &pipelines, branch, hushrun());
     let backend = match Backend::select(Some(root)) {
         Ok(Selection::On(backend)) => {
-            // \[ADR 0106\] What waited while the backend was out of reach (C-53).
+            // \[ADR 0142\] What waited while the backend was out of reach (C-143).
             let _ = backend.flush();
             backend
         }

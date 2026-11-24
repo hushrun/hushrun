@@ -1,4 +1,4 @@
-//! \[ADR 0104\] Coding agents and the hosted platforms they run on (C-50): one table, read by
+//! \[ADR 0140\] Coding agents and the hosted platforms they run on (C-140): one table, read by
 //! [`crate::detect`], which tells a hosted agent's sandbox from CI, and by the CLI's test of who
 //! runs hushrun (C-23), so the two never disagree about which agent this is.
 //!
@@ -9,7 +9,7 @@
 //! run a sandbox beside bare `CI=true` only, as `HUSHRUN_AGENT` does (ADR 0046), and never beside
 //! a named CI, where an agent's step in a job keeps ADR 0044's guards.
 
-/// \[ADR 0104\] Names a platform row by its id, such as `copilot-cloud`, for a sandbox whose own
+/// \[ADR 0140\] Names a platform row by its id, such as `copilot-cloud`, for a sandbox whose own
 /// marker is missing or wrong: it is that platform's sandbox, with everything that follows.
 pub const SANDBOX_VARIABLE: &str = "HUSHRUN_SANDBOX";
 
@@ -237,7 +237,7 @@ mod tests {
     use super::*;
     use crate::Env;
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn the_table_has_one_row_per_id_and_platforms_first() {
         let mut ids: Vec<&str> = PLATFORMS.iter().map(|p| p.id).collect();
@@ -257,7 +257,7 @@ mod tests {
         assert!(PLATFORMS.iter().all(|p| !p.markers.is_empty()));
     }
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn a_platform_is_known_by_its_marker() {
         let env = Env::from_pairs([("CLAUDE_CODE_REMOTE", "true"), ("CLAUDECODE", "1")]);

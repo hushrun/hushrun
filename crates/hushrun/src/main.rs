@@ -163,7 +163,7 @@ fn run(cli: &Cli) -> ExitCode {
         Command::Logout(args) => cmd::login::logout(&cli.global, args),
         // C-17: results' identity and agent tokens need no hushrun.yaml.
         Command::Whoami => cmd::whoami::run(&cli.global),
-        // C-53: the outbox needs no hushrun.yaml.
+        // C-143: the outbox needs no hushrun.yaml.
         Command::Flush => cmd::flush::run(&cli.global),
         Command::Fetch(args) => cmd::flush::fetch(&cli.global, args),
         Command::Token(command) => cmd::token::run(&cli.global, command),

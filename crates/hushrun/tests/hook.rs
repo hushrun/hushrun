@@ -937,7 +937,7 @@ fn a_failure_here_outranks_an_earlier_pass_nothing_recorded() {
     assert!(!r.push("feature", AGENT).status.success());
 }
 
-// covers: C-23, C-50
+// covers: C-23, C-140
 #[test]
 fn a_push_of_something_else_is_left_alone() {
     let fake = FakeResults::start();
@@ -971,7 +971,7 @@ fn a_push_of_something_else_is_left_alone() {
     let refused = r.push("feature", AGENT);
     assert!(!refused.status.success());
 
-    // ADR 0104: an agent's sandbox that sets only CI=true isn't CI, and is refused.
+    // ADR 0140: an agent's sandbox that sets only CI=true isn't CI, and is refused.
     assert!(
         !r.push("feature", &[("CI", "true"), ("CLAUDECODE", "1")])
             .status

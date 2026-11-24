@@ -85,8 +85,8 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
     // A dry run's plan as one JSON document (C-15), in place of all of its text.
     let json = args.dry_run && global.format == Format::Json;
     let mut look = Look::at(&root)?;
-    // \[ADR 0106\] Which agent clouds the team uses: what the flag says, else what a person at a
-    // terminal answers, else what the repository already has (C-55).
+    // \[ADR 0142\] Which agent clouds the team uses: what the flag says, else what a person at a
+    // terminal answers, else what the repository already has (C-145).
     look.clouds = agents::chosen(args, &root, json)?;
     if !json {
         look.print();
@@ -390,7 +390,7 @@ struct Look {
     /// B-69: the long-lived branches hushrun.yaml's `build: baked: branches:` names, which the
     /// bake job bakes into their own tags.
     bake_branches: Vec<String>,
-    /// \[ADR 0106\] The agent clouds the team uses, whose files init writes (C-55).
+    /// \[ADR 0142\] The agent clouds the team uses, whose files init writes (C-145).
     clouds: Vec<agents::Cloud>,
     /// The backend package.json or hushrun.yaml names.
     backend: Option<String>,
@@ -974,7 +974,7 @@ impl Look {
 }
 
 impl Package {
-    /// \[ADR 0106\] Its package.json holds hushrun's npm package, so hooks start it through npx.
+    /// \[ADR 0142\] Its package.json holds hushrun's npm package, so hooks start it through npx.
     fn holds_hushrun(&self) -> bool {
         let (name, _) = name_and_range(&npm_package());
         json::value(self.doc.text()).is_ok_and(|value| {
@@ -1799,7 +1799,7 @@ impl Plan {
                     json::quote(&range)
                 ));
                 self.dependency = Some(spec);
-                // \[ADR 0106\] package.json gets hushrun: its hooks start it through npx.
+                // \[ADR 0142\] package.json gets hushrun: its hooks start it through npx.
                 self.tools.files = agents::plan(&look.root, &look.clouds, true);
             }
         }

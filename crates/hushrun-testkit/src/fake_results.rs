@@ -87,9 +87,9 @@ struct State {
     /// \[RFC 0004 §3.8\] It takes what a server from before tests took: 5,000 results a run in
     /// 1 MiB, and no `savedMs` above 0 with `units.reused` 0.
     older_limits: bool,
-    /// \[ADR 0105\] It answers a request with no token as if a sandbox's network had added one.
+    /// \[ADR 0141\] It answers a request with no token as if a sandbox's network had added one.
     proxy: bool,
-    /// \[ADR 0105\] What `POST {base}/v0/sessions` carried, each: its bearer and its body.
+    /// \[ADR 0141\] What `POST {base}/v0/sessions` carried, each: its bearer and its body.
     sessions: Vec<(String, Value)>,
 }
 
@@ -140,11 +140,11 @@ impl FakeResults {
     pub const TOKEN: &'static str = "fake-results-token";
     /// The agent token it takes once it knows the agent's key.
     pub const AGENT_TOKEN: &'static str = "hra_fakeresults0123456789abcdefghijABCDEFGH";
-    /// \[ADR 0105\] A bearer agent token: it records with no machine's signature.
+    /// \[ADR 0141\] A bearer agent token: it records with no machine's signature.
     pub const BEARER_TOKEN: &'static str = "hra_fakebearer00123456789abcdefghijABCDEFGH";
-    /// \[ADR 0105\] The session token `POST {base}/v0/sessions` answers.
+    /// \[ADR 0141\] The session token `POST {base}/v0/sessions` answers.
     pub const SESSION_TOKEN: &'static str = "hrs_fakesession0123456789abcdefghijABCDEFGH";
-    /// \[ADR 0105\] A Codex-style placeholder the fake's "network" takes for a bearer token.
+    /// \[ADR 0141\] A Codex-style placeholder the fake's "network" takes for a bearer token.
     pub const PLACEHOLDER: &'static str = "codex-secret-placeholder-hushrun";
 
     pub fn start() -> FakeResults {
@@ -175,12 +175,12 @@ impl FakeResults {
         });
     }
 
-    /// \[ADR 0105\] Answers requests with no token as if the sandbox's network had added one.
+    /// \[ADR 0141\] Answers requests with no token as if the sandbox's network had added one.
     pub fn add_credentials_as_a_proxy(&self) {
         self.state().proxy = true;
     }
 
-    /// \[ADR 0105\] Each `POST {base}/v0/sessions` so far: what it carried as its bearer, and its
+    /// \[ADR 0141\] Each `POST {base}/v0/sessions` so far: what it carried as its bearer, and its
     /// body.
     pub fn sessions(&self) -> Vec<(String, Value)> {
         self.state().sessions.clone()

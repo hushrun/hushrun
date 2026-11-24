@@ -1,8 +1,8 @@
-# 0104. A hosted agent's sandbox is local, whatever CI it sets
+# 0140. A hosted agent's sandbox is local, whatever CI it sets
 
 - **Status:** proposed; built
 - **Date:** 2026-11-23
-- **Rules:** C-50 new; C-11, C-17, C-23 and §11.2's detection read
+- **Rules:** C-140 new; C-11, C-17, C-23 and §11.2's detection read
 - **Amends:** [0046](0046-one-variable-for-a-sandbox.md) item 3, for a platform's own marker
 
 ## Context
@@ -54,7 +54,7 @@ system store. With the environment's default network, hushrun's hosts were refus
 5. **A sandbox in GitHub Actions never gets CI's ID token.** `Env` sets
    `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` aside in a platform's sandbox,
    so no result, ledger write or build request carries it as CI's credential. Only
-   `hushrun login --session` reads them (ADR 0105), to get a session as an agent.
+   `hushrun login --session` reads them (ADR 0141), to get a session as an agent.
 6. **`hushrun doctor`** says, in a sandbox or with `--hosts`: the platform and its marker; where the
    credential comes from, by name; whether each host answers over TLS that verifies with the
    system's store (the backend and its registry; 403 and 407 count as the proxy refusing), and, for
@@ -73,7 +73,7 @@ system store. With the environment's default network, hushrun's hosts were refus
 ## Consequences
 
 - A hosted sandbox reuses passes within its session with no setup, and shares them once a credential
-  is set (ADR 0105). Results of a sandbox count in CI jobs without variants as any agent's pass does
+  is set (ADR 0141). Results of a sandbox count in CI jobs without variants as any agent's pass does
   (ADR 0044): no new guard.
 - A job where a platform's marker is set makes itself a sandbox. The workflow can set it, and so can
   any earlier step through `$GITHUB_ENV`, a pull request's install script included, as it could

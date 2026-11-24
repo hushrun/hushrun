@@ -48,7 +48,7 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
     }
 }
 
-/// \[ADR 0106\] What `hushrun fetch` asks of build reuse: `build fetch`'s, for `checks`.
+/// \[ADR 0142\] What `hushrun fetch` asks of build reuse: `build fetch`'s, for `checks`.
 pub(crate) fn fetch_blocks(global: &GlobalOpts, checks: &[String]) -> CmdResult {
     let place = Place::read()?;
     fetch(global, &place, checks)

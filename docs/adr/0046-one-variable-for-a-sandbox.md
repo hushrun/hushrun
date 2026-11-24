@@ -151,9 +151,9 @@ forbids unsafe code, and it would hand the decoded key to the command `hushrun r
 - **Refusing a run on a bad string.** A variable never stops a command (§10.1), and a check that ran
   without sharing costs a run, not a wrong skip.
 
-## Amendment: a platform's own marker beats a named CI (ADR 0104)
+## Amendment: a platform's own marker beats a named CI (ADR 0140)
 
-[ADR 0104](0104-hosted-agents-sandboxes-are-local.md): item 3 still holds for `HUSHRUN_AGENT`, and
+[ADR 0140](0140-hosted-agents-sandboxes-are-local.md): item 3 still holds for `HUSHRUN_AGENT`, and
 for a coding agent's marker, which may be in any CI job. A vendor's hosted platform marker, such as
 `CLAUDE_CODE_REMOTE` or Copilot's cloud agent's, makes the run a sandbox beside `CI=true` and beside
 a named CI's own variable, since only that platform sets it, and Copilot's runs inside GitHub

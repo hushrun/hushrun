@@ -1,8 +1,8 @@
-# 0105. Credentials a sandbox's network adds, and sessions
+# 0141. Credentials a sandbox's network adds, and sessions
 
 - **Status:** proposed; built
 - **Date:** 2026-11-23
-- **Rules:** C-51 and C-52 new; C-13, C-17, C-18 and C-50 read
+- **Rules:** C-141 and C-142 new; C-13, C-17, C-18 and C-140 read
 - **Amends:** [0046](0046-one-variable-for-a-sandbox.md), for sandboxes that hold no key
 
 ## Context
@@ -34,7 +34,7 @@ None of these can hold a key, and none should need an org admin to copy a secret
    it, and a 401 means the network wasn't set up, which the run says, naming the host. `bearer`:
    `HUSHRUN_TOKEN` is a bearer agent token, sent with no key. A value hushrun doesn't know is
    ignored (§10.1). Neither signs.
-3. **A placeholder is sent as it is.** In a hosted platform's sandbox (C-50), a `HUSHRUN_TOKEN` that
+3. **A placeholder is sent as it is.** In a hosted platform's sandbox (C-140), a `HUSHRUN_TOKEN` that
    has none of hushrun's shapes (`hru_`, `hra_`, `hrs_`, `hrl_`) is taken for a placeholder the
    network replaces: it goes where an agent token goes (hushrun's host, or the backend
    `HUSHRUN_BACKEND` names), with no key. Outside such a sandbox it is a token like any other, and
@@ -65,8 +65,8 @@ None of these can hold a key, and none should need an org admin to copy a secret
    backend the environment names, minting Cursor's ID token
    for the backend's origin and caching it until it expires, and saves the session.
 7. **Copilot.** Its setup steps run `hushrun login --session` with the job's ID token (`permissions:
-   id-token: write`). In the agent's own job, hushrun knows (C-50), the job's ID token is set aside
-   from everything but that command (ADR 0104 item 5).
+   id-token: write`). In the agent's own job, hushrun knows (C-140), the job's ID token is set aside
+   from everything but that command (ADR 0140 item 5).
 
 ## Consequences
 

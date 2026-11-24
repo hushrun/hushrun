@@ -1,4 +1,4 @@
-//! \[ADR 0105\] A sandbox's credentials (C-51, C-52): `HUSHRUN_AUTH=proxy`, where the network adds
+//! \[ADR 0141\] A sandbox's credentials (C-141, C-142): `HUSHRUN_AUTH=proxy`, where the network adds
 //! the credential; a placeholder in `HUSHRUN_TOKEN` that the network replaces; `HUSHRUN_AUTH=bearer`;
 //! and session tokens, which `hushrun login --session` swaps an agent token, a Cursor cloud agent's
 //! ID token or a GitHub Actions job's ID token for, and which runs then read from `sessions.json`.
@@ -150,7 +150,7 @@ fn posts(fake: &FakeResults) -> Vec<(Option<String>, bool)> {
         .collect()
 }
 
-// covers: C-51
+// covers: C-141
 #[test]
 fn with_proxy_auth_requests_carry_no_token_and_a_401_says_the_network_added_none() {
     let fake = FakeResults::start();
@@ -185,7 +185,7 @@ fn with_proxy_auth_requests_carry_no_token_and_a_401_says_the_network_added_none
     assert!(bare.recorded().is_empty());
 }
 
-// covers: C-51
+// covers: C-141
 #[test]
 fn a_placeholder_goes_to_hushruns_host_only_in_a_hosted_sandbox_and_unsigned() {
     let fake = FakeResults::start();
@@ -225,7 +225,7 @@ fn a_placeholder_goes_to_hushruns_host_only_in_a_hosted_sandbox_and_unsigned() {
     );
 }
 
-// covers: C-51
+// covers: C-141
 #[test]
 fn a_bearer_agent_token_records_with_no_key_when_auth_says_so() {
     let fake = FakeResults::start();
@@ -254,7 +254,7 @@ fn a_bearer_agent_token_records_with_no_key_when_auth_says_so() {
     assert_eq!(posts(&fake).len(), before);
 }
 
-// covers: C-52
+// covers: C-142
 #[test]
 fn login_session_swaps_an_agent_token_and_runs_use_the_saved_session() {
     let fake = FakeResults::start();
@@ -342,7 +342,7 @@ fn cursor_socket(dir: &Path, token: &'static str) -> (PathBuf, std::sync::mpsc::
     (path, rx)
 }
 
-// covers: C-52
+// covers: C-142
 #[cfg(unix)]
 #[test]
 fn a_cursor_cloud_agent_gets_a_session_by_itself_and_keeps_it() {
@@ -409,7 +409,7 @@ fn github_endpoint(token: &'static str) -> (String, std::sync::mpsc::Receiver<St
     (url, rx)
 }
 
-// covers: C-52
+// covers: C-142
 #[test]
 fn copilots_setup_step_and_its_sandbox_swap_the_jobs_id_token_for_a_session() {
     const ID_TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjQwNzA5MDg4MDB9.github";
@@ -450,7 +450,7 @@ fn copilots_setup_step_and_its_sandbox_swap_the_jobs_id_token_for_a_session() {
     );
 }
 
-// covers: C-53
+// covers: C-143
 #[test]
 fn a_result_the_backend_couldnt_take_waits_skips_here_and_goes_with_the_next_run() {
     let fake = FakeResults::start();
@@ -533,7 +533,7 @@ fn a_result_the_backend_couldnt_take_waits_skips_here_and_goes_with_the_next_run
     );
 }
 
-// covers: C-13, C-52
+// covers: C-13, C-142
 #[cfg(unix)]
 #[test]
 fn a_backend_a_repositorys_file_chose_gets_no_sandbox_credential_for_a_session() {
@@ -578,7 +578,7 @@ fn a_backend_a_repositorys_file_chose_gets_no_sandbox_credential_for_a_session()
     assert!(fake.sessions().is_empty());
 }
 
-// covers: C-54
+// covers: C-144
 #[test]
 fn what_fetch_kept_skips_a_check_once_the_backend_is_out_of_reach() {
     let fake = FakeResults::start();

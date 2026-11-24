@@ -1,4 +1,4 @@
-//! \[ADR 0104\] `hushrun doctor` in a coding agent's sandbox (C-50): which platform this is, where
+//! \[ADR 0140\] `hushrun doctor` in a coding agent's sandbox (C-140): which platform this is, where
 //! the credential comes from, whether each host hushrun needs answers here, the exact entry that
 //! platform's allowlist needs, and what will be shared. It names variables and hosts, never a
 //! value.
@@ -226,7 +226,7 @@ pub fn shared_line(place: Option<&Place>) -> String {
 mod tests {
     use super::*;
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn hushruns_own_backend_needs_three_hosts_and_another_one() {
         let names = |backend: Option<&str>| {
@@ -245,7 +245,7 @@ mod tests {
         );
     }
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn lines_name_variables_and_never_a_value() {
         let env = hushrun_ci::Env::from_pairs([("CLAUDE_CODE_REMOTE", "true")]);

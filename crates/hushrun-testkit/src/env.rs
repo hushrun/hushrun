@@ -28,7 +28,7 @@ const NAMES: &[&str] = &[
     "VIRTUAL_ENV",
     "COVERAGE_CORE",
     "COVERAGE_PROCESS_START",
-    // \[ADR 0104\] What says a coding agent runs, or which hosted sandbox this is: a test's
+    // \[ADR 0140\] What says a coding agent runs, or which hosted sandbox this is: a test's
     // hushrun decides CI, sandbox or person by what the test sets, never by the shell it runs in.
     "AI_AGENT",
     "CLAUDECODE",

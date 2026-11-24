@@ -1,8 +1,8 @@
-# 0106. Results that wait, what a sandbox fetches, and hooks at a session's end
+# 0142. Results that wait, what a sandbox fetches, and hooks at a session's end
 
 - **Status:** proposed; built
 - **Date:** 2026-11-23
-- **Rules:** C-53, C-54 and C-55 new; C-11, C-24 and B-36 read
+- **Rules:** C-143, C-144 and C-145 new; C-11, C-24 and B-36 read
 
 ## Context
 

@@ -1,4 +1,4 @@
-//! \[ADR 0106\] `hushrun flush` (C-53): sends what the outbox holds for the backend `hushrun run`
+//! \[ADR 0142\] `hushrun flush` (C-143): sends what the outbox holds for the backend `hushrun run`
 //! records to here, and says what it did. Run at the end of an agent's session, by the hooks
 //! `hushrun init` writes, so what a session passed reaches the backend before the sandbox goes.
 
@@ -82,7 +82,7 @@ pub fn run(global: &GlobalOpts) -> CmdResult {
     Ok(Exit::Ok)
 }
 
-/// \[ADR 0106\] `hushrun fetch [CHECK]...` (C-54): `hushrun ready`'s lookups of every check of
+/// \[ADR 0142\] `hushrun fetch [CHECK]...` (C-144): `hushrun ready`'s lookups of every check of
 /// the worktree, each answer kept for 24 hours, then `hushrun build fetch` of the checks named.
 /// What can't be fetched is a line, never a failure: the setup script goes on.
 pub fn fetch(global: &GlobalOpts, args: &FetchArgs) -> CmdResult {

@@ -1,4 +1,4 @@
-//! \[ADR 0107\] `hushrun build pull` (B-77): puts the repository's newest baked store where a run
+//! \[ADR 0143\] `hushrun build pull` (B-240): puts the repository's newest baked store where a run
 //! reads one, for a sandbox whose image is fixed. It downloads the image the backend's registry
 //! keeps for the repository and this platform (`<registry host>/<org>/<name>:hushrun-<platform>-latest`,
 //! B-70), with a pull token (`HUSHRUN_REGISTRY_TOKEN`), the backend's credential here, or nothing
@@ -386,7 +386,7 @@ mod tests {
         out
     }
 
-    // covers: B-77
+    // covers: B-240
     #[test]
     fn a_layer_unpacks_the_store_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
@@ -420,7 +420,7 @@ mod tests {
         assert!(platform().contains('-'));
     }
 
-    // covers: B-77
+    // covers: B-240
     #[test]
     fn a_swap_leaves_the_old_store_when_the_new_cant_go_in() {
         let dir = tempfile::tempdir().unwrap();

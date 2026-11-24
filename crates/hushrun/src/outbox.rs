@@ -1,4 +1,4 @@
-//! \[ADR 0106\] The results outbox (C-53): a result a server couldn't be reached to record waits in
+//! \[ADR 0142\] The results outbox (C-143): a result a server couldn't be reached to record waits in
 //! `<cache dir>/outbox/<key>-<server>.json` until a later run, `hushrun ready` or `hushrun flush` reaches it,
 //! and while the server is out of reach, lookups read it, so a check this machine passed skips.
 //!
@@ -252,7 +252,7 @@ pub fn entries(dir: &Path) -> Vec<Entry> {
         .collect()
 }
 
-/// \[C-53\] A pass or fail of `key` this machine kept for `base`, pending or sent, that counts by
+/// \[C-143\] A pass or fail of `key` this machine kept for `base`, pending or sent, that counts by
 /// `counts`: what a lookup answers while the server is out of reach.
 pub fn local(
     dir: &Path,
@@ -378,7 +378,7 @@ mod tests {
         .unwrap()
     }
 
-    // covers: C-53
+    // covers: C-143
     #[test]
     fn one_function_decides_every_state() {
         let day = 24 * 60 * 60 * 1000;
@@ -406,7 +406,7 @@ mod tests {
         }
     }
 
-    // covers: C-53
+    // covers: C-143
     #[test]
     fn a_flush_sends_each_entry_once_and_only_to_its_server() {
         let dir = tempfile::tempdir().unwrap();
@@ -476,7 +476,7 @@ mod tests {
         assert!(local(dir.path(), &key, "https://b/o/acme", &|_| true).is_none());
     }
 
-    // covers: C-53
+    // covers: C-143
     #[test]
     fn a_week_old_entry_expires_and_is_never_sent() {
         let dir = tempfile::tempdir().unwrap();
@@ -502,7 +502,7 @@ mod tests {
         assert!(local(dir.path(), &key, "https://a/o/acme", &|_| true).is_none());
     }
 
-    // covers: C-53
+    // covers: C-143
     #[test]
     fn runs_keeping_results_at_once_lose_none() {
         let dir = tempfile::tempdir().unwrap();
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(entries(dir.path()).len(), 16);
     }
 
-    // covers: C-53
+    // covers: C-143
     #[test]
     fn one_key_waits_for_two_servers_apart() {
         let dir = tempfile::tempdir().unwrap();
@@ -533,7 +533,7 @@ mod tests {
         assert!(read(dir.path(), &key.hex(), "https://b/o/acme").is_some());
     }
 
-    // covers: C-53
+    // covers: C-143
     #[test]
     fn another_accounts_credential_of_the_same_kind_sends_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -560,7 +560,7 @@ mod tests {
         assert_eq!(tries, 0);
     }
 
-    // covers: C-53
+    // covers: C-143
     #[test]
     fn a_settled_entry_and_a_left_temporary_file_go_after_a_while() {
         let dir = tempfile::tempdir().unwrap();
@@ -597,7 +597,7 @@ mod tests {
 
 // --- What `hushrun fetch` saved -----------------------------------------------------------------
 
-/// \[ADR 0106\] How long what `hushrun fetch` saved is read: 24 hours (C-54).
+/// \[ADR 0142\] How long what `hushrun fetch` saved is read: 24 hours (C-144).
 pub const FETCHED_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// One result `hushrun fetch` saved, sealed by its SHA-256 over the server, the key and the result.
@@ -649,7 +649,7 @@ pub fn save_fetched(dir: &Path, base: &str, key: &Digest, result: &RunResult) ->
     written
 }
 
-/// \[C-54\] What `hushrun fetch` saved for `key` from `base` within 24 hours, its seal whole, that
+/// \[C-144\] What `hushrun fetch` saved for `key` from `base` within 24 hours, its seal whole, that
 /// counts by `counts`.
 pub fn fetched(
     dir: &Path,
@@ -672,7 +672,7 @@ pub fn fetched(
 mod fetched_tests {
     use super::*;
 
-    // covers: C-54
+    // covers: C-144
     #[test]
     fn what_fetch_saved_is_read_for_its_server_for_a_day_and_whole() {
         let dir = tempfile::tempdir().unwrap();

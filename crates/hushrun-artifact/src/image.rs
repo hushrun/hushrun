@@ -23,7 +23,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::registry::{ArtifactError, BlobStream, Manifest, OCI_INDEX, OCI_MANIFEST, Repository};
 
-/// \[B-77\] A pulled image: its manifest's digest and each layer's bytes.
+/// \[B-240\] A pulled image: its manifest's digest and each layer's bytes.
 pub type PulledLayers = (Digest, Vec<Vec<u8>>);
 
 /// The image config's media type.
@@ -877,7 +877,7 @@ impl crate::Artifacts {
         })
     }
 
-    /// \[B-77\] The image `tag` names in `repository`: its manifest's digest and each of its
+    /// \[B-240\] The image `tag` names in `repository`: its manifest's digest and each of its
     /// layers, read whole, checked against their digests, and refused past `most` bytes each;
     /// `None` when the tag names nothing.
     pub fn pull_layers(

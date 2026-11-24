@@ -29,7 +29,7 @@ const BACKEND: &str = "HUSHRUN_BACKEND";
 const STOOD_IN_FOR: [&str; 4] = [TOKEN, MACHINE_KEY, MACHINE_KEY_FILE, BACKEND];
 /// hushrun's own variables, of which any but `HUSHRUN_AGENT` that holds a string is dropped.
 const OWN: &str = "HUSHRUN_";
-/// \[ADR 0104\] GitHub's ID-token variables, which make a job the repository's CI (L-10, B-31).
+/// \[ADR 0140\] GitHub's ID-token variables, which make a job the repository's CI (L-10, B-31).
 /// In a hosted sandbox that runs in GitHub Actions, Copilot's, they are the platform's job's, not
 /// a CI run of the repository: [`Env`] sets them aside, where only `hushrun login --session` asks
 /// for them ([`Env::sandbox_github_id_token`]), so the sandbox records as an agent, never as CI.
@@ -54,7 +54,7 @@ pub struct Env {
     overridden: Vec<&'static str>,
     /// hushrun's variables that held a `HUSHRUN_AGENT` string, and were dropped.
     misplaced: Vec<String>,
-    /// \[ADR 0104\] GitHub's ID-token endpoint and request token, set aside in a hosted sandbox.
+    /// \[ADR 0140\] GitHub's ID-token endpoint and request token, set aside in a hosted sandbox.
     set_aside: Option<(String, String)>,
 }
 
@@ -156,9 +156,9 @@ impl Env {
         env
     }
 
-    /// \[ADR 0104\] In a hosted sandbox inside GitHub Actions, the job's ID-token endpoint and
+    /// \[ADR 0140\] In a hosted sandbox inside GitHub Actions, the job's ID-token endpoint and
     /// request token, which nothing but `hushrun login --session` reads: there they buy a session
-    /// as an agent (C-52), never CI's standing.
+    /// as an agent (C-142), never CI's standing.
     pub fn sandbox_github_id_token(&self) -> Option<(&str, &str)> {
         self.set_aside
             .as_ref()
@@ -294,7 +294,7 @@ pub enum CiError {
 #[error("{0}")]
 pub struct ApiError(pub String);
 
-/// What [`detection`] finds: a CI provider, a person's machine, or \[ADR 0104\] a coding agent's
+/// What [`detection`] finds: a CI provider, a person's machine, or \[ADR 0140\] a coding agent's
 /// sandbox, which is local too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detected {
@@ -302,7 +302,7 @@ pub enum Detected {
     Ci(Provider),
     /// A person's machine, or `HUSHRUN_PROVIDER=local`.
     Local,
-    /// \[ADR 0104\] A coding agent's sandbox (C-50): local, with the platform or agent that says so.
+    /// \[ADR 0140\] A coding agent's sandbox (C-140): local, with the platform or agent that says so.
     Sandbox(&'static platforms::Platform),
 }
 
@@ -321,19 +321,19 @@ impl Detected {
 /// `HUSHRUN_AGENT`. One hushrun doesn't know leaves the provider to detection ([`ignored`] says
 /// so). \[ADR 0046\] `HUSHRUN_AGENT` overrides bare `CI=true` and nothing else: it can reach a named
 /// CI's job, in a job-level secret or a project variable, and a job that took itself for a sandbox
-/// would lose ADR 0044's guards and skip wrongly. \[ADR 0104\] [`detection`] says more: which
+/// would lose ADR 0044's guards and skip wrongly. \[ADR 0140\] [`detection`] says more: which
 /// sandbox, when one is.
 pub fn detect(env: &Env) -> Provider {
     detection(env).provider()
 }
 
-/// \[ADR 0104\] Whether [`Env`] sets GitHub's ID-token variables aside: [`detection`] finds a hosted
+/// \[ADR 0140\] Whether [`Env`] sets GitHub's ID-token variables aside: [`detection`] finds a hosted
 /// platform's sandbox, which no explicit `HUSHRUN_PROVIDER` overrode to a CI provider.
 fn sets_aside_github_id_token(env: &Env) -> bool {
     matches!(detection(env), Detected::Sandbox(platform) if platform.kind == platforms::Kind::Platform)
 }
 
-/// \[ADR 0104\] What runs this command (C-50), decided here and nowhere else: an explicit
+/// \[ADR 0140\] What runs this command (C-140), decided here and nowhere else: an explicit
 /// `HUSHRUN_PROVIDER` that parses first, a person's decision; then `HUSHRUN_SANDBOX` naming a
 /// platform row by its id, the same decision for a sandbox; then a hosted platform's own marker
 /// ([`platforms::Kind::Platform`]), which beats `CI=true` and a named CI's variable alike, since
@@ -387,7 +387,7 @@ pub fn detection(env: &Env) -> Detected {
     }
 }
 
-/// \[ADR 0104\] The sandbox this runs in, when [`detection`] finds one.
+/// \[ADR 0140\] The sandbox this runs in, when [`detection`] finds one.
 pub fn sandbox(env: &Env) -> Option<&'static platforms::Platform> {
     match detection(env) {
         Detected::Sandbox(platform) => Some(platform),
@@ -964,7 +964,7 @@ mod tests {
         );
     }
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn a_hosted_platforms_marker_makes_a_sandbox_beside_any_ci() {
         let of = |pairs: &[(&str, &str)]| detection(&Env::from_pairs(pairs.iter().copied()));
@@ -1028,7 +1028,7 @@ mod tests {
         assert!(sandbox(&Env::from_pairs([("CLAUDE_CODE_REMOTE", "0")])).is_none());
     }
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn a_hosted_sandbox_in_github_actions_never_gets_ci_s_id_token() {
         let pairs = [
@@ -1064,7 +1064,7 @@ mod tests {
         assert!(step.get("ACTIONS_ID_TOKEN_REQUEST_URL").is_some());
     }
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn a_coding_agents_marker_beats_bare_ci_and_nothing_else() {
         let of = |pairs: &[(&str, &str)]| detection(&Env::from_pairs(pairs.iter().copied()));

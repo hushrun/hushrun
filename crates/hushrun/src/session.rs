@@ -1,4 +1,4 @@
-//! \[ADR 0105\] Session tokens (C-52): a short credential for one repository that a sandbox's agent
+//! \[ADR 0141\] Session tokens (C-142): a short credential for one repository that a sandbox's agent
 //! gets for a longer one, at `POST {base}/v0/sessions`, and keeps in `sessions.json` beside the
 //! credentials file, by origin. `hushrun login --session` makes one with what the environment
 //! holds: a bearer agent token (`HUSHRUN_TOKEN`), a Cursor cloud agent's ID token
@@ -255,7 +255,7 @@ pub fn obtain(
     })
 }
 
-/// \[ADR 0105\] In a Cursor cloud agent's sandbox, with no session for `base` yet, gets one and
+/// \[ADR 0141\] In a Cursor cloud agent's sandbox, with no session for `base` yet, gets one and
 /// saves it: Cursor's ID token buys it with no secret in the sandbox. `None` when it can't, which
 /// only debug logs say: the run goes on as it would have.
 pub fn for_cursor(env: &hushrun_ci::Env, base: &LedgerUrl, now_ms: i64) -> Option<Session> {
@@ -430,7 +430,7 @@ mod tests {
         }
     }
 
-    // covers: C-52
+    // covers: C-142
     #[test]
     fn sessions_saved_at_the_same_moment_keep_each_others_origins() {
         let dir = tempfile::tempdir().unwrap();
@@ -467,7 +467,7 @@ mod tests {
         assert!(left.is_empty());
     }
 
-    // covers: C-52
+    // covers: C-142
     #[test]
     fn an_answer_from_cursors_socket_reads_whole_or_chunked() {
         assert_eq!(
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(expiry("nope"), None);
     }
 
-    // covers: C-52
+    // covers: C-142
     #[cfg(unix)]
     #[test]
     fn cursors_socket_mints_a_token_for_the_audience() {

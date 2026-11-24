@@ -1,7 +1,7 @@
 # Agent clouds
 
 What to put in each hosted agent platform so a session skips what this exact code already passed
-(ADR 0104 to 0107). Replace `acme` with your organization and `shop` with the repository's name.
+(ADR 0140 to 0143). Replace `acme` with your organization and `shop` with the repository's name.
 `hushrun init --agent-clouds <list>` writes the hooks and Copilot's setup steps for you.
 
 | File | Platform | What it does |

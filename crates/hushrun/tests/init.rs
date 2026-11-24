@@ -6692,7 +6692,7 @@ fn init_says_no_cache_step_where_the_backend_keeps_hints_nor_with_local_or_a_dry
     assert!(!out.stdout.contains("actions/cache"), "{}", out.stdout);
 }
 
-// covers: C-55 (ADR 0106: init writes an agent cloud's hooks only for the clouds --agent-clouds
+// covers: C-145 (ADR 0142: init writes an agent cloud's hooks only for the clouds --agent-clouds
 // names; a repository's own Claude Code settings get none without it)
 #[cfg(unix)]
 #[test]
@@ -6735,7 +6735,7 @@ fn init_writes_agent_cloud_hooks_only_for_the_clouds_named() {
     );
 }
 
-// covers: C-55 (ADR 0106: a hook starts hushrun through npx only when package.json holds it)
+// covers: C-145 (ADR 0142: a hook starts hushrun through npx only when package.json holds it)
 #[cfg(unix)]
 #[test]
 fn a_package_json_without_hushrun_gets_hooks_that_run_hushrun_from_path() {

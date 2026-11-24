@@ -26,7 +26,7 @@ pub struct File {
     pub change: String,
 }
 
-/// \[ADR 0106\] An agent cloud a team uses, whose files init writes (C-55).
+/// \[ADR 0142\] An agent cloud a team uses, whose files init writes (C-145).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Cloud {
     ClaudeCode,
@@ -106,7 +106,7 @@ pub fn parse_clouds(words: &[String]) -> Result<Vec<Cloud>, String> {
     Ok(clouds)
 }
 
-/// \[ADR 0106\] The clouds init writes files for: `--agent-clouds`, and none without it (a
+/// \[ADR 0142\] The clouds init writes files for: `--agent-clouds`, and none without it (a
 /// repository's own `.claude/settings.json` is no sign the team wants hooks there). A person at a terminal (no `--yes`, `--dry-run` or JSON) who named none is told how,
 /// in one line: init asks nothing more of the terminal, whose answers its other questions read.
 pub fn chosen(
@@ -142,7 +142,7 @@ pub fn chosen(
 }
 
 /// What differs from the repository at `root`. \[ADR 0065\] A copy a newer hushrun wrote stays:
-/// this hushrun's skill is the older one, and `ready` says to update hushrun. \[ADR 0106\] And
+/// this hushrun's skill is the older one, and `ready` says to update hushrun. \[ADR 0142\] And
 /// the files of the agent clouds `clouds`, each started through npx where `npm` (a package.json
 /// holds hushrun), else from `PATH`.
 pub fn plan(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
@@ -186,7 +186,7 @@ fn runner(npm: bool) -> &'static str {
     }
 }
 
-/// \[ADR 0106\] What each cloud gets (C-55): an end-of-session hook that runs `hushrun flush`
+/// \[ADR 0142\] What each cloud gets (C-145): an end-of-session hook that runs `hushrun flush`
 /// (Claude Code's `Stop` in `.claude/settings.json`, which also gets a `SessionStart` that pulls
 /// the baked store in Claude Code on the web; Cursor's `stop` in `.cursor/hooks.json`; Copilot's
 /// `sessionEnd` in `.github/hooks/hushrun.json`), Copilot's setup steps, and a dev container's
@@ -325,7 +325,7 @@ fn add_hook(
     true
 }
 
-/// A dev container that installs hushrun with its feature (ADR 0107).
+/// A dev container that installs hushrun with its feature (ADR 0143).
 const DEVCONTAINER: &str = r#"{
   "name": "hushrun",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
@@ -335,7 +335,7 @@ const DEVCONTAINER: &str = r#"{
 }
 "#;
 
-/// Copilot's setup steps: install, a session for the agent (C-52) and the baked store (B-77).
+/// Copilot's setup steps: install, a session for the agent (C-142) and the baked store (B-240).
 fn copilot_steps(npm: bool) -> String {
     let (install, run) = if npm {
         ("      - run: npm ci || true\n", "npx --no-install hushrun")
@@ -549,7 +549,7 @@ mod tests {
         );
     }
 
-    // covers: C-55
+    // covers: C-145
     #[test]
     fn each_cloud_gets_its_hooks_once_and_keeps_what_its_files_have() {
         let dir = tempfile::tempdir().unwrap();

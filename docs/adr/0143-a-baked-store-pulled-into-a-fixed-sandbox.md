@@ -1,8 +1,8 @@
-# 0107. A baked store pulled into a sandbox whose image is fixed, and recipes per platform
+# 0143. A baked store pulled into a sandbox whose image is fixed, and recipes per platform
 
 - **Status:** proposed; built
 - **Date:** 2026-11-23
-- **Rules:** B-77 and C-55 new; B-63 to B-67 and B-70 read
+- **Rules:** B-240 and C-145 new; B-63 to B-67 and B-70 read
 
 ## Context
 
@@ -31,7 +31,7 @@ There, a store can only arrive by being downloaded. And each platform puts its s
    `ghcr.io/hushrun/features/hushrun`: it installs a release with its own installer, and its
    `onCreateCommand` runs `hushrun fetch` (and `hushrun build pull` when asked). It holds no secret
    and recommends the container's own.
-4. **`hushrun init` names the agent clouds the team uses** (C-55: `--agent-clouds` only; a person at
+4. **`hushrun init` names the agent clouds the team uses** (C-145: `--agent-clouds` only; a person at
    a terminal who named none is told how) and writes only those files.
    It reads no answer for it: init's other questions read the terminal, and scripted answers to them
    must keep working.

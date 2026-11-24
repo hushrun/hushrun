@@ -1,6 +1,6 @@
 //! Who runs hushrun: a coding agent, or a person (C-23). The pre-push hook refuses an agent's
 //! push, and \[ADR 0065\] the newer-release notice (C-21) tells an agent without a terminal. One
-//! definition, so the two never disagree about who is an agent, and \[ADR 0104\] its agents come
+//! definition, so the two never disagree about who is an agent, and \[ADR 0140\] its agents come
 //! from the table `detect` reads, so a sandbox and its agent are named the same way.
 
 /// The name of the coding agent this runs under, as the environment `var` reads tells it.
@@ -23,7 +23,7 @@ pub fn agent(var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     if let Some(name) = var("AI_AGENT").filter(|name| !name.trim().is_empty()) {
         return Some(name.trim().to_string());
     }
-    // \[ADR 0104\] The one table of agents and their platforms, which `detect` reads too.
+    // \[ADR 0140\] The one table of agents and their platforms, which `detect` reads too.
     let env = hushrun_ci::Env::from_pairs(
         hushrun_ci::platforms::PLATFORMS
             .iter()
@@ -43,7 +43,7 @@ pub fn agent(var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
 mod tests {
     use super::*;
 
-    // covers: C-23, C-50
+    // covers: C-23, C-140
     #[test]
     fn an_agent_is_who_the_environment_says() {
         let who = |vars: &[(&str, &str)]| {
@@ -72,7 +72,7 @@ mod tests {
         assert_eq!(who(&[("OPENCODE", "1")]).as_deref(), Some("OpenCode"));
         assert_eq!(who(&[("OPENCODE", "0")]), None);
         assert_eq!(who(&[("CURSOR_AGENT", "1")]).as_deref(), Some("Cursor"));
-        // ADR 0104: a hosted platform's marker names its agent.
+        // ADR 0140: a hosted platform's marker names its agent.
         assert_eq!(
             who(&[("CLAUDE_CODE_REMOTE", "true")]).as_deref(),
             Some("Claude Code")

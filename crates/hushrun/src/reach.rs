@@ -1,4 +1,4 @@
-//! \[ADR 0104\] Whether a host answers over HTTPS from here, for `hushrun doctor` (C-50): one
+//! \[ADR 0140\] Whether a host answers over HTTPS from here, for `hushrun doctor` (C-140): one
 //! request with no credential, through the proxy the environment names, trusting the system's
 //! store, as every request of hushrun's does. What it says holds no value of any variable.
 
@@ -116,7 +116,7 @@ fn hushrun_ci_crypto() {
 mod tests {
     use super::*;
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn a_failure_says_what_kind_it_is() {
         assert!(matches!(
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(short("c"), "c");
     }
 
-    // covers: C-50
+    // covers: C-140
     #[test]
     fn a_host_that_answers_is_reached() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

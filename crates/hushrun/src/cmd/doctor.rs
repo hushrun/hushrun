@@ -108,8 +108,8 @@ pub fn run(app: &App<'_>, args: &DoctorArgs) -> CmdResult {
         if good { Level::Ok } else { Level::Warning },
         detail,
     );
-    // \[ADR 0104\] In a coding agent's sandbox, or with --hosts: the platform, the credential's
-    // source, the hosts, the allowlist's entry and what is shared (C-50).
+    // \[ADR 0140\] In a coding agent's sandbox, or with --hosts: the platform, the credential's
+    // source, the hosts, the allowlist's entry and what is shared (C-140).
     sandbox::check(&mut report, &app.env, identity.place.as_ref(), args.hosts);
 
     // Configuration.
