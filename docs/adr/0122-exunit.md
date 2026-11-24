@@ -91,12 +91,40 @@ test of the same name in another. `unit: test` reuses by test file and says so.
 
 ## Compiled code
 
-`mix compile` shares nothing yet: B-260 to B-269 are kept for it. Mix has no cache protocol to
-serve, so a design has to restore `_build/<env>/lib/<dep>` before Mix decides a dependency is
-stale (through the same loader, around `Mix.Tasks.Deps.Compile`), key it by the dependency's
-`mix.lock` entry, the Elixir and OTP versions, `MIX_ENV` and `MIX_TARGET`, and the project's
-compile-time configuration (which Mix compiles dependencies under), keep native code (`elixir_make`,
-`rustler`) out or keyed by the C toolchain, and travel as a kind of its own through the relay.
+`mix compile` shares nothing; B-260 to B-269 stay kept for it. Measured on Elixir 1.14 / OTP 25
+(2026-11-24), one project compiled in two folders, then `_build` copied from the first to the
+second:
+
+- **Every beam holds its checkout's absolute path.** Each `.beam` of the project differs between
+  the two folders in two chunks only: `CInf` (the compile info's `source`) and `Dbgi` (the debug
+  info's file). The `.app` file, the compile manifests and the consolidated protocols are the
+  same. Stripping those two chunks would make the bytes match, but not the code:
+- **Code holds it too.** A module with `def path, do: Path.join(__DIR__, "data.txt")` compiled in
+  the first folder answers the first folder's path in the second. `__DIR__`, `__ENV__.file`,
+  `@external_resource` and what templates and `embed_*` macros read from them are literals in
+  the code; a block reused in another folder runs with another checkout's files.
+- **Mix takes another folder's `_build` as up to date.** Its manifests hold relative paths and
+  each source's digest, so with the sources' modification times older than the manifest it
+  compiled nothing in the second folder: nothing in Mix would catch a wrong block.
+- **What a compile read of the environment isn't known.** A module attribute set from
+  `System.get_env/1` at compile time (`@flag System.get_env("DEMO_FLAG")`) kept the first
+  machine's value in the second, which didn't set it. Mix tracks `Application.compile_env/3`
+  through the config, never a variable, and a tracer sees a call to `System.get_env` without
+  telling whether it ran at compile time or will at run time.
+- **Per-commit values**: a `mix.exs` may compute `version:` from `git describe`, so even the
+  `.app` can depend on more than the files.
+
+So a block of `_build/<env>/lib/<app>` would be sound only under a key that holds the checkout's
+absolute path (no sharing between worktrees, only between checkouts at one path, such as one CI
+runner's), and that holds every variable a compile read, which nothing reports. A design that
+keys by path and leaves variables out would reuse a block another machine compiled with other
+values, silently; this one doesn't ship it. What would make it sound: Elixir reporting the
+variables a compile read (as Cargo's `rerun-if-env-changed` or Go's test log do), or an opt-in
+per project that lists the variables its compile depends on, with the key holding the checkout's
+path; with those, the design is a block per application of `_build/<env>/lib/<app>`, keyed by
+its sources, `mix.lock`'s entry (dependencies), the Elixir and OTP builds, `MIX_ENV`,
+`MIX_TARGET` and the compile-time config, restored before `Mix.Tasks.Compile` runs through the
+same loader as the test adapter, as kind `mix/1` (the backend stores any kind).
 
 ## Alternatives
 
