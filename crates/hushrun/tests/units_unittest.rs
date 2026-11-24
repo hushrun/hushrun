@@ -375,7 +375,12 @@ fn unittest_reuses_the_test_modules_that_passed_on_the_files_they_read() {
         "{}",
         changed.stderr
     );
-    assert!(changed.stderr.contains("Ran 3 tests"), "{}", changed.stderr);
+    // Three modules of one test each, or test_split's two when the audit chose it.
+    assert!(
+        changed.stderr.contains("Ran 3 tests") || changed.stderr.contains("Ran 4 tests"),
+        "{}",
+        changed.stderr
+    );
 
     // The rest set changes: any test may read it, so every test module runs.
     r.write("requirements.txt", "nothing==2.0\n");
