@@ -2710,7 +2710,7 @@ puts under `Subkey(action, "stdout")` just before the archive, was empty (`print
 prints a compile's output again only from its own cache); and the bytes say so
 (`archive::portable`): an `ar` archive whose first member is `__.PKGDEF` and every other member a
 Go object, `_go_.o` or an object the assembler made for a standard library package (flags
-`ObjFlagFromAssembly` and `ObjFlagStd`, read after the object's text header, whose end `\n!\n` is
+`ObjFlagFromAssembly` and `ObjFlagStd`, [ADR 0111] or before Go 1.27 B-150's mark, read after the object's text header, whose end `\n!\n` is
 looked for over the whole member: the runtime's header on macOS runs past 4096 bytes): a cgo object or a `.syso` is `native`, assembly of any
 other package `assembly` (F1: its includes are outside Go's id); its build ID, read where Go's
 `buildid.ReadFile` reads it, is `<action>/<content>` with `<action>` Go's `HashToString` of the
@@ -2795,6 +2795,20 @@ the same from Go 1.10, and leaves hushrun's store out: nothing is served from it
 One with a version B-39 names serves the store under that toolchain's own identity (B-43). One
 with no usable `GOCACHE` answers every `get` as a miss, keeps every body in its own folder until
 `close`, and fails nothing. *Rests on:* nothing.
+
+**B-150 The standard library's assembly before Go 1.27.** [ADR 0111] An object the assembler made
+(`ObjFlagFromAssembly`) is a standard library package's, for B-42, when its own header says
+`ObjFlagStd`, or when the archive's `_go_.o`, the compiler's object of the same package, says
+`ObjFlagStd` and not `ObjFlagFromAssembly`. The compiler marks its object so under `-std`, which
+the `go` command gives the compile of a standard package, and of no other, in every version B-39
+names; `-std` in `-gcflags` is B-42's `altered`. Go's assembler takes `-std`, and marks its own
+objects, only from Go 1.27: with Go 1.24 to 1.26 `runtime`, `internal/bytealg` and every other
+standard package with assembly were `assembly` and never left the machine (8 of the 24 packages
+of a small program on amd64). *Rests on:* `cmd/go` adding `-std` to a compile's flags exactly when the package is
+standard (`gc.go`, `p.Standard`), and `cmd/compile` setting `ObjFlagStd` from it (read in Go
+1.24.7's and 1.27.4's source; the two-machine tests pass on 1.24.7, 1.25.0, 1.26.0 and 1.27.4).
+*Breaks if:* a Go release gives `-std` to a package outside the standard library: B-43's identity
+hashes only the toolchain's headers, and such a package's assembly could include others.
 
 ## C and C++ (draft)
 

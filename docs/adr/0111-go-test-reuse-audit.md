@@ -1,8 +1,8 @@
-# 0111. What a real Go module showed of test reuse: coverage, and files no test binary is built from
+# 0111. What a real Go module showed: coverage, files no test binary is built from, and the standard library's assembly
 
 - **Status:** accepted
 - **Date:** 2026-11-24
-- **Rules:** C-70, C-71; amends C-30 for Go; relies on ADR 0070, 0086, 0093
+- **Rules:** C-70, C-71, B-150; amends C-30 for Go and B-42; relies on ADR 0070, 0086, 0093
 
 ## Context
 
@@ -29,7 +29,7 @@ What held, unchanged:
   reruns its packages and their importers in the other.
 - `go vet` is a whole check, as before: hushrun knows no unit of it.
 
-Two gaps, both seen in real runs:
+Three gaps, each seen in real runs:
 
 1. **Coverage dropped.** With `-coverprofile=c.out`, a package hushrun reused wrote nothing to the
    profile: 8 lines became 7, one package gone, and the next step that uploads it would read a
@@ -42,6 +42,13 @@ Two gaps, both seen in real runs:
    a file the tags leave out, and in a `go.work` member's check (`cd app && go test ./...`) every
    file of the other module. The cost was inverted: the file that can't change the tests cost more
    than the one that does.
+3. **`runtime` never left the machine below Go 1.27.** B-42 lets an assembler's object travel only
+   when its header says `ObjFlagStd`, the standard library's. Go's assembler sets that only from
+   Go 1.27, when it started taking `-std`; Go 1.24 to 1.26, all of which B-39 serves, never set it.
+   On Go 1.24.7, 1.25.0 and 1.26.0 a small program's build kept 8 of its 24 packages here
+   (`runtime`, `internal/bytealg` and every other standard package with assembly: `8 assembly
+   outside the standard library`), and three of `build_go`'s tests failed; CI pins 1.27.4, so it
+   never saw it. Each machine then compiled `runtime` itself.
 
 ## Decision
 
@@ -68,6 +75,14 @@ Two gaps, both seen in real runs:
 
    A file of another kind (`.s`, `.c`, `.h`, `go.mod`, `go.work`, data) stays where it was: the rest
    set unless a rule names it.
+3. **The standard library's assembly is known by its package's Go object too** (B-150). An
+   assembler's object counts as the standard library's when its own header says so, or when the
+   archive's `_go_.o` says `ObjFlagStd` (and isn't assembly). The compiler sets that flag under
+   `-std`, which `cmd/go` adds to a compile exactly when the package is standard, in every version
+   B-39 names; `-std` given through `-gcflags` is already B-42's `altered`. What made standard
+   assembly safe to share holds unchanged: its includes are the toolchain's, which B-43's identity
+   hashes. A downloaded archive could claim either flag, as it could claim the assembler's before;
+   that stays the audit's and the trust policy's to catch, as for every block.
 
 ## Consequences
 
@@ -83,8 +98,11 @@ Two gaps, both seen in real runs:
 - Two hazards join the ones that must never miss a failure (`go_hazards_miss_no_failure`): two
   files' build tags swapped with no file added or removed, which only the packages' keys can tell,
   and a test file the tags left out whose tag is removed.
-- Build blocks change nothing here: a `-race` or `-cover` compile is another action id, Go's own,
-  and is shared or kept by ADR 0093's rules as any compile is.
+- With Go 1.24 to 1.26, `runtime` and the standard library's other assembly packages are shared
+  as with 1.27. `build_go`'s tests pass on 1.24.7, 1.25.0, 1.26.0 and 1.27.4 here; CI runs 1.27.4
+  only, so the older versions are proved by the unit test of B-150 and by this run, not by CI.
+- A `-race` or `-cover` compile is another action id, Go's own, and is shared or kept by ADR
+  0093's rules as any compile is.
 
 ## Alternatives considered
 
