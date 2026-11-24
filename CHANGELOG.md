@@ -12,6 +12,22 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **unittest and Django's `manage.py test`, reused by test module and by test** (C-66 to C-69,
+  [ADR 0110](docs/adr/0110-unittest.md)). `python -m unittest …`, `manage.py test …`,
+  `django-admin test` and `python -m django test`, also after `uv run`, `poetry run` and the like
+  and through `coverage run`, get an observed adapter of their own instead of pytest's, which saw
+  nothing of them. It loads through a `sitecustomize.py` first on `PYTHONPATH`, which runs the one
+  it hides first, keeps COMMAND as written, and drives the observer pytest's adapter drives, now
+  `hushrun_observe.py` beside pytest's plugin. A unit is a test module by the pattern discovery
+  uses (`discover -p`, Django's `--pattern`, `test*.py`); a test's id is `Class.method`;
+  `setUpModule` and `setUpClass` are shared setups; a failing `tearDownClass` keeps no pass for
+  the tests it served. A Python started with `-I`, `-E` or `-S`, COMMAND's own `env PYTHONPATH=…`
+  and Django's `--parallel` are said once, and everything runs. Needs Python 3.10 or later; 3.12
+  or later to watch each test. Two fixes reach pytest's adapter too: the observer's import hook no
+  longer fails an import C makes with no Python frame, and an SQLite `mode=memory` URI (Django's
+  and pytest-django's test database) is no file read. Python's C extensions get no build blocks:
+  setuptools takes its compiler only from `CC`, which hushrun doesn't set, and pip's isolated
+  builds replace `PYTHONPATH` (ADR 0110).
 - **Kotlin Multiplatform's test tasks are test files** (C-94 to C-97, B-210, ADR 0117): the
   Gradle adapter follows Kotlin/JS, Kotlin/Wasm and Kotlin/Native test tasks (`jsNodeTest`,
   `wasmJsNodeTest`, `linuxX64Test`…) as it follows `Test` tasks, each class named by the file
