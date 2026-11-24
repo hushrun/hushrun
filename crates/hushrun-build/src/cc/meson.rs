@@ -178,8 +178,8 @@ pub fn set_up_before(folder: &Path) -> bool {
     any
 }
 
-/// The folders a COMMAND may name to Meson as build folders: `meson compile|test|install|… -C
-/// <dir>`, and each word of `meson setup …` that isn't an option (an option's value among them,
+/// The folders a COMMAND may name to Meson as build folders:
+/// `meson compile|test|install|… -C <dir>`, and each word of `meson setup …` that isn't an option (an option's value among them,
 /// which the caller's look for `meson-private` leaves out), each from `cwd`.
 pub fn named_folders(words: &[String], cwd: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
