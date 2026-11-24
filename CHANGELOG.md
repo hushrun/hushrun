@@ -6,6 +6,25 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Gradle's tasks shared between machines ([ADR 0104](docs/adr/0104-gradle-build-blocks.md)): in a
+run that shares, hushrun is the remote build cache of a Gradle build, so an Android or JVM
+project's new branch starts from what main's CI already ran.
+
+### Added
+
+- **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
+  in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
+  `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to
+  run so Gradle's configuration cache holds, and sets `HUSHRUN_GRADLE_CACHE`,
+  `HUSHRUN_GRADLE_CACHE_TOKEN` and, unless a test adapter sets it, `HUSHRUN_GRADLE`. The script
+  gives the build that remote unless the build set one. Entries are kept in a canonical form, so
+  the same outputs have the same digest on every machine; they are checked whole, searched for the
+  machine's folders before they may leave, fetched only where the check's `gradle/1` manifest
+  names them, and never audited or compared, since Gradle's outputs needn't repeat. The summary
+  says `build: gradle: N tasks: …`. A settings file without the line, a build whose build cache is
+  off, and a port another run holds are each said in one line. Not yet in baked stores or `hushrun
+  build fetch`.
+
 ## [0.19.1] - 2026-11-23
 
 What the first real bake found ([ADR 0103](docs/adr/0103-what-the-first-real-bake-found.md)): a
