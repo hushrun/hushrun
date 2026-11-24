@@ -13,6 +13,11 @@ use serde_json::Value;
 const CLEARED: &[&str] = &[
     "CI",
     "GITHUB_ACTIONS",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
     "GITLAB_CI",
     "BUILDKITE",
     "CIRCLECI",
@@ -47,6 +52,16 @@ const CLEARED: &[&str] = &[
     "CMAKE_C_COMPILER_LAUNCHER",
     "CMAKE_CXX_COMPILER_LAUNCHER",
     "RUSTC_WRAPPER",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "AUGMENT_AGENT",
+    "ANTIGRAVITY_AGENT",
+    "COPILOT_MODEL",
+    "COPILOT_ALLOW_ALL",
+    "COPILOT_GITHUB_TOKEN",
 ];
 
 const NO_HOST: &str = "http://127.0.0.1:9";

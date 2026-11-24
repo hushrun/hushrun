@@ -13,7 +13,7 @@
     "named_by": {"description": "What named the server (C-11); with `signed_out`, the file that names it.", "enum": ["HUSHRUN_AGENT", "HUSHRUN_BACKEND", "package.json", "hushrun.yaml", "login", null]},
     "directory": {"description": "Where results stay when no server is named: hushrun's cache directory.", "type": ["string", "null"]},
     "off": {"description": "Why results are off, when they are.", "type": ["string", "null"]},
-    "credential": {"description": "What goes with the server's requests (C-13).", "enum": ["agent_token", "token", "login", "github_oidc", "none"]},
+    "credential": {"description": "What goes with the server's requests (C-13).", "enum": ["agent_token", "token", "login", "github_oidc", "session", "bearer", "proxy", "none"]},
     "withheld": {"description": "HUSHRUN_TOKEN is set, and this backend doesn't get it.", "type": "boolean"},
     "org": {"type": ["string", "null"]},
     "as": {"description": "Who the server says the credential is: user:<email>, oidc:<subject> or agent:<name>.", "type": ["string", "null"]},

@@ -1,0 +1,35 @@
+{
+  "id": "hushrun",
+  "version": "1.0.0",
+  "name": "hushrun",
+  "description": "Installs hushrun, which skips a check this exact code already passed, and on create fetches what the repository's backend has for it.",
+  "documentationURL": "https://hushrun.com/docs/agent-clouds/devcontainers",
+  "licenseURL": "https://github.com/hushrun/hushrun/blob/main/LICENSE.md",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "latest",
+      "description": "The release to install, such as 0.20.0, or latest."
+    },
+    "fetch": {
+      "type": "boolean",
+      "default": true,
+      "description": "On create, run hushrun fetch: the newest result of each check, and the compiled code the backend has."
+    },
+    "pull": {
+      "type": "boolean",
+      "default": false,
+      "description": "On create, run hushrun build pull: the repository's newest baked store, into /hushrun."
+    }
+  },
+  "containerEnv": {
+    "PATH": "/usr/local/hushrun/bin:${PATH}"
+  },
+  "onCreateCommand": "/usr/local/hushrun/on-create.sh",
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/devcontainers/features/node",
+    "ghcr.io/devcontainers/features/rust",
+    "ghcr.io/devcontainers/features/go"
+  ]
+}
