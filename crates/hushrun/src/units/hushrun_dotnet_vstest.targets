@@ -1,0 +1,97 @@
+<!--
+  [ADR 0118] The VSTest target of a test project in a run of hushrun's, in place of the SDK's. For a
+  test project (IsTestProject), and not for `dotnet test -list-tests`:
+
+  1. it writes what the project is (its path, target framework, configuration, assembly) and what it
+     and the projects it references compile, and asks hushrun (`__hushrun-dotnet before`) what to do:
+     `skip` (the plan reuses the whole project), or `run` with a test case filter that leaves out
+     the tests the plan reuses one by one;
+  2. unless skipped, it builds the project as the SDK's target does, then calls the SDK's own VSTest
+     target on it again with VSTestNoBuild, in an instance without COMMAND's VSTestLogger and
+     VSTestTestCaseFilter, which that instance sets from the files `before` wrote: COMMAND's own
+     loggers and a TRX logger of hushrun's, and COMMAND's filter and hushrun's, in MSBuild's
+     escaped form. Nothing of the build changes;
+  3. it asks hushrun (`__hushrun-dotnet after`) to read the TRX file, whether the tests passed or not.
+
+  Any other project, and a project whose `before` said nothing, runs the SDK's target unchanged.
+-->
+<Project>
+  <Target Name="VSTest" DependsOnTargets="ShowInfoMessageIfProjectHasNoIsTestProjectProperty;_HushrunBefore">
+    <MSBuild Condition="'$(VSTestNoBuild)' != 'true' AND '$(IsTestProject)' == 'true' AND '$(_HushrunAction)' != 'skip'"
+             Projects="$(MSBuildProjectFullPath)" />
+    <MSBuild Condition="'$(IsTestProject)' == 'true' AND '$(_HushrunAction)' == ''"
+             Projects="$(MSBuildProjectFullPath)"
+             Targets="VSTest"
+             Properties="_HushrunInner=true;VSTestNoBuild=true" />
+    <MSBuild Condition="'$(IsTestProject)' == 'true' AND '$(_HushrunAction)' == 'run'"
+             Projects="$(MSBuildProjectFullPath)"
+             Targets="VSTest"
+             Properties="_HushrunInner=true;VSTestNoBuild=true;_HushrunFile=$([MSBuild]::Escape('$(_HushrunFile)'))"
+             RemoveProperties="VSTestLogger;VSTestTestCaseFilter"
+             ContinueOnError="ErrorAndContinue" />
+    <PropertyGroup Condition="'$(_HushrunAction)' == 'run'">
+      <_HushrunPassed>$(MSBuildLastTaskResult)</_HushrunPassed>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(_HushrunAction)' == 'skip'">
+      <_HushrunPassed>true</_HushrunPassed>
+    </PropertyGroup>
+    <Exec Condition="'$(_HushrunAction)' != ''"
+          Command="&quot;$(HUSHRUN_DOTNET)&quot; __hushrun-dotnet after &quot;$(_HushrunFile)&quot; $(_HushrunPassed)"
+          StandardOutputImportance="low" />
+  </Target>
+
+  <!-- What the project is and what it and the projects it references compile, in
+       `$(_HushrunFile).project`, with COMMAND's filter and loggers beside it. -->
+  <Target Name="_HushrunDescribe">
+    <!-- In instances of their own (`_HushrunProbe`), so that nothing the build's instances run
+         changes: resolving references early in the build's own instance changes what it compiles. -->
+    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="HushrunSources" Properties="_HushrunProbe=true" ContinueOnError="true">
+      <Output TaskParameter="TargetOutputs" ItemName="_HushrunSource" />
+    </MSBuild>
+    <PropertyGroup>
+      <_HushrunDir>$([MSBuild]::EnsureTrailingSlash('$(HUSHRUN_UNITS)'))dotnet</_HushrunDir>
+      <_HushrunFile>$(_HushrunDir)$([System.IO.Path]::DirectorySeparatorChar)$([System.Guid]::NewGuid().ToString('N'))</_HushrunFile>
+    </PropertyGroup>
+    <ItemGroup>
+      <_HushrunLine Include="sources=$(MSBuildLastTaskResult)" />
+      <_HushrunLine Include="project=$(MSBuildProjectFullPath)" />
+      <_HushrunLine Include="framework=$(TargetFramework)" />
+      <_HushrunLine Include="configuration=$(Configuration)" />
+      <_HushrunLine Include="platform=$(Platform)" />
+      <_HushrunLine Include="assembly=$(TargetPath)" />
+      <_HushrunLine Include="start=$(VSTestSessionCorrelationId)" />
+      <_HushrunLine Include="nobuild=$(VSTestNoBuild)" />
+      <_HushrunLine Include="results=$(VSTestResultsDirectory)" />
+      <_HushrunLine Include="testingplatform=$(TestingPlatformDotnetTestSupport)" />
+      <_HushrunLine Include="@(Compile->'own=%(FullPath)')" />
+      <_HushrunLine Include="@(_HushrunSource->'source=%(Identity)')" />
+    </ItemGroup>
+    <MakeDir Directories="$(_HushrunDir)" />
+    <WriteLinesToFile File="$(_HushrunFile).project" Lines="@(_HushrunLine)" Overwrite="true" />
+    <WriteLinesToFile File="$(_HushrunFile).userfilter" Lines="$(VSTestTestCaseFilter)" Overwrite="true" WriteOnlyWhenDifferent="false" />
+    <WriteLinesToFile File="$(_HushrunFile).userloggers" Lines="$(VSTestLogger)" Overwrite="true" WriteOnlyWhenDifferent="false" />
+  </Target>
+
+  <Target Name="_HushrunBefore"
+          Condition="'$(IsTestProject)' == 'true' AND '$(VSTestListTests)' != 'true'"
+          DependsOnTargets="_HushrunDescribe">
+    <Exec Command="&quot;$(HUSHRUN_DOTNET)&quot; __hushrun-dotnet before &quot;$(_HushrunFile)&quot;"
+          StandardOutputImportance="low"
+          ContinueOnError="true" />
+    <PropertyGroup Condition="Exists('$(_HushrunFile).action')">
+      <_HushrunAction>$([System.IO.File]::ReadAllText('$(_HushrunFile).action').Trim())</_HushrunAction>
+    </PropertyGroup>
+  </Target>
+
+  <!-- A project on Microsoft.Testing.Platform replaces the VSTest target after hushrun's, and runs
+       its tests itself: hushrun only says what it compiles, so that the run tells it isn't
+       observed and a change to its files runs it alone. -->
+  <Target Name="_HushrunTestingPlatform"
+          BeforeTargets="InvokeTestingPlatform"
+          Condition="'$(TestingPlatformDotnetTestSupport)' == 'true' AND '$(_HushrunProbe)' != 'true'"
+          DependsOnTargets="_HushrunDescribe">
+    <Exec Command="&quot;$(HUSHRUN_DOTNET)&quot; __hushrun-dotnet before &quot;$(_HushrunFile)&quot;"
+          StandardOutputImportance="low"
+          ContinueOnError="true" />
+  </Target>
+</Project>

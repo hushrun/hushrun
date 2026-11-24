@@ -47,6 +47,7 @@ const BY_NAME: &[(&str, &str)] = &[
     ("./mvnw verify", "maven"),
     ("gradle test", "gradle"),
     ("./gradlew test", "gradle"),
+    ("dotnet test Demo.sln", "dotnet"),
     ("ctest --test-dir build", "ctest"),
     ("swift test", "swift"),
     ("mix test", "exunit"),
@@ -60,7 +61,7 @@ const BY_NAME: &[(&str, &str)] = &[
 
 #[test]
 fn each_adapter_gets_the_command_that_names_its_program() {
-    assert_eq!(RECOGNIZED.len(), 13);
+    assert_eq!(RECOGNIZED.len(), 14);
     let dir = loads_all();
     for (command, adapter) in BY_NAME {
         assert_eq!(

@@ -1136,6 +1136,17 @@ hushrun: build: gradle: 1 task run here stays on this machine (1: its outputs ho
 KSP has no such step. A Kotlin/JS or native task leaves out at most 250 tests one by one, and no
 class of the default package.
 
+### .NET
+
+`dotnet build`'s compiles aren't reused: since .NET 8 the SDK writes the commit into every
+assembly, so no compile could be reused across commits ([ADR 0118](../adr/0118-dotnet-test.md),
+decision 11). hushrun reuses .NET's tests, not its assemblies. With
+`tests: reuse`, `hushrun run unit -- dotnet test` leaves out each test project that already passed
+on the files it and the projects it references compile, unbuilt, and with `unit: test` the tests
+that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on
+Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
+when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
+
 ### Ruby's tests
 
 With `tests: reuse` on a check that runs RSpec or Minitest, a spec or test file that already passed
