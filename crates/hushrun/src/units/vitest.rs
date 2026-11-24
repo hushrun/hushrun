@@ -27,9 +27,12 @@ use super::facts::{FactsFile, MergedTest, TestFacts, Unfollowed};
 pub const ADAPTER: &str = "vitest";
 /// The adapter's name in a worker's facts file.
 pub const WORKER: &str = "vitest-worker";
-/// What the adapter observes being read: its sources (C-30). Vue, Svelte and other kinds a
-/// plugin compiles are in the rest set.
-pub const SOURCE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
+/// What the adapter observes being read: its sources (C-30). \[ADR 0108\] `.vue`: Vue's
+/// components, which @vitejs/plugin-vue compiles to modules named by their file, with what their
+/// compile read besides. Svelte and other kinds a plugin compiles are in the rest set.
+pub const SOURCE_KINDS: &[&str] = &[
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".vue",
+];
 /// The variable the config line loads the plugin from.
 pub const VARIABLE: &str = "HUSHRUN_VITEST";
 /// The line a repository's Vitest config needs, in its `plugins`. \[ADR 0084, amended\] A
@@ -41,6 +44,8 @@ pub const CONFIG_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(pro
 const PLUGIN: &str = include_str!("hushrun_vitest.mjs");
 /// The setup file the plugin puts first, in each worker.
 const SETUP: &str = include_str!("hushrun_vitest_setup.mjs");
+/// \[ADR 0108\] What the plugin does for Vue's components.
+const VUE: &str = include_str!("hushrun_vitest_vue.mjs");
 /// The config files Vitest looks for, in the order it does.
 const CONFIG_NAMES: &[&str] = &[
     "vitest.config.ts",
@@ -288,13 +293,14 @@ fn unobservable(text: &str) -> Option<&'static str> {
 /// The directory that holds the plugin and its setup file for this binary, written whole when
 /// they aren't there yet: `<cache dir>/adapters/vitest-<first 16 hex of their SHA-256>`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
-    let digest = hushrun_core::Digest::of(format!("{PLUGIN}\0{SETUP}").as_bytes()).hex();
+    let digest = hushrun_core::Digest::of(format!("{PLUGIN}\0{SETUP}\0{VUE}").as_bytes()).hex();
     let dir = cache
         .join("adapters")
         .join(format!("vitest-{}", &digest[..16]));
     for (name, text) in [
         ("hushrun-vitest.mjs", PLUGIN),
         ("hushrun-vitest-setup.mjs", SETUP),
+        ("hushrun-vitest-vue.mjs", VUE),
     ] {
         let path = dir.join(name);
         if std::fs::read(&path).ok().as_deref() != Some(text.as_bytes()) {
@@ -421,9 +427,11 @@ fn relative(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// What a module id a worker ran says: a file, by its path without a query; nothing, for Vite's
-/// own helpers (`\0vite/…`); or a module some plugin made from no one file, `Err`.
+/// own helpers (`\0vite/…`) \[ADR 0108\] and @vitejs/plugin-vue's (`\0plugin-vue:export-helper`,
+/// the same text from the plugin's own code for every component); or a module some plugin made
+/// from no one file, `Err`.
 fn module_path(id: &str) -> Result<Option<PathBuf>, String> {
-    if id.starts_with("\0vite/") {
+    if id.starts_with("\0vite/") || id == VUE_HELPER {
         return Ok(None);
     }
     let id = id.split('?').next().unwrap_or(id);
@@ -433,6 +441,9 @@ fn module_path(id: &str) -> Result<Option<PathBuf>, String> {
     }
     Ok(Some(path.to_path_buf()))
 }
+
+/// \[ADR 0108\] The one module @vitejs/plugin-vue makes from no file.
+const VUE_HELPER: &str = "\0plugin-vue:export-helper";
 
 /// \[C-37\] Why no pass of a run is kept when Vitest reported an error no test owns: the first
 /// such error's test file, from the root, and its first line when it is short; `None` when there
@@ -932,6 +943,14 @@ mod tests {
         );
         assert!(module_path("\0virtual:routes").is_err());
         assert!(module_path("virtual:routes").is_err());
+        // [ADR 0108] plugin-vue's one helper is its own code, and a component's blocks are its
+        // file's or the file their `src=` names.
+        assert_eq!(module_path("\0plugin-vue:export-helper").unwrap(), None);
+        assert!(module_path("\0plugin-vue:other").is_err());
+        assert_eq!(
+            module_path("/repo/src/A.vue?vue&type=style&index=0&lang.module.css").unwrap(),
+            Some(PathBuf::from("/repo/src/A.vue"))
+        );
         assert!(module_path("src/relative.ts").is_err());
     }
 

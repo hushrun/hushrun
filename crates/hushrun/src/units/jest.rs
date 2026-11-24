@@ -32,9 +32,11 @@ pub const MAIN: &str = "jest-main";
 /// The kinds of code the adapter observes being read.
 pub const CODE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
 /// What the adapter observes being read: its sources (C-30). A snapshot is read by its test file
-/// alone, through `fs`, so a change to one runs only that test file. Every other kind is rest.
+/// alone, through `fs`, so a change to one runs only that test file. \[ADR 0108\] A Vue component
+/// is a module Jest compiles under its own name (`@vue/vue3-jest`, `@vue/vue2-jest`), and what its
+/// transformer reads for its `src=` blocks goes through `fs`. Every other kind is rest.
 pub const SOURCE_KINDS: &[&str] = &[
-    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".snap",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".snap", ".vue",
 ];
 /// The variable the config line loads the adapter from.
 pub const VARIABLE: &str = "HUSHRUN_JEST";

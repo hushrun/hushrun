@@ -88,6 +88,18 @@ project's new branch starts from what main's CI already ran.
   reused test shows as `# skip reused by hushrun`, and bats' output is otherwise unchanged. bats-core
   1.10 or later, on Linux and macOS. `hushrun init` knows `bats` and `shellcheck`. Shell has no
   compile step, so there are no build blocks for it.
+- **Vue's components in test reuse** (C-58 to C-61, ADR 0108). `.vue` is a source of the Vitest and
+  Jest adapters, so a change to one component runs only the test files that mounted it. Under
+  Vitest, the files a component's `<script setup>` macros took their types from are read with it,
+  through the compiler `@vitejs/plugin-vue` holds, and plugin-vue's helper module no longer makes
+  every component's test file `not observed`; under Jest, a component's `src=` files are read with
+  it even when Jest's cache holds it.
+
+### Fixed
+
+- **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
+  find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
+  holds; the plugin now adds its own directory there.
 
 ## [0.19.1] - 2026-11-23
 
