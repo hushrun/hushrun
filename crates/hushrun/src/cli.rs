@@ -184,6 +184,19 @@ pub enum Command {
     /// Show where `hushrun run` records results, with which credential, and who the backend
     /// says you are.
     Whoami,
+    /// Fetch what a sandbox whose network goes after setup needs: the newest result of each
+    /// check of this tree, and the compiled code of the checks named.
+    ///
+    /// For a setup script, which has the network and a credential that later phases may lack.
+    /// What it fetches is kept for 24 hours, and later runs use it while the backend is out of
+    /// reach. `hushrun build fetch` fetches only the compiled code.
+    Fetch(FetchArgs),
+    /// Send the results that waited on this machine while the backend was out of reach.
+    ///
+    /// A result `hushrun run` couldn't record waits in the outbox, in hushrun's cache directory,
+    /// for 7 days. The next run and `hushrun ready` send it; so does this, at the end of an
+    /// agent's session.
+    Flush,
     /// Agent tokens: let agents in sandboxes, and CI outside GitHub, record results without a
     /// browser (an org admin's).
     ///
@@ -362,6 +375,14 @@ pub enum BuildCommand {
     /// (`hushrun login`), or in GitHub Actions the job's ID token. Good for 24 hours; no token is
     /// kept.
     Fetch(BuildFetchArgs),
+    /// Put this repository's newest baked store where runs read one (HUSHRUN_BUILD_LOWER, or
+    /// /hushrun), from the backend's registry: for a sandbox whose image is fixed.
+    ///
+    /// It pulls `<registry>/<org>/<name>:hushrun-<platform>-latest` with a pull token in
+    /// HUSHRUN_REGISTRY_TOKEN, the backend's credential here, or nothing for a public
+    /// repository; checks the store, and its signature when hushrun.yaml names signers of baked
+    /// stores; and only then replaces what was there.
+    Pull(BuildPullArgs),
     /// Write a self-contained store of one repository's compiled crates, Go packages and C and
     /// C++ objects for this machine's platforms: sealed packs, sealed hints and baked.json,
     /// nothing else.
@@ -523,6 +544,34 @@ pub enum BakeFrom {
     Store,
     /// The org's backend, as `hushrun build fetch` reads it.
     Backend,
+}
+
+/// `hushrun fetch [CHECK]...` (C-144).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct FetchArgs {
+    /// The checks whose newest builds to fetch, by the names `hushrun run` runs them under. Every
+    /// check of the tree has its newest result fetched whatever is named.
+    pub checks: Vec<String>,
+}
+
+/// `hushrun build pull` (B-240).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct BuildPullArgs {
+    /// The image, `<host>/<org>/<name>` [default: this repository's on its backend's registry].
+    #[arg(long, value_name = "REPOSITORY")]
+    pub image: Option<String>,
+    /// The tag, by default `hushrun-<platform>-latest`.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+    /// The platform, as tags name it, such as linux-x64 [default: this machine's].
+    #[arg(long, value_name = "PLATFORM", conflicts_with = "tag")]
+    pub platform: Option<String>,
+    /// Where to put it [default: HUSHRUN_BUILD_LOWER, else /hushrun].
+    #[arg(long, value_name = "FOLDER")]
+    pub to: Option<std::path::PathBuf>,
+    /// The registry is reached over plain HTTP (tests only).
+    #[arg(long, hide = true)]
+    pub insecure: bool,
 }
 
 /// `hushrun build fetch [CHECK]...` (B-36).
@@ -754,6 +803,18 @@ pub struct InitArgs {
     #[arg(long, conflicts_with_all = ["local", "pipeline_flags"])]
     pub bake: bool,
 
+    /// The agent clouds your team uses, comma-separated: claude-code, cursor, copilot, codex,
+    /// jules, devin, devcontainer, or none. init writes their files: hooks that send what a
+    /// session passed before it ends, Copilot's setup steps, a dev container's feature
+    /// [default: the ones the repository already has files for].
+    #[arg(
+        long,
+        value_name = "LIST",
+        value_delimiter = ',',
+        conflicts_with = "pipeline_flags"
+    )]
+    pub agent_clouds: Option<Vec<String>>,
+
     /// Write a starter hushrun.yaml for a deploy pipeline instead. The flags below imply it.
     #[arg(long, help_heading = "Pipeline")]
     pub pipeline: bool,
@@ -790,6 +851,10 @@ impl InitArgs {
 pub struct DoctorArgs {
     #[command(flatten)]
     pub registry: RegistryOpts,
+    /// Checks the hosts hushrun needs from here, and what an allowlist must hold, also outside
+    /// a coding agent's sandbox, where doctor checks them anyway.
+    #[arg(long)]
+    pub hosts: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -972,6 +1037,21 @@ pub struct LoginArgs {
     /// Print the approval page's address without opening a browser.
     #[arg(long)]
     pub no_browser: bool,
+
+    /// Swap this sandbox's credential for a short session of one repository, and save it: an
+    /// agent token (HUSHRUN_TOKEN), a Cursor cloud agent's ID token, or a GitHub Actions job's
+    /// ID token. For agents, with no browser.
+    #[arg(long, conflicts_with = "no_browser")]
+    pub session: bool,
+
+    /// With --session: how long it lasts, 1 to 12 hours [default: the server's, 4].
+    #[arg(long, value_name = "HOURS", requires = "session", value_parser = clap::value_parser!(u32).range(1..=12))]
+    pub hours: Option<u32>,
+
+    /// With --session: the repository, for an agent token of the whole org, such as
+    /// github.com/acme/shop [default: the repository hushrun runs in].
+    #[arg(long, value_name = "REPO", requires = "session")]
+    pub repository: Option<String>,
 }
 
 /// `hushrun token` (C-17).
@@ -1020,6 +1100,12 @@ pub struct TokenCreateArgs {
     /// hushrun cloud].
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub rate: Option<u32>,
+
+    /// A bearer token, with no machine key: for a sandbox whose network adds the token to
+    /// hushrun's requests (HUSHRUN_AUTH=proxy), or one that swaps it for a session. The server
+    /// records its results as the agent's, unsigned.
+    #[arg(long)]
+    pub bearer: bool,
 
     #[command(flatten)]
     pub target: TokenBackendArgs,
