@@ -1100,6 +1100,32 @@ hushrun: unit: 1 of 40 test files run; 39 already passed on the files they read
 
 The rules are C-58 to C-61 ([ADR 0108](../adr/0108-vue-components.md)).
 
+### Kotlin
+
+Kotlin's tests and builds go through Gradle, with the same line in the settings file. Beside
+`test`, `jvmTest` and Android's `testDebugUnitTest`, hushrun follows Kotlin Multiplatform's own
+test tasks, `jsNodeTest`, `jsBrowserTest`, `wasmJsNodeTest` and native ones such as
+`linuxX64Test`: a test class is the file that declares it, so a `commonTest` class is one test
+file for every platform it runs on, and a class or test that already passed on the files it read
+is left out on all of them, through Gradle's own test filter. Kotest's specs are test files too,
+left out whole; their tests, which have no method to name, always run when their spec does.
+
+```text
+$ hushrun run unit -- ./gradlew allTests
+hushrun: unit: 3 of 12 tests run, in 2 of 5 test classes; 9 already passed on the files they read
+```
+
+For compiled code, Kotlin's compile tasks, KSP's and kapt's annotation processing are cacheable and
+relocatable, and are shared like any other Gradle task. kapt's stub generation writes its
+sources' absolute paths into its output, so it stays on the machine, and the summary names it:
+
+```text
+hushrun: build: gradle: 1 task run here stays on this machine (1: its outputs hold the checkout's folder): :app:kaptGenerateStubsDebugKotlin
+```
+
+KSP has no such step. A Kotlin/JS or native task leaves out at most 250 tests one by one, and no
+class of the default package.
+
 ## When hushrun runs anyway
 
 Whenever hushrun can't tell whether this code passed, it runs the command and says why:

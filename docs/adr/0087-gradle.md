@@ -50,7 +50,7 @@ and C-46 hold over §4.5.
 4. **Test tasks**: every `Test` task of every project, Android's `test<Variant>UnitTest` and Kotlin
    Multiplatform's `jvmTest` included. Not followed, each said in the facts: a test task of an
    included build (another build, whose settings have no line; known by its name), an
-   `AbstractTestTask` that isn't a `Test` (Kotlin/Native, Kotlin/JS), a framework the script
+   `AbstractTestTask` that isn't a `Test` (Kotlin/Native, Kotlin/JS, followed since [ADR 0117](0117-kotlin.md)), a framework the script
    doesn't know. Not seen at all: `buildSrc`'s tests, a `JavaExec` that runs tests, Android's
    instrumented tests (no `Test` task; §6 of the RFC). With Isolated Projects on, the script says so in Gradle's output and
    observes nothing: its configuration crosses projects.

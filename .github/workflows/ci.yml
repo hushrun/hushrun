@@ -136,6 +136,11 @@ jobs:
       # The Android test runs against the runner's own SDK (`ANDROID_HOME`) when it holds the
       # platform the test compiles for, android-36; otherwise this job opts out of it by name
       # (`HUSHRUN_TEST_ANDROID=skip`) and says so, since under `required` a missing SDK fails it.
+      # Kotlin (ADR 0117): Kotlin/Native's test runs here, on Linux x86-64 only, since its
+      # toolchain (hundreds of megabytes from download.jetbrains.com) lands in the Gradle user
+      # home's `hushrun-konan` when the next step fills that home online.
+      - name: Opt in to the Kotlin/Native test-class test
+        run: echo "HUSHRUN_TEST_KOTLIN_NATIVE=1" >> "$GITHUB_ENV"
       - name: Install Gradle and fill its user home for the test-class tests
         run: |
           set -euo pipefail
