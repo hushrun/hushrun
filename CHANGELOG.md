@@ -80,6 +80,19 @@ project's new branch starts from what main's CI already ran.
   build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
   LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
   the ADR lists what the first build on a Mac checks.
+- **Go: coverage runs whole, files no test binary is built from rerun only what read them, and
+  `runtime` is shared before Go 1.27** (C-70, C-71, B-150, ADR 0111). A `go test` with `-cover`, `-coverprofile`, `-coverpkg` or
+  `-covermode` (in COMMAND, after `-args` or in `GOFLAGS`) now runs every package, as Jest and
+  Vitest do with coverage: a reused package wrote nothing to the profile, which then read as a
+  drop. And every `.go` file that isn't a tested package's test file is a source: editing another
+  package's tests, an unimported package, a file the tags leave out or another module of a
+  `go.work` no longer reruns every package. The first run of each Go check after upgrading
+  reruns every package once. With Go 1.24 to 1.26, whose assembler doesn't mark the standard
+  library's objects, `runtime` and the other standard packages with assembly now leave the machine
+  as build blocks, as they did with Go 1.27: they are known by their own package's compiled object.
+  A Go fetch that comes while the check's `open`s are still under way now waits for them, within
+  B-45's bound, so a slow server no longer makes Go's first packages compile on a machine that
+  could have downloaded them.
 - **Vue's components in test reuse** (C-58 to C-61, ADR 0108). `.vue` is a source of the Vitest and
   Jest adapters, so a change to one component runs only the test files that mounted it. Under
   Vitest, the files a component's `<script setup>` macros took their types from are read with it,
