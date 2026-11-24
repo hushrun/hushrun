@@ -194,8 +194,11 @@ if [[ -n ${HUSHRUN_BATS_EXE-} && -n ${HUSHRUN_UNITS-} && -z ${__hushrun_bats_loa
   __hushrun_bats_in_main() {
     if [[ -n $__hushrun_bats_rewrap ]]; then
       __hushrun_bats_rewrap=
-      local listed
-      listed=$(builtin trap -p EXIT 2>/dev/null) || listed=
+      # Listed into a file, not `$(…)`: a subshell may list its own traps, which are reset.
+      local listed= at=$HUSHRUN_BATS_RUN/exit-trap
+      if builtin trap -p EXIT >"$at" 2>/dev/null; then
+        listed=$(<"$at")
+      fi
       __hushrun_bats_was=
       [[ -z $listed ]] || eval "__hushrun_bats_action $listed" 2>/dev/null || :
       case $__hushrun_bats_was in
