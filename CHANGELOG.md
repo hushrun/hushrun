@@ -67,6 +67,9 @@ project's new branch starts from what main's CI already ran.
   reruns every package once. With Go 1.24 to 1.26, whose assembler doesn't mark the standard
   library's objects, `runtime` and the other standard packages with assembly now leave the machine
   as build blocks, as they did with Go 1.27: they are known by their own package's compiled object.
+  A Go fetch that comes while the check's `open`s are still under way now waits for them, within
+  B-45's bound, so a slow server no longer makes Go's first packages compile on a machine that
+  could have downloaded them.
 
 ## [0.19.1] - 2026-11-23
 

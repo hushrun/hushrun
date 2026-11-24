@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-24
-- **Rules:** C-70, C-71, B-150; amends C-30 for Go and B-42; relies on ADR 0070, 0086, 0093
+- **Rules:** C-70, C-71, B-150; amends C-30 for Go, B-42 and B-45; relies on ADR 0070, 0086, 0093
 
 ## Context
 
@@ -83,6 +83,16 @@ Three gaps, each seen in real runs:
    assembly safe to share holds unchanged: its includes are the toolchain's, which B-43's identity
    hashes. A downloaded archive could claim either flag, as it could claim the assembler's before;
    that stays the audit's and the trust policy's to catch, as for every block.
+
+4. **A Go fetch waits for the `open`s it needs** (B-45). On Vue's PR, the macOS job of
+   `build_go`'s two-machine test reused 28 of 29 packages and built one, on code with no Go
+   change. The cache program starts with COMMAND, while the check's `open` and its `go/1` `open`
+   are still on the wire; a fetch that came then found the relay `Opening` or the manifest
+   `Asking`, and was a miss at once. B-45 already promised a fetch waits for the manifest's lookup,
+   at most a second or half its local cost; it now waits for the `open`s too, within the same
+   bound, shared with the lookup. A test whose fake server answers `open` 400 ms late fails
+   without it (`None` for a block the manifest names) and passes with it. Gradle's fetch goes
+   through the same function and gets the same wait.
 
 ## Consequences
 

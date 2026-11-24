@@ -2778,7 +2778,9 @@ counted and not listed. A Go fetch is looked up only when that manifest names it
 about every entry its cache misses, most of them local ones no server holds. The first Go fetch
 of the check starts the prefetch of what the manifest names that the store lacks (a machine
 whose `go` finds everything in its own cache asks nothing and downloads nothing); a fetch that
-comes while that lookup runs waits for it, at most a second or half its local cost. *Rests on:*
+comes while that lookup runs waits for it, at most a second or half its local cost; [ADR 0111] so
+does one that comes while the check's `open` or its `go/1` `open` is still under way, within the
+same bound, which it then shares with the lookup (Go asks for its first packages as COMMAND starts). *Rests on:*
 the server keeping manifests per repository, check, platform and kind, and taking any kind that
 `is_kind` reads (no server change). *Breaks if:* a check's manifest names other packages than
 its next run asks for: they compile here, a cost and never a wrong block.
