@@ -313,6 +313,9 @@ struct Check {
     /// B-82: COMMAND's Gradle is served hushrun's cache: its `gradle/1` manifest is asked for and
     /// closed apart.
     gradle: bool,
+    /// B-176: COMMAND's Maven is served hushrun's cache: its `maven/1` manifest is asked for and
+    /// closed apart.
+    maven: bool,
 }
 
 /// The check's Go manifest (B-45): asked once `open` answered, kept until the first Go fetch
@@ -357,6 +360,10 @@ struct State {
     gradle_manifest: GoManifest,
     /// The prefetch of the Gradle manifest is looking up what it names.
     gradle_prefetching: bool,
+    /// B-176: the check's `maven/1` manifest, as the Gradle one is kept.
+    maven_manifest: GoManifest,
+    /// The prefetch of the Maven manifest is looking up what it names.
+    maven_prefetching: bool,
     /// The check's `cc/1` manifests, by target triple (B-60), and its `xcode/1` manifests, by
     /// Xcode build (B-90): by kind and platform.
     cc_manifests: HashMap<(Kind, String), CcManifest>,
@@ -418,6 +425,7 @@ impl State {
     fn named_manifest(&mut self, kind: Kind) -> &mut GoManifest {
         match kind {
             Kind::Gradle => &mut self.gradle_manifest,
+            Kind::Maven => &mut self.maven_manifest,
             _ => &mut self.go_manifest,
         }
     }
@@ -426,6 +434,7 @@ impl State {
     fn named_prefetching(&mut self, kind: Kind) -> &mut bool {
         match kind {
             Kind::Gradle => &mut self.gradle_prefetching,
+            Kind::Maven => &mut self.maven_prefetching,
             _ => &mut self.go_prefetching,
         }
     }
@@ -698,6 +707,8 @@ impl Relay {
                 go_prefetching: false,
                 gradle_manifest: GoManifest::NotAsked,
                 gradle_prefetching: false,
+                maven_manifest: GoManifest::NotAsked,
+                maven_prefetching: false,
                 cc_manifests: HashMap::new(),
                 cc_prefetching: 0,
                 cc_told: HashSet::new(),
@@ -780,9 +791,11 @@ impl Relay {
                 stop_serving,
                 go,
                 gradle,
+                maven: false,
             });
             state.go_manifest = GoManifest::NotAsked;
             state.gradle_manifest = GoManifest::NotAsked;
+            state.maven_manifest = GoManifest::NotAsked;
             state.cc_manifests.clear();
             if !matches!(state.phase, Phase::Stopped(_)) {
                 state.phase = Phase::Opening;
@@ -993,6 +1006,18 @@ impl Relay {
             Request::GradleReport { key, problem } => {
                 // As Go's: answered once the record is read, so the cache may discard it.
                 self.report_problem_soon(Kind::Gradle, key, problem);
+                Answer::Ok
+            }
+            Request::MavenFetch { key, local_ms } => {
+                self.named_fetch(Kind::Maven, key, local_ms).await
+            }
+            Request::MavenVouch { key, outputs } => self.vouch(Kind::Maven, key, outputs).await,
+            Request::MavenBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::MavenReport { key, problem } => {
+                self.report_problem_soon(Kind::Maven, key, problem);
                 Answer::Ok
             }
         }
@@ -1218,6 +1243,7 @@ impl Relay {
                 }
                 let prefetching = match kind {
                     Kind::Gradle => state.gradle_prefetching,
+                    Kind::Maven => state.maven_prefetching,
                     _ => state.go_prefetching,
                 };
                 if !prefetching || Instant::now() >= until {
@@ -2333,7 +2359,14 @@ impl Relay {
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        for kind in [Kind::Rustc, Kind::Go, Kind::Cc, Kind::Gradle, Kind::Xcode] {
+        for kind in [
+            Kind::Rustc,
+            Kind::Go,
+            Kind::Cc,
+            Kind::Gradle,
+            Kind::Xcode,
+            Kind::Maven,
+        ] {
             let keys: Vec<Digest> = keys
                 .iter()
                 .filter(|(k, _)| *k == kind)
@@ -2570,6 +2603,16 @@ impl Relay {
                 false,
                 *cost_ms,
             ),
+            // B-175: and so is a Maven module's entry (B-173).
+            Request::MavenBuilt { key, cost_ms } => (
+                Kind::Maven,
+                *key,
+                *key,
+                LocalClass::Library,
+                true,
+                false,
+                *cost_ms,
+            ),
             // B-60: a C or C++ object is a library.
             Request::CcBuilt {
                 key,
@@ -2658,7 +2701,7 @@ impl Relay {
         // B-33: every class is compared, a linked output among them (B-16); a Gradle entry
         // never is, since Gradle's outputs needn't be the same from one execution to the next
         // (B-81).
-        if sharing == Sharing::Observe && kind != Kind::Gradle {
+        if sharing == Sharing::Observe && kind != Kind::Gradle && kind != Kind::Maven {
             let relay = self.clone();
             let linked = class != LocalClass::Library;
             self.runtime
@@ -2869,6 +2912,31 @@ impl Relay {
 
     // --- the end of a check --------------------------------------------------------------
 
+    /// B-176: the check that began serves Maven hushrun's cache too: its `maven/1` manifest is
+    /// asked for beside the check's own `open`, under one platform for every machine, and closed
+    /// apart. Nothing for a relay that reads a saved policy, whose runs ask no manifest.
+    pub(crate) fn also_maven(self: &Arc<Relay>) {
+        let check = {
+            let mut state = self.state();
+            let Some(at) = state.check.as_mut() else {
+                return;
+            };
+            at.maven = true;
+            let check = at.check;
+            if self.config.saved.is_some() {
+                return;
+            }
+            state.maven_manifest = GoManifest::Asking;
+            check
+        };
+        let relay = self.clone();
+        self.runtime.spawn(async move {
+            relay
+                .manifest_open(Kind::Maven, check, hushrun_build::maven::PLATFORM.into())
+                .await;
+        });
+    }
+
     /// Ends a check (B-26, B-29): no new PUT starts, those in flight get the end's wait, the
     /// rest stays in the outbox; `close` goes once with the manifest and the counts; the socket
     /// goes. The lines for the person.
@@ -3002,6 +3070,9 @@ impl Relay {
             // B-82: and its Gradle, with its own manifest and run.
             let gradle = (check.gradle && entries.iter().any(|e| e.kind() == Kind::Gradle))
                 .then(|| self.close_request(Kind::Gradle, check, entries));
+            // B-176: and its Maven, the same way.
+            let maven = (check.maven && entries.iter().any(|e| e.kind() == Kind::Maven))
+                .then(|| self.close_request(Kind::Maven, check, entries));
             // B-60: and its C and C++ compiles, once for each target triple they were for.
             let mut cc: Vec<CloseRequest> = cc_platforms(entries)
                 .into_iter()
@@ -3022,7 +3093,7 @@ impl Relay {
                     None,
                 );
                 let go = async {
-                    for close in go.iter().chain(gradle.iter()) {
+                    for close in go.iter().chain(gradle.iter()).chain(maven.iter()) {
                         let _ = relay
                             .client
                             .post::<_, serde_json::Value>(blocks::CLOSE_PATH, close, left, None)
@@ -3217,6 +3288,7 @@ impl Relay {
                 && e.cc.is_none()
                 && e.xcode.is_none()
                 && e.gradle.is_none()
+                && e.maven.is_none()
                 && e.portable
                     .as_ref()
                     .is_some_and(|p| !(p.portable || (from_a_job && p.bound_only())))
@@ -3225,6 +3297,7 @@ impl Relay {
             e.go.as_ref().is_some_and(|go| go.local.is_some())
                 || e.xcode.as_ref().is_some_and(|x| x.local.is_some())
                 || e.gradle.as_ref().is_some_and(|g| g.local.is_some())
+                || e.maven.as_ref().is_some_and(|m| m.local.is_some())
                 || e.cc.as_ref().is_some_and(|cc| !goes_up(&cc.local))
                 || rust_stays(e)
         };
@@ -3268,11 +3341,13 @@ impl Relay {
                 counts,
             };
         }
-        if kind == Kind::Go || kind == Kind::Gradle {
+        if matches!(kind, Kind::Go | Kind::Gradle | Kind::Maven) {
             let mut bytes = check.run.0.to_vec();
             bytes.extend_from_slice(format!("{}\n", kind.word()).as_bytes());
             let platform = if kind == Kind::Gradle {
                 hushrun_build::gradle::PLATFORM.to_string()
+            } else if kind == Kind::Maven {
+                hushrun_build::maven::PLATFORM.to_string()
             } else {
                 check.go.clone().unwrap_or_default()
             };

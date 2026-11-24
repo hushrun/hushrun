@@ -129,6 +129,9 @@ jobs:
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+          # Java (ADR 0113): and the build cache extension and plugins of the Maven build-block tests.
+          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
+            cargo nextest run -p hushrun --test build_maven --locked --no-fail-fast || echo "filling Maven's repository for build_maven failed: the test run says what is missing"
       # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
       # published checksum, and a Gradle user home filled here once by running those tests online,
       # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
@@ -269,6 +272,9 @@ jobs:
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+          # Java (ADR 0113): and the build cache extension and plugins of the Maven build-block tests.
+          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
+            cargo nextest run -p hushrun --test build_maven --locked --no-fail-fast || echo "filling Maven's repository for build_maven failed: the test run says what is missing"
       # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
       # published checksum, and a Gradle user home filled here once by running those tests online,
       # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,

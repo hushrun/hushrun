@@ -114,6 +114,9 @@ pub enum Kind {
     /// Gradle's task outputs, served to Gradle as its remote build cache, kind `gradle/1`
     /// (B-77), with a manifest of their own per check.
     Gradle,
+    /// Maven's modules, served to Apache's build cache extension as its remote cache, kind
+    /// `maven/1` (B-170), with a manifest of their own per check.
+    Maven,
 }
 
 impl Kind {
@@ -125,6 +128,7 @@ impl Kind {
             Kind::Cc => crate::cc::KIND,
             Kind::Xcode => crate::xcode::KIND,
             Kind::Gradle => crate::gradle::KIND,
+            Kind::Maven => crate::maven::KIND,
         }
     }
 
@@ -136,6 +140,7 @@ impl Kind {
             Some(word) if word == Kind::Cc.word() => Kind::Cc,
             Some(word) if word == Kind::Xcode.word() => Kind::Xcode,
             Some(word) if word == Kind::Gradle.word() => Kind::Gradle,
+            Some(word) if word == Kind::Maven.word() => Kind::Maven,
             _ => Kind::Rustc,
         }
     }

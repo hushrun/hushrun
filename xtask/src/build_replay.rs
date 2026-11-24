@@ -2048,6 +2048,7 @@ mod tests {
             xcode: None,
             cc: None,
             gradle: None,
+            maven: None,
         }
     }
 

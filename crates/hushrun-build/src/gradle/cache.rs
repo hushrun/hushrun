@@ -568,6 +568,7 @@ fn gradle_entry(outcome: Outcome, key: &Digest, task: &str) -> Entry {
         go: None,
         cc: None,
         gradle: Some(GradleEntry::default()),
+        maven: None,
     }
 }
 

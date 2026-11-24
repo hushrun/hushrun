@@ -172,6 +172,24 @@ pub enum Request {
     GradleBuilt { key: Digest, cost_ms: u64 },
     /// Gradle's cache's [`Request::Report`].
     GradleReport { key: Digest, problem: Problem },
+    /// Maven's cache's [`Request::Fetch`] (B-174): the entry of a module under `key`, of kind
+    /// `maven/1`, whose first key is itself. Looked up only when the check's `maven/1` manifest
+    /// names it, as Gradle's are: the extension asks about every module it builds.
+    MavenFetch {
+        key: Digest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// Maven's cache's [`Request::Vouch`].
+    MavenVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// Maven's cache's [`Request::Built`] (B-175): a module's entry this run's Maven stored under
+    /// `key`, which may leave the machine (B-173).
+    MavenBuilt { key: Digest, cost_ms: u64 },
+    /// Maven's cache's [`Request::Report`].
+    MavenReport { key: Digest, problem: Problem },
 }
 
 impl Request {
@@ -187,6 +205,7 @@ impl Request {
                 | Request::CcBuilt { .. }
                 | Request::XcodeBuilt { .. }
                 | Request::GradleBuilt { .. }
+                | Request::MavenBuilt { .. }
         )
     }
 }

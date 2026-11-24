@@ -65,6 +65,7 @@ pub mod link;
 pub mod linkenv;
 pub mod loader;
 pub mod manifests;
+pub mod maven;
 pub mod memo;
 pub mod messages;
 pub mod metadata;

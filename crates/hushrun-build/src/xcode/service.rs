@@ -830,6 +830,7 @@ impl Service {
     fn entry(&self, outcome: Outcome, key: &Digest) -> Entry {
         Entry {
             gradle: None,
+            maven: None,
             outcome,
             class: Some(Class::Library),
             crate_name: String::new(),

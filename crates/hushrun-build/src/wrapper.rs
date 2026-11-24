@@ -287,6 +287,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         xcode: None,
         cc: None,
         gradle: None,
+        maven: None,
     }
 }
 
