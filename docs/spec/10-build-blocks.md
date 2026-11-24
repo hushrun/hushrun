@@ -3172,6 +3172,8 @@ checks count nowhere. The compiler's own output is unchanged.
 run, `HUSHRUN_CC` set by hand) replaces itself with the compiler and the arguments as given, and
 reads nothing else. *Rests on:* nothing.
 
+**B-240 `hushrun build pull`.** [ADR 0143] It puts the repository's newest baked store where runs read one. The image is `--image`, else `<registry host of the backend's origin>/<org>/<image name of the repository>` (B-70), and the tag `--tag`, else `hushrun-<platform>-latest` for `--platform` or this machine's (B-66). The credential, as Basic `hushrun:<token>`: `HUSHRUN_REGISTRY_TOKEN`, else the backend's token here when the image is on that backend's registry, else none (a public repository's image). It reads the manifest and each layer, each checked against its digest and at most 8 GiB, and unpacks from them only entries under `hushrun/`, regular files and folders, into a folder beside the destination; an entry outside the folder, a link or a device stops it. That folder must be a baked store (B-63, `baked.json` read, names and bytes checked), and when `hushrun.yaml` names signers of baked stores, its signature must verify (B-67). Only then does it replace the destination, `--to`, else `HUSHRUN_BUILD_LOWER`, else `/hushrun`, by renames: what was there stays when the swap fails. It says `hushrun: pulled <image>:<tag> (<digest>) into <folder>: <signed by … | why a run won't trust it unasked>`. A tag that names nothing, a store that doesn't check, or a registry that refuses exits 1, and replaces nothing. A run still decides what it trusts as it begins (B-63, B-64).
+
 ## Gradle (draft)
 
 > Draft, from [ADR 0104](../adr/0104-gradle-build-blocks.md) (proposed). Built: sharing through
@@ -3401,6 +3403,31 @@ unsets the variable only when it names hushrun's file, and removes the file. `st
 of these hold. *Rests on:* apps opened after `launchctl setenv` getting the variable, and Xcode
 reading it for the app's builds. *Breaks if:* it doesn't: the spike says.
 
+## C++20 modules and precompiled headers
+
+**B-241 An empty response file.** [ADR 0120] An `@file` argument whose file, from the compile's
+folder, holds nothing but white space adds no argument: B-51 classifies the call without it, and
+B-53 keys it so, as the same compile written without it. CMake 3.28 and later give every scanned
+C++20 compile `@<object>.modmap`, empty with clang for a source that imports and exports no
+module. A `.modmap` that holds anything passes the call through as `modules`; any other response
+file, or one that can't be read, as `response-file`. GCC's scanned compiles pass through as
+`modules` by their `-fmodules-ts` and `-fmodule-mapper=` (B-51). *Rests on:* a response file's
+words being the only thing it adds, and an empty one none. *Breaks if:* a compiler read a response
+file's name for anything else.
+
+**B-242 Precompiled headers.** [ADR 0120] A precompiled header made or used passes through as
+`pch` (B-51), and so does `-Xclang` before a flag B-51 counts as `pch` or `modules`, as that flag
+would: CMake's `target_precompile_headers` with clang passes `-Xclang -include-pch -Xclang
+<header>.pch`. Every other `-Xclang` is `loads-code`. Nothing a precompiled header's user or a
+module's importer compiles is stored.
+
+**B-243 A clang that takes the include graph.** [ADR 0120] A clang compile gets B-55's
+variables only when the compiler's identity says its driver takes them: asked once with the
+identity (B-52), as `/usr/bin/env CC_PRINT_HEADERS_FORMAT=json
+CC_PRINT_HEADERS_FILTERING=direct-per-file CC_PRINT_HEADERS_FILE=/dev/null <compiler> -x <lang>
+-E /dev/null -o /dev/null`, which must exit 0. clang 15 to 18 know the filtering variable but not
+`direct-per-file`, and fail every compile given it; they compile with B-54's fallback, as GCC
+does. The identity's memo is `hushrun.cc-compiler-memo/3`, so that each compiler is asked again.
 ## TypeScript (draft)
 
 > Draft, from [ADR 0106](../adr/0106-typescript-build-blocks.md) (proposed). Built: local reuse

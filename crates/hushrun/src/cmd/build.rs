@@ -33,6 +33,7 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
         BuildCommand::Status => status(global, &place),
         BuildCommand::Clean => clean(global, &place),
         BuildCommand::Fetch(fetch_args) => fetch(global, &place, &fetch_args.checks),
+        BuildCommand::Pull(pull_args) => crate::cmd::build_pull::run(global, &pull_args),
         BuildCommand::Bake(bake_args) => bake(global, &place, &bake_args),
         BuildCommand::Manifest(manifest_args) => manifest(global, &place, &manifest_args),
         BuildCommand::Xcode(command) => xcode(&place, &command),
@@ -46,6 +47,12 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
             },
         ),
     }
+}
+
+/// \[ADR 0142\] What `hushrun fetch` asks of build reuse: `build fetch`'s, for `checks`.
+pub(crate) fn fetch_blocks(global: &GlobalOpts, checks: &[String]) -> CmdResult {
+    let place = Place::read()?;
+    fetch(global, &place, checks)
 }
 
 /// `hushrun build fetch [CHECK]...` (B-36): for a sandbox's setup phase, which has the network

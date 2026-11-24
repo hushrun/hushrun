@@ -23,7 +23,7 @@ use crate::regular;
 /// The schema the identity is taken under.
 const SCHEMA: &str = "hushrun.cc-compiler/v1";
 /// The schema of a memo entry.
-const MEMO_SCHEMA: &str = "hushrun.cc-compiler-memo/2";
+const MEMO_SCHEMA: &str = "hushrun.cc-compiler-memo/3";
 /// Where a memo entry's name starts, in the store's compiler memos ([`crate::compiler::MEMOS`]).
 const MEMO_PREFIX: &str = "cc-";
 
@@ -75,6 +75,10 @@ pub struct Identity {
     pub digest: Digest,
     /// The driver is clang's: it writes the include graph when asked (B-55).
     pub clang: bool,
+    /// \[B-243\] This clang takes the graph's variables: clang 15 to 18 know
+    /// `CC_PRINT_HEADERS_FILTERING` but not `direct-per-file`, and fail every compile given it.
+    #[serde(default)]
+    pub graph: bool,
     /// The target triple the driver names: a block's platform (B-60).
     pub target: String,
     /// The SDK the driver uses, as it names it, when it names one.
@@ -373,6 +377,32 @@ fn ask_identity(
         .filter(|s| s.success)
         .ok_or(NoIdentity::Driver("-###"))?;
     let clang = driver.stderr.contains("\"-cc1\"");
+    // \[B-243\] Asked once, as the compile would be: through `env`, with the graph's variables.
+    let graph = clang
+        && ask(
+            Path::new("/usr/bin/env"),
+            &[
+                format!(
+                    "{}={}",
+                    crate::cc::graph::FORMAT.0,
+                    crate::cc::graph::FORMAT.1
+                ),
+                format!(
+                    "{}={}",
+                    crate::cc::graph::FILTERING.0,
+                    crate::cc::graph::FILTERING.1
+                ),
+                format!("{}=/dev/null", crate::cc::graph::FILE),
+                exe.to_string_lossy().into_owned(),
+                "-x".into(),
+                lang.word().into(),
+                "-E".into(),
+                "/dev/null".into(),
+                "-o".into(),
+                "/dev/null".into(),
+            ],
+        )
+        .is_some_and(|said| said.success);
     let target = driver
         .stderr
         .lines()
@@ -493,6 +523,7 @@ fn ask_identity(
         Identity {
             digest: Digest::of(canonical.as_bytes()),
             clang,
+            graph,
             target,
             sdk,
             sdk_resolved,

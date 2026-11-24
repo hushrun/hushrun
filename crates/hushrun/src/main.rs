@@ -18,10 +18,13 @@ mod lifecycle;
 mod machine;
 mod measure;
 mod notice;
+mod outbox;
 mod output;
 mod planfile;
+mod reach;
 mod releases;
 mod results;
+mod session;
 mod signing;
 mod skill;
 mod units;
@@ -172,6 +175,9 @@ fn run(cli: &Cli) -> ExitCode {
         Command::Logout(args) => cmd::login::logout(&cli.global, args),
         // C-17: results' identity and agent tokens need no hushrun.yaml.
         Command::Whoami => cmd::whoami::run(&cli.global),
+        // C-143: the outbox needs no hushrun.yaml.
+        Command::Flush => cmd::flush::run(&cli.global),
+        Command::Fetch(args) => cmd::flush::fetch(&cli.global, args),
         Command::Token(command) => cmd::token::run(&cli.global, command),
         // C-20: updating needs no hushrun.yaml either.
         Command::Update => cmd::update::run(&cli.global),
@@ -209,6 +215,8 @@ fn run(cli: &Cli) -> ExitCode {
             | Command::Login(_)
             | Command::Logout(_)
             | Command::Whoami
+            | Command::Flush
+            | Command::Fetch(_)
             | Command::Token(_)
             | Command::Update
             | Command::Ready(_)
