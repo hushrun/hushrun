@@ -420,9 +420,13 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
         m.env.clone(),
         Box::new(|_| Ok("go build".into())),
     );
-    // A panic is answered at once, not by the watchdog at the budget.
+    // A panic is answered by its handler, not by the watchdog at the budget (1000 ms here, and
+    // never before a tick past it): a loaded machine may take a while to print the panic.
     let panicked_at = reader.join().unwrap();
-    assert!(panicked_at < Duration::from_millis(500), "{panicked_at:?}");
+    assert!(
+        panicked_at < Duration::from_millis(1000) - TICK * 2,
+        "{panicked_at:?}"
+    );
     // The slow handler answers after `close`'s wait: given its time, it writes nothing.
     std::thread::sleep(Duration::from_millis(1500));
     let lines = out.lines();
