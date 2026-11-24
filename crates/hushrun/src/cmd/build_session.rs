@@ -583,6 +583,37 @@ fn give_meson(session: &mut Session, root: &Path, env: &dyn Fn(&str) -> Option<O
     }
 }
 
+/// B-100: gives COMMAND the TypeScript hook, for the checkout the run is in, where the folder
+/// is a Node package's or below one. A hook that can't be set up costs a line, never the run.
+fn give_tsc(session: &mut Session, here: &Here<'_>) {
+    let Some(folder) = &here.folder else {
+        return;
+    };
+    if !node_project(folder) {
+        return;
+    }
+    let root = checkout_root(folder, here.env);
+    if let Err(err) = session.set_tsc(&root, here.env) {
+        session.add_line(format!(
+            "build: TypeScript compiles aren't reused in this run: {err}"
+        ));
+    }
+}
+
+/// Whether `folder` or a folder above it, up to its checkout, holds a `package.json`: where
+/// COMMAND may run `tsc` (B-100).
+fn node_project(folder: &Path) -> bool {
+    for dir in folder.ancestors() {
+        if dir.join("package.json").is_file() {
+            return true;
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    false
+}
+
 /// The line of a Go module's run whose Rust crates aren't reused because `RUSTC_WRAPPER` is set
 /// already, said in an org that shares, where the folder is a cargo project's too.
 const RUST_LEFT_OUT: &str =
@@ -780,6 +811,7 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
         session.leave_out_rustc();
     }
     give_cc(&mut session, here);
+    give_tsc(&mut session, here);
     if let Some(folder) = &here.folder {
         session.check(folder, Some(Instant::now() + CHECK_BUDGET));
         if let Some(sysroot) = (here.sysroot)(folder) {
@@ -1798,6 +1830,7 @@ fn begin_with(
         session.leave_out_rustc();
     }
     give_cc(&mut session, here);
+    give_tsc(&mut session, here);
     // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {
