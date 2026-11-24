@@ -34,7 +34,7 @@ use super::shared::{Asker, List, Shared};
 use super::store::Map;
 use super::{
     Seen, cargo, ctest, exunit, gotest, gradle, jest, maven, mocha, node_test, pytest, swift,
-    unittest, vitest,
+    unittest, vitest, xcodebuild,
 };
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
@@ -63,11 +63,13 @@ pub const RECOGNIZED: &[Recognize] = &[
     unittest::recognized,
     ctest::recognized,
     swift::recognized,
+    xcodebuild::recognized,
 ];
 
 /// How many of [`RECOGNIZED`], at its end, load through `PATH` and take wrapper COMMANDs too:
-/// CTest's and Swift's, which came after pytest took every COMMAND nobody else did.
-pub const THROUGH_PATH: usize = 2;
+/// CTest's, Swift's and \[ADR 0121\] `xcodebuild test`'s, which came after pytest took every
+/// COMMAND nobody else did.
+pub const THROUGH_PATH: usize = 3;
 
 /// \[ADR 0110\] How many of [`RECOGNIZED`], at its end, take a COMMAND pytest's adapter took
 /// before they were there: unittest's, and the [`THROUGH_PATH`] ones.

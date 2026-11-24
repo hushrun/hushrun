@@ -12,6 +12,14 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **`xcodebuild test`'s test targets and tests** (C-110 to C-113, ADR 0121): with `tests: mode:
+  reuse` on macOS, an Xcode project's unit-test and UI-test bundles are units, read from
+  `project.pbxproj` (build phases, synchronized folders, local packages, the targets they depend on
+  and the app that hosts them), and with `unit: test` each XCTest and Swift Testing test is reused
+  on its own. hushrun's `xcodebuild` on `PATH` adds `-skip-testing:` and a result bundle, and reads
+  outcomes with `xcresulttool` (Xcode 16 and later). `xcrun xcodebuild`, `test-without-building`,
+  `-xctestrun` and repeated runs are refused, said once. SwiftPM's compiles outside Xcode aren't
+  reused yet: the ADR says how they will be.
 - **unittest and Django's `manage.py test`, reused by test module and by test** (C-66 to C-69,
   [ADR 0110](docs/adr/0110-unittest.md)). `python -m unittest …`, `manage.py test …`,
   `django-admin test` and `python -m django test`, also after `uv run`, `poetry run` and the like
