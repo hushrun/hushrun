@@ -42,7 +42,9 @@ it, so a test that rendered a component ran it (C-40). A runes module is a `.js`
 
 1. **Vite serves the setup file.** The plugin adds its own directory to the resolved
    `server.fs.allow`, which Vite reads at each request: the workspace stays allowed, and a list a
-   project or plugin set is kept, with that one directory added.
+   project or plugin set is kept, with that one directory added. ADR 0108 (Vue) found the same
+   failure and makes the same change, in the same words; this decision holds it for SvelteKit's
+   own `fs.allow` list too.
 2. **`.svelte` is a source** (C-30): a change to one runs the test files, and with `reads: test`
    the tests, that ran it. A kind a Svelte config adds through `extensions` (mdsvex's `.svx`) stays
    in the rest set.

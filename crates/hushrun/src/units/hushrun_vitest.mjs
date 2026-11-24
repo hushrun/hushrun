@@ -203,13 +203,6 @@ export default function hushrun() {
     },
     configResolved(resolved) {
       guard('configResolved', () => {
-        // [ADR 0109] Vite serves a module to a worker whose environment isn't Node (jsdom,
-        // happy-dom) through `/@fs/` only from `server.fs.allow`, which holds the workspace (or
-        // what a plugin set, SvelteKit's list): hushrun's setup file is outside it.
-        const allow = resolved.server && resolved.server.fs && resolved.server.fs.allow;
-        if (Array.isArray(allow) && !allow.includes(path.dirname(SETUP))) {
-          allow.push(path.dirname(SETUP));
-        }
         for (const file of [resolved.configFile, ...(resolved.configFileDependencies || [])]) {
           if (file) state.configFiles.add(path.resolve(file));
         }
@@ -220,6 +213,13 @@ export default function hushrun() {
           .filter((n) => !KNOWN_NAMES.has(n) && !KNOWN_PREFIXES.some((p) => n.startsWith(p)))
           .filter((n) => !svelte.known(n));
         state.projects.set(resolved.root, { plugins: unknown });
+      });
+      // [ADR 0108] An environment of the browser's (`jsdom`, `happy-dom`) loads the setup file
+      // through Vite's `/@fs/`, which serves only what `server.fs.allow` holds: hushrun's own
+      // directory joins what Vite resolved there, the project's defaults kept.
+      guard('fs.allow', () => {
+        const allow = resolved.server && resolved.server.fs && resolved.server.fs.allow;
+        if (Array.isArray(allow) && !allow.includes(path.dirname(SETUP))) allow.push(path.dirname(SETUP));
       });
     },
     async transform(code, id) {
