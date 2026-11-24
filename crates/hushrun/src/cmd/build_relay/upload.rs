@@ -201,9 +201,11 @@ fn now_ms() -> u64 {
 }
 
 impl Relay {
-    /// The check's upload loop: while the run shares and the policy says it writes, claims a
-    /// few waiting markers of this run's host, org and credential, packs them, and sends them.
-    pub(crate) async fn uploads(self: Arc<Relay>) {
+    /// Starts the check's upload loop ([`Relay::uploads`]), unless one runs. It is marked as
+    /// running here, before it is spawned: an end of the command that came before the runtime
+    /// first polled it would otherwise find no loop, wait for none, and leave every upload for
+    /// the next run.
+    pub(crate) fn start_uploads(self: &Arc<Relay>) {
         {
             let mut state = self.state();
             if state.uploading {
@@ -211,6 +213,14 @@ impl Relay {
             }
             state.uploading = true;
         }
+        let relay = self.clone();
+        self.runtime.spawn(async move { relay.uploads().await });
+    }
+
+    /// The check's upload loop: while the run shares and the policy says it writes, claims a
+    /// few waiting markers of this run's host, org and credential, packs them, and sends them.
+    /// [`Relay::start_uploads`] marked it as running.
+    async fn uploads(self: Arc<Relay>) {
         // However the loop ends, a panic included, it is over: the end of the command waits
         // for it no longer, and a later check starts its own. A panic's claims wait for the
         // run's death, as a crash's do (B-14, B-29).
@@ -653,11 +663,11 @@ const HINTS_PER_BLOCK: usize = 2;
 
 /// B-31: at the end of a CI job's command, the upload loop goes on, up to `until`, while a block
 /// of this run's is still to go: one waiting that may go now, or one this run holds. It stops
-/// early once none is, or the loop stopped.
-pub(crate) async fn drain(relay: &Arc<Relay>, until: Instant) {
-    let deadline = until;
+/// early once none is, or the loop stopped. With no `until` (a settled end, `Tuning::settle`, on
+/// any machine), only that ends it.
+pub(crate) async fn drain(relay: &Arc<Relay>, until: Option<Instant>) {
     let outbox = Outbox::new(&relay.config.store);
-    while Instant::now() < deadline {
+    while until.is_none_or(|until| Instant::now() < until) {
         relay.wake.notify_one();
         let now = now_ms();
         let left = outbox
@@ -674,20 +684,21 @@ pub(crate) async fn drain(relay: &Arc<Relay>, until: Instant) {
 
 /// When the command ends (B-29): no new PUT starts; the PUTs, `begin`s and `commit`s in flight
 /// get until `cut`, then are cut off (their markers count a cut-off). Returns once the check's
-/// upload loop has stopped, or at `deadline`, the end's own, whatever it is doing.
-pub(crate) async fn settle(relay: &Arc<Relay>, cut: Instant, deadline: Instant) {
+/// upload loop has stopped, or at `deadline`, the end's own, whatever it is doing. With neither
+/// (a settled end, `Tuning::settle`), only once the loop has stopped.
+pub(crate) async fn settle(relay: &Arc<Relay>, cut: Option<Instant>, deadline: Option<Instant>) {
     loop {
         if !relay.state().uploading {
             return;
         }
         let now = Instant::now();
-        if now >= cut {
+        if cut.is_some_and(|cut| now >= cut) {
             relay.cut.send_replace(true);
             for handle in relay.state().puts.values() {
                 handle.abort();
             }
         }
-        if now >= deadline {
+        if deadline.is_some_and(|deadline| now >= deadline) {
             return;
         }
         tokio::time::sleep(relay.config.tuning.tick).await;

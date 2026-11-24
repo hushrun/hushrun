@@ -83,6 +83,20 @@ pub(crate) struct Tuning {
     pub(crate) tick: Duration,
     /// Bytes of a pack held in memory while it is made; more go to a file.
     pub(crate) spill: usize,
+    /// Test only, `false` in a release build ([`SETTLE_VAR`]): every wait above that the
+    /// product bounds by time waits instead for what it waits on to be over. Those waits: a Go
+    /// or Gradle fetch waiting for `open`, its manifest and the prefetch (B-45, B-82); a C or
+    /// C++ question waiting for its manifest (B-60); a download waited for within half its
+    /// compile's cost, or not started before the first one measured the rate (B-26); and the
+    /// end of a command waiting for uploads (B-29, B-31). Their bounds are policy, what is worth
+    /// waiting for on this machine, and are tested on their own with their numbers. An
+    /// end-to-end test of what one machine reuses of another's asks something else, and its
+    /// answer must not depend on how loaded the machine is. Settled, each wait ends when what
+    /// it waits on is over: `open` or the manifest answered or failed, the prefetch's lookups
+    /// done, the download arrived or dropped, every upload of this run done or put off by the
+    /// backend's answer, or the relay stopped. The relay reaches each without a timer, so the
+    /// outcome is a function of what the backend answered.
+    pub(crate) settle: bool,
 }
 
 impl Default for Tuning {
@@ -100,6 +114,7 @@ impl Default for Tuning {
             downloads: 8,
             tick: Duration::from_millis(20),
             spill: pack::IN_MEMORY,
+            settle: settle_from_env(),
         }
     }
 }
@@ -123,6 +138,21 @@ fn cc_manifest_wait() -> Duration {
         return Duration::from_millis(ms);
     }
     CC_MANIFEST_WAIT
+}
+
+/// Test only, never read in a release build: `HUSHRUN_BUILD_SETTLE=1` sets [`Tuning::settle`].
+pub(crate) const SETTLE_VAR: &str = "HUSHRUN_BUILD_SETTLE";
+
+/// Whether this run's relay settles its waits: [`SETTLE_VAR`] set to `1`, in a debug build.
+fn settle_from_env() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var(SETTLE_VAR).as_deref() == Ok("1")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
 }
 /// The most target triples a check asks `cc/1` manifests for: each is one more `open`.
 const MOST_CC_PLATFORMS: usize = 8;
@@ -821,8 +851,7 @@ impl Relay {
                         .await;
                 });
             }
-            let relay = self.clone();
-            self.runtime.spawn(async move { relay.uploads().await });
+            self.start_uploads();
         }
         Ok(Share {
             socket: path,
@@ -1213,7 +1242,9 @@ impl Relay {
         let wait = local_ms
             .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
             .min(GO_PREFETCH_WAIT);
-        let until = Instant::now() + wait;
+        // Settled (a test's), no bound: each loop below ends on what it waits for.
+        let until = (!self.config.tuning.settle).then(|| Instant::now() + wait);
+        let over = |now: Instant| until.is_some_and(|until| now >= until);
         // \[ADR 0111\] The cache program starts with COMMAND, as the check's `open`s go out: a
         // fetch that comes while one is under way (the policy, or this kind's manifest) waits for
         // it within the same bound as for the lookup below, else Go's first packages compiled
@@ -1224,12 +1255,15 @@ impl Relay {
                 let now = Instant::now();
                 let opening = matches!(state.phase_now(now), Phase::Opening);
                 let asking = *state.named_manifest(kind) == GoManifest::Asking;
-                if !(opening || asking) || now >= until {
+                if !(opening || asking) || over(now) {
                     break;
                 }
             }
             tokio::time::sleep(self.config.tuning.tick).await;
         }
+        // The manifest is taken, and its prefetch marked as under way, under one lock: a fetch
+        // that came between the two found it taken and no prefetch looking up, and missed what
+        // the manifest named.
         let manifest = {
             let mut state = self.state();
             let now = Instant::now();
@@ -1239,7 +1273,10 @@ impl Relay {
             let got = matches!(state.named_manifest(kind), GoManifest::Got(_));
             if got && state.answering(now) {
                 match std::mem::replace(state.named_manifest(kind), GoManifest::Taken) {
-                    GoManifest::Got(manifest) => Some(manifest),
+                    GoManifest::Got(manifest) => {
+                        *state.named_prefetching(kind) = true;
+                        Some(manifest)
+                    }
                     _ => None,
                 }
             } else {
@@ -1247,9 +1284,16 @@ impl Relay {
             }
         };
         if let Some(manifest) = manifest {
-            *self.state().named_prefetching(kind) = true;
+            // However the prefetch ends, a panic included, it is no longer under way: a fetch
+            // waiting for it stops waiting.
+            struct Prefetched<'a>(&'a Relay, Kind);
+            impl Drop for Prefetched<'_> {
+                fn drop(&mut self) {
+                    *self.0.state().named_prefetching(self.1) = false;
+                }
+            }
+            let _prefetched = Prefetched(&self, kind);
             self.clone().prefetch_in(kind, manifest).await;
-            *self.state().named_prefetching(kind) = false;
         }
         let address = Relay::address_in(kind, &key);
         loop {
@@ -1265,7 +1309,7 @@ impl Relay {
                     Kind::Gradle => state.gradle_prefetching,
                     _ => state.go_prefetching,
                 };
-                if !prefetching || Instant::now() >= until {
+                if !prefetching || over(Instant::now()) {
                     return Answer::None;
                 }
             }
@@ -1341,7 +1385,10 @@ impl Relay {
         let wait = local_ms
             .map_or(cc_manifest_wait(), |ms| Duration::from_millis(ms) / 2)
             .min(cc_manifest_wait());
+        // Settled (a test's), no bound: each loop below ends on what it waits for.
+        let settle = self.config.tuning.settle;
         let until = Instant::now() + wait;
+        let over = move |now: Instant| !settle && now >= until;
         let pairs = loop {
             {
                 let mut state = self.state();
@@ -1380,7 +1427,7 @@ impl Relay {
                     }
                     break taken;
                 }
-                if now >= until {
+                if over(now) {
                     return false;
                 }
             }
@@ -1388,15 +1435,22 @@ impl Relay {
         };
         match pairs {
             Some(pairs) => {
-                // Answering: the prefetch's lookups are this question's.
+                // Answering: the prefetch's lookups are this question's. However it ends, a
+                // panic included, it is no longer under way: the questions waiting for it stop.
+                struct Prefetched<'a>(&'a Relay);
+                impl Drop for Prefetched<'_> {
+                    fn drop(&mut self) {
+                        let mut state = self.0.state();
+                        state.cc_prefetching = state.cc_prefetching.saturating_sub(1);
+                    }
+                }
+                let _prefetched = Prefetched(self);
                 self.clone().prefetch_in(kind, pairs).await;
-                let mut state = self.state();
-                state.cc_prefetching = state.cc_prefetching.saturating_sub(1);
             }
             None => {
                 // Another question started the prefetch: what it looks up answers this one.
                 let until = Instant::now() + wait;
-                while self.state().cc_prefetching > 0 && Instant::now() < until {
+                while self.state().cc_prefetching > 0 && (settle || Instant::now() < until) {
                     tokio::time::sleep(self.config.tuning.tick).await;
                 }
             }
@@ -1885,6 +1939,8 @@ impl Relay {
             }
             let budget = cost / 2;
             match state.meter.rate(now) {
+                // Settled (a test's): every fetch is waited for to its end, whatever the rate.
+                _ if tuning.settle => {}
                 None => {
                     // No rate yet: the first fetch asked for runs to its end as the
                     // measurement; every other one is "none" until a rate exists, unless it is
@@ -1959,7 +2015,8 @@ impl Relay {
                 None => elapsed,
             };
             let queued_at_rest = resting && fetch.state == Download::Queued;
-            if projected > budget || elapsed >= budget || queued_at_rest {
+            let late = !tuning.settle && (projected > budget || elapsed >= budget);
+            if late || queued_at_rest {
                 if let Some(fetch) = state.fetches.get_mut(&address) {
                     fetch.waited = false;
                 }
@@ -2953,8 +3010,13 @@ impl Relay {
         // `cut`, and `close` goes within what is left before `deadline`.
         let wait = upload::wait_at_end(&self.config.tuning, &end);
         let started = Instant::now();
-        let cut = started + wait.uploads;
-        let deadline = started + wait.total;
+        // Settled (a test's), and not asked to stop: no cut and no deadline. Every upload this
+        // run built goes on until it is done or the backend's answer puts it off, on any machine,
+        // then `close` names what went up: what is left out of the manifest depends on the
+        // backend's answers alone (`Tuning::settle`).
+        let settled = self.config.tuning.settle && !end.stopping;
+        let cut = (!settled).then_some(started + wait.uploads);
+        let deadline = (!settled).then_some(started + wait.total);
         let relay = self.clone();
         self.runtime.block_on(async move {
             // B-34: the lookup of stale vouches still in flight ends, so that what it learnt is
@@ -2970,11 +3032,16 @@ impl Relay {
                         relay.ask_about(&reused).await;
                     }
                 };
-                let _ = tokio::time::timeout_at(cut.into(), ask).await;
+                match cut {
+                    Some(cut) => {
+                        let _ = tokio::time::timeout_at(cut.into(), ask).await;
+                    }
+                    None => ask.await,
+                }
             };
             let uploads = async {
                 // CI: the loop goes on claiming what waits, since the store goes with the job.
-                if end.in_ci {
+                if end.in_ci || settled {
                     upload::drain(&relay, cut).await;
                 }
                 relay.ending.store(true, Ordering::Relaxed);
@@ -2996,7 +3063,9 @@ impl Relay {
             !matches!(state.phase, Phase::Stopped(_) | Phase::Opening) && state.policy.is_some()
         };
         let left = deadline
-            .saturating_duration_since(Instant::now())
+            .map_or(self.config.tuning.close, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            })
             .min(self.config.tuning.close);
         // B-75: a bake's build closes only a whole build: one that failed, was stopped, or left
         // blocks it built unsent would name the commit with a part of its blocks, and every later

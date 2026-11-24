@@ -56,6 +56,7 @@ fn tuning() -> Tuning {
         downloads: 8,
         tick: Duration::from_millis(5),
         spill: super::pack::IN_MEMORY,
+        settle: false,
     }
 }
 

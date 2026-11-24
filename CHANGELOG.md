@@ -195,6 +195,12 @@ project's new branch starts from what main's CI already ran.
 - **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
   find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
   holds; the plugin now adds its own directory there.
+- **A Go or Gradle package the manifest named, compiled anyway** (B-45, B-82): a fetch that came
+  just as another took the check's manifest found it taken and no prefetch under way, and missed.
+  The manifest is taken and its prefetch marked under one lock.
+- **Uploads left for the next run by a command that ended early** (B-29): an end that came before
+  the upload loop first ran found no loop and waited for none. The loop is marked as running when
+  it is started.
 
 
 ## [0.19.1] - 2026-11-23

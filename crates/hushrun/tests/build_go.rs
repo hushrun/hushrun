@@ -184,13 +184,18 @@ impl Machine {
             .env("HUSHRUN_TOKEN", FakeBuild::TOKEN)
             .env("HUSHRUN_BUILD", "on")
             .env("HUSHRUN_BUILD_AUDIT", "none")
+            .env(
+                hushrun_testkit::env::SETTLE.0,
+                hushrun_testkit::env::SETTLE.1,
+            )
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"));
         cmd
     }
 
-    /// `hushrun run build -- sh -c SCRIPT`, held a moment after the script so that the uploads
-    /// of a build this short get their turn.
+    /// `hushrun run build -- sh -c SCRIPT`, its relay settled ([`hushrun_testkit::env::SETTLE`]):
+    /// the run ends once every upload it built went up, so the other machine's reuse never
+    /// depends on how fast this one was.
     fn run(&self, fake: &FakeBuild, script: &str) -> (i32, String, String) {
         self.run_with(fake, script, |_| {})
     }
@@ -202,15 +207,7 @@ impl Machine {
         change: impl FnOnce(&mut Command),
     ) -> (i32, String, String) {
         let mut cmd = self.hushrun(fake);
-        cmd.args([
-            "run",
-            "build",
-            "--force",
-            "--",
-            "sh",
-            "-c",
-            &format!("{script} && sleep 1"),
-        ]);
+        cmd.args(["run", "build", "--force", "--", "sh", "-c", script]);
         change(&mut cmd);
         let output = cmd.output().unwrap();
         (
@@ -645,6 +642,35 @@ fn every_package_of_a_pure_go_command_is_reused_on_the_other_machine_runtime_too
     assert!(!line.contains("built"), "{stderr}");
 }
 
+// covers: B-26, B-29, B-45
+#[test]
+fn every_package_is_reused_on_the_other_machine_however_slowly_the_backend_answers() {
+    if !have_go() {
+        return;
+    }
+    // Each pause is longer than a bound a release waits within: A's uploads outlast its end (one
+    // PUT at a time would take the run past `end_wait`), B's `open` outlasts the second a Go
+    // fetch waits for it, and B's downloads outlast half of what compiling a runtime package
+    // takes. A settled relay waits for each to be over, so B reuses every package whatever the
+    // pauses, as it would on a machine slower by as much.
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None, &[]);
+    fake.delay(route::STORE_PUT, Duration::from_millis(1000));
+    let (code, _, stderr) = a.run(&fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("for the next run"), "{stderr}");
+    fake.delay(route::STORE_PUT, Duration::ZERO);
+    fake.delay(route::OPEN, Duration::from_millis(1500));
+    fake.delay(route::STORE_GET, Duration::from_millis(300));
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), &[]);
+    let (code, _, stderr) = b.run(&fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    let line = go_line(&stderr);
+    assert!(line.contains("from the shared store"), "{stderr}");
+    assert!(!line.contains("built"), "{stderr}");
+}
+
 // covers: B-44
 #[test]
 fn a_toolexec_build_in_gos_own_cache_reports_and_suspends_nothing() {
@@ -900,6 +926,8 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
         stamp("t3"),
     );
     let mut cmd = b.hushrun(&fake);
+    // What this test measures is the bound itself: the relay's waits stay as a release has them.
+    cmd.env_remove(hushrun_testkit::env::SETTLE.0);
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
@@ -1088,15 +1116,7 @@ fn gitlab_go_run(
         .env("TMPDIR", &temp)
         .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
         .env("HUSHRUN_ID_TOKEN", token)
-        .args([
-            "run",
-            "build",
-            "--force",
-            "--",
-            "sh",
-            "-c",
-            &format!("{script} && sleep 1"),
-        ]);
+        .args(["run", "build", "--force", "--", "sh", "-c", script]);
     let output = cmd.output().unwrap();
     (
         output.status.code().unwrap_or(-1),
