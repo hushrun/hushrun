@@ -32,6 +32,14 @@ project's new branch starts from what main's CI already ran.
   build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
   LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
   the ADR lists what the first build on a Mac checks.
+- **Go test reuse: coverage runs whole, and files no test binary is built from rerun only what
+  read them** (C-70, C-71, ADR 0111). A `go test` with `-cover`, `-coverprofile`, `-coverpkg` or
+  `-covermode` (in COMMAND, after `-args` or in `GOFLAGS`) now runs every package, as Jest and
+  Vitest do with coverage: a reused package wrote nothing to the profile, which then read as a
+  drop. And every `.go` file that isn't a tested package's test file is a source: editing another
+  package's tests, an unimported package, a file the tags leave out or another module of a
+  `go.work` no longer reruns every package. The first run of each Go check after upgrading
+  reruns every package once.
 
 ## [0.19.1] - 2026-11-23
 
