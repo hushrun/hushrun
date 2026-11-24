@@ -96,11 +96,7 @@ if [[ -n ${HUSHRUN_BATS_EXE-} && -n ${HUSHRUN_UNITS-} && -z ${__hushrun_bats_loa
         esac
         ;;
       bats_exit_trap)
-        if [[ $__hushrun_bats_role == main ]]; then
-          __hushrun_bats_patch bats_exit_trap '{' '{ __hushrun_bats_finish;' && done=1
-        else
-          __hushrun_bats_patch bats_exit_trap 'exit "$status"' '__hushrun_bats_test_ended; exit "$status"' && done=1
-        fi
+        __hushrun_bats_patch bats_exit_trap 'exit "$status"' '__hushrun_bats_test_ended; exit "$status"' && done=1
         ;;
       bats_file_exit_trap)
         __hushrun_bats_patch bats_file_exit_trap 'exit "$bats_exec_file_status"' \
@@ -187,11 +183,31 @@ if [[ -n ${HUSHRUN_BATS_EXE-} && -n ${HUSHRUN_UNITS-} && -z ${__hushrun_bats_loa
       '{"why": "a start of bats ended before hushrun read what it ran"}'
     "$HUSHRUN_BATS_EXE" __hushrun-bats plan "$HUSHRUN_UNITS" "$run" </dev/null >/dev/null 2>&1 || :
     __hushrun_bats_role=main
-    __hushrun_bats_wanted='bats_exit_trap'
+    __hushrun_bats_rewrap=
     builtin trap -- '__hushrun_bats_finish' EXIT
   }
 
-  __hushrun_bats_in_main() { :; }
+  __hushrun_bats_action() { __hushrun_bats_was=${3-}; }
+
+  # bats' main process sets an EXIT trap of its own, which replaces hushrun's: at the next command
+  # hushrun's goes first again, before bats', which keeps its status. No function of bats' changes.
+  __hushrun_bats_in_main() {
+    if [[ -n $__hushrun_bats_rewrap ]]; then
+      __hushrun_bats_rewrap=
+      local listed
+      listed=$(builtin trap -p EXIT 2>/dev/null) || listed=
+      __hushrun_bats_was=
+      [[ -z $listed ]] || eval "__hushrun_bats_action $listed" 2>/dev/null || :
+      case $__hushrun_bats_was in
+      '' | __hushrun_bats_finish) builtin trap -- '__hushrun_bats_finish' EXIT ;;
+      '__hushrun_bats_finish; '*) ;;
+      *) builtin trap -- "__hushrun_bats_finish; $__hushrun_bats_was" EXIT ;;
+      esac
+    fi
+    case $BASH_COMMAND in
+    trap*EXIT*) __hushrun_bats_rewrap=1 ;;
+    esac
+  }
 
   __hushrun_bats_finish() {
     local status=$?

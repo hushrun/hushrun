@@ -461,3 +461,96 @@ fn a_failing_test_is_never_reused_and_bats_says_what_it_says_without_hushrun() {
         assert!(!second.reused().contains(&"fails".to_string()));
     }
 }
+
+/// Every file below `dir`, each with its first lines: what a failure shows of the hook's notes.
+fn listing(dir: &Path) -> String {
+    let mut out = String::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(here) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let head: Vec<&str> = text.lines().take(12).collect();
+            out.push_str(&format!("== {}\n{}\n", path.display(), head.join("\n")));
+        }
+    }
+    out
+}
+
+// covers: C-86, C-88
+#[test]
+fn the_hook_writes_one_facts_file_for_each_start_of_bats() {
+    for bats in bats_dirs() {
+        let shop = shop("{mode: reuse, unit: test, reads: test}");
+        let p = Project::new(&bats, &files(&shop));
+        let units = p.root.join("units");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(
+            units.join("hushrun.json"),
+            json!({"schema": "hushrun.units/v0", "root": p.repo, "reuse": [], "unit": "test", "reads": "test"})
+                .to_string(),
+        )
+        .unwrap();
+        let hook = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/units/hushrun_bats.bash");
+        let mut cmd = Command::new(bats.join("bats"));
+        cmd.arg("test")
+            .current_dir(&p.repo)
+            .env_clear()
+            .env("PATH", &p.path)
+            .env("HOME", p.root.join("home"))
+            .env("BASH_ENV", &hook)
+            .env("HUSHRUN_UNITS", &units)
+            .env("HUSHRUN_BATS_EXE", env!("CARGO_BIN_EXE_hushrun"));
+        let out = cmd.output().expect("bats");
+        let bash = Command::new("bash")
+            .arg("--version")
+            .env("PATH", &p.path)
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let says = format!(
+            "bats in {}, {bash}\nexit {:?}\n{}{}\n{}",
+            bats.display(),
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            listing(&units)
+        );
+        assert!(out.status.success(), "{says}");
+        let facts: Vec<Value> = std::fs::read_dir(&units)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json") && !p.ends_with("hushrun.json"))
+            .map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap())
+            .collect();
+        assert_eq!(facts.len(), 1, "{says}");
+        let left: Vec<_> = std::fs::read_dir(&units)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".started"))
+            .collect();
+        assert!(left.is_empty(), "{says}");
+        let units_seen = facts[0]["units"].as_array().cloned().unwrap_or_default();
+        assert_eq!(units_seen.len(), 2, "{says}");
+        for unit in &units_seen {
+            assert_eq!(unit["selected"], unit["finished"], "{says}");
+            for test in unit["tests"].as_array().unwrap() {
+                assert_eq!(test["finished"], json!(true), "{says}");
+            }
+        }
+    }
+}
