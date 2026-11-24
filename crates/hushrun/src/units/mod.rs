@@ -41,6 +41,7 @@ pub mod mocha;
 pub mod node_test;
 pub mod program;
 pub mod pytest;
+pub mod ruby;
 pub mod runner;
 pub mod rustdoc;
 pub mod shared;

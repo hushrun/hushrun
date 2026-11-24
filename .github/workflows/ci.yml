@@ -217,6 +217,20 @@ jobs:
           elixir-version: "1.18.4"
       - name: Name mix for the ExUnit tests
         run: echo "HUSHRUN_TEST_MIX=$(command -v mix)" >> "$GITHUB_ENV"
+      # Ruby: RSpec, Minitest 6 and Minitest 5 for the tests of the Ruby adapter (ADR 0114), each
+      # in a gem directory of its own, pinned.
+      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
+        with:
+          ruby-version: "3.3"
+      - name: Install RSpec and Minitest for the test-file tests
+        run: |
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems" rspec:3.13.2 minitest:6.1.0 rake:13.4.2
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems5" minitest:5.20.0 rake:13.4.2
+          {
+            echo "HUSHRUN_TEST_RUBY=$(command -v ruby)"
+            echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems"
+            echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5"
+          } >> "$GITHUB_ENV"
       # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
       - name: Install TypeScript for the tsc build-block tests
         run: |
@@ -403,6 +417,20 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/mocha11" --no-audit --no-fund --ignore-scripts mocha@11.7.5
           echo "HUSHRUN_TEST_MOCHA10=$RUNNER_TEMP/mocha10/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_MOCHA11=$RUNNER_TEMP/mocha11/node_modules" >> "$GITHUB_ENV"
+      # Ruby: RSpec, Minitest 6 and Minitest 5 for the tests of the Ruby adapter (ADR 0114), each
+      # in a gem directory of its own, pinned.
+      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
+        with:
+          ruby-version: "3.3"
+      - name: Install RSpec and Minitest for the test-file tests
+        run: |
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems" rspec:3.13.2 minitest:6.1.0 rake:13.4.2
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems5" minitest:5.20.0 rake:13.4.2
+          {
+            echo "HUSHRUN_TEST_RUBY=$(command -v ruby)"
+            echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems"
+            echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5"
+          } >> "$GITHUB_ENV"
       # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
       - name: Install TypeScript for the tsc build-block tests
         run: |

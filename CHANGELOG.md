@@ -151,6 +151,16 @@ project's new branch starts from what main's CI already ran.
   build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
   LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
   the ADR lists what the first build on a Mac checks.
+- **RSpec's and Minitest's test files and tests reused** (C-82 to C-85, [ADR 0114](docs/adr/0114-ruby.md)):
+  with `tests: reuse`, `rspec`, `bin/rails test`, `rake test` and `ruby` (alone or after
+  `bundle exec`) load hushrun's Ruby adapter through `RUBYLIB` and `RUBYOPT`, and a spec or test
+  file that already passed on the files it read doesn't run again. What it read is the code of the
+  repository that ran for it (one TracePoint per file, armed once per test), what that code
+  requires and opens, to the end, and what code outside the repository loaded or opened while it
+  or an earlier test file ran (Zeitwerk, Rails' initializers and fixtures). With `unit: test`,
+  each RSpec example (`spec/cart_spec.rb::[1:2]`) and Minitest test (`CartTest#test_total`) is
+  reused on its own, RSpec's left out by an exclusion filter before any of its hooks runs. Ruby
+  3.1 or later, CRuby; Minitest 5 and 6, RSpec 3. Ruby has no compile step to reuse.
 - **Go: coverage runs whole, files no test binary is built from rerun only what read them, and
   `runtime` is shared before Go 1.27** (C-70, C-71, B-150, ADR 0111). A `go test` with `-cover`, `-coverprofile`, `-coverpkg` or
   `-covermode` (in COMMAND, after `-args` or in `GOFLAGS`) now runs every package, as Jest and
