@@ -971,6 +971,35 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### Rust: clippy, checks and doctests
+
+`cargo check` and `cargo clippy` go through the same store as `cargo build`: every target's
+check is kept, the programs', tests' and benches' with `--all-targets` too, and a workspace
+member's check under clippy is kept apart from rustc's, with its lints, which a reuse prints again.
+A `clippy.toml` added where clippy would find it first, or another clippy, compiles the crate again.
+
+```text
+$ hushrun run clippy -- cargo clippy --workspace --all-targets -- -D warnings   # a new worktree
+hushrun: build: 4 of 9 crates reused, 5 built
+```
+
+With `tests: reuse`, `cargo test --doc` runs only the doctests of the libraries whose files
+changed: a library's doctests are a unit under its root file (`crates/core/src/lib.rs`), and one
+that already passed on what it read isn't handed to rustdoc at all, so nothing of it compiles. What
+they read is what the library's unit tests read, its dev-dependencies' sources included, and
+`RUSTDOCFLAGS`. Doctests inside a plain `cargo test` still run every time; run them as a check of
+their own, as a project that uses nextest already does.
+
+```text
+$ hushrun run doctest -- cargo test --workspace --doc --locked
+hushrun: doctest: 2 of 5 doctest crates run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check
+```
+
+hushrun says why and runs the command as it was when it can't tell what a command ran: a
+`RUSTDOC` or `build.rustdoc` of your own, `cargo nextest run --archive-file` (its binaries were
+built elsewhere), and `--partition count:M/N`, which a binary left out would shift between jobs.
+`--partition hash:M/N` gives each test its job by name, and works.
+
 ### Xcode
 
 Xcode apps (iOS, iPadOS, macOS) reuse compiles through Xcode's own compilation cache, which hushrun
