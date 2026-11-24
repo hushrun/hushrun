@@ -49,16 +49,22 @@ const BY_NAME: &[(&str, &str)] = &[
     ("./gradlew test", "gradle"),
     ("bats test", "bats"),
     ("./test/bats/bin/bats -r test", "bats"),
+    ("dotnet test Demo.sln", "dotnet"),
     ("ctest --test-dir build", "ctest"),
+    ("meson test -C build", "meson"),
     ("swift test", "swift"),
     ("mix test", "exunit"),
     ("mix test --trace test/a_test.exs", "exunit"),
+    ("python -m unittest", "unittest"),
+    ("python manage.py test", "unittest"),
+    ("bundle exec rspec", "ruby"),
+    ("bin/rails test", "ruby"),
     ("pytest -q", "pytest"),
 ];
 
 #[test]
 fn each_adapter_gets_the_command_that_names_its_program() {
-    assert_eq!(RECOGNIZED.len(), 12);
+    assert_eq!(RECOGNIZED.len(), 17);
     let dir = loads_all();
     for (command, adapter) in BY_NAME {
         assert_eq!(
@@ -120,6 +126,8 @@ fn a_command_pytest_reported_for_stays_pytests_where_ctest_or_swift_would_claim_
         "make test",
         "swift test",
         "/usr/bin/ctest",
+        // [ADR 0110] A Django TEST_RUNNER of pytest's, which pytest's adapter observed.
+        "python manage.py test",
     ] {
         assert_eq!(kept(command, Some("pytest")), Ok("pytest"), "{command}");
     }

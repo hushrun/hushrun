@@ -23,6 +23,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::registry::{ArtifactError, BlobStream, Manifest, OCI_INDEX, OCI_MANIFEST, Repository};
 
+/// \[B-240\] A pulled image: its manifest's digest and each layer's bytes.
+pub type PulledLayers = (Digest, Vec<Vec<u8>>);
+
 /// The image config's media type.
 pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 /// The config label that says what each layer holds, as JSON ([`Label`]).
@@ -871,6 +874,44 @@ impl crate::Artifacts {
                 .pull_blob(repository, &config, MOST_CONFIG)
                 .await?;
             Ok(Previous::read(&manifest.bytes, &config))
+        })
+    }
+
+    /// \[B-240\] The image `tag` names in `repository`: its manifest's digest and each of its
+    /// layers, read whole, checked against their digests, and refused past `most` bytes each;
+    /// `None` when the tag names nothing.
+    pub fn pull_layers(
+        &self,
+        repository: &Repository,
+        tag: &str,
+        most: u64,
+    ) -> Result<Option<PulledLayers>, ArtifactError> {
+        self.runtime.block_on(async {
+            let manifest = match self.registry.manifest(repository, tag).await {
+                Ok(manifest) => manifest,
+                Err(ArtifactError::NotFound(_)) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let json: Value = serde_json::from_slice(&manifest.bytes)
+                .map_err(|e| ArtifactError::Invalid(format!("{tag}'s manifest: {e}")))?;
+            let layers = json["layers"]
+                .as_array()
+                .ok_or_else(|| ArtifactError::Invalid(format!("{tag} names no layers")))?;
+            let mut out = Vec::new();
+            for layer in layers {
+                let digest = layer["digest"]
+                    .as_str()
+                    .and_then(|d| Digest::parse(d).ok())
+                    .ok_or_else(|| ArtifactError::Invalid(format!("{tag}: a layer's digest")))?;
+                let bytes = self.registry.pull_blob(repository, &digest, most).await?;
+                if Digest::of(&bytes) != digest {
+                    return Err(ArtifactError::Invalid(format!(
+                        "{tag}: a layer isn't {digest}"
+                    )));
+                }
+                out.push(bytes);
+            }
+            Ok(Some((manifest.digest(), out)))
         })
     }
 

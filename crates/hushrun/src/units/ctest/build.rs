@@ -287,6 +287,23 @@ impl<'a> Walker<'a> {
 
     /// The programs and modules the build in `build` makes in `dir` or under it, from the top of
     /// the build directory; `None` when the build can't be read.
+    /// \[ADR 0120\] Every C and C++ file of the repository the build directory `build` compiles
+    /// into any of its programs, as each program's walk says: the sources a test program run on
+    /// its own is told apart from. Empty where the build can't be read.
+    pub fn sources(&mut self, build: &Path) -> BTreeSet<String> {
+        let Some(programs) = self.programs_in(build, build) else {
+            return BTreeSet::new();
+        };
+        let mut out = BTreeSet::new();
+        for program in programs {
+            let built = self.program(&build.join(&program), build);
+            if !built.every_source && built.refused.is_none() {
+                out.extend(built.reads.into_iter().filter(|f| is_source(f)));
+            }
+        }
+        out
+    }
+
     fn programs_in(&mut self, dir: &Path, build: &Path) -> Option<Vec<String>> {
         if !self.dirs.contains_key(build) {
             let opened = self.open(build);
@@ -328,7 +345,14 @@ impl<'a> Walker<'a> {
 
     fn open(&mut self, build: &Path) -> Dir {
         let dir = super::select::build_dir(build);
-        match dir.generator.as_str() {
+        // \[C-103\] A build folder Meson set up is a Ninja build too, whose rules Meson names.
+        let meson = is_meson(build);
+        let generator = if meson {
+            "Ninja"
+        } else {
+            dir.generator.as_str()
+        };
+        match generator {
             "Ninja" => {
                 let ninja = Some(PathBuf::from(&dir.make_program))
                     .filter(|p| p.is_file())
@@ -348,13 +372,21 @@ impl<'a> Walker<'a> {
                 let mut extras = Extras::default();
                 let mut outputs = BTreeSet::new();
                 for (output, rule) in out.lines().filter_map(|line| line.rsplit_once(": ")) {
+                    // Meson's: `c_LINKER`, `cpp_LINKER` (and `_RSP`) for programs and shared
+                    // libraries alike, `STATIC_LINKER` for a static one.
+                    let meson_program = meson
+                        && rule != "STATIC_LINKER"
+                        && (rule.ends_with("_LINKER") || rule.ends_with("_LINKER_RSP"));
                     if rule.contains("EXECUTABLE_LINKER")
                         || rule.contains("MODULE_LIBRARY_LINKER")
                         || rule.contains("SHARED_LIBRARY_LINKER")
+                        || meson_program
                     {
                         extras.programs.insert(output.to_string());
                         extras.linked.insert(output.to_string());
-                    } else if rule.contains("STATIC_LIBRARY_LINKER") {
+                    } else if rule.contains("STATIC_LIBRARY_LINKER")
+                        || (meson && rule == "STATIC_LINKER")
+                    {
                         extras.linked.insert(output.to_string());
                     } else if rule == "phony" {
                         extras.phony.insert(output.to_string());
@@ -858,6 +890,11 @@ fn fetched(rel: &str) -> bool {
 /// record names.
 fn cmake_own(rel: &str) -> bool {
     rel.contains("/cmake_pch") || rel.contains("/Unity/unity_")
+}
+
+/// \[C-103\] Whether Meson set the build folder up.
+pub fn is_meson(build: &Path) -> bool {
+    build.join("meson-private").is_dir()
 }
 
 fn is_object(name: &str) -> bool {
@@ -1678,7 +1715,12 @@ impl Walker<'_> {
         if let Some(known) = self.trees.get(build) {
             return known.clone();
         }
-        let configured_at = self.time(&build.join("CMakeFiles/cmake.check_cache"));
+        let configured_at = if is_meson(build) {
+            // \[C-103\] What Meson writes each time it sets the folder up or regenerates it.
+            self.time(&build.join("meson-private/coredata.dat"))
+        } else {
+            self.time(&build.join("CMakeFiles/cmake.check_cache"))
+        };
         let configure = match self.dirs.get(build) {
             Some(Dir::Ninja { ninja, .. }) => {
                 let ninja = ninja.clone();

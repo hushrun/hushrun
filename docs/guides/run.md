@@ -725,12 +725,26 @@ In the environment's settings:
   HUSHRUN_AGENT=hushrun_agent_v1_…
   ```
 
-- network access that reaches `api.hushrun.com`, as an allowed domain or with full access,
-  and the npm registry;
+- network access that reaches `api.hushrun.com`, `registry.hushrun.com` and
+  `*.r2.cloudflarestorage.com`, as allowed domains or with full access, and the npm registry;
 - a setup script that installs the dependencies, which installs hushrun with them: `npm ci`.
 
 Each session's `npm test` then goes through `hushrun run`, and skips what another session, a
 teammate or CI already passed on the same files.
+
+### Hosted agent platforms
+
+hushrun knows the sandboxes vendors host for their agents by a variable only that platform sets,
+such as `CLAUDE_CODE_REMOTE` on Claude Code on the web or `CURSOR_AGENT_SOCKET` on Cursor's cloud
+agents. There a run is local, even beside `CI=true` or, for GitHub's Copilot cloud agent, inside a
+GitHub Actions job. With no credential set, results stay in the sandbox and skip checks for the rest
+of the session; with one, they are shared. An agent's own variable, such as `CLAUDECODE`, makes a
+sandbox only beside a bare `CI=true`: an agent's step in a named CI's job stays CI.
+
+In the sandbox, `hushrun doctor` names the platform, where the credential comes from, whether each
+host hushrun needs answers, and the exact entry that platform's allowlist needs. It never prints a
+value. `sh scripts/agent-cloud-probe.sh`, in this repository, shows what a new platform's sandbox
+looks like, with variable names only.
 
 ### A container
 
@@ -999,6 +1013,74 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### C and C++
+
+The objects of a CMake build come from the store when their inputs match (ADR 0097). Some
+compiles always run as asked, and the summary's `compiled as asked` line counts each by its reason:
+
+- **C++20 modules.** CMake 3.28 and later scan every C++20 source. With clang, a source that
+  imports no module is stored and reused as any other; a module and the sources that import one
+  compile every time (`modules`). With GCC every scanned compile does, since GCC writes a second
+  file beside each object.
+- **Precompiled headers** (`target_precompile_headers`): the header and the sources that use it
+  compile every time (`pch`).
+- **clang 15 to 18** compile through the launcher as GCC does: without the include graph newer
+  clangs write, so a quoted include from another folder is keyed by the source's folder.
+
+Tests a CTest run starts are reused one by one (ADR 0090). So are the tests of a GoogleTest or
+Catch2 3 program you start yourself, by its path, with `tests: {mode: reuse, unit: test}`:
+
+```text
+$ hushrun run unit -- build/tests/t_calc
+hushrun: unit: 1 of 40 tests run, in 1 of 1 test program; 39 already passed on the files they read, and 1 more that already passed runs anyway, as a check
+```
+
+hushrun leaves tests out through the framework's own variables (`GTEST_FILTER`, Catch2's
+`TESTBRIDGE_TEST_ONLY`) and reads what each test came to from its XML, so the command stays as you
+wrote it; GoogleTest or Catch2 says it is filtering. A `--gtest_filter` of your own, or sharding,
+keeps every test running and records each. doctest and Catch2 2 read nothing from the
+environment: run them through `ctest` with `doctest_discover_tests` or `catch_discover_tests`.
+
+### C and C++ without CMake
+
+Make, autotools, Meson and a handwritten `build.ninja` get the same launcher as CMake, with nothing
+to set ([ADR 0119](../adr/0119-c-without-cmake-and-meson-test.md)):
+
+```text
+$ hushrun run build -- make -j8                          # in a second worktree
+hushrun: build: c/c++: 41 objects: 40 reused, 1 built
+```
+
+- **Make and autotools.** Inside `hushrun run`, GNU Make's commands find hushrun's `cc`, `gcc`,
+  `clang` (and their C++ names) first on `PATH`, through `MAKEFILES`; each starts the next compiler
+  of its name through the launcher. A Makefile that names its compiler by a path, or sets `PATH`
+  itself, compiles as before. `./configure` writes the compiler's name, not a path, so a plain
+  `make` afterwards is the compiler's own, and has nothing to do. BSD make reads no `MAKEFILES` and
+  gets nothing.
+- **Meson.** In a repository with a `meson.build`, a `meson setup` inside `hushrun run` names its
+  compilers through the same one-line indirection CMake keeps in its cache: outside a run it is the
+  compiler. A build folder set up before keeps its compilers, and the run says so: set it up again
+  inside `hushrun run` with `meson setup --wipe <folder>`. Its `compile_commands.json` then starts
+  with `/bin/sh`, which some editors' language servers can't follow.
+- **Ninja.** `hushrun run … -- ninja` on a `build.ninja` you wrote gets the compilers it names on
+  `PATH`; `build.ninja` isn't touched, so `ninja -n` has no work after.
+- **Configure checks** (autoconf's `conftest.c`, Meson's in `meson-private`) compile as asked and
+  are never stored.
+- **`meson test`.** With `tests: reuse`, `hushrun run test -- meson test -C build` reuses each test
+  program whose files didn't change, as with CTest: hushrun's `meson` on `PATH` names the tests that
+  still need to run, after checking that their programs are built from what the plan keyed.
+
+### Python
+
+Pure Python compiles nothing to reuse, and a C extension a package builds as it installs
+(setuptools, meson-python) doesn't go through hushrun's C and C++ launcher: setuptools takes its
+compiler only from `CC`, which hushrun never sets because CMake, Meson and the Rust `cc` crate read
+it too; meson-python starts its own Meson, not the `meson setup` on COMMAND's `PATH` that
+hushrun gives the launcher (ADR 0119); and pip's isolated builds compile against headers in a new
+temporary folder each time. pip's wheel cache keeps what it built already
+([ADR 0110](../adr/0110-unittest.md)). Python's tests are reused one by one under `tests: reuse`,
+with pytest, unittest (`python -m unittest`) and Django's `manage.py test`.
+
 ### Rust: clippy, checks and doctests
 
 `cargo check` and `cargo clippy` go through the same store as `cargo build`: every target's
@@ -1153,6 +1235,45 @@ hushrun: build: gradle: 1 task run here stays on this machine (1: its outputs ho
 
 KSP has no such step. A Kotlin/JS or native task leaves out at most 250 tests one by one, and no
 class of the default package.
+
+### .NET
+
+`dotnet build`'s compiles aren't reused: since .NET 8 the SDK writes the commit into every
+assembly, so no compile could be reused across commits ([ADR 0118](../adr/0118-dotnet-test.md),
+decision 11). hushrun reuses .NET's tests, not its assemblies. With
+`tests: reuse`, `hushrun run unit -- dotnet test` leaves out each test project that already passed
+on the files it and the projects it references compile, unbuilt, and with `unit: test` the tests
+that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on
+Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
+when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
+
+### Ruby's tests
+
+With `tests: reuse` on a check that runs RSpec or Minitest, a spec or test file that already passed
+on the files it read doesn't run again:
+
+```yaml
+checks:
+  test:
+    tests: reuse
+```
+
+```text
+$ hushrun run test -- bundle exec rspec
+hushrun: test: 2 of 40 test files run; 38 already passed on the files they read
+Run options: exclude {:hushrun_reused=>"already passed on the files it read"}
+```
+
+`rspec`, `bin/rails test`, `rake test`, `rake spec` and `ruby -Itest …`, alone or after
+`bundle exec`, load hushrun's adapter through `RUBYLIB` and `RUBYOPT`; no file of the repository
+changes, and a script that sets `RUBYOPT` should add to what it had (`RUBYOPT="$RUBYOPT -W0"`).
+A test file read the repository's code that ran for it, what that code requires, `require_relative`s
+and opens, and what spec_helper or test_helper loaded. In a Rails app, what Zeitwerk, an
+initializer or a fixture loaded while one test file ran is read by every later one, since the app
+keeps it; with `config.eager_load` on in the test environment (Rails' default when `CI` is set)
+every file of `app/` is, and only changes to test files skip anything. `tests: {mode: reuse, unit:
+test}` reuses each RSpec example and Minitest test on its own. Ruby 3.1 or later; Spring and
+`rspec --only-failures` aren't observed, and say so.
 
 ## When hushrun runs anyway
 

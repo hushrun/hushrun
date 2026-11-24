@@ -89,6 +89,8 @@ pub struct Session {
     /// What COMMAND gets for C and C++ (B-50): the launcher variables CMake reads, those the
     /// person hadn't set, and `HUSHRUN_CC`.
     cc_env: Vec<(OsString, OsString)>,
+    /// The folder of the compiler programs make's commands find first on `PATH` (B-231).
+    cc_programs: Option<PathBuf>,
     /// The person's `cc_maps` setting as the run began (B-55).
     cc_maps_setting: bool,
     /// Which manifest the run leaves in the store when it ends (B-63), when it is a check's.
@@ -1602,6 +1604,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         xcode: None,
         rustc_left_out: false,
         cc_env: Vec::new(),
+        cc_programs: None,
         cc_maps_setting: settings.cc_maps,
         slot: None,
         gradle_env: Vec::new(),
@@ -1834,8 +1837,54 @@ impl Session {
             .map(|name| ((*name).into(), crate::cc::INDIRECTION.into()))
             .collect();
         cc_env.push((crate::cc::HUSHRUN_CC.into(), link.into_os_string()));
+        // B-230, B-232: GNU Make's commands find the compiler programs first on PATH.
+        let programs = crate::cc::programs::make(&self.current.folder)?;
+        let hook = programs.join(crate::cc::programs::HOOK);
+        match crate::cc::programs::makefiles(
+            &hook,
+            env(crate::cc::programs::MAKEFILES).as_deref(),
+        ) {
+            Some(value) => cc_env.push((crate::cc::programs::MAKEFILES.into(), value)),
+            None => self.more.push(format!(
+                "build: C and C++ objects of GNU Make builds aren't reused in this run: the run's folder, {}, has a space or a `:` in its path",
+                programs.display()
+            )),
+        }
+        self.cc_programs = Some(programs);
         self.cc_env = cc_env;
         Ok(())
+    }
+
+    /// B-235: what COMMAND `words`, started in `cwd`, gets beside [`Session::env`]: `PATH` with
+    /// the compiler programs first when it is `ninja …` itself on a `build.ninja` neither CMake
+    /// nor Meson wrote. `path` is `PATH` as COMMAND would have it.
+    pub fn cc_command_env(
+        &self,
+        words: &[String],
+        cwd: &Path,
+        path: Option<&std::ffi::OsStr>,
+    ) -> Vec<(OsString, OsString)> {
+        let Some(programs) = &self.cc_programs else {
+            return Vec::new();
+        };
+        if crate::cc::programs::ninja_folder(words, cwd).is_none() {
+            return Vec::new();
+        }
+        crate::cc::programs::path_with(programs, path)
+            .map(|path| vec![(OsString::from("PATH"), path)])
+            .unwrap_or_default()
+    }
+
+    /// Adds a variable COMMAND gets with the launcher's, in place of one of the same name: hushrun's
+    /// own `meson` first on `PATH` for a Meson repository (B-236).
+    pub fn add_cc_env(&mut self, name: OsString, value: OsString) {
+        self.cc_env.retain(|(n, _)| *n != name);
+        self.cc_env.push((name, value));
+    }
+
+    /// The folder of the compiler programs (B-231), when the run gives COMMAND the launcher.
+    pub fn cc_programs(&self) -> Option<&Path> {
+        self.cc_programs.as_deref()
     }
 
     /// Gives COMMAND the TypeScript hook (B-100): `checkout` is the repository's folder as the

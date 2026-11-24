@@ -2712,7 +2712,7 @@ puts under `Subkey(action, "stdout")` just before the archive, was empty (`print
 prints a compile's output again only from its own cache); and the bytes say so
 (`archive::portable`): an `ar` archive whose first member is `__.PKGDEF` and every other member a
 Go object, `_go_.o` or an object the assembler made for a standard library package (flags
-`ObjFlagFromAssembly` and `ObjFlagStd`, read after the object's text header, whose end `\n!\n` is
+`ObjFlagFromAssembly` and `ObjFlagStd`, [ADR 0111] or before Go 1.27 B-150's mark, read after the object's text header, whose end `\n!\n` is
 looked for over the whole member: the runtime's header on macOS runs past 4096 bytes): a cgo object or a `.syso` is `native`, assembly of any
 other package `assembly` (F1: its includes are outside Go's id); its build ID, read where Go's
 `buildid.ReadFile` reads it, is `<action>/<content>` with `<action>` Go's `HashToString` of the
@@ -2778,7 +2778,9 @@ counted and not listed. A Go fetch is looked up only when that manifest names it
 about every entry its cache misses, most of them local ones no server holds. The first Go fetch
 of the check starts the prefetch of what the manifest names that the store lacks (a machine
 whose `go` finds everything in its own cache asks nothing and downloads nothing); a fetch that
-comes while that lookup runs waits for it, at most a second or half its local cost. *Rests on:*
+comes while that lookup runs waits for it, at most a second or half its local cost; [ADR 0111] so
+does one that comes while the check's `open` or its `go/1` `open` is still under way, within the
+same bound, which it then shares with the lookup (Go asks for its first packages as COMMAND starts). *Rests on:*
 the server keeping manifests per repository, check, platform and kind, and taking any kind that
 `is_kind` reads (no server change). *Breaks if:* a check's manifest names other packages than
 its next run asks for: they compile here, a cost and never a wrong block.
@@ -2797,6 +2799,20 @@ the same from Go 1.10, and leaves hushrun's store out: nothing is served from it
 One with a version B-39 names serves the store under that toolchain's own identity (B-43). One
 with no usable `GOCACHE` answers every `get` as a miss, keeps every body in its own folder until
 `close`, and fails nothing. *Rests on:* nothing.
+
+**B-150 The standard library's assembly before Go 1.27.** [ADR 0111] An object the assembler made
+(`ObjFlagFromAssembly`) is a standard library package's, for B-42, when its own header says
+`ObjFlagStd`, or when the archive's `_go_.o`, the compiler's object of the same package, says
+`ObjFlagStd` and not `ObjFlagFromAssembly`. The compiler marks its object so under `-std`, which
+the `go` command gives the compile of a standard package, and of no other, in every version B-39
+names; `-std` in `-gcflags` is B-42's `altered`. Go's assembler takes `-std`, and marks its own
+objects, only from Go 1.27: with Go 1.24 to 1.26 `runtime`, `internal/bytealg` and every other
+standard package with assembly were `assembly` and never left the machine (8 of the 24 packages
+of a small program on amd64). *Rests on:* `cmd/go` adding `-std` to a compile's flags exactly when the package is
+standard (`gc.go`, `p.Standard`), and `cmd/compile` setting `ObjFlagStd` from it (read in Go
+1.24.7's and 1.27.4's source; the two-machine tests pass on 1.24.7, 1.25.0, 1.26.0 and 1.27.4).
+*Breaks if:* a Go release gives `-std` to a package outside the standard library: B-43's identity
+hashes only the toolchain's headers, and such a package's assembly could include others.
 
 ## C and C++ (draft)
 
@@ -3156,6 +3172,100 @@ checks count nowhere. The compiler's own output is unchanged.
 run, `HUSHRUN_CC` set by hand) replaces itself with the compiler and the arguments as given, and
 reads nothing else. *Rests on:* nothing.
 
+### C and C++ without CMake (draft)
+
+[ADR 0119](../adr/0119-c-without-cmake-and-meson-test.md): GNU Make, the Makefiles autotools writes, Meson, and a `build.ninja` no generator
+wrote reach the launcher of B-50 to B-62, whose rules hold for every call it gets. Nothing here is
+written outside the run's session but by Meson, whose build folder keeps B-50's indirection, and
+nothing the run writes is read once it is over.
+
+**B-230 Builds without CMake.** Wherever B-50 gives COMMAND the launcher, it also makes the
+compiler programs (B-231) and sets `MAKEFILES` (B-232); in a Meson repository it puts hushrun's
+`meson` on `PATH` (B-234); a COMMAND that is `ninja …` itself on a handwritten build gets the
+programs on its `PATH` (B-235). The session begins for them as for CMake (B-50) where a
+`RUSTC_WRAPPER` the person set would keep it from beginning: in a folder at or under a
+`meson.build`, `configure`, `configure.ac`, Makefile (`GNUmakefile`, `makefile`, `Makefile`) or
+`build.ninja` of its checkout. Nothing on Windows. COMMAND's own `PATH` is never changed but by
+B-234 and B-235: a compiler found on it is the one the person has, for every tool that writes
+down where it found one.
+
+**B-231 The compiler programs.** A folder `cc-programs` of the run's session holds `cc`, `c++`,
+`gcc`, `g++`, `clang` and `clang++`, each a POSIX `sh` script, the same text in every run, and a
+marker file `.hushrun-cc-programs`. A script finds the first program of its name on `PATH` in a
+folder without the marker (an empty entry being the current folder), sets `PATH` to `PATH` without
+those folders (each other entry as it was, a trailing `:` kept), and replaces itself with
+`$HUSHRUN_CC <that program's path> <arguments>` when `HUSHRUN_CC` names a file it can run, else
+with the program itself; with none found it says `<name>: not found` and exits 127. The launcher
+then gets the compiler by its path, as CMake gives it, and every rule of B-51 to B-62 holds.
+
+**B-232 GNU Make.** `MAKEFILES` names `cc-programs/hushrun.mk` first, then what the person set,
+when its path holds no space, `:` or `$`; otherwise the run says once `build: C and C++ objects of
+GNU Make builds aren't reused in this run: the run's folder, <folder>, has a space or a `:` in its
+path`. GNU Make reads it before any makefile, in every make COMMAND starts, a recursive one
+included; it puts the folder first on `PATH` for make's commands (`export PATH`), once however
+deep make starts make, and not where make runs in a folder holding a `CMakeCache.txt`, whose rules
+name their compilers by path. Under GNU Make 3 (macOS's 3.81), which starts a command line without a shell
+itself and finds its program on its own `PATH`, it also sets `SHELL` to `/bin//sh`, the same shell
+under another text, so that every line goes through a shell that reads the exported `PATH`. A
+Makefile's own `SHELL` replaces it: another shell does the same, and `SHELL = /bin/sh` again (as
+`configure` writes it) leaves the lines without metacharacters to make, whose compiles then pass by
+the programs under GNU Make 3. A Makefile that sets `CC` or `CXX` to a name reaches the programs as
+its default `cc` does; one that names a compiler by its path, or sets `PATH` itself, doesn't. Make
+compares times, not commands: a plain `make` after the run has nothing to do (`make -q`).
+
+**B-233 Tools that write down a compiler's path.** The folder also holds `cmake` and `meson`, which
+start the first of their name on `PATH` past the marked folders with `PATH` without them: a build
+folder they configure from make's commands names the real compiler, never a script of a session.
+The link's linker (B-18) is looked for past the marked folders too. A tool started by its path
+from make's commands, or another that writes down the compiler it finds (`which gcc` into a
+generated file), is not guarded: the file names a script of a session, which is gone after the
+run.
+
+**B-234 hushrun's `meson`.** In a repository with a `meson.build` at its checkout's root, the run
+puts hushrun's own `meson` (ADR 0080's programs on `PATH`) first on COMMAND's `PATH`. It starts
+the real `meson`, the first on `PATH` as COMMAND had it outside folders of hushrun's programs, with
+that `PATH`, stdio, the exit status and the signals passed through, and changes nothing but
+`meson setup`'s variables (B-236) and, in a run that reuses tests, `meson test` (C-102). A run whose
+test adapter puts programs of its own on `PATH` puts its `meson` there instead.
+
+**B-235 Handwritten Ninja.** A COMMAND whose program is `ninja`, by name, whose build file (`-f`,
+else `build.ninja`, in `-C`'s folder, the last one, else COMMAND's) exists, is in a folder
+holding neither a `CMakeCache.txt` nor a `meson-private`, and whose first 4 KiB say neither
+`# CMAKE generated file` nor `autogenerated by the Meson build system`, gets `PATH` with the
+compiler programs first. Nothing is written into `build.ninja`: Ninja keys each output by its
+command's text, which stays the same in a run and out of one (`ninja -n` has no work after). A
+`ninja` started by a shell line or a script gets nothing from this rule (it does from B-232 when
+make starts it).
+
+**B-236 `meson setup`.** hushrun's `meson` (B-234), started with `setup` first while `HUSHRUN_CC`
+names a file it can run, sets `CC` and `CXX` for the real `meson`, each to
+`/bin/sh -c '<B-50's script>' <compiler>`, `<compiler>` an absolute path quoted as a shell splits
+it: with the variable unset or empty, the first of Meson's defaults (`cc`, `gcc`, `clang`;
+`c++`, `g++`, `clang++`) on `PATH` past folders of hushrun's programs; set to one word that isn't a
+launcher (`ccache`, `sccache`, `distcc`, `icecc`, `buildcache`) nor `/bin/sh`, that word's
+program; left as it is otherwise, or when no compiler is found. Meson keeps the compilers for the
+build folder's life (`--reconfigure` keeps them), so its `build.ninja` starts B-50's indirection,
+which is the compiler outside a run, the launcher inside one, and the same text both ways:
+`ninja -n` has no work after the run, and a build after it with hushrun gone is the compiler's.
+Meson's `compile_commands.json` names `/bin/sh` first. No other tool COMMAND starts gets `CC` or
+`CXX`.
+
+**B-237 A Meson build folder set up before.** After COMMAND, in a run whose mode is `on` or that
+shares, each folder COMMAND's words name (`meson … -C <dir>`, a word of `meson setup` that isn't an
+option, and B-50's `ninja -C`, `make -C`, `cmake --build`) that holds `meson-private`, and whose
+`meson-info/intro-compilers.json` names C or C++ compilers none of which starts with `/bin/sh` or a
+launcher, gets one line: `build: C and C++ objects aren't reused in <folder>: Meson set it up
+before hushrun's launcher and keeps its compilers; set it up again inside hushrun run (meson setup
+--wipe <folder>)`.
+
+**B-238 Configure checks.** Like CMake's (B-51's `cmake-probe`), a compile whose source is
+`conftest` (`.c`, `.cpp`, …) and whose output's name starts `conftest` (autoconf's checks), or
+that runs in, or writes into, a `meson-private` folder (Meson's), passes through as
+`configure-probe` and counts in no manifest: their folders and names say nothing that a later
+compile could reuse, and storing them would only fill the store.
+
+**B-240 `hushrun build pull`.** [ADR 0143] It puts the repository's newest baked store where runs read one. The image is `--image`, else `<registry host of the backend's origin>/<org>/<image name of the repository>` (B-70), and the tag `--tag`, else `hushrun-<platform>-latest` for `--platform` or this machine's (B-66). The credential, as Basic `hushrun:<token>`: `HUSHRUN_REGISTRY_TOKEN`, else the backend's token here when the image is on that backend's registry, else none (a public repository's image). It reads the manifest and each layer, each checked against its digest and at most 8 GiB, and unpacks from them only entries under `hushrun/`, regular files and folders, into a folder beside the destination; an entry outside the folder, a link or a device stops it. That folder must be a baked store (B-63, `baked.json` read, names and bytes checked), and when `hushrun.yaml` names signers of baked stores, its signature must verify (B-67). Only then does it replace the destination, `--to`, else `HUSHRUN_BUILD_LOWER`, else `/hushrun`, by renames: what was there stays when the swap fails. It says `hushrun: pulled <image>:<tag> (<digest>) into <folder>: <signed by … | why a run won't trust it unasked>`. A tag that names nothing, a store that doesn't check, or a registry that refuses exits 1, and replaces nothing. A run still decides what it trusts as it begins (B-63, B-64).
+
 ## Gradle (draft)
 
 > Draft, from [ADR 0104](../adr/0104-gradle-build-blocks.md) (proposed). Built: sharing through
@@ -3385,6 +3495,31 @@ unsets the variable only when it names hushrun's file, and removes the file. `st
 of these hold. *Rests on:* apps opened after `launchctl setenv` getting the variable, and Xcode
 reading it for the app's builds. *Breaks if:* it doesn't: the spike says.
 
+## C++20 modules and precompiled headers
+
+**B-241 An empty response file.** [ADR 0120] An `@file` argument whose file, from the compile's
+folder, holds nothing but white space adds no argument: B-51 classifies the call without it, and
+B-53 keys it so, as the same compile written without it. CMake 3.28 and later give every scanned
+C++20 compile `@<object>.modmap`, empty with clang for a source that imports and exports no
+module. A `.modmap` that holds anything passes the call through as `modules`; any other response
+file, or one that can't be read, as `response-file`. GCC's scanned compiles pass through as
+`modules` by their `-fmodules-ts` and `-fmodule-mapper=` (B-51). *Rests on:* a response file's
+words being the only thing it adds, and an empty one none. *Breaks if:* a compiler read a response
+file's name for anything else.
+
+**B-242 Precompiled headers.** [ADR 0120] A precompiled header made or used passes through as
+`pch` (B-51), and so does `-Xclang` before a flag B-51 counts as `pch` or `modules`, as that flag
+would: CMake's `target_precompile_headers` with clang passes `-Xclang -include-pch -Xclang
+<header>.pch`. Every other `-Xclang` is `loads-code`. Nothing a precompiled header's user or a
+module's importer compiles is stored.
+
+**B-243 A clang that takes the include graph.** [ADR 0120] A clang compile gets B-55's
+variables only when the compiler's identity says its driver takes them: asked once with the
+identity (B-52), as `/usr/bin/env CC_PRINT_HEADERS_FORMAT=json
+CC_PRINT_HEADERS_FILTERING=direct-per-file CC_PRINT_HEADERS_FILE=/dev/null <compiler> -x <lang>
+-E /dev/null -o /dev/null`, which must exit 0. clang 15 to 18 know the filtering variable but not
+`direct-per-file`, and fail every compile given it; they compile with B-54's fallback, as GCC
+does. The identity's memo is `hushrun.cc-compiler-memo/3`, so that each compiler is asked again.
 ## TypeScript (draft)
 
 > Draft, from [ADR 0106](../adr/0106-typescript-build-blocks.md) (proposed). Built: local reuse

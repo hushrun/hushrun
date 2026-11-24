@@ -3614,6 +3614,82 @@ fn a_go_fetch_asks_the_server_only_about_what_the_checks_go_manifest_names() {
 
 // covers: B-45
 #[test]
+fn a_go_fetch_that_comes_before_the_opens_answer_waits_for_them() {
+    // \[ADR 0111\] Go asks for its first packages as COMMAND starts, while the check's `open`s
+    // are still on the wire: a slow server used to make those packages compile whatever the
+    // manifest named. Both `open`s answer 400 ms late; the fetch, asked at once, still gets its
+    // block.
+    let fake = FakeBuild::start();
+    let a = machine();
+    let named = go_block(&a.store, 74, Some(me(&fake)));
+    let packed = super::pack::pack_block(&a.store, &named, &a.session).unwrap();
+    fake.put_block(
+        go_address(&named),
+        "person/1",
+        &packed.pack.bytes().unwrap(),
+        packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    fake.set_manifest(vec![Pair(go_address(&named), go_address(&named))]);
+    fake.delay(route::OPEN, Duration::from_millis(400));
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    relay
+        .begin_check(&b.session, None, Some("linux_amd64".into()), false, &|_| {
+            None
+        })
+        .unwrap();
+    assert!(
+        matches!(relay.state().phase, super::Phase::Opening)
+            || matches!(relay.state().go_manifest, super::GoManifest::Asking),
+        "the opens answered before the fetch was asked: the test proves nothing"
+    );
+    assert_eq!(
+        ask(
+            &relay,
+            Request::GoFetch {
+                key: named,
+                local_ms: None
+            }
+        ),
+        Answer::Ready { key: named }
+    );
+    relay.end_check(&[]);
+
+    // Within its bound only: with this machine's own compile of the key at 100 ms, it waits
+    // 50 ms, and the open still on the wire makes it a miss, as before.
+    let fake = FakeBuild::start();
+    fake.set_manifest(vec![Pair(go_address(&named), go_address(&named))]);
+    fake.delay(route::OPEN, Duration::from_secs(3));
+    let c = machine();
+    let relay = start(&fake, &c, |_| {});
+    relay
+        .begin_check(&c.session, None, Some("linux_amd64".into()), false, &|_| {
+            None
+        })
+        .unwrap();
+    let asked = Instant::now();
+    assert_eq!(
+        ask(
+            &relay,
+            Request::GoFetch {
+                key: named,
+                local_ms: Some(100)
+            }
+        ),
+        Answer::None
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        asked.elapsed()
+    );
+    relay.end_check(&[]);
+}
+
+// covers: B-45
+#[test]
 fn a_go_block_built_here_goes_up_and_closes_as_go_1() {
     let fake = FakeBuild::start();
     let m = machine();
