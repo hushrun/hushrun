@@ -156,7 +156,8 @@ impl Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Class {
-    /// A `lib` or `rlib`, also the metadata-only one `cargo check` asks for.
+    /// A `lib` or `rlib`, also the metadata-only one `cargo check` asks for, and any compile that
+    /// emits no `link`, of whatever crate type (B-160).
     Library,
     /// A `proc-macro`, loaded by the compiler itself.
     ProcMacro,
