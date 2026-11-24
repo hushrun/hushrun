@@ -549,6 +549,7 @@ impl Cache {
 /// A Gradle entry's line in the run's log: its task by Gradle's name.
 fn gradle_entry(outcome: Outcome, key: &Digest, task: &str) -> Entry {
     Entry {
+        xcode: None,
         outcome,
         class: Some(Class::Library),
         crate_name: task.to_string(),

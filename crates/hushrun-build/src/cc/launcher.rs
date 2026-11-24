@@ -246,6 +246,7 @@ fn log_pass(current: &Current, why: &'static str, probe: bool, args: &[OsString]
         _ => PassedThrough::UnknownArgument,
     };
     current.log(&Entry {
+        xcode: None,
         cc: Some(CcEntry {
             source,
             why: Some(why.to_string()),
@@ -275,6 +276,7 @@ fn entry(outcome: Outcome) -> Entry {
         downloaded: false,
         baked: false,
         go: None,
+        xcode: None,
         cc: None,
         gradle: None,
     }
@@ -1084,6 +1086,7 @@ pub fn reused_entry(
         downloaded,
         step: Some(step),
         key: Some(key),
+        xcode: None,
         cc: Some(cc),
         ..entry(Outcome::Reused)
     }
@@ -1304,6 +1307,7 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
         cleanup(&[&deps, &graph_file]);
         current.log(&Entry {
             rustc_ms: compile_ms,
+            xcode: None,
             cc: Some(CcEntry {
                 source,
                 why: Some("compile-failed".into()),
@@ -1349,6 +1353,7 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
             });
             current.log(&Entry {
                 rustc_ms: compile_ms,
+                xcode: None,
                 cc: Some(CcEntry {
                     source,
                     why: Some("depfile".into()),
@@ -1410,6 +1415,7 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
         key,
         stored_bytes,
         note: plan.note.take(),
+        xcode: None,
         cc: Some(cc_entry),
         ..entry(outcome)
     });

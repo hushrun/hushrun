@@ -336,7 +336,8 @@ pub(crate) fn publish(
             }
             hushrun_build::model::Kind::Go
             | hushrun_build::model::Kind::Cc
-            | hushrun_build::model::Kind::Gradle => {
+            | hushrun_build::model::Kind::Gradle
+            | hushrun_build::model::Kind::Xcode => {
                 object.insert("kind".into(), kind.word().into());
             }
         }

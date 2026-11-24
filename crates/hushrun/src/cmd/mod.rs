@@ -7,6 +7,7 @@ mod bake_build;
 pub mod build;
 pub(crate) mod build_relay;
 pub(crate) mod build_session;
+pub(crate) mod build_xcode;
 pub(crate) mod common;
 pub mod digest;
 pub mod doctor;

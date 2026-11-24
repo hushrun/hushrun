@@ -180,6 +180,16 @@ pub fn parts_of(entries: &[Entry], slot: &Slot) -> Vec<SavedPart> {
                 };
                 (Kind::Cc, cc.platform.clone())
             }
+            Kind::Xcode => {
+                let Some(xcode) = entry
+                    .xcode
+                    .as_ref()
+                    .filter(|xcode| xcode.local.is_none() && !xcode.platform.is_empty())
+                else {
+                    continue;
+                };
+                (Kind::Xcode, xcode.platform.clone())
+            }
             // Gradle's entries aren't baked yet (B-82): their manifest goes with `close` alone.
             Kind::Gradle => continue,
         };
@@ -519,6 +529,7 @@ mod tests {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
             gradle: None,
         }
@@ -535,6 +546,7 @@ mod tests {
 
     fn cc(step: u8, key: u8, platform: &str) -> Entry {
         Entry {
+            xcode: None,
             cc: Some(crate::cc::launcher::CcEntry {
                 platform: platform.into(),
                 ..Default::default()
@@ -775,6 +787,7 @@ mod leftovers {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
             gradle: None,
         }

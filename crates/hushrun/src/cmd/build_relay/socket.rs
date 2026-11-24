@@ -37,7 +37,18 @@ pub(crate) fn bind(
     session_folder: &Path,
     env: &dyn Fn(&str) -> Option<OsString>,
 ) -> Result<Bound, String> {
-    let wanted = session_folder.join(SOCKET);
+    bind_as(session_folder, SOCKET, env)
+}
+
+/// [`bind`], for a socket named `name`: the Xcode service's (B-85) beside the relay's.
+#[cfg(unix)]
+pub(crate) fn bind_as(
+    session_folder: &Path,
+    name: &str,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<Bound, String> {
+    let socket = name;
+    let wanted = session_folder.join(socket);
     let (folder, own_folder) = if wanted.as_os_str().len() <= MOST_SOCKET_PATH {
         (session_folder.to_path_buf(), None)
     } else {
@@ -45,7 +56,7 @@ pub(crate) fn bind(
         let fits = |parent: &Path| {
             parent
                 .join(format!("{FOLDER_PREFIX}{}", "x".repeat(FOLDER_RANDOM)))
-                .join(SOCKET)
+                .join(socket)
                 .as_os_str()
                 .len()
                 <= MOST_SOCKET_PATH
@@ -66,7 +77,7 @@ pub(crate) fn bind(
         }
         return Err(why);
     }
-    let path = folder.join(SOCKET);
+    let path = folder.join(socket);
     if path.as_os_str().len() > MOST_SOCKET_PATH {
         if let Some(own) = &own_folder {
             let _ = std::fs::remove_dir(own);

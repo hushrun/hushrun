@@ -35,6 +35,7 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
         BuildCommand::Fetch(fetch_args) => fetch(global, &place, &fetch_args.checks),
         BuildCommand::Bake(bake_args) => bake(global, &place, &bake_args),
         BuildCommand::Manifest(manifest_args) => manifest(global, &place, &manifest_args),
+        BuildCommand::Xcode(command) => xcode(&place, &command),
         BuildCommand::Share(share) => set_share(
             global,
             &place,
@@ -2643,6 +2644,22 @@ fn set(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
 }
 
 /// `hushrun build status`, and `hushrun build` alone.
+/// `hushrun build xcode` (B-92).
+fn xcode(place: &Place, command: &crate::cli::BuildXcodeCommand) -> CmdResult {
+    use crate::cli::BuildXcodeCommand;
+    use crate::cmd::build_xcode::app;
+    match command {
+        BuildXcodeCommand::On => app::on(),
+        BuildXcodeCommand::Off => app::off(),
+        BuildXcodeCommand::Status => app::status(place.store.as_deref()),
+        BuildXcodeCommand::Serve => {
+            let keep_days = settings::load(&place.settings)
+                .map_or(hushrun_build::KEEP_DAYS, |saved| saved.keep_days);
+            app::serve(place.store.clone(), keep_days)
+        }
+    }
+}
+
 fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
     let saved = settings::load(&place.settings);
     let effective = saved.as_ref().ok().map(|saved| {

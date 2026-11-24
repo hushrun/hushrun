@@ -81,6 +81,8 @@ pub struct Session {
     go: Option<crate::go::probe::Go>,
     /// Whether the run asked for Go's cache program already, given one or not: it asks once.
     go_asked: bool,
+    /// The xcconfig file COMMAND's Xcode reads (B-84), when the run serves Xcode's cache.
+    xcode: Option<PathBuf>,
     /// Another compiler wrapper is set (B-2): COMMAND gets no `RUSTC_WRAPPER` of hushrun's, and
     /// the session serves Go alone.
     rustc_left_out: bool,
@@ -502,6 +504,9 @@ pub struct Entry {
     /// A C or C++ object's line, logged by the launcher (B-61): absent for the others'.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc: Option<crate::cc::launcher::CcEntry>,
+    /// The Xcode service's line (B-91), when it logged it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xcode: Option<XcodeEntry>,
     /// A Gradle task's entry's line, logged by hushrun's Gradle cache (B-83): absent for the
     /// others'. Its task is in `crate_name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,10 +533,34 @@ pub struct GoEntry {
     pub local: Option<crate::go::archive::Local>,
 }
 
+/// What an Xcode value's line says beside the rest (B-91).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XcodeEntry {
+    /// It was served from the service's own cache on this machine ([`crate::xcode::cas`]): what
+    /// another checkout, branch or the Xcode app compiled here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_cache: bool,
+    /// Why it stays on this machine, when Xcode put it and it doesn't go up (B-89).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+    /// How many objects its block holds.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub objects: u64,
+    /// The Xcode build it was compiled with, as its manifest's platform (B-90).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub platform: String,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 impl Entry {
     /// Which adapter logged the line.
     pub fn kind(&self) -> crate::model::Kind {
-        if self.go.is_some() {
+        if self.xcode.is_some() {
+            crate::model::Kind::Xcode
+        } else if self.go.is_some() {
             crate::model::Kind::Go
         } else if self.cc.is_some() {
             crate::model::Kind::Cc
@@ -1420,6 +1449,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         more: Vec::new(),
         go: None,
         go_asked: false,
+        xcode: None,
         rustc_left_out: false,
         cc_env: Vec::new(),
         cc_maps_setting: settings.cc_maps,
@@ -1562,7 +1592,24 @@ impl Session {
         }
         env.extend(self.cc_env.iter().cloned());
         env.extend(self.gradle_env.iter().cloned());
+        if let Some(xcconfig) = &self.xcode {
+            env.push((
+                crate::xcode::XCCONFIG_VAR.into(),
+                xcconfig.clone().into_os_string(),
+            ));
+        }
         env
+    }
+
+    /// Gives COMMAND the xcconfig file that points Xcode's compilation cache at the run's
+    /// service (B-84).
+    pub fn set_xcode(&mut self, xcconfig: PathBuf) {
+        self.xcode = Some(xcconfig);
+    }
+
+    /// The xcconfig file COMMAND gets, when the run serves Xcode's cache.
+    pub fn xcode(&self) -> Option<&Path> {
+        self.xcode.as_deref()
     }
 
     /// B-77: serves Gradle hushrun's cache for this run, on `bound`, and gives COMMAND what
@@ -2039,6 +2086,7 @@ mod tests {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
             gradle: None,
         };
@@ -2154,6 +2202,7 @@ mod tests {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
             gradle: None,
         }
@@ -3014,6 +3063,7 @@ mod tests {
     fn c_objects_are_counted_apart_from_crates_and_said_in_their_own_lines() {
         use crate::cc::launcher::CcEntry;
         let cc = |outcome: Outcome, why: Option<&str>| Entry {
+            xcode: None,
             cc: Some(CcEntry {
                 why: why.map(str::to_string),
                 ..CcEntry::default()
@@ -3021,6 +3071,7 @@ mod tests {
             ..entry(outcome)
         };
         let probe = Entry {
+            xcode: None,
             cc: Some(CcEntry {
                 why: Some("cmake-probe".into()),
                 probe: true,
@@ -3103,6 +3154,7 @@ mod tests {
     fn objects_a_run_that_shares_keeps_here_are_said_with_why_and_downloads_counted() {
         use crate::cc::launcher::CcEntry;
         let stored = |local: &[&str], shared: bool| Entry {
+            xcode: None,
             cc: Some(CcEntry {
                 local: local.iter().map(|s| s.to_string()).collect(),
                 shared,
@@ -3120,6 +3172,7 @@ mod tests {
             Entry {
                 downloaded: true,
                 saved_ms: 4_000,
+                xcode: None,
                 cc: Some(CcEntry::default()),
                 ..entry(Outcome::Reused)
             },
@@ -3137,6 +3190,7 @@ mod tests {
     #[test]
     fn a_c_object_s_line_is_of_kind_cc_and_its_blocks_name_it() {
         let line = Entry {
+            xcode: None,
             cc: Some(crate::cc::launcher::CcEntry::default()),
             ..entry(Outcome::Reused)
         };

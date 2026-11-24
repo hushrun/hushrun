@@ -100,6 +100,12 @@ pub(crate) fn begin(
             go: session.go().map(|go| go.platform.clone()),
         });
     }
+    // B-84: Xcode's compilation cache, through a service of this run, last: the service reads
+    // the session as it now stands (its relay, its baked store).
+    if let (Some(folder), Some(root)) = (folder.as_deref(), checkout.as_deref()) {
+        let in_ci = crate::gitlab_job::in_ci(&Env::from_process());
+        crate::cmd::build_xcode::give(&mut session, folder, root, in_ci, &env);
+    }
     let cargo = std::env::current_dir().ok().is_some_and(|folder| {
         folder
             .ancestors()
@@ -1601,6 +1607,8 @@ pub(crate) fn finish_as(
     now: SystemTime,
     ending: crate::cmd::build_relay::Ending,
 ) -> hushrun_build::session::Summary {
+    // B-91: the Xcode service first, so the check's `close` holds what it stored.
+    crate::cmd::build_xcode::end(&mut session);
     if session.current().share.relay().is_some()
         && let Some(relay) = crate::cmd::build_relay::Relay::running()
     {

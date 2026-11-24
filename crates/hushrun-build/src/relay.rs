@@ -132,6 +132,28 @@ pub enum Request {
     /// The launcher's [`Request::Report`]: answered once the block's record is read, so the
     /// launcher may then discard it.
     CcReport { key: Digest, problem: Problem },
+    /// The Xcode service's [`Request::Fetch`] (B-90): the block of the value under `key`, of
+    /// kind `xcode/1`, whose first key is itself. The relay looks it up only when the check's
+    /// `xcode/1` manifest for `platform` (the Xcode build) names it: Xcode asks for every
+    /// compile's key, and most of them are ones no server holds.
+    XcodeFetch {
+        key: Digest,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The service's [`Request::Vouch`]: whether a server still serves the downloaded block
+    /// `key` with these `outputs`.
+    XcodeVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// The service's [`Request::Built`]: a value Xcode put in this run, stored as a block under
+    /// `key` that may leave the machine (B-82).
+    XcodeBuilt { key: Digest, cost_ms: u64 },
+    /// The service's [`Request::Report`]: answered once the block's record is read, so the
+    /// service may then discard it.
+    XcodeReport { key: Digest, problem: Problem },
     /// Gradle's cache's [`Request::Fetch`] (B-80): the entry under `key`, of kind `gradle/1`,
     /// whose first key is itself. Looked up only when the check's `gradle/1` manifest names it,
     /// as Go's are: Gradle asks about every task its own cache misses.
@@ -163,6 +185,7 @@ impl Request {
                 | Request::GoBuilt { .. }
                 | Request::GoReport { .. }
                 | Request::CcBuilt { .. }
+                | Request::XcodeBuilt { .. }
                 | Request::GradleBuilt { .. }
         )
     }
