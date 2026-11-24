@@ -180,6 +180,8 @@ pub fn parts_of(entries: &[Entry], slot: &Slot) -> Vec<SavedPart> {
                 };
                 (Kind::Cc, cc.platform.clone())
             }
+            // Gradle's entries aren't baked yet (B-82): their manifest goes with `close` alone.
+            Kind::Gradle => continue,
         };
         if !seen.insert((kind, platform.clone(), step, key)) {
             continue;
@@ -518,6 +520,7 @@ mod tests {
             baked: false,
             go: None,
             cc: None,
+            gradle: None,
         }
     }
 
@@ -773,6 +776,7 @@ mod leftovers {
             baked: false,
             go: None,
             cc: None,
+            gradle: None,
         }
     }
 

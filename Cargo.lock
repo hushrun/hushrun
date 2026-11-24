@@ -1956,6 +1956,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "zlib-rs",
 ]
 
 [[package]]

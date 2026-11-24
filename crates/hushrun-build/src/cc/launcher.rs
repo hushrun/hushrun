@@ -276,6 +276,7 @@ fn entry(outcome: Outcome) -> Entry {
         baked: false,
         go: None,
         cc: None,
+        gradle: None,
     }
 }
 

@@ -285,6 +285,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         baked: false,
         go: None,
         cc: None,
+        gradle: None,
     }
 }
 

@@ -3153,3 +3153,112 @@ checks count nowhere. The compiler's own output is unchanged.
 **B-62 Without a session.** A launcher that finds no usable session (a build that outlived its
 run, `HUSHRUN_CC` set by hand) replaces itself with the compiler and the arguments as given, and
 reads nothing else. *Rests on:* nothing.
+
+## Gradle (draft)
+
+> Draft, from [ADR 0104](../adr/0104-gradle-build-blocks.md) (proposed). Built: sharing through
+> the relay. Not built: Gradle blocks in baked stores (B-63) and in `hushrun build fetch` (B-36).
+
+Gradle keys each cacheable task by its own **build cache key** (the hash of the task's
+implementation, its inputs by content and its paths as the task normalizes them), keeps entries in
+a local cache of its own, and on a miss asks a **remote** cache over HTTP: `GET {url}{key}`, and
+`PUT {url}{key}` once it has run the task. hushrun is that remote in a run that shares: entries
+are blocks of kind `gradle/1` in the same store, through the same relay, records and outbox as the
+other kinds (B-13, B-14, B-26 to B-34). Gradle's local cache stays Gradle's. hushrun computes none
+of the key, and Gradle doesn't ask a task's outputs to be the same from one execution to the next:
+every check below is the only guard there is, and none of them proves an entry's bytes are what
+its inputs make.
+
+**B-77 Hushrun's cache for Gradle.** In a run that has a relay (B-26), `hushrun run` serves a
+cache to Gradle when the folder COMMAND runs in, or one above it up to the checkout's (the nearest
+folder holding `.git`), holds `settings.gradle` or `settings.gradle.kts`, and that file holds the
+text `HUSHRUN_GRADLE` (ADR 0087's line); a settings file without it is said once, `build: Gradle's
+tasks aren't shared in this run: <file> doesn't load hushrun's script; add `<line>` after any
+pluginManagement {} and plugins {} block`, and nothing more is done. Windows and an isolated check
+get nothing. The cache listens on `127.0.0.1` at the store's port (`<store>/gradle/endpoint.json`,
+mode 0600: a port from 20000 to 31999 and 64 hex characters of token, made once from
+`/dev/urandom`), else, when another process holds that port, at one the system picks, with the
+line `build: gradle: another run is using this store's Gradle cache port, so this run's Gradle
+can't reuse its configuration cache`. It answers `GET`, `HEAD` and `PUT` of `/cache/<key>` with
+Basic authentication `hushrun:<token>` (compared in constant time; anything else is 401), a key of
+32 to 128 lowercase hex characters (else 404), HTTP/1.1 with `Content-Length` or chunked bodies,
+`Expect: 100-continue` and kept connections, 64 at once, idle ones closed after 120 seconds, and a
+peer that isn't the loopback refused. COMMAND gets `HUSHRUN_GRADLE_CACHE`
+(`http://127.0.0.1:<port>/cache/`) and `HUSHRUN_GRADLE_CACHE_TOKEN`, and `HUSHRUN_GRADLE` naming
+`<store>/gradle/cache-<16 hex>.gradle` unless the run's environment sets it; ADR 0087's test script,
+which a check that observes tests sets instead, ends with the same text. That script, once the
+settings file is evaluated, gives the build an `HttpBuildCache` remote at that URL with push on
+and `allowInsecureProtocol`, unless the build set a remote of its own, which stays; any failure
+leaves the build as it was. The cache is used only where the build turns Gradle's build cache on;
+where neither the user's `gradle.properties` (Gradle's user home) nor the build's says
+`org.gradle.caching=true`, the run says `build: gradle: the build cache is off for this build, so
+Gradle asks hushrun's cache nothing: set `org.gradle.caching=true` in gradle.properties, or pass
+--build-cache`. *Rests on:* Gradle recording each variable a settings script reads as an input of
+its configuration cache, so a URL and a token that are the same from run to run keep it; a remote
+set in `settingsEvaluated` surviving a reused configuration cache (both seen on Gradle 8.14.3);
+`--offline` turning the remote off, which is Gradle's.
+
+**B-78 Keys and the canonical entry.** A block's key is the SHA-256 of `hushrun.gradle-key/v1\n`
+followed by Gradle's key, and its first key is itself. Its one file, `entry.tar`, is the entry in
+its **canonical form**: a ustar tar of the entry's members in Gradle's order, each with its name,
+type (a file or a folder), permission bits and bytes, owner, group and dates 0, a name over 100
+bytes in a PAX header (`path`), ended by two zero blocks; `METADATA`'s `key=value` lines sorted,
+comments dropped, `buildInvocationId=hushrunhushrunhushrunhushr`, `creationTime=0`,
+`executionTime=0`. Its record holds Gradle's key (`gradle_key`), the task (`task`, unescaped), the
+Gradle version (`gradle`) and the task's execution time (`rustc_ms`, from `METADATA`). An entry
+Gradle sends is refused unless it is one gzip member (no trailing bytes, its CRC-32 and length
+right), a tar whose headers' checksums hold, every member a file or a folder (PAX extended and
+global headers and GNU long names read past), every name relative, its parts neither empty, `.`
+nor `..`, with no backslash or NUL, exactly one `METADATA`, a file, whose `buildCacheKey` is the key
+it was sent under, and at most 1 GiB unpacked; a body over 512 MiB is read and dropped. A block is
+served only when its record names `gradle/1` and the key asked, its one file's size and SHA-256 are
+its record's, and its bytes are read as an entry of that key whose canonical form is those bytes;
+Gradle is sent them as a gzip stream of stored deflate blocks. *Rests on:* Gradle reading an
+entry's `METADATA` for its origin alone and dating each file it unpacks with the time it writes it
+(seen on Gradle 8.14.3).
+
+**B-79 What may leave.** An entry Gradle stores whose members' names or bytes (`METADATA` aside)
+hold, as bytes anywhere, the checkout's folder (as given and resolved), Gradle's user home
+(`GRADLE_USER_HOME`, else `$HOME/.gradle`), the store's folder or the home folder, tried in that
+order, is not stored: it stays in Gradle's own cache, and its line says which (`checkout`,
+`gradle-home`, `store`, `home`). A folder of one character is never searched for. *Rests on:* the
+same search as B-10's; a value the task read and wrote in another form is in the bytes and not
+found, as B-24 says of every kind.
+
+**B-80 A `GET`.** For a key whose block is suspended (B-15): 404. A block in the store is served
+as B-78 says once `Current::may_reuse` allows it (B-34), the question to the relay being
+`gradle_vouch`. Else, in a run whose mode is `on`, the cache asks the relay `gradle_fetch`, which
+answers only while sharing is on and the check's `gradle/1` manifest (B-82) names the key, as a Go
+fetch is answered (B-45): the first such question starts the manifest's prefetch, and one asked
+while it looks up waits for it at most a second, and at most half what this machine's own last
+execution took; then the download is waited for within half the cost (B-26). Every other answer is
+404, and Gradle runs the task. A download that fails B-78's checks is reported `rejected` to the
+scope it came from, its key suspended for the kept days, and removed. A served block's use is dated
+(B-14), and a download's first reuse here is recorded (B-32). A relay that doesn't answer once is
+asked nothing more by the cache for the rest of the run. A `HEAD` is 200 when the store holds a block of the key that
+isn't suspended, else 404, with no body: it downloads nothing and logs nothing.
+
+**B-81 A `PUT`.** Answered 200 whatever becomes of the entry. A canonical entry B-79 doesn't keep
+here is stored as a block built by this run (B-32) and told to the relay (`gradle_built`, with the
+task's execution time as its cost), which uploads it where the run may write, as for every kind
+(B-29): what the server's scopes let the caller write, a CI job's own scope or `protected/<id>`,
+a person's machine its own or `team`. Not stored: a key suspended, a store below B-22's floor. A
+block there already that was only downloaded gives way to this execution, which is then told to
+the relay; one built here stays. Gradle's entries are never audited (B-16) and never compared in
+shared `observe` (B-33): a difference is no sign of a forged entry when a task may make other bytes
+each time (a test report's dates, a jar's file dates); it is logged (`differed`) and nothing else.
+
+**B-82 Manifest and close.** A check whose run serves the cache asks `open` of kind `gradle/1` and
+platform `jvm` beside its own `open`, for its manifest alone, as a Go command's does (B-45), and,
+when it logged a Gradle line, sends `close` of kind `gradle/1`, platform `jvm`, under a run that is
+the SHA-256 of the check's run followed by `gradle/1\n`, with a manifest of its entries' pairs in
+the order logged, leaving out those B-79 kept here and those whose upload hasn't gone. Gradle's
+blocks are in no saved manifest, and `hushrun build bake` leaves them out. *Rests on:* the server
+taking any kind and keeping manifests per kind (no server change); Gradle's keys holding the
+operating system wherever a task's outputs depend on it, so one platform serves every machine.
+
+**B-83 What a run says (Gradle).** The cache's lines go into the run's log beside the other
+kinds', the task by Gradle's name in `crate_name`, and the summary counts them apart: `build:
+gradle: N tasks: X from hushrun's cache (Y from the shared store), Z run and stored`, with `saving
+about T` from the served tasks' execution times; and, when some stay, `build: gradle: N tasks run
+here stay on this machine (…)`, by B-79's reason. Gradle's own output is unchanged.

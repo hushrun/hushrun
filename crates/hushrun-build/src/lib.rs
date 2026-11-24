@@ -56,6 +56,7 @@ pub mod decide;
 pub mod depinfo;
 pub mod description;
 pub mod go;
+pub mod gradle;
 pub mod inputs;
 pub mod invocation;
 pub mod key;

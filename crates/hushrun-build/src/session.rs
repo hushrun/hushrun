@@ -91,6 +91,10 @@ pub struct Session {
     cc_maps_setting: bool,
     /// Which manifest the run leaves in the store when it ends (B-63), when it is a check's.
     slot: Option<crate::manifests::Slot>,
+    /// What COMMAND gets for Gradle (B-77): the script, the cache's URL and its token.
+    gradle_env: Vec<(OsString, OsString)>,
+    /// hushrun's Gradle cache while it serves (B-77): it stops with the session.
+    gradle_cache: Option<crate::gradle::cache::Running>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -159,6 +163,9 @@ pub struct Current {
     /// What the C and C++ launcher reads (B-50): absent, it passes every call through (B-62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc: Option<crate::cc::CcRun>,
+    /// What hushrun's Gradle cache reads (B-79): absent, the run serves Gradle nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradle: Option<crate::gradle::GradleRun>,
     /// The baked store the run reads underneath its store (B-63, B-64), as its state said when
     /// the run began. Absent: none, or one the run ignores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,6 +502,18 @@ pub struct Entry {
     /// A C or C++ object's line, logged by the launcher (B-61): absent for the others'.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc: Option<crate::cc::launcher::CcEntry>,
+    /// A Gradle task's entry's line, logged by hushrun's Gradle cache (B-83): absent for the
+    /// others'. Its task is in `crate_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradle: Option<GradleEntry>,
+}
+
+/// What a Gradle entry's line says beside the rest (B-83).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GradleEntry {
+    /// Why it stays on this machine, when Gradle stored it and it doesn't go up (B-79).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<crate::gradle::Local>,
 }
 
 /// What a Go package archive's line says beside the rest (B-46).
@@ -516,6 +535,8 @@ impl Entry {
             crate::model::Kind::Go
         } else if self.cc.is_some() {
             crate::model::Kind::Cc
+        } else if self.gradle.is_some() {
+            crate::model::Kind::Gradle
         } else {
             crate::model::Kind::Rustc
         }
@@ -655,6 +676,93 @@ pub struct Counts {
     pub go: GoCounts,
     /// What the C and C++ launcher's lines came to (B-61), counted apart from the crates.
     pub cc: CcCounts,
+    /// What hushrun's Gradle cache's lines came to (B-83), counted apart from the crates.
+    pub gradle: GradleCounts,
+}
+
+/// What a run's Gradle entries came to (B-83).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GradleCounts {
+    /// Entries Gradle asked hushrun's cache for and found, or stored in it.
+    pub tasks: u64,
+    /// Served to Gradle from hushrun's store.
+    pub reused: u64,
+    /// Of those, downloaded from the shared store for it.
+    pub downloaded: u64,
+    /// Stored by Gradle after it ran the task.
+    pub built: u64,
+    /// Milliseconds the tasks served took where they were run.
+    pub saved_ms: u64,
+    /// Entries Gradle stored that stay on this machine, by reason, in the order first seen.
+    pub local: Vec<(crate::gradle::Local, u64)>,
+}
+
+impl GradleCounts {
+    fn add(&mut self, entry: &Entry) {
+        let Some(gradle) = &entry.gradle else {
+            return;
+        };
+        self.tasks += 1;
+        match entry.outcome {
+            Outcome::Reused => {
+                self.reused += 1;
+                self.downloaded += u64::from(entry.downloaded);
+                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
+            }
+            Outcome::BuiltAndStored | Outcome::BuiltNotStored(_) | Outcome::PassedThrough(_) => {
+                self.built += 1;
+            }
+        }
+        if let Some(local) = gradle.local {
+            match self.local.iter_mut().find(|(seen, _)| *seen == local) {
+                Some((_, n)) => *n += 1,
+                None => self.local.push((local, 1)),
+            }
+        }
+    }
+
+    /// B-83's lines for Gradle, without a prefix. Empty when Gradle asked nothing.
+    pub fn lines(&self) -> Vec<String> {
+        if self.tasks == 0 {
+            return Vec::new();
+        }
+        let tasks = |n: u64| {
+            if n == 1 {
+                "1 task".to_string()
+            } else {
+                format!("{n} tasks")
+            }
+        };
+        let mut parts = Vec::new();
+        if self.reused > 0 {
+            let mut part = format!("{} from hushrun's cache", self.reused);
+            part.push_str(&from_where(self.downloaded, 0));
+            parts.push(part);
+        }
+        if self.built > 0 {
+            parts.push(format!("{} run and stored", self.built));
+        }
+        let mut first = format!("build: gradle: {}: {}", tasks(self.tasks), parts.join(", "));
+        if self.saved_ms >= 1_000 {
+            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
+        }
+        let mut lines = vec![first];
+        let kept: u64 = self.local.iter().map(|(_, n)| n).sum();
+        if kept > 0 {
+            let why: Vec<String> = self
+                .local
+                .iter()
+                .map(|(local, n)| format!("{n}: {}", local.words()))
+                .collect();
+            lines.push(format!(
+                "build: gradle: {} run here {} on this machine ({})",
+                tasks(kept),
+                if kept == 1 { "stays" } else { "stay" },
+                why.join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 /// What a run's C and C++ objects came to (B-61).
@@ -960,6 +1068,10 @@ impl Counts {
                 counts.cc.add(entry);
                 continue;
             }
+            if entry.gradle.is_some() {
+                counts.gradle.add(entry);
+                continue;
+            }
             counts.compiles += 1;
             match entry.outcome {
                 Outcome::Reused => {
@@ -1067,6 +1179,7 @@ fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
     let mut lines = rust_lines(counts, rebuilt);
     lines.extend(counts.go.lines());
     lines.extend(counts.cc.lines(counts.mode));
+    lines.extend(counts.gradle.lines());
     lines
 }
 
@@ -1294,6 +1407,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         share: Shared::Off,
         share_setting: settings.share,
         cc: None,
+        gradle: None,
         lower: None,
         stub: None,
     };
@@ -1310,6 +1424,8 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         cc_env: Vec::new(),
         cc_maps_setting: settings.cc_maps,
         slot: None,
+        gradle_env: Vec::new(),
+        gradle_cache: None,
     })
 }
 
@@ -1445,7 +1561,45 @@ impl Session {
             env.push((crate::go::GOCACHEPROG.into(), go.value.clone().into()));
         }
         env.extend(self.cc_env.iter().cloned());
+        env.extend(self.gradle_env.iter().cloned());
         env
+    }
+
+    /// B-77: serves Gradle hushrun's cache for this run, on `bound`, and gives COMMAND what
+    /// loads it: `HUSHRUN_GRADLE` naming `script` unless `env` has one already (ADR 0087's
+    /// adapter sets its own, whose script ends with the same text), the cache's URL and its
+    /// token. `run` is what the cache searches entries for (B-79), written into `session.json`
+    /// before COMMAND starts. Called once the session shares (B-26): the cache asks its relay.
+    /// The URL Gradle is given.
+    pub fn set_gradle(
+        &mut self,
+        run: crate::gradle::GradleRun,
+        script: &Path,
+        bound: crate::gradle::endpoint::Bound,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> std::io::Result<String> {
+        self.current.gradle = Some(run);
+        write_current(&self.current)?;
+        let url = bound.url();
+        let token = bound.endpoint.token.clone();
+        let cache = crate::gradle::cache::Cache::new(self.current.clone(), &token);
+        self.gradle_cache = Some(crate::gradle::cache::start(bound.listener, cache)?);
+        let mut gradle_env: Vec<(OsString, OsString)> = Vec::new();
+        if env(crate::gradle::SCRIPT_VARIABLE).is_none_or(|v| v.is_empty()) {
+            gradle_env.push((
+                crate::gradle::SCRIPT_VARIABLE.into(),
+                script.as_os_str().to_os_string(),
+            ));
+        }
+        gradle_env.push((crate::gradle::CACHE_VARIABLE.into(), url.clone().into()));
+        gradle_env.push((crate::gradle::TOKEN_VARIABLE.into(), token.into()));
+        self.gradle_env = gradle_env;
+        Ok(url)
+    }
+
+    /// Whether the run serves Gradle hushrun's cache (B-77).
+    pub fn serves_gradle(&self) -> bool {
+        self.gradle_cache.is_some()
     }
 
     /// Gives COMMAND the C and C++ launcher (B-50): `checkout` is the repository's folder as the
@@ -1886,6 +2040,7 @@ mod tests {
             baked: false,
             go: None,
             cc: None,
+            gradle: None,
         };
         found.log(&entry);
         found.log(&entry);
@@ -2000,6 +2155,7 @@ mod tests {
             baked: false,
             go: None,
             cc: None,
+            gradle: None,
         }
     }
 

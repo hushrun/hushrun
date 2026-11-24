@@ -2046,6 +2046,7 @@ mod tests {
             baked: false,
             go: None,
             cc: None,
+            gradle: None,
         }
     }
 

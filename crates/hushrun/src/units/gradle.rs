@@ -208,13 +208,16 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
 /// The script for this binary, written whole when it isn't there yet:
 /// `<cache dir>/adapters/gradle-<first 16 hex of its SHA-256>/hushrun.gradle`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
-    let digest = hushrun_core::Digest::of(SCRIPT.as_bytes()).hex();
+    // B-77: the script ends with hushrun's Gradle cache's, so a run that observes tests and
+    // shares sets one `HUSHRUN_GRADLE` that loads both.
+    let script = format!("{SCRIPT}\n{}", hushrun_build::gradle::SCRIPT);
+    let digest = hushrun_core::Digest::of(script.as_bytes()).hex();
     let path = cache
         .join("adapters")
         .join(format!("gradle-{}", &digest[..16]))
         .join("hushrun.gradle");
-    if std::fs::read(&path).ok().as_deref() != Some(SCRIPT.as_bytes()) {
-        super::facts::write_whole(&path, SCRIPT.as_bytes())?;
+    if std::fs::read(&path).ok().as_deref() != Some(script.as_bytes()) {
+        super::facts::write_whole(&path, script.as_bytes())?;
     }
     Ok(path)
 }

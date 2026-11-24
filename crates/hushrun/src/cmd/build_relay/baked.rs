@@ -177,6 +177,8 @@ fn kept_here(kind: Kind, description: &serde_json::Value) -> Option<String> {
             .and_then(|local| local.first())
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        // Gradle's entries aren't baked yet (B-82).
+        Kind::Gradle => Some("Gradle entries aren't baked".into()),
     }
 }
 
