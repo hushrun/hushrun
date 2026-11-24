@@ -94,7 +94,6 @@ pub fn choose_kept(
     pytest::any_other(command)
 }
 
-
 /// \[C-39\] What an adapter knows of tests one by one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnowsTests {
