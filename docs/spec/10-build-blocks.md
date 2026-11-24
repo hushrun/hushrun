@@ -6,7 +6,9 @@
 > that runs: a crate the compiler already built from the same inputs is not compiled again, in
 > this worktree or in another one on the same machine. For Go (B-39 to B-47), a package archive
 > another machine compiled is reused through Go's own cache program, beside Go's own cache. For C
-> and C++ (B-50 to B-62, a draft), an object is reused through CMake's compiler launcher. Nothing here changes what a check's result
+> and C++ (B-50 to B-62, a draft), an object is reused through CMake's compiler launcher; for
+> TypeScript (B-100 to B-109, a draft), what `tsc` wrote and printed, through a hook in its Node
+> process. Nothing here changes what a check's result
 > is. Nothing leaves the machine unless the org shares build blocks through its backend and the
 > person lets this machine take part (B-25 to B-35): then a portable block (B-24) goes up sealed
 > with its own key, and another machine reuses it only after the same checks as a block of its own.
@@ -3376,3 +3378,121 @@ with no session: it asks no backend and keeps no block. `off` unloads and remove
 unsets the variable only when it names hushrun's file, and removes the file. `status` says which
 of these hold. *Rests on:* apps opened after `launchctl setenv` getting the variable, and Xcode
 reading it for the app's builds. *Breaks if:* it doesn't: the spike says.
+
+## TypeScript (draft)
+
+> Draft, from [ADR 0106](../adr/0106-typescript-build-blocks.md) (proposed). Built: local reuse
+> between worktrees and runs, and sharing through the relay. TypeScript 4 to 6 only: TypeScript 7
+> and later compile in native code `bin/tsc` starts, whose reads a Node process can't see, and pass
+> through.
+
+A **compile** here is one run of the TypeScript compiler's `tsc` in a Node process: a plain
+`tsc`, `tsc -p <config>`, `tsc --noEmit` or `tsc --build` over project references, one process
+whatever the number of projects. A compile's **block**, kind `tsc/1`, holds every file it wrote,
+its standard output and error, and its exit status, in the same store, through the same relay,
+records and outbox as the `rustc` wrapper's (B-13, B-14, B-26 to B-34). A **root** is the
+repository's folder as B-50 names it, in its given and resolved forms.
+
+**B-100 The hook.** When the mode is not `off`, `hushrun run` begins the session as B-2 says and,
+in a folder at or under a `package.json` of its checkout, writes the hook (`hushrun-tsc-<digest>.cjs`,
+named by its content) into the store's `tsc/` folder, sets `NODE_OPTIONS` for COMMAND to what
+COMMAND's environment had followed by `--require <hook>` (the path in double quotes, backslashes
+doubled, when it holds white space; a path with a quote sets nothing and costs a line), and
+`HUSHRUN_TSC` to a link named `hushrun-tsc` beside the wrapper's (B-2), pointing at the hushrun
+binary. Nothing on Windows or for an isolated check. The hook does nothing in a Node process without
+`HUSHRUN_TSC`, in a worker thread, or whose main file, after links, isn't a compiler its table
+names: TypeScript's `bin/tsc` or `lib/tsc.js` in a package named `typescript` of major version 4
+to 6. Every other Node process pays one test of its main file's name. A test adapter that sets
+`NODE_OPTIONS` (C-44's Jest) adds to the hook's, never over it (C-50).
+
+**B-101 Passed through.** The compiler runs as asked, nothing stored, and the run's log says why,
+for `--watch` or `-w` (`watch`); `--init`, `--help`, `--all`, `--version`, `--showConfig`
+(`prints`); `--diagnostics`, `--extendedDiagnostics` (`timings`); `--generateTrace`,
+`--generateCpuProfile` (`trace`); `--build` with `--verbose`, `--dry` or `--clean` (`build-mode`);
+a working folder outside every root (`cwd-outside-roots`); a compiler file that can't be read
+(`compiler`); a store that can't be read (`store-read`). Options are matched as the compiler
+matches them, in any case, after one or two dashes. Every other argument is keyed by its text.
+
+**B-102 The first key.** The SHA-256 of the JCS form of: the kind, the compiler's row and the
+version its `package.json` names; the compiler's identity, the SHA-256 of the file its row names
+(`lib/_tsc.js`, else `lib/tsc.js`), memoised under the store by path, size, dates, inode and device;
+each argument with every root's text replaced by `{root}`; the working folder from the root; Node's
+`process.platform`; whether file names keep case, as the compiler decides it (its own file not
+found under its name with every letter's case swapped); whether standard output is a terminal (the
+compiler's default for `--pretty`); the values of `NO_COLOR`, `FORCE_COLOR` and `NODE_ENV` that are
+set; and the person's and the repository's keyed variables (B-5, B-35).
+
+**B-103 The second key.** While the compiler runs, the hook records what it did through Node's
+`fs`, Node's own calls inside a call left out: each file read, with the SHA-256 of the very bytes
+it was given; each path looked at (`statSync`, `lstatSync`, `existsSync`, `accessSync`) as a file,
+a folder, another kind or absent; each folder listed, by its entries' names and kinds; each path
+resolved (`realpathSync` and its `native`), by where it led. What the compile wrote earlier in the
+same process (one project's declarations that `--build` reads for the next) is left out of all
+four. Paths under a root are recorded from it (`{root}/src/a.ts`). A path outside every root
+looked at and absent, below a folder above the root (the compiler's walk up for `package.json` and
+`node_modules`), is kept as its name below that folder, and holds where that name is absent below
+every folder above the root of the checkout that looks it up, whatever its depth. Any other path
+outside every root is kept as it is, and ties the block (B-104). The compiler's look at its own
+file under swapped case is in the first key, not here. The **hint**, written under the first key,
+holds the four lists sorted, and the second key is the SHA-256 of the first key, the hint and the
+reads' digests in its order. A lookup takes the hints of the first key, the newest first, and the
+first whose every kind, listing, link and absence holds here and whose reads, hashed now, give a
+key the store holds, is the block. A hint is never trusted: a wrong one gives a key nothing holds.
+
+**B-104 Not stored.** A compile is stored only when the hook recorded no error of its own
+(`hook-error`) and nothing a block can't hold or key, each said by its name: reading through a
+file descriptor (`read-fd`), an asynchronous call or a watch (`async-…`), and removing, renaming,
+copying, linking, appending to, truncating or re-dating a file (`unlink`, `rename`, …); when it
+ended with the compiler's own status 0, 1 or 2 (`status`); when every file it wrote is under a
+root and there when it ended (`write-outside-roots`, `output-gone`); when its messages hold no
+`{root}` of their own (`placeholder`); for `--build`, when it read no `.tsbuildinfo`
+(`build-over-outputs`): the compiler then decides by the dates of outputs it finds, which no key
+holds, so only a build that found none is stored; and when the store's volume has the space B-22
+asks. A block whose written files hold a root's text, or whose hint names a path outside the
+roots, is **tied**: stored under the SHA-256 of its key and the roots, so only a checkout at the same
+folder finds it, and it never leaves the machine. Every root's text in the messages is stored as
+`{root}`.
+
+**B-105 Restore.** A block found, vouched for (B-108) and not picked by the audit is put in place
+before the compiler loads: each file, checked against the size and SHA-256 its record holds and
+written under a temporary name in its folder (made when missing) and renamed into place, dated
+now; then the hook prints its standard output and error, the roots replaced by this checkout's,
+and ends the process with its status. A file that fails its check, or a write that fails, runs the
+compiler as asked, which writes over whatever was put in place (`restore`). A plain `tsc --build`
+after a restore finds every project up to date, its outputs newer than its sources. In `observe`,
+and for a compile the audit picks (B-16: one time in fifty, one in ten at a download's first reuse,
+`HUSHRUN_BUILD_AUDIT`), the compiler runs, and what it wrote and printed is compared, file by path
+and digest, with the block found: a difference suspends the first key for the kept days and says
+so, and a downloaded block that differs is reported `differs`.
+
+**B-106 Fallback.** Nothing the hook or the helper does changes what the compiler does unless a
+block is put in place whole: a missing session, a helper that can't be started or answers
+anything else, a panic, a store that can't be written, each runs the compiler exactly as asked.
+The compiler's standard output and error pass through as it writes them; the hook keeps a copy.
+The helper is asked twice: before the compiler loads (`hushrun-tsc lookup`, the call on standard
+input, its answer on standard output) and as the process ends (`hushrun-tsc store <plan>`), whose
+outcome never changes the process's status.
+
+**B-107 Type checks.** A compile that writes nothing, `tsc --noEmit` among them, is a block of its
+messages and status alone: a type check whose program read the same bytes, kinds, listings and
+links prints the same errors and ends with the same status without the compiler starting, in any
+checkout.
+
+**B-108 Sharing.** In a run that shares (B-25), a block that isn't tied goes up as kind `tsc/1`
+under its first key, class `library`, its platform Node's `process.platform`, when the helper tells
+the relay it was built; a check closes once for each platform its compiles ran on, with the pairs
+of its reuses and blocks, as B-60's. A lookup that finds nothing here asks the relay for the first
+key's hints only when the check's `tsc/1` manifest for the platform names it (asked with `open` at
+the first such question), within 10 seconds or half this machine's last compile of the key, and
+fetches one of at most eight second keys the downloaded hints lead to. A downloaded hint is followed
+only when every path it names is under `{root}` or a name above it, with at most 200,000 paths.
+A downloaded block is served only as `Shared::may_reuse` says (B-34), its files' sizes and SHA-256
+checked as B-105's, every path under `{root}`, and its messages with every control character but a
+newline, a tab and SGR colour taken out; one that fails is reported `rejected`, its first key
+suspended for the kept days and the block removed. TypeScript blocks aren't baked (B-63). *Rests
+on:* the server taking any kind `is_kind` reads (no server change).
+
+**B-109 What a run says (TypeScript).** The run's summary says, when the hook asked anything:
+`build: typescript: N compiles: X reused (Y from the shared store), Z built`, with what reuse saved
+from a second on and how many were compared and differed; and `build: typescript: N compiles run as
+asked or not stored (<count> <reason>, …)`, the three most frequent reasons first.

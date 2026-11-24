@@ -192,8 +192,17 @@ pub fn parts_of(entries: &[Entry], slot: &Slot) -> Vec<SavedPart> {
             }
             // Gradle's entries aren't baked yet (B-82): their manifest goes with `close` alone.
             Kind::Gradle => continue,
-            // TypeScript blocks stay on the machine that built them (B-108).
-            Kind::Tsc => continue,
+            // B-108: per Node platform, those that may leave the machine.
+            Kind::Tsc => {
+                let Some(tsc) = entry
+                    .tsc
+                    .as_ref()
+                    .filter(|tsc| tsc.local.is_empty() && !tsc.platform.is_empty())
+                else {
+                    continue;
+                };
+                (Kind::Tsc, tsc.platform.clone())
+            }
         };
         if !seen.insert((kind, platform.clone(), step, key)) {
             continue;

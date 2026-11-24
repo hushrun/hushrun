@@ -1335,7 +1335,11 @@ fn an_adapter_s_node_options_go_after_the_build_s_hook() {
         os("--max-old-space-size=4096 --require /s/tsc.cjs --require /c/jest.cjs")
     );
     assert_eq!(
-        super::beside(Some(os("--require /s/tsc.cjs")), None, &os("--require /c/jest.cjs")),
+        super::beside(
+            Some(os("--require /s/tsc.cjs")),
+            None,
+            &os("--require /c/jest.cjs")
+        ),
         os("--require /s/tsc.cjs --require /c/jest.cjs")
     );
     // Without the build's, the adapter's alone.

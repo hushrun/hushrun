@@ -19,7 +19,9 @@ pub fn classify(args: &[String]) -> Result<Asked, &'static str> {
         .filter(|a| a.starts_with('-'))
         .map(|a| {
             let name = a.trim_start_matches('-');
-            name.split_once(':').map_or(name, |(n, _)| n).to_ascii_lowercase()
+            name.split_once(':')
+                .map_or(name, |(n, _)| n)
+                .to_ascii_lowercase()
         })
         .collect();
     let has = |words: &[&str]| names.iter().any(|n| words.contains(&n.as_str()));
@@ -29,7 +31,16 @@ pub fn classify(args: &[String]) -> Result<Asked, &'static str> {
     if has(&["watch", "w"]) {
         return Err("watch");
     }
-    if has(&["init", "help", "h", "?", "all", "version", "v", "showconfig"]) {
+    if has(&[
+        "init",
+        "help",
+        "h",
+        "?",
+        "all",
+        "version",
+        "v",
+        "showconfig",
+    ]) {
         return Err("prints");
     }
     if has(&["diagnostics", "extendeddiagnostics"]) {
@@ -58,10 +69,19 @@ mod tests {
     fn plain_compiles_and_type_checks_are_handled() {
         assert_eq!(of(&[]), Ok(Asked { build: false }));
         assert_eq!(of(&["--noEmit"]), Ok(Asked { build: false }));
-        assert_eq!(of(&["-p", "tsconfig.build.json"]), Ok(Asked { build: false }));
+        assert_eq!(
+            of(&["-p", "tsconfig.build.json"]),
+            Ok(Asked { build: false })
+        );
         assert_eq!(of(&["-b"]), Ok(Asked { build: true }));
-        assert_eq!(of(&["--build", "packages/a", "--force"]), Ok(Asked { build: true }));
-        assert_eq!(of(&["--pretty", "false", "--listFiles"]), Ok(Asked { build: false }));
+        assert_eq!(
+            of(&["--build", "packages/a", "--force"]),
+            Ok(Asked { build: true })
+        );
+        assert_eq!(
+            of(&["--pretty", "false", "--listFiles"]),
+            Ok(Asked { build: false })
+        );
     }
 
     // covers: B-101

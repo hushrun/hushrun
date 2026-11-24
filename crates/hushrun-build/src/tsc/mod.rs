@@ -101,7 +101,10 @@ pub fn node_options(had: Option<&OsStr>, file: &Path) -> Option<OsString> {
     } else {
         text.to_string()
     };
-    let mut options = had.filter(|o| !o.is_empty()).map(OsStr::to_os_string).unwrap_or_default();
+    let mut options = had
+        .filter(|o| !o.is_empty())
+        .map(OsStr::to_os_string)
+        .unwrap_or_default();
     if !options.is_empty() {
         options.push(" ");
     }
@@ -150,6 +153,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&first).unwrap(), PRELOAD);
         let again = install_preload(dir.path()).unwrap();
         assert_eq!(first, again);
-        assert_eq!(std::fs::read_dir(dir.path().join(FOLDER)).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(FOLDER)).unwrap().count(),
+            1
+        );
     }
 }

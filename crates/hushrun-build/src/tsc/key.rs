@@ -190,7 +190,11 @@ pub fn step(
         tty: call.tty,
         env: KEYED_ENV
             .iter()
-            .filter_map(|name| call.env.get(*name).map(|v| ((*name).to_string(), v.clone())))
+            .filter_map(|name| {
+                call.env
+                    .get(*name)
+                    .map(|v| ((*name).to_string(), v.clone()))
+            })
             .collect(),
         person,
     };
@@ -493,14 +497,26 @@ mod tests {
     #[test]
     fn paths_are_kept_from_the_root_in_either_form() {
         let p = places();
-        assert_eq!(p.hide("/w/repo/src/a.ts").as_deref(), Some("{root}/src/a.ts"));
-        assert_eq!(p.hide("/real/w/repo/src/a.ts").as_deref(), Some("{root}/src/a.ts"));
+        assert_eq!(
+            p.hide("/w/repo/src/a.ts").as_deref(),
+            Some("{root}/src/a.ts")
+        );
+        assert_eq!(
+            p.hide("/real/w/repo/src/a.ts").as_deref(),
+            Some("{root}/src/a.ts")
+        );
         assert_eq!(p.hide("/w/repo").as_deref(), Some("{root}"));
         assert_eq!(p.hide("/w/repo2/a.ts"), None);
-        assert_eq!(p.show("{root}/src/a.ts").unwrap(), PathBuf::from("/real/w/repo/src/a.ts"));
+        assert_eq!(
+            p.show("{root}/src/a.ts").unwrap(),
+            PathBuf::from("/real/w/repo/src/a.ts")
+        );
         assert_eq!(p.show("{root}/../x"), None);
         assert_eq!(p.show("relative"), None);
-        assert_eq!(p.hide_text("error /w/repo/a.ts and /real/w/repo/b.ts"), "error {root}/a.ts and {root}/b.ts");
+        assert_eq!(
+            p.hide_text("error /w/repo/a.ts and /real/w/repo/b.ts"),
+            "error {root}/a.ts and {root}/b.ts"
+        );
         assert_eq!(p.show_text("{root}/a.ts"), "/real/w/repo/a.ts");
     }
 
@@ -508,10 +524,23 @@ mod tests {
     #[test]
     fn names_looked_for_above_the_checkout_are_kept_by_name() {
         let p = places();
-        assert_eq!(p.above_name("/real/w/package.json").as_deref(), Some("package.json"));
-        assert_eq!(p.above_name("/real/node_modules/@types").as_deref(), Some("node_modules/@types"));
+        assert_eq!(
+            p.above_name("/real/w/package.json").as_deref(),
+            Some("package.json")
+        );
+        assert_eq!(
+            p.above_name("/real/node_modules/@types").as_deref(),
+            Some("node_modules/@types")
+        );
         assert_eq!(p.above_name("/real/w/repo/x"), None);
-        assert_eq!(p.above(), vec![PathBuf::from("/real/w"), PathBuf::from("/real"), PathBuf::from("/")]);
+        assert_eq!(
+            p.above(),
+            vec![
+                PathBuf::from("/real/w"),
+                PathBuf::from("/real"),
+                PathBuf::from("/")
+            ]
+        );
     }
 
     fn record() -> Record {
@@ -525,9 +554,15 @@ mod tests {
             looks: vec![
                 ("/real/w/repo/src/package.json".into(), "-".into()),
                 ("/real/w/package.json".into(), "-".into()),
-                ("/REAL/W/REPO/NODE_MODULES/TYPESCRIPT/LIB/_TSC.JS".into(), "-".into()),
+                (
+                    "/REAL/W/REPO/NODE_MODULES/TYPESCRIPT/LIB/_TSC.JS".into(),
+                    "-".into(),
+                ),
             ],
-            lists: vec![("/real/w/repo/src".into(), Some(vec![("a.ts".into(), "f".into())]))],
+            lists: vec![(
+                "/real/w/repo/src".into(),
+                Some(vec![("a.ts".into(), "f".into())]),
+            )],
             links: vec![("/w/repo".into(), Some("/real/w/repo".into()))],
             ..Record::default()
         }
@@ -544,9 +579,15 @@ mod tests {
         .unwrap();
         assert_eq!(hint.reads, vec!["{root}/src/a.ts", "{root}/src/b.ts"]);
         assert_eq!(digests.len(), 2);
-        assert_eq!(hint.looks, vec![("{root}/src/package.json".to_string(), "-".to_string())]);
+        assert_eq!(
+            hint.looks,
+            vec![("{root}/src/package.json".to_string(), "-".to_string())]
+        );
         assert_eq!(hint.above, vec!["package.json"]);
-        assert_eq!(hint.links, vec![("{root}".to_string(), Some("{root}".to_string()))]);
+        assert_eq!(
+            hint.links,
+            vec![("{root}".to_string(), Some("{root}".to_string()))]
+        );
         assert!(!hint.outside());
         assert_eq!(Hint::read(&hint.bytes()), Some(hint));
     }
@@ -555,7 +596,11 @@ mod tests {
     #[test]
     fn a_read_outside_the_checkout_ties_the_block() {
         let mut r = record();
-        r.reads.push(("/usr/lib/node_modules/typescript/lib/lib.d.ts".into(), Digest::of(b"l").hex(), 1));
+        r.reads.push((
+            "/usr/lib/node_modules/typescript/lib/lib.d.ts".into(),
+            Digest::of(b"l").hex(),
+            1,
+        ));
         let (hint, _) = hint_of(&r, &places(), "/c").unwrap();
         assert!(hint.outside());
     }
@@ -574,7 +619,10 @@ mod tests {
                 (format!("{text}/src/package.json"), "-".into()),
                 (format!("{text}/src/a.ts"), "f".into()),
             ],
-            lists: vec![(format!("{text}/src"), Some(vec![("a.ts".into(), "f".into())]))],
+            lists: vec![(
+                format!("{text}/src"),
+                Some(vec![("a.ts".into(), "f".into())]),
+            )],
             links: vec![(text.clone(), Some(text.clone()))],
             ..Record::default()
         };

@@ -1823,7 +1823,7 @@ fn what_every_test_file_reads_with_jest() {
     }
 }
 
-// covers: C-44
+// covers: C-44, C-50, C-51
 #[test]
 fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
     for jest in jests() {

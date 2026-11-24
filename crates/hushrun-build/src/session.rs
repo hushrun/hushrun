@@ -813,6 +813,8 @@ pub struct TscCounts {
     pub calls: u64,
     /// Put in place without a compile.
     pub reused: u64,
+    /// Of those, downloaded from the shared store for it (B-108).
+    pub downloaded: u64,
     /// Compiles that ran, stored or not, passed through or not.
     pub built: u64,
     /// Compiles compared with a block found for them (an audit, `observe`).
@@ -836,6 +838,7 @@ impl TscCounts {
         match entry.outcome {
             Outcome::Reused => {
                 self.reused += 1;
+                self.downloaded += u64::from(entry.downloaded);
                 self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
             }
             _ => self.built += 1,
@@ -877,9 +880,10 @@ impl TscCounts {
             )
         } else {
             format!(
-                "build: typescript: {}: {} reused, {} built",
+                "build: typescript: {}: {} reused{}, {} built",
                 compiles(self.calls),
                 self.reused,
+                from_where(self.downloaded, 0),
                 self.built
             )
         };
@@ -1827,8 +1831,8 @@ impl Session {
         }
         let link = self.sibling_link(crate::tsc::PROGRAM_NAME)?;
         let hook = crate::tsc::install_preload(&self.current.store)?;
-        let options = crate::tsc::node_options(env("NODE_OPTIONS").as_deref(), &hook)
-            .ok_or_else(|| {
+        let options =
+            crate::tsc::node_options(env("NODE_OPTIONS").as_deref(), &hook).ok_or_else(|| {
                 std::io::Error::other(format!(
                     "the hook's path, {}, has a quote, which NODE_OPTIONS can't hold",
                     hook.display()
@@ -3226,6 +3230,66 @@ mod tests {
         run.begin().finish(now());
         assert!(other.is_dir());
         assert!(live.exists());
+    }
+
+    // covers: B-109
+    #[test]
+    fn typescript_compiles_are_counted_apart_and_said_in_their_own_lines() {
+        use crate::tsc::helper::TscEntry;
+        let tsc = |outcome: Outcome, why: Option<&str>| Entry {
+            tsc: Some(TscEntry {
+                why: why.map(str::to_string),
+                ..TscEntry::default()
+            }),
+            ..entry(outcome)
+        };
+        let entries = vec![
+            entry(Outcome::BuiltAndStored),
+            Entry {
+                saved_ms: 2_500,
+                downloaded: true,
+                ..tsc(Outcome::Reused, None)
+            },
+            tsc(Outcome::BuiltAndStored, None),
+            tsc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("watch"),
+            ),
+            tsc(
+                Outcome::BuiltNotStored(NotStored::Unkeyable),
+                Some("build-over-outputs"),
+            ),
+            tsc(
+                Outcome::BuiltNotStored(NotStored::Unkeyable),
+                Some("build-over-outputs"),
+            ),
+        ];
+        let summary = Summary::of(Mode::On, 10, &entries);
+        assert_eq!(
+            summary.counts().compiles,
+            1,
+            "one crate, the compiles apart"
+        );
+        let lines: Vec<&String> = summary
+            .lines()
+            .iter()
+            .filter(|l| l.contains("typescript"))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "build: typescript: 5 compiles: 1 reused (1 from the shared store), 4 built, saving about 2s",
+                "build: typescript: 3 compiles run as asked or not stored (1 watch, 2 build-over-outputs)",
+            ]
+        );
+        let observing = Summary::of(Mode::Observe, 10, &entries);
+        assert!(
+            observing.lines().iter().any(
+                |l| l == "build: typescript: observing: 0 of 5 compiles would have been reused"
+            ),
+            "{:?}",
+            observing.lines()
+        );
     }
 
     // covers: B-61

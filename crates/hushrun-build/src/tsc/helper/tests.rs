@@ -125,7 +125,10 @@ impl Checkout {
     }
 
     fn last_why(&self) -> Option<String> {
-        self.log().last().and_then(|e| e.tsc.clone()).and_then(|t| t.why)
+        self.log()
+            .last()
+            .and_then(|e| e.tsc.clone())
+            .and_then(|t| t.why)
     }
 }
 
@@ -202,7 +205,8 @@ fn calls_it_doesn_t_handle_pass_through_and_say_why() {
 fn what_a_block_can_t_hold_is_not_stored_with_its_reason() {
     let (_t, world) = World::new();
     let a = world.checkout("a", "on");
-    let cases: Vec<(Box<dyn Fn(&mut Record)>, &str)> = vec![
+    type Change = Box<dyn Fn(&mut Record)>;
+    let cases: Vec<(Change, &str)> = vec![
         (Box::new(|r| r.other.push("unlink".into())), "unlink"),
         (Box::new(|r| r.errors.push("boom".into())), "hook-error"),
         (Box::new(|r| r.code = 7), "status"),
@@ -221,7 +225,9 @@ fn what_a_block_can_t_hold_is_not_stored_with_its_reason() {
     // `--build` over a build's state decides by dates.
     let mut record = a.record();
     std::fs::write(a.root.join("tsconfig.tsbuildinfo"), "{}").unwrap();
-    record.reads.push((a.path("tsconfig.tsbuildinfo"), Digest::of(b"{}").hex(), 2));
+    record
+        .reads
+        .push((a.path("tsconfig.tsbuildinfo"), Digest::of(b"{}").hex(), 2));
     a.compile(a.lookup(&["-b"]), record);
     assert_eq!(a.last_why().as_deref(), Some("build-over-outputs"));
     assert!(Store::new(&world.dir.join("store")).keys().is_empty());
@@ -283,7 +289,10 @@ fn in_observe_a_block_found_is_compared_and_a_difference_suspends_the_key() {
     a.compile(a.lookup(&[]), a.record());
     let b = world.checkout("b", "observe");
     let answer = b.lookup(&[]);
-    assert!(matches!(answer, Answer::Record { .. }), "observe never reuses");
+    assert!(
+        matches!(answer, Answer::Record { .. }),
+        "observe never reuses"
+    );
     let mut record = b.record();
     std::fs::write(b.root.join("dist/a.js"), "other").unwrap();
     record.stdout = format!("{}/src/a.ts: fine\n", b.root.display());

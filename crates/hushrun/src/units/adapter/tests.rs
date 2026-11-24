@@ -242,3 +242,24 @@ fn each_runner_is_named_as_people_write_it() {
         assert_eq!(adapter.runner(), runner, "{command}");
     }
 }
+
+// covers: C-52
+#[test]
+fn node_s_own_runner_and_mocha_are_said_not_observed() {
+    let cwd = std::path::Path::new(".");
+    let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for command in [
+        &["node", "--test"][..],
+        &["node", "--import", "tsx", "--test", "test/*.test.ts"],
+        &["/usr/bin/node", "--experimental-strip-types", "--test"],
+        &["tsx", "--test"],
+        &["mocha", "-r", "ts-node/register"],
+    ] {
+        let Err(why) = choose(&words(command), cwd) else {
+            panic!("{command:?} has an adapter");
+        };
+        assert!(why.contains("can't be reused one by one yet"), "{why}");
+    }
+    // A Node program that isn't a test run is no runner of tests.
+    assert!(super::without_adapter(&words(&["node", "script.js"])).is_none());
+}

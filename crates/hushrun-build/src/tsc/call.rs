@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 use hushrun_core::Digest;
 use serde::{Deserialize, Serialize};
 
+/// A folder's entries: each name with its kind.
+pub type Entries = Vec<(String, String)>;
+
 /// The schema of a call.
 pub const CALL_SCHEMA: &str = "hushrun.tsc-call/v1";
 /// The schema of a record.
@@ -68,7 +71,7 @@ pub struct Record {
     /// Each folder listed, with its entries' names and kinds (`f`, `d`, `l`, `o`), or none
     /// when it couldn't be.
     #[serde(default)]
-    pub lists: Vec<(String, Option<Vec<(String, String)>>)>,
+    pub lists: Vec<(String, Option<Entries>)>,
     /// Each path resolved, with what it resolved to, or none when it couldn't be.
     #[serde(default)]
     pub links: Vec<(String, Option<String>)>,
