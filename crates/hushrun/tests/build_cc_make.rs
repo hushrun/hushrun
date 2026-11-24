@@ -442,7 +442,7 @@ fn an_autotools_project_reuses_its_objects_and_configure_names_the_compiler_by_n
     assert!(q.status.success(), "{}", text(&q));
 }
 
-// covers: B-236, B-237
+// covers: B-234, B-236, B-237
 #[test]
 fn a_meson_build_set_up_in_a_run_reuses_its_objects_and_builds_outside_one() {
     let Some(meson) = tool("meson", "HUSHRUN_TEST_MESON") else {

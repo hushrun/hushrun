@@ -297,8 +297,8 @@ fn autoconf_s_and_meson_s_own_checks_are_probes() {
     ));
     assert!(!configure_probe(
         Path::new("/w"),
-        "src/conftest.c",
-        "src/conftest_real.o"
+        "src/conftest_util.c",
+        "src/conftest_util.o"
     ));
 }
 

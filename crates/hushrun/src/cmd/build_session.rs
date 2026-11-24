@@ -280,13 +280,25 @@ fn go_beside_another_wrapper(here: &Here<'_>) -> bool {
 }
 
 /// Whether `folder` or a folder above it, up to its checkout, holds a `CMakeLists.txt`, or
-/// `folder` is a CMake build folder: where COMMAND may build C or C++ with CMake (B-50).
+/// `folder` is a CMake build folder: where COMMAND may build C or C++ with CMake (B-50); \[B-230\]
+/// or holds what builds C and C++ without it: a `meson.build`, a `configure` or `configure.ac`, a
+/// Makefile, a `build.ninja`.
 fn cmake_project(folder: &Path) -> bool {
     if folder.join("CMakeCache.txt").is_file() {
         return true;
     }
     for dir in folder.ancestors() {
-        if dir.join("CMakeLists.txt").is_file() {
+        let builds = [
+            "CMakeLists.txt",
+            "meson.build",
+            "configure",
+            "configure.ac",
+            "GNUmakefile",
+            "makefile",
+            "Makefile",
+            "build.ninja",
+        ];
+        if builds.iter().any(|name| dir.join(name).is_file()) {
             return true;
         }
         if dir.join(".git").exists() {

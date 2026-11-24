@@ -943,6 +943,35 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### C and C++ without CMake
+
+Make, autotools, Meson and a handwritten `build.ninja` get the same launcher as CMake, with nothing
+to set ([ADR 0119](../adr/0119-c-without-cmake-and-meson-test.md)):
+
+```text
+$ hushrun run build -- make -j8                          # in a second worktree
+hushrun: build: c/c++: 41 objects: 40 reused, 1 built
+```
+
+- **Make and autotools.** Inside `hushrun run`, GNU Make's commands find hushrun's `cc`, `gcc`,
+  `clang` (and their C++ names) first on `PATH`, through `MAKEFILES`; each starts the next compiler
+  of its name through the launcher. A Makefile that names its compiler by a path, or sets `PATH`
+  itself, compiles as before. `./configure` writes the compiler's name, not a path, so a plain
+  `make` afterwards is the compiler's own, and has nothing to do. BSD make reads no `MAKEFILES` and
+  gets nothing.
+- **Meson.** In a repository with a `meson.build`, a `meson setup` inside `hushrun run` names its
+  compilers through the same one-line indirection CMake keeps in its cache: outside a run it is the
+  compiler. A build folder set up before keeps its compilers, and the run says so: set it up again
+  inside `hushrun run` with `meson setup --wipe <folder>`. Its `compile_commands.json` then starts
+  with `/bin/sh`, which some editors' language servers can't follow.
+- **Ninja.** `hushrun run … -- ninja` on a `build.ninja` you wrote gets the compilers it names on
+  `PATH`; `build.ninja` isn't touched, so `ninja -n` has no work after.
+- **Configure checks** (autoconf's `conftest.c`, Meson's in `meson-private`) compile as asked and
+  are never stored.
+- **`meson test`.** With `tests: reuse`, `hushrun run test -- meson test -C build` reuses each test
+  program whose files didn't change, as with CTest: hushrun's `meson` on `PATH` names the tests that
+  still need to run, after checking that their programs are built from what the plan keyed.
+
 ### Xcode
 
 Xcode apps (iOS, iPadOS, macOS) reuse compiles through Xcode's own compilation cache, which hushrun
