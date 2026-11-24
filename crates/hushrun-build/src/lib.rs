@@ -87,6 +87,7 @@ pub mod share;
 pub mod sidecar;
 pub mod store;
 pub mod sweep;
+pub mod tsc;
 pub mod unit;
 pub mod wrapper;
 pub mod xcode;
