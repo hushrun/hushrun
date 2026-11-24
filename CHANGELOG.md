@@ -6,9 +6,23 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+hushrun in agent clouds ([ADR 0140](docs/adr/0140-hosted-agents-sandboxes-are-local.md)): a
+hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says what it needs.
+
 Gradle's tasks shared between machines ([ADR 0104](docs/adr/0104-gradle-build-blocks.md)): in a
 run that shares, hushrun is the remote build cache of a Gradle build, so an Android or JVM
 project's new branch starts from what main's CI already ran.
+
+### Changed
+
+- **`hushrun.whoami/v1`'s `credential`** adds `session`, `bearer` and `proxy`.
+- **A hosted platform's own variable makes a sandbox** (C-140): `CLAUDE_CODE_REMOTE` (Claude Code on
+  the web), `CURSOR_AGENT_SOCKET` (Cursor's cloud agents), `COPILOT_AGENT_SESSION_ID` (Copilot's
+  cloud agent, unconfirmed) and `CODEX_PROXY_CERT` (Codex cloud, unconfirmed) make a run local
+  beside `CI=true` and beside a named CI's variable, such as `GITHUB_ACTIONS`. An explicit
+  `HUSHRUN_PROVIDER` still wins. A coding agent's own variable, such as `CLAUDECODE`, makes a run
+  local beside a bare `CI=true` only. In such a sandbox, GitHub's ID-token variables read as unset:
+  a sandbox never records as CI.
 
 ### Added
 
@@ -21,6 +35,78 @@ project's new branch starts from what main's CI already ran.
   Meson's configure checks aren't stored. With `tests: reuse`, `meson test` reuses test programs
   and tests one by one, as CTest does. New variables COMMAND gets: `MAKEFILES` (the hook first,
   the person's after it) and, in a Meson repository, `PATH` with hushrun's `meson` first.
+- **C++ test programs started directly, test by test** (C-106 to C-108, ADR 0120). `hushrun run
+  NAME -- build/tests/t_calc` with a GoogleTest or Catch2 3 program of a CMake build directory
+  reuses each test that passed on the files the program is built from, leaving tests out through
+  `GTEST_FILTER` or Catch2's `TESTBRIDGE_TEST_ONLY` and reading GoogleTest's XML or Catch2's
+  JUnit file, with COMMAND as written. doctest and Catch2 2 programs are said not to be observed.
+  C++20 sources that import no module are now stored and reused with clang (an empty CMake module
+  map adds nothing, B-241), clang's precompiled header is counted as `pch` (B-242), and clang 15
+  to 18, whose compiles all failed through the launcher, get no include-graph variables (B-243).
+- **`hushrun build pull`** (B-240, [ADR 0143](docs/adr/0143-a-baked-store-pulled-into-a-fixed-sandbox.md)):
+  the repository's newest baked store from the backend's registry, checked (and its signature, when
+  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`.
+- **Recipes per agent cloud** in `recipes/agent-clouds/`, and a Dev Container Feature in
+  `features/src/hushrun`, to publish as `ghcr.io/hushrun/features/hushrun`.
+- **A results outbox** (C-143, [ADR 0142](docs/adr/0142-results-that-wait-and-what-a-sandbox-fetches.md)):
+  outside CI, a result whose backend couldn't be reached waits in `<cache dir>/outbox/` for 7 days,
+  and the next run, `hushrun ready` or the new `hushrun flush` sends it. While the backend is out of
+  reach, lookups read it, so a check this machine passed still skips.
+- **`hushrun fetch`** (C-144): for a setup script, the newest result of every check of the tree, kept
+  for 24 hours, and the compiled code `hushrun build fetch` fetches.
+- **`hushrun init --agent-clouds`** (C-145): end-of-session hooks that run `hushrun flush` for Claude
+  Code, Cursor and Copilot, Copilot's setup steps and a dev container's feature, for the clouds the
+  team uses. The AGENTS.md block says to run `hushrun flush` before finishing.
+- **Sessions** (C-142, [ADR 0141](docs/adr/0141-credentials-a-sandboxs-network-adds-and-sessions.md)):
+  `hushrun login --session` swaps an agent token, a Cursor cloud agent's ID token (minted over
+  `CURSOR_AGENT_SOCKET`) or a GitHub Actions job's ID token for a session of one repository, saved
+  in `sessions.json` beside the credentials, which runs then use. A Cursor cloud agent's run gets
+  one by itself.
+- **`HUSHRUN_AUTH=proxy` and `HUSHRUN_AUTH=bearer`** (C-141): a sandbox whose network adds the
+  credential, and a bearer agent token with no key. `hushrun token create --bearer` makes one. In a
+  hosted sandbox, a placeholder in `HUSHRUN_TOKEN` is sent as it is.
+- **`hushrun doctor` in a sandbox** (C-140), or with `--hosts`: the platform, where the credential
+  comes from, whether each host answers over TLS, the allowlist's exact entry and what is shared.
+- **`scripts/agent-cloud-probe.sh`**: what a sandbox looks like to hushrun, with variable names only.
+- **unittest and Django's `manage.py test`, reused by test module and by test** (C-66 to C-69,
+  [ADR 0110](docs/adr/0110-unittest.md)). `python -m unittest …`, `manage.py test …`,
+  `django-admin test` and `python -m django test`, also after `uv run`, `poetry run` and the like
+  and through `coverage run`, get an observed adapter of their own instead of pytest's, which saw
+  nothing of them. It loads through a `sitecustomize.py` first on `PYTHONPATH`, which runs the one
+  it hides first, keeps COMMAND as written, and drives the observer pytest's adapter drives, now
+  `hushrun_observe.py` beside pytest's plugin. A unit is a test module by the pattern discovery
+  uses (`discover -p`, Django's `--pattern`, `test*.py`); a test's id is `Class.method`;
+  `setUpModule` and `setUpClass` are shared setups; a failing `tearDownClass` keeps no pass for
+  the tests it served. A Python started with `-I`, `-E` or `-S`, COMMAND's own `env PYTHONPATH=…`
+  and Django's `--parallel` are said once, and everything runs. Needs Python 3.10 or later; 3.12
+  or later to watch each test. Two fixes reach pytest's adapter too: the observer's import hook no
+  longer fails an import C makes with no Python frame, and an SQLite `mode=memory` URI (Django's
+  and pytest-django's test database) is no file read. Python's C extensions get no build blocks:
+  setuptools takes its compiler only from `CC`, which hushrun doesn't set, and pip's isolated
+  builds replace `PYTHONPATH` (ADR 0110).
+- **Kotlin Multiplatform's test tasks are test files** (C-94 to C-97, B-210, ADR 0117): the
+  Gradle adapter follows Kotlin/JS, Kotlin/Wasm and Kotlin/Native test tasks (`jsNodeTest`,
+  `wasmJsNodeTest`, `linuxX64Test`…) as it follows `Test` tasks, each class named by the file
+  that declares it and left out, whole or test by test, through Gradle's filter, so a
+  `commonTest` class is one test file on every platform. Kotest's specs are pinned as units left
+  out whole. `hushrun init` takes `allTests`, `jvmTest`, `jsTest`, `testDebugUnitTest` and `testReleaseUnitTest` as
+  test checks. The Gradle cache's line of tasks that stay on the machine names them, such as
+  kapt's `kaptGenerateStubsKotlin`, whose stubs hold their sources' paths.
+- **Node's test runner and Mocha reuse test files and tests** (C-54 to C-57, ADR 0107): with
+  `tests: reuse`, `node --test` (Node 22.15 or later) and Mocha 10 and 11 skip the test files, and
+  with `unit: test` the single tests, that already passed on the files they read, loaded through
+  `NODE_OPTIONS` with no file of the repository changed. Node's runner is watched per test file's
+  process and chooses its files by its own patterns; Mocha loads every spec file as usual and has
+  the reused tests taken out of their suites before any hook runs, a spec file with a root hook
+  being read by all. `--watch`, `--test-isolation=none`, Mocha's `--parallel` and `--dry-run` run
+  as written and say why. Plain JavaScript has no compile step to reuse: no build-block kind.
+- **`mix test` reuses ExUnit's test files** (C-114 to C-117, ADR 0122). With `tests` on, an
+  Elixir project's `mix test`, an umbrella's included, loads hushrun's ExUnit adapter through
+  `ERL_LIBS` and `ELIXIR_ERL_OPTIONS`, with nothing of the repository changed: each test file read
+  what its code references to the end (Elixir's lexical tracker and Mix's compile manifests), what
+  its own processes called (call counters by process), and the project's configuration, and the
+  test files that already passed on those files are left out through ExUnit's own `exclude`
+  filter. By test file only; `mix compile` shares nothing yet.
 - **TypeScript compiles reused and shared, kind `tsc/1`** (B-100 to B-109, ADR 0106, a draft):
   inside `hushrun run`, in a checkout with a `package.json`, `NODE_OPTIONS` gets a hook
   (`--require`, added to what it had) and `HUSHRUN_TSC` the helper `hushrun-tsc`. A `tsc`,
@@ -46,6 +132,14 @@ project's new branch starts from what main's CI already ran.
   replayed. `cargo nextest run --archive-file`, and a `--partition` other than `hash:`, now say why
   their test files aren't observed instead of building the workspace or shifting tests between
   jobs.
+- **`dotnet test` reuses test projects, and test methods one by one** (C-98 to C-101,
+  [ADR 0118](docs/adr/0118-dotnet-test.md)). With `tests: reuse`, a C#, F# or Visual Basic test
+  project (xUnit, NUnit, MSTest, through VSTest) that already passed on the files it and the
+  projects it references compile is neither built nor tested again, and with `unit: test` only its
+  tests that didn't pass run. hushrun names its own VSTest targets through `VSTestTargets`, so
+  COMMAND, its `--filter` and its loggers stay as written. Microsoft.Testing.Platform projects and
+  `dotnet test` of an assembly run unobserved, and the run says so. Compiles aren't reused: the
+  SDK writes the commit into every assembly (ADR 0118, decision 11).
 - **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
   in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
   `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to
@@ -66,6 +160,32 @@ project's new branch starts from what main's CI already ran.
   build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
   LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
   the ADR lists what the first build on a Mac checks.
+- **Go: coverage runs whole, files no test binary is built from rerun only what read them, and
+  `runtime` is shared before Go 1.27** (C-70, C-71, B-150, ADR 0111). A `go test` with `-cover`, `-coverprofile`, `-coverpkg` or
+  `-covermode` (in COMMAND, after `-args` or in `GOFLAGS`) now runs every package, as Jest and
+  Vitest do with coverage: a reused package wrote nothing to the profile, which then read as a
+  drop. And every `.go` file that isn't a tested package's test file is a source: editing another
+  package's tests, an unimported package, a file the tags leave out or another module of a
+  `go.work` no longer reruns every package. The first run of each Go check after upgrading
+  reruns every package once. With Go 1.24 to 1.26, whose assembler doesn't mark the standard
+  library's objects, `runtime` and the other standard packages with assembly now leave the machine
+  as build blocks, as they did with Go 1.27: they are known by their own package's compiled object.
+  A Go fetch that comes while the check's `open`s are still under way now waits for them, within
+  B-45's bound, so a slow server no longer makes Go's first packages compile on a machine that
+  could have downloaded them.
+- **Vue's components in test reuse** (C-58 to C-61, ADR 0108). `.vue` is a source of the Vitest and
+  Jest adapters, so a change to one component runs only the test files that mounted it. Under
+  Vitest, the files a component's `<script setup>` macros took their types from are read with it,
+  through the compiler `@vitejs/plugin-vue` holds, and plugin-vue's helper module no longer makes
+  every component's test file `not observed`; under Jest, a component's `src=` files are read with
+  it even when Jest's cache holds it.
+
+### Fixed
+
+- **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
+  find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
+  holds; the plugin now adds its own directory there.
+
 
 ## [0.19.1] - 2026-11-23
 

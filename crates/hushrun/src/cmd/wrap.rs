@@ -90,7 +90,19 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
         None => BuildRepo::read(global, args).ok(),
     };
     let backend = match Backend::select(build_repo.as_ref().map(|repo| repo.root.as_path())) {
-        Ok(Selection::On(backend)) => Some(backend),
+        Ok(Selection::On(backend)) => {
+            // \[ADR 0142\] What waited while the backend was out of reach goes first (C-143).
+            if Env::from_process().get(variants::INSIDE_A_RUN).is_none()
+                && let Some(flushed) = backend.flush()
+                && flushed.sent > 0
+            {
+                say.line(format_args!(
+                    "sent {} that waited on this machine",
+                    crate::cmd::flush::results(flushed.sent)
+                ));
+            }
+            Some(backend)
+        }
         // \[ADR 0067\] Said once: a CI job that shares nothing would otherwise look as if it did.
         Ok(Selection::Off(off @ Off::InCi)) => {
             if Env::from_process().get(variants::INSIDE_A_RUN).is_none() {

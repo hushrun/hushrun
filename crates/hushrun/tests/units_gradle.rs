@@ -18,6 +18,7 @@
 #[path = "common/store.rs"]
 mod store;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,6 +68,11 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
     "HUSHRUN_BUILD",
     "HUSHRUN_BUILD_KEEP_DAYS",
     "HUSHRUN_BUILD_DIR",
@@ -2225,5 +2231,381 @@ fn a_test_task_nothing_was_learned_of_under_the_check_executes_in_its_first_run(
             third.stdout
         );
         r.clean();
+    }
+}
+
+// --- Kotlin Multiplatform (ADR 0117) ------------------------------------------------------------
+
+/// The test cases a task's XML report holds for one report file, `TEST-<file>.xml`.
+fn task_cases(r: &Repo, project: &str, task: &str, report: &str) -> Vec<String> {
+    let path = r
+        .repo
+        .join(project)
+        .join(format!("build/test-results/{task}/TEST-{report}.xml"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.split("<testcase name=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next().map(str::to_string))
+        .collect()
+}
+
+/// A Kotlin Multiplatform build of two projects, `lib` and `other`, each with a JVM and a
+/// Kotlin/JS (Node.js) target and tests in `commonTest`, and `targets` added to each (a Kotlin/
+/// Native one). `other`'s `flips` fails while `FAIL` is set; an `env` of each platform reads it.
+fn kmp_build(tests: &str, targets: &str, natives: &[&str]) -> Vec<(String, String)> {
+    let mut files = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(
+            ".gitignore",
+            "build/\n.gradle/\n.kotlin/\nkotlin-js-store/\n",
+        ),
+        file(
+            "settings.gradle.kts",
+            "pluginManagement { repositories { gradlePluginPortal(); mavenCentral() } }\ndependencyResolutionManagement { repositories { mavenCentral() } }\nrootProject.name = \"kmp\"\ninclude(\"lib\", \"other\")\nSystem.getenv(\"HUSHRUN_GRADLE\")?.let { apply(from = it) }\n",
+        ),
+        file(
+            "build.gradle.kts",
+            "plugins { kotlin(\"multiplatform\") version \"2.3.21\" apply false }\n",
+        ),
+    ];
+    for project in ["lib", "other"] {
+        files.push(file(
+            &format!("{project}/build.gradle.kts"),
+            &format!(
+                "plugins {{ kotlin(\"multiplatform\") }}\nkotlin {{\n  jvm()\n  js {{ nodejs() }}\n{targets}  sourceSets {{ commonTest.dependencies {{ implementation(kotlin(\"test\")) }} }}\n}}\n"
+            ),
+        ));
+        files.push(file(
+            &format!("{project}/src/commonTest/kotlin/p/{project}/Env.kt"),
+            &format!("package p.{project}\nexpect fun env(name: String): String?\n"),
+        ));
+        files.push(file(
+            &format!("{project}/src/jvmTest/kotlin/p/{project}/Env.jvm.kt"),
+            &format!(
+                "package p.{project}\nactual fun env(name: String): String? = System.getenv(name)\n"
+            ),
+        ));
+        files.push(file(
+            &format!("{project}/src/jsTest/kotlin/p/{project}/Env.js.kt"),
+            &format!("package p.{project}\nactual fun env(name: String): String? = js(\"process.env[name]\") as String?\n"),
+        ));
+        for native in natives {
+            files.push(file(
+                &format!("{project}/src/{native}Test/kotlin/p/{project}/Env.{native}.kt"),
+                &format!("package p.{project}\nimport kotlinx.cinterop.toKString\n@OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)\nactual fun env(name: String): String? = platform.posix.getenv(name)?.toKString()\n"),
+            ));
+        }
+    }
+    files.extend([
+        file(
+            "lib/src/commonMain/kotlin/p/lib/Price.kt",
+            "package p.lib\nobject Price { fun of(n: Int) = n * 2 }\n",
+        ),
+        // Two classes in one file are one unit: the file that declares them.
+        file(
+            "lib/src/commonTest/kotlin/p/lib/PriceTest.kt",
+            "package p.lib\nimport kotlin.test.*\nclass PriceTest { @Test fun doubles() { assertEquals(6, Price.of(3)) } }\nclass ZeroTest { @Test fun zero() { assertEquals(0, Price.of(0)) } }\n",
+        ),
+        file(
+            "other/src/commonTest/kotlin/p/other/OtherTest.kt",
+            "package p.other\nimport kotlin.test.*\nclass OtherTest {\n  @Test fun works() { assertTrue(true) }\n  @Test fun flips() { assertNull(env(\"FAIL\")) }\n}\n",
+        ),
+        file(
+            "other/src/commonTest/kotlin/p/other/MoreTest.kt",
+            "package p.other\nimport kotlin.test.*\nclass MoreTest { @Test fun more() { assertEquals(2, 1 + 1) } }\n",
+        ),
+    ]);
+    files
+}
+
+/// Every test a task's XML reports say ran, in `lib` and `other`, as `<class>.<method>`: a
+/// Kotlin/JS class is named after its task too (`jsNodeTest.p.lib.PriceTest`), and a name holds
+/// its platform (`doubles[js, node]`).
+fn task_ran(r: &Repo, task: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for project in ["lib", "other"] {
+        let dir = r.repo.join(project).join("build/test-results").join(task);
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for case in text.split("<testcase ").skip(1) {
+                let attr = |name: &str| {
+                    case.split(&format!("{name}=\""))
+                        .nth(1)
+                        .and_then(|v| v.split('"').next())
+                        .map(str::to_string)
+                };
+                let (Some(name), Some(class)) = (attr("name"), attr("classname")) else {
+                    continue;
+                };
+                let class = class
+                    .strip_prefix(&format!("{task}."))
+                    .unwrap_or(&class)
+                    .to_string();
+                out.insert(format!(
+                    "{class}.{}",
+                    name.split('[').next().unwrap_or(&name)
+                ));
+            }
+        }
+    }
+    out
+}
+
+const OTHER: &str = "other/src/commonTest/kotlin/p/other/OtherTest.kt";
+const MORE: &str = "other/src/commonTest/kotlin/p/other/MoreTest.kt";
+const LIB_PRICE: &str = "lib/src/commonTest/kotlin/p/lib/PriceTest.kt";
+
+// covers: C-94, C-95, C-96
+#[test]
+fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside_the_jvms() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&kmp_build("{mode: reuse, unit: test}", "", &[]));
+    let args = |extra: &[&'static str]| -> Vec<String> {
+        let mut a: Vec<String> = [
+            "run",
+            "unit",
+            "--",
+            gradle.as_str(),
+            offline(),
+            "--console=plain",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        a.extend(
+            [
+                "jvmTest",
+                "jsNodeTest",
+                "--continue",
+                "--configuration-cache",
+            ]
+            .map(String::from),
+        );
+        a.extend(extra.iter().map(|s| s.to_string()));
+        a
+    };
+    // Kotlin/JS installs its npm packages with yarn, `--offline` under Gradle's: yarn's cache sits
+    // beside the Gradle user home, where the online run that fills that home fills it too.
+    let yarn = gradle_user_home()
+        .map(|home| format!("{home}/hushrun-yarn-cache"))
+        .unwrap_or_default();
+    let run = |env: &[(&str, &str)]| {
+        let a = args(&[]);
+        let mut env = env.to_vec();
+        env.push(("YARN_CACHE_FOLDER", yarn.as_str()));
+        r.run(&a.iter().map(String::as_str).collect::<Vec<_>>(), &env)
+    };
+    let first = run(&[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    // A Kotlin/JS class is named by the file that declares it, as its JVM twin is by its class
+    // file: one unit for both tasks, whose tests are one test each.
+    assert_eq!(
+        map["units"][OTHER]["tests"],
+        json!({"p.other.OtherTest.flips": "failed", "p.other.OtherTest.works": "passed"}),
+        "{map:#}"
+    );
+    assert_eq!(
+        map["units"][LIB_PRICE]["tests"],
+        json!({"p.lib.PriceTest.doubles": "passed", "p.lib.ZeroTest.zero": "passed"}),
+        "{map:#}"
+    );
+    assert!(
+        !first.stderr.contains("isn't a JVM Test task"),
+        "{}",
+        first.stderr
+    );
+
+    // The failed test runs again on both platforms, the one that passed doesn't.
+    let second = run(&[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    // What each platform ran, by test: the same on both, the failed test and at most one more
+    // that already passed, which the audit runs as a check.
+    let js = task_ran(&r, "jsNodeTest");
+    assert_eq!(js, task_ran(&r, "jvmTest"), "{}", second.stdout);
+    assert!(js.contains("p.other.OtherTest.flips"), "{js:?}");
+    assert!(js.len() <= 2, "{js:?}\n{}", second.stdout);
+    // lib changes: lib's classes run on both platforms; other's, which don't read lib, are left
+    // out whole on both but one that an audit runs.
+    r.write(
+        "lib/src/commonMain/kotlin/p/lib/Price.kt",
+        "package p.lib\nobject Price { fun of(n: Int) = n + n }\n",
+    );
+    let third = run(&[]);
+    assert_eq!(third.code, 0, "{}\n{}", third.stdout, third.stderr);
+    let said = line(&third, "hushrun: unit: ");
+    assert!(
+        said.contains("of 5 tests run") && said.contains("already passed on the files they read"),
+        "{said}"
+    );
+    assert_eq!(
+        task_cases(&r, "lib", "jsNodeTest", "jsNodeTest.p.lib.PriceTest"),
+        ["doubles[js, node]"]
+    );
+    let other_ran = |task: &str, report: &str| !task_cases(&r, "other", task, report).is_empty();
+    let js = [
+        other_ran("jsNodeTest", "jsNodeTest.p.other.OtherTest"),
+        other_ran("jsNodeTest", "jsNodeTest.p.other.MoreTest"),
+    ];
+    let jvm = [
+        other_ran("jvmTest", "p.other.OtherTest"),
+        other_ran("jvmTest", "p.other.MoreTest"),
+    ];
+    // A class left out is left out of both tasks, as one unit.
+    assert_eq!(js, jvm, "{}", third.stdout);
+    assert!(
+        js.iter().filter(|ran| **ran).count() <= 1,
+        "{}",
+        third.stdout
+    );
+    // \[C-37\] `hushrun why` knows a class by its file.
+    let why = r
+        .hushrun()
+        .args(["why", "unit", MORE])
+        .output()
+        .expect("hushrun");
+    let said = String::from_utf8_lossy(&why.stdout);
+    assert!(said.contains("MoreTest.kt would be reused"), "{said}");
+}
+
+// covers: C-94, C-95, C-96
+#[test]
+fn kotlin_native_test_classes_are_units_and_their_tests_are_reused_one_by_one() {
+    // Kotlin/Native's toolchain comes from download.jetbrains.com on first use, hundreds of
+    // megabytes: CI's Linux job opts in with HUSHRUN_TEST_KOTLIN_NATIVE=1, and elsewhere it is
+    // skipped by name, as Android's is.
+    if std::env::var("HUSHRUN_TEST_KOTLIN_NATIVE").as_deref() != Ok("1")
+        || !cfg!(all(target_os = "linux", target_arch = "x86_64"))
+    {
+        eprintln!(
+            "note: skipping: Kotlin/Native runs with HUSHRUN_TEST_KOTLIN_NATIVE=1 on Linux x86-64 (ADR 0117)"
+        );
+        return;
+    }
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&kmp_build(
+        "{mode: reuse, unit: test}",
+        "  linuxX64()\n",
+        &["linuxX64"],
+    ));
+    let args = [
+        "run",
+        "unit",
+        "--",
+        gradle.as_str(),
+        offline(),
+        "--console=plain",
+        "linuxX64Test",
+        "--continue",
+        "--configuration-cache",
+    ];
+    // Kotlin/Native keeps its toolchain outside the Gradle user home, where the online run that
+    // fills that home leaves it too.
+    let konan = std::env::var("HUSHRUN_TEST_KONAN_DATA_DIR")
+        .ok()
+        .or_else(|| gradle_user_home().map(|home| format!("{home}/hushrun-konan")))
+        .unwrap_or_default();
+    let konan = ("KONAN_DATA_DIR", konan.as_str());
+    let first = r.run(&args, &[("FAIL", "1"), konan]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    assert_eq!(
+        map["units"][OTHER]["tests"],
+        json!({"p.other.OtherTest.flips": "failed", "p.other.OtherTest.works": "passed"}),
+        "{map:#}"
+    );
+    assert!(
+        !first.stderr.contains("isn't a JVM Test task"),
+        "{}",
+        first.stderr
+    );
+    let second = r.run(&args, &[konan]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let ran = task_ran(&r, "linuxX64Test");
+    assert!(ran.contains("p.other.OtherTest.flips"), "{ran:?}");
+    assert!(ran.len() <= 2, "{ran:?}\n{}", second.stdout);
+}
+
+/// Kotest specs in two Kotlin projects: `a`'s reads `a`'s code, `b`'s two read only their own.
+fn kotest_build(tests: &str) -> Vec<(String, String)> {
+    let mut files = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(".gitignore", "build/\n.gradle/\n.kotlin/\n"),
+        file(
+            "settings.gradle",
+            &format!(
+                "pluginManagement {{ repositories {{ gradlePluginPortal(); mavenCentral() }} }}\n{LINE}\nrootProject.name = 'kt'\ninclude 'a', 'b'\n"
+            ),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'org.jetbrains.kotlin.jvm' version '2.3.21' apply false }\nsubprojects {\n  apply plugin: 'org.jetbrains.kotlin.jvm'\n  repositories { mavenCentral() }\n  dependencies { testImplementation 'io.kotest:kotest-runner-junit5:5.9.1'; testRuntimeOnly 'org.junit.platform:junit-platform-launcher' }\n  test { useJUnitPlatform() }\n}\n",
+        ),
+        file(
+            "a/src/main/kotlin/p/a/Price.kt",
+            "package p.a\nobject Price { fun of(n: Int) = n * 2 }\n",
+        ),
+        file(
+            "a/src/test/kotlin/p/a/PriceSpec.kt",
+            "package p.a\nimport io.kotest.core.spec.style.FunSpec\nclass PriceSpec : FunSpec({ test(\"doubles\") { check(Price.of(3) == 6) } })\n",
+        ),
+    ];
+    for name in ["One", "Two", "Three"] {
+        files.push(file(
+            &format!("b/src/test/kotlin/p/b/{name}Spec.kt"),
+            &format!("package p.b\nimport io.kotest.core.spec.style.StringSpec\nclass {name}Spec : StringSpec({{\n  \"works\" {{ }}\n  \"also\" {{ }}\n}})\n"),
+        ));
+    }
+    files
+}
+
+// covers: C-97
+#[test]
+fn kotest_specs_are_left_out_whole_when_what_they_read_is_unchanged() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    for tests in ["reuse", "{mode: reuse, unit: test}"] {
+        let r = Repo::new(&kotest_build(tests));
+        let first = r.run(&command(&gradle, &[]), &[]);
+        assert_eq!(first.code, 0, "{tests}: {}\n{}", first.stdout, first.stderr);
+        r.write(
+            "a/src/main/kotlin/p/a/Price.kt",
+            "package p.a\nobject Price { fun of(n: Int) = n + n }\n",
+        );
+        let second = r.run(&command(&gradle, &[]), &[]);
+        assert_eq!(
+            second.code, 0,
+            "{tests}: {}\n{}",
+            second.stdout, second.stderr
+        );
+        // a's spec runs; b's are left out whole by Gradle's class exclusion, which Kotest's
+        // engine honours, but one an audit may run.
+        assert_eq!(r.xml_cases("a", "p.a.PriceSpec"), ["doubles"], "{tests}");
+        let ran = ["One", "Two", "Three"]
+            .iter()
+            .filter(|n| !r.xml_cases("b", &format!("p.b.{n}Spec")).is_empty())
+            .count();
+        assert!(
+            ran <= 1,
+            "{tests}: {ran} of b's specs ran\n{}",
+            second.stdout
+        );
+        let said = line(&second, "hushrun: unit: ");
+        assert!(
+            said.contains("already passed on the files"),
+            "{tests}: {said}"
+        );
     }
 }

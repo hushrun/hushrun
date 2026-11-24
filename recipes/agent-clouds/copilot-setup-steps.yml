@@ -1,0 +1,16 @@
+# .github/workflows/copilot-setup-steps.yml: what GitHub runs before Copilot's cloud agent works.
+# The job's ID token buys the agent a session of this repository (hushrun login --session), which
+# records as agent:copilot, never as CI; and the baked store goes where runs read it.
+name: Copilot setup steps
+on: workflow_dispatch
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm ci
+      - run: npx --no-install hushrun login --session || true
+      - run: npx --no-install hushrun build pull || true

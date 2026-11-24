@@ -738,6 +738,9 @@ pub struct GradleCounts {
     pub saved_ms: u64,
     /// Entries Gradle stored that stay on this machine, by reason, in the order first seen.
     pub local: Vec<(crate::gradle::Local, u64)>,
+    /// \[B-210\] The tasks of those, by Gradle's name, in the order first seen, each once.
+    #[serde(skip)]
+    pub local_tasks: Vec<String>,
 }
 
 impl GradleCounts {
@@ -760,6 +763,9 @@ impl GradleCounts {
             match self.local.iter_mut().find(|(seen, _)| *seen == local) {
                 Some((_, n)) => *n += 1,
                 None => self.local.push((local, 1)),
+            }
+            if !entry.crate_name.is_empty() && !self.local_tasks.contains(&entry.crate_name) {
+                self.local_tasks.push(entry.crate_name.clone());
             }
         }
     }
@@ -797,12 +803,28 @@ impl GradleCounts {
                 .iter()
                 .map(|(local, n)| format!("{n}: {}", local.words()))
                 .collect();
-            lines.push(format!(
+            let mut line = format!(
                 "build: gradle: {} run here {} on this machine ({})",
                 tasks(kept),
                 if kept == 1 { "stays" } else { "stay" },
                 why.join(", ")
-            ));
+            );
+            // \[B-210\] Which, so that a build can tell its own task from a plugin's (kapt's
+            // stubs hold their sources' paths): three at most, and how many more.
+            if !self.local_tasks.is_empty() {
+                let shown: Vec<&str> = self
+                    .local_tasks
+                    .iter()
+                    .take(3)
+                    .map(String::as_str)
+                    .collect();
+                line.push_str(&format!(": {}", shown.join(", ")));
+                let more = self.local_tasks.len() - shown.len();
+                if more > 0 {
+                    line.push_str(&format!(" and {more} more"));
+                }
+            }
+            lines.push(line);
         }
         lines
     }

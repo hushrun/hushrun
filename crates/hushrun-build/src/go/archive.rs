@@ -8,7 +8,8 @@
 //!
 //! - it is an `ar` archive whose first member is `__.PKGDEF`, and every other member is a Go
 //!   object: `_go_.o`, or an object the assembler made for a package of the standard library
-//!   (its header's flags `ObjFlagFromAssembly` and `ObjFlagStd`). Any other member (a cgo
+//!   (its header's flags `ObjFlagFromAssembly` and `ObjFlagStd`, or, \[ADR 0111\] before Go 1.27,
+//!   whose assembler doesn't mark it, `ObjFlagStd` on the archive's own `_go_.o`). Any other member (a cgo
 //!   object, a `.syso`, assembly of another package, a text member) keeps the archive here;
 //! - its build ID, read exactly where Go's `buildid.ReadFile` reads it, is `<action>/<content>`
 //!   with `<action>` Go's encoding of the action id asked;
@@ -232,13 +233,23 @@ pub fn portable(bytes: &[u8], action: &[u8; 32]) -> Result<(), Local> {
     if first.name != b"__.PKGDEF" {
         return Err(Local::Malformed);
     }
+    // \[ADR 0111\] (B-150) A standard library package's: its Go object says so, as the compiler
+    // marks it under `-std`, which the go command gives a standard package's compile in every
+    // version (and B-42 counts `-std` in `-gcflags` as altered). Go's assembler marks its own
+    // objects so only from Go 1.27: before, the standard library's assembly (`runtime`'s among it)
+    // carried no mark, and stayed on the machine.
+    let standard = rest.iter().any(|member| {
+        member.name == b"_go_.o"
+            && object_flags(member.data)
+                .is_some_and(|flags| flags & FROM_ASSEMBLY == 0 && flags & STD != 0)
+    });
     for member in rest {
         let flags = object_flags(member.data).ok_or(Local::Native)?;
         let assembly = flags & FROM_ASSEMBLY != 0;
         if member.name == b"_go_.o" && !assembly {
             continue;
         }
-        if !(assembly && flags & STD != 0) {
+        if !(assembly && (flags & STD != 0 || standard)) {
             return Err(if assembly {
                 Local::Assembly
             } else {
@@ -301,6 +312,17 @@ pub(crate) mod tests {
     /// A package archive for `action`, as the compiler and `go` write one: its build ID's
     /// content half computed from its bytes. `extra` are more members, by name and bytes.
     pub(crate) fn archive(action: &[u8; 32], body: &[u8], extra: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        archive_with(action, body, extra, STD)
+    }
+
+    /// [`archive`], its `_go_.o` with `go_flags`: `STD` for a standard library package's, as the
+    /// compiler marks it under `-std`, none for any other.
+    fn archive_with(
+        action: &[u8; 32],
+        body: &[u8],
+        extra: &[(&str, Vec<u8>)],
+        go_flags: u32,
+    ) -> Vec<u8> {
         let placeholder = format!("{}/{}", hash_to_string(action), "A".repeat(ID_PART));
         let pkgdef = {
             let mut text = format!(
@@ -312,7 +334,10 @@ pub(crate) mod tests {
         };
         let mut out = AR_MAGIC.to_vec();
         out.extend(member("__.PKGDEF", &pkgdef));
-        out.extend(member("_go_.o", &object(Some(&placeholder), STD, body)));
+        out.extend(member(
+            "_go_.o",
+            &object(Some(&placeholder), go_flags, body),
+        ));
         for (name, data) in extra {
             out.extend(member(name, data));
         }
@@ -354,6 +379,37 @@ pub(crate) mod tests {
             &[("index_amd64.o", object(None, FROM_ASSEMBLY | STD, b"asm"))],
         );
         assert_eq!(portable(&std_asm, &action), Ok(()));
+    }
+
+    // covers: B-150
+    #[test]
+    fn the_standard_librarys_assembly_travels_before_go_1_27_marks_it() {
+        // Go 1.24 to 1.26: the assembler takes no -std, so `runtime`'s assembly carries no
+        // ObjFlagStd; the compiler's `_go_.o` of the same archive does.
+        let action = [15u8; 32];
+        let runtime = archive_with(
+            &action,
+            b"runtime",
+            &[("asm_amd64.o", object(None, FROM_ASSEMBLY, b"asm"))],
+            STD,
+        );
+        assert_eq!(portable(&runtime, &action), Ok(()));
+        // Another package's assembly, its `_go_.o` unmarked, stays here as before.
+        let other = archive_with(
+            &action,
+            b"x",
+            &[("p_amd64.o", object(None, FROM_ASSEMBLY, b"asm"))],
+            0,
+        );
+        assert_eq!(portable(&other, &action), Err(Local::Assembly));
+        // A mark on assembly alone is Go 1.27's own, and travels as before.
+        let marked = archive_with(
+            &action,
+            b"x",
+            &[("p_amd64.o", object(None, FROM_ASSEMBLY | STD, b"asm"))],
+            0,
+        );
+        assert_eq!(portable(&marked, &action), Ok(()));
     }
 
     // covers: B-42
@@ -405,10 +461,11 @@ pub(crate) mod tests {
         assert_eq!(portable(&syso, &action), Err(Local::Native));
         // F1: assembly of a package outside the standard library may include a header Go
         // doesn't hash.
-        let asm = archive(
+        let asm = archive_with(
             &action,
             b"x",
             &[("p_arm64.o", object(None, FROM_ASSEMBLY, b"asm"))],
+            0,
         );
         assert_eq!(portable(&asm, &action), Err(Local::Assembly));
         // A `_go_.o` that says it came from assembly is no compiler's object.

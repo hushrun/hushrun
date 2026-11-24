@@ -1294,7 +1294,8 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
     let mut env: Vec<(OsString, OsString)> = Vec::new();
     // `-H` prints the include tree to stderr, which the graph's variables would turn into the
     // graph's JSON there: such a compile has no graph, as GCC's hasn't (B-55).
-    if plan.identity.clang && !plan.compile.prints_headers {
+    // \[B-243\] Only a clang that takes them: one that doesn't fails the compile.
+    if plan.identity.clang && plan.identity.graph && !plan.compile.prints_headers {
         env.push((graph::FORMAT.0.into(), graph::FORMAT.1.into()));
         env.push((graph::FILTERING.0.into(), graph::FILTERING.1.into()));
         env.push((graph::FILE.into(), graph_file.clone().into_os_string()));
