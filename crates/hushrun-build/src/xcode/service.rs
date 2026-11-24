@@ -1,4 +1,4 @@
-//! What the service answers (B-78 to B-84), without the transport: the gRPC server in the
+//! What the service answers (B-85 to B-91), without the transport: the gRPC server in the
 //! hushrun binary reads each request, hands it to [`Service::answer`], writes the reply, and then
 //! runs what the reply left to do ([`After`]) off Xcode's path.
 //!
@@ -9,10 +9,10 @@
 //! (B-64); a download the relay brings, only where the run shares and the check's `xcode/1`
 //! manifest names it. Anything else is a miss, and Xcode compiles. One time in fifty, one in ten
 //! on a downloaded block's first reuse here, a block is answered as a miss on purpose, never
-//! twice for one key in a run, and the value Xcode then puts is compared with it (B-84).
+//! twice for one key in a run, and the value Xcode then puts is compared with it (B-91).
 //!
 //! **A `PutValue`** is kept in the cache at once. Then, where the run has a session, the value
-//! and what it reaches become a block when they may leave the machine (B-82), for the relay to
+//! and what it reaches become a block when they may leave the machine (B-89), for the relay to
 //! upload, and the audit's comparison is made.
 //!
 //! **Objects** (`Get`, `Load`, `Put`, `Save`) are the cache's alone: named by their content, so
@@ -61,10 +61,10 @@ pub struct Config {
     /// The run's session, when there is one: what hushrun's store, the baked store and the relay
     /// are read through. `None`: the cache alone.
     pub current: Option<Current>,
-    /// The Xcode build the values are compiled with (B-83): the platform of the manifest a fetch
+    /// The Xcode build the values are compiled with (B-90): the platform of the manifest a fetch
     /// is looked up in, and of the run's `close`.
     pub platform: Option<String>,
-    /// Folders of this machine an output must not hold to leave it (B-82): the home folder, the
+    /// Folders of this machine an output must not hold to leave it (B-89): the home folder, the
     /// checkout's, DerivedData's.
     pub folders: Vec<String>,
     /// Where block files are staged before the store copies them.
@@ -272,7 +272,7 @@ impl Service {
             if block::present(&value, &self.cache) {
                 lock(&self.counts).local += 1;
                 if let Some(current) = &self.current {
-                    // B-83: in the check's manifest only when its block is in the store, and so
+                    // B-90: in the check's manifest only when its block is in the store, and so
                     // went up or will: a value that stays here would name a block no server has.
                     let key = super::key(xcode_key);
                     let shared = Store::new(&current.store)
@@ -345,7 +345,7 @@ impl Service {
                     )
                 });
         }
-        // B-83: a download, only where the run shares and its manifest names it.
+        // B-90: a download, only where the run shares and its manifest names it.
         if current.mode != Mode::On {
             return None;
         }
@@ -453,7 +453,7 @@ impl Service {
         let first_download = origin
             .as_ref()
             .is_some_and(|o| o.downloaded_only() && !o.reused);
-        // B-84: one in fifty, one in ten on a downloaded block's first reuse here, answered as a
+        // B-91: one in fifty, one in ten on a downloaded block's first reuse here, answered as a
         // miss and compared with what Xcode then puts; every one in local `observe`.
         let picked = current.mode == Mode::Observe
             || current.audits_reuse(origin.as_ref(), |reuse| {
@@ -610,7 +610,7 @@ impl Service {
         self.store_block(current, &store, &key, xcode_key, value, cost_ms, now, true);
     }
 
-    /// Stores the block of `value` under `key` when it may leave the machine (B-82), built here
+    /// Stores the block of `value` under `key` when it may leave the machine (B-89), built here
     /// by this run (B-32), in place of one only downloaded; tells the relay when `tell`.
     #[allow(clippy::too_many_arguments)]
     fn store_block(
@@ -829,6 +829,7 @@ impl Service {
     /// An Xcode value's line in the run's log.
     fn entry(&self, outcome: Outcome, key: &Digest) -> Entry {
         Entry {
+            gradle: None,
             outcome,
             class: Some(Class::Library),
             crate_name: String::new(),

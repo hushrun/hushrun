@@ -2047,6 +2047,7 @@ mod tests {
             go: None,
             xcode: None,
             cc: None,
+            gradle: None,
         }
     }
 

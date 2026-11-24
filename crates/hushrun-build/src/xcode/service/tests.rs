@@ -127,7 +127,7 @@ fn get(service: &Service, key: &[u8]) -> Option<Value> {
     }
 }
 
-// covers: B-78, B-79
+// covers: B-85, B-86
 #[test]
 fn objects_are_named_by_their_content_and_got_back() {
     let machine = Machine::new();
@@ -191,7 +191,7 @@ fn objects_are_named_by_their_content_and_got_back() {
     assert!(matches!(reply, Reply::CasStored(Err(_))));
 }
 
-// covers: B-78
+// covers: B-85
 #[test]
 fn a_put_may_name_a_file_the_plugin_wrote() {
     let machine = Machine::new();
@@ -213,7 +213,7 @@ fn a_put_may_name_a_file_the_plugin_wrote() {
     assert!(matches!(reply, Reply::CasStored(Err(_))));
 }
 
-// covers: B-79
+// covers: B-86
 #[test]
 fn another_checkouts_compile_is_found_in_this_machines_cache() {
     let machine = Machine::new();
@@ -227,7 +227,7 @@ fn another_checkouts_compile_is_found_in_this_machines_cache() {
     assert_eq!(get(&second, b"other key"), None);
 }
 
-// covers: B-79
+// covers: B-86
 #[test]
 fn a_value_whose_outputs_are_gone_is_a_miss() {
     let machine = Machine::new();
@@ -238,7 +238,7 @@ fn a_value_whose_outputs_are_gone_is_a_miss() {
     assert_eq!(get(&service, &key), None);
 }
 
-// covers: B-80, B-82
+// covers: B-87, B-89
 #[test]
 fn a_value_put_in_a_run_becomes_a_block_and_serves_a_fresh_cache() {
     let machine = Machine::new().with_session(Some("none"));
@@ -276,7 +276,7 @@ fn a_value_put_in_a_run_becomes_a_block_and_serves_a_fresh_cache() {
     );
 }
 
-// covers: B-82
+// covers: B-89
 #[test]
 fn an_output_holding_a_folder_of_this_machine_stays_here() {
     let machine = Machine::new().with_session(Some("none"));
@@ -303,7 +303,7 @@ fn an_output_holding_a_folder_of_this_machine_stays_here() {
     assert_eq!(xcode.local.as_deref(), Some("cache"));
 }
 
-// covers: B-84
+// covers: B-91
 #[test]
 fn the_audit_compares_what_xcode_compiles_again() {
     let machine = Machine::new().with_session(Some("every"));
@@ -353,7 +353,7 @@ fn the_audit_compares_what_xcode_compiles_again() {
     assert!(get(&machine.service(&[]), &key).is_some());
 }
 
-// covers: B-83
+// covers: B-90
 #[test]
 fn with_no_relay_a_miss_is_a_miss() {
     let machine = Machine::new().with_session(Some("none"));

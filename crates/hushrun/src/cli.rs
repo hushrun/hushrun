@@ -403,7 +403,7 @@ pub enum BuildCommand {
     Xcode(BuildXcodeCommand),
 }
 
-/// `hushrun build xcode` (B-85).
+/// `hushrun build xcode` (B-92).
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum BuildXcodeCommand {
     /// Make the Xcode app's builds use hushrun's compilation cache, the one `hushrun run` fills:

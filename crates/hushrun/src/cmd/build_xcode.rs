@@ -1,4 +1,4 @@
-//! B-78: the transport of the Xcode compilation-cache service, gRPC over HTTP/2 on a Unix
+//! B-85: the transport of the Xcode compilation-cache service, gRPC over HTTP/2 on a Unix
 //! socket, as Xcode's toolchain plugin speaks it to `COMPILATION_CACHE_REMOTE_SERVICE_PATH`. What
 //! each request is answered is `hushrun_build::xcode::service`'s; this is only the wire: one
 //! HTTP/2 connection per plugin, one stream per call, each request one length-prefixed protobuf
@@ -273,7 +273,7 @@ fn status(
     Ok(())
 }
 
-// --- a run's service (B-77) ------------------------------------------------------------------
+// --- a run's service (B-84) ------------------------------------------------------------------
 
 /// The run's service, from the session's beginning to its end: one per process, as the relay.
 static RUN: std::sync::Mutex<Option<Running>> = std::sync::Mutex::new(None);
@@ -281,7 +281,7 @@ static RUN: std::sync::Mutex<Option<Running>> = std::sync::Mutex::new(None);
 /// The xcconfig file's name in the session's folder.
 const XCCONFIG: &str = "xcode.xcconfig";
 
-/// B-77: gives COMMAND Xcode's compilation cache through a service of this run, when the
+/// B-84: gives COMMAND Xcode's compilation cache through a service of this run, when the
 /// checkout holds an Xcode project and the Xcode COMMAND would build with is one hushrun knows:
 /// the service is started on a socket in the session's folder, the xcconfig file that names it
 /// is written beside it, and COMMAND gets `XCODE_XCCONFIG_FILE`. Every reason for none but an
@@ -322,7 +322,7 @@ pub(crate) fn give(
         .filter(|path| {
             std::fs::read_to_string(path).map_or(true, |text| !xcconfig::is_hushruns(&text))
         });
-    // B-82: on a person's machine, an output holding their home folder or the checkout's never
+    // B-89: on a person's machine, an output holding their home folder or the checkout's never
     // leaves it. A CI job's folders are every job's, and name no person.
     let mut folders = Vec::new();
     if !in_ci {
@@ -374,7 +374,7 @@ pub(crate) fn give(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(running);
 }
 
-/// B-84: stops the run's service, before the relay ends the check (so every value it stored is
+/// B-91: stops the run's service, before the relay ends the check (so every value it stored is
 /// in the log the check's `close` is made from), and says what it did in one line.
 pub(crate) fn end(session: &mut hushrun_build::session::Session) {
     let running = RUN
@@ -390,7 +390,7 @@ pub(crate) fn end(session: &mut hushrun_build::session::Session) {
     }
 }
 
-/// The run's line about Xcode's compiles (B-84), or none when Xcode asked nothing.
+/// The run's line about Xcode's compiles (B-91), or none when Xcode asked nothing.
 pub(crate) fn summary(counts: &Counts) -> Option<String> {
     if counts.asked == 0 && counts.put == 0 {
         return None;

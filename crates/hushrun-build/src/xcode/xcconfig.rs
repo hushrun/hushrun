@@ -1,5 +1,5 @@
 //! The build settings that turn Xcode's compilation cache on and point it at hushrun's service
-//! (B-77), as an xcconfig file Xcode reads from `XCODE_XCCONFIG_FILE`. Xcode applies that file
+//! (B-84), as an xcconfig file Xcode reads from `XCODE_XCCONFIG_FILE`. Xcode applies that file
 //! to every target of a build, the targets of its Swift packages included, above the project's
 //! own settings and below settings given on `xcodebuild`'s command line.
 //!
@@ -14,7 +14,7 @@
 //!   it, which would tie every key to one DerivedData. Clang still validates modules as usual.
 //!
 //! The values are x8's (an open-source service of the same protocol), which its author verified
-//! against Xcode 27; the Mac spike of ADR 0104 measures them here.
+//! against Xcode 27; the Mac spike of ADR 0105 measures them here.
 
 use std::path::Path;
 
@@ -95,7 +95,7 @@ pub fn is_hushruns(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    // covers: B-77
+    // covers: B-84
     #[test]
     fn the_checkouts_folder_is_mapped_unless_it_holds_white_space() {
         let maps = maps(&Root::Folder(Path::new("/Users/ana/src/app/"))).unwrap();
@@ -109,7 +109,7 @@ mod tests {
         );
     }
 
-    // covers: B-77
+    // covers: B-84
     #[test]
     fn the_file_names_the_socket_and_the_persons_own_file() {
         let maps = maps(&Root::Workspace).unwrap();

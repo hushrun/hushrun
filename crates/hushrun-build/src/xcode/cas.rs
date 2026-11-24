@@ -1,4 +1,4 @@
-//! The service's own cache on this machine (B-79): every object and every value Xcode puts, in
+//! The service's own cache on this machine (B-86): every object and every value Xcode puts, in
 //! the store's folder under `xcode/`, so that any checkout, worktree or branch on this machine,
 //! and the Xcode app beside `xcodebuild`, finds what another compiled. It is to Xcode what
 //! `GOCACHE` is to Go: the local side, kept whatever leaves the machine.
@@ -400,7 +400,7 @@ mod tests {
         }
     }
 
-    // covers: B-79
+    // covers: B-86
     #[test]
     fn an_id_is_its_content_and_its_references_in_order() {
         let a = object(b"a", &[]).id();
@@ -420,7 +420,7 @@ mod tests {
         );
     }
 
-    // covers: B-79
+    // covers: B-86
     #[test]
     fn objects_and_values_are_kept_and_checked() {
         let dir = tempfile::tempdir().unwrap();
@@ -452,7 +452,7 @@ mod tests {
         assert!(!path.exists());
     }
 
-    // covers: B-79
+    // covers: B-86
     #[test]
     fn the_trim_removes_what_nobody_used_and_waits_a_day() {
         let dir = tempfile::tempdir().unwrap();

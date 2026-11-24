@@ -1,4 +1,4 @@
-//! Xcode build blocks (B-77 to B-84): what Xcode's own compilation cache keeps, shared between
+//! Xcode build blocks (B-84 to B-91): what Xcode's own compilation cache keeps, shared between
 //! checkouts, branches, the Xcode app and other machines through hushrun's store and relay.
 //!
 //! From Xcode 26, Swift and Clang (C, C++, Objective-C, their modules) can key each compile by
@@ -48,7 +48,7 @@ pub const XCCONFIG_VAR: &str = "XCODE_XCCONFIG_FILE";
 /// The variable that turns the service off for a run: `0`, `off` or `false`.
 pub const OFF_VAR: &str = "HUSHRUN_BUILD_XCODE";
 
-/// hushrun's key for the value of Xcode's key `key` (B-81): the SHA-256 of the JCS form of the
+/// hushrun's key for the value of Xcode's key `key` (B-88): the SHA-256 of the JCS form of the
 /// schema and the key in hex. Xcode's key holds the compiler's version, its arguments and the
 /// content of every input; the block's address never shows it.
 pub fn key(xcode_key: &[u8]) -> Digest {
@@ -77,7 +77,7 @@ pub fn turned_off(value: Option<&std::ffi::OsStr>) -> bool {
 mod tests {
     use super::*;
 
-    // covers: B-81
+    // covers: B-88
     #[test]
     fn a_key_is_a_digest_of_xcodes_and_never_xcodes_itself() {
         let a = key(b"xcode key");
@@ -86,7 +86,7 @@ mod tests {
         assert_ne!(a, Digest::of(b"xcode key"));
     }
 
-    // covers: B-77
+    // covers: B-84
     #[test]
     fn the_variable_turns_the_service_off() {
         for off in ["0", "off", "OFF", "false", "no"] {

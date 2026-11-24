@@ -111,7 +111,7 @@ fn start_at(
 
 fn begin(relay: &Arc<Relay>, m: &Machine) {
     relay
-        .begin_check(&m.session, None, None, &|_| None)
+        .begin_check(&m.session, None, None, false, &|_| None)
         .unwrap();
 }
 
@@ -750,7 +750,9 @@ fn panicking_run(world: &str) {
             c.tuning.close = Duration::from_secs(3);
         },
     );
-    let share = relay.begin_check(session, None, None, &|_| None).unwrap();
+    let share = relay
+        .begin_check(session, None, None, false, &|_| None)
+        .unwrap();
     until("open", || answering(&relay));
     let wait = hushrun_build::relay::WAIT;
     let (key, step) = (Digest::of(&[13, 1]), Digest::of(&[13, 2]));
@@ -1819,7 +1821,9 @@ fn a_long_session_folder_gets_its_socket_in_a_private_folder_and_a_wrapper_reach
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let relay = start(&fake, &m, |_| {});
-    let share = relay.begin_check(&long, None, None, &|_| None).unwrap();
+    let share = relay
+        .begin_check(&long, None, None, false, &|_| None)
+        .unwrap();
     assert!(!share.socket.starts_with(&long));
     assert!(share.socket.as_os_str().len() <= hushrun_build::relay::MOST_SOCKET_PATH);
     until("open", || answering(&relay));
@@ -3408,7 +3412,7 @@ fn panicking_vouches(world: &str) {
         c.tuning.close = Duration::from_secs(3);
     });
     relay
-        .begin_check(Path::new(session), None, None, &|_| None)
+        .begin_check(Path::new(session), None, None, false, &|_| None)
         .unwrap();
     until("open", || answering(&relay));
     until("the lookup's panic", || {
@@ -3494,6 +3498,7 @@ fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_buil
         go: Some(hushrun_build::session::GoEntry::default()),
         xcode: None,
         cc: None,
+        gradle: None,
     }
 }
 
@@ -3509,7 +3514,7 @@ fn a_close_names_no_crate_that_stays_on_the_machine() {
     let m = machine();
     let relay = start(&fake, &m, |_| {});
     relay
-        .begin_check(&m.session, None, None, &|_| None)
+        .begin_check(&m.session, None, None, false, &|_| None)
         .unwrap();
     until("open", || answering(&relay));
     let with = |name: &[u8], reasons: &[Reason]| {
@@ -3560,7 +3565,13 @@ fn a_go_fetch_asks_the_server_only_about_what_the_checks_go_manifest_names() {
     let b = machine();
     let relay = start(&fake, &b, |_| {});
     relay
-        .begin_check(&b.session, None, Some("darwin_arm64".into()), &|_| None)
+        .begin_check(
+            &b.session,
+            None,
+            Some("darwin_arm64".into()),
+            false,
+            &|_| None,
+        )
         .unwrap();
     until("the Go manifest", || {
         matches!(relay.state().go_manifest, super::GoManifest::Got(_))
@@ -3608,7 +3619,9 @@ fn a_go_block_built_here_goes_up_and_closes_as_go_1() {
     let key = go_block(&m.store, 73, Some(me(&fake)));
     let relay = start(&fake, &m, |_| {});
     relay
-        .begin_check(&m.session, None, Some("linux_amd64".into()), &|_| None)
+        .begin_check(&m.session, None, Some("linux_amd64".into()), false, &|_| {
+            None
+        })
         .unwrap();
     until("open", || answering(&relay));
     ask(&relay, Request::GoBuilt { key, cost_ms: 1000 });
@@ -3658,7 +3671,13 @@ fn the_go_open_goes_beside_the_checks_own_and_waits_for_nothing() {
     let relay = start(&fake, &m, |_| {});
     let started = Instant::now();
     relay
-        .begin_check(&m.session, None, Some("darwin_arm64".into()), &|_| None)
+        .begin_check(
+            &m.session,
+            None,
+            Some("darwin_arm64".into()),
+            false,
+            &|_| None,
+        )
         .unwrap();
     until("the Go manifest", || {
         matches!(relay.state().go_manifest, super::GoManifest::Got(_))
@@ -3679,7 +3698,9 @@ fn the_go_manifest_names_only_archives_that_may_leave() {
     let m = machine();
     let relay = start(&fake, &m, |_| {});
     relay
-        .begin_check(&m.session, None, Some("linux_amd64".into()), &|_| None)
+        .begin_check(&m.session, None, Some("linux_amd64".into()), false, &|_| {
+            None
+        })
         .unwrap();
     until("open", || answering(&relay));
     let shared = Digest::of(b"shared");

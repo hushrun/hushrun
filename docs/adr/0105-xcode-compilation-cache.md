@@ -1,10 +1,10 @@
-# 0104. Xcode's compilation cache, served by hushrun
+# 0105. Xcode's compilation cache, served by hushrun
 
 - **Status:** proposed; built (the service, local reuse between checkouts and the Xcode app,
   blocks through the relay, baked stores), not yet run against a real Xcode: the Mac spike below
   decides what stays
 - **Date:** 2026-11-24
-- **Rules:** B-77 to B-85 (draft); B-13, B-14, B-15, B-24, B-26 to B-34, B-63, B-64 read for
+- **Rules:** B-84 to B-92 (draft); B-13, B-14, B-15, B-24, B-26 to B-34, B-63, B-64 read for
   Xcode
 
 ## Context
@@ -44,41 +44,41 @@ the protocol is stable enough to build on and found its traps first:
 
 ## Decision
 
-1. **hushrun serves the protocol; Xcode computes the keys** (B-78). hushrun does not wrap `swiftc`
+1. **hushrun serves the protocol; Xcode computes the keys** (B-85). hushrun does not wrap `swiftc`
    or `clang` for Xcode: the service answers every call, over HTTP/2 on a Unix socket, with a
    protobuf codec written by hand (std only in `hushrun-build`; the HTTP/2 server is `h2`, already
    in the binary through reqwest). An id is the SHA-256 of `hushrun.xcode-object/v1`, the number of
    references, each reference and the bytes, so every machine names the same object the same way,
    and a value's bytes are a digest of everything below it.
-2. **The local side is the service's own cache** (B-79), in the store's `xcode/` folder: every
+2. **The local side is the service's own cache** (B-86), in the store's `xcode/` folder: every
    object and value Xcode puts, kept whatever leaves the machine, dated on use, trimmed after the
    store's kept days. This is what a new worktree or branch on the same Mac reuses, with or
    without a backend: DerivedData is per checkout, the cache is per machine.
-3. **A block is one value and everything it reaches** (B-80), kind `xcode/1`, under the SHA-256 of
-   `hushrun.xcode-key/v1` and Xcode's key (B-81): one download brings a compile's value and its
+3. **A block is one value and everything it reaches** (B-87), kind `xcode/1`, under the SHA-256 of
+   `hushrun.xcode-key/v1` and Xcode's key (B-88): one download brings a compile's value and its
    outputs together, and the object lookups that follow are answered from the cache. Opening one
    checks every object against its id and that every object the value reaches is there, before
    anything is kept; a block that fails is refused whole, and a downloaded one is reported and its
    key suspended, as Go's are.
-4. **What may leave** (B-82): a value whose outputs the service can name, all of them in the cache,
+4. **What may leave** (B-89): a value whose outputs the service can name, all of them in the cache,
    under 256 MiB and 20,000 objects, with no output holding the person's home folder or the
    checkout's (on a person's machine; a CI job's folders name no person). Anything else stays in
    the cache and is still reused on this machine.
-5. **Downloads follow a manifest per Xcode build** (B-83). Xcode asks for every compile's key, and
+5. **Downloads follow a manifest per Xcode build** (B-90). Xcode asks for every compile's key, and
    most are ones no server holds: the relay asks the server only for a key the check's `xcode/1`
    manifest for the platform `xcode-<build>` names, and the first such key starts the prefetch of
    the rest, as a C or C++ first key does (B-60). The relay's manifest state is now one table by
    kind and platform for both.
-6. **The audit is the same** (B-84): one block in fifty, one in ten at a downloaded block's first
+6. **The audit is the same** (B-91): one block in fifty, one in ten at a downloaded block's first
    reuse, every one in `observe`, is answered as a miss on purpose and the value Xcode puts next is
    compared with it; a difference suspends the key and reports a download.
-7. **Entry: `XCODE_XCCONFIG_FILE`** (B-77). `hushrun run` sets it for COMMAND, when the checkout
+7. **Entry: `XCODE_XCCONFIG_FILE`** (B-84). `hushrun run` sets it for COMMAND, when the checkout
    holds an Xcode project, workspace or Swift package and `xcodebuild -version` names Xcode 27, to
    a file in the session's folder with the caching settings, the socket, and the maps with the
    checkout's own folder; a file the person set is included first (`#include?`). Xcode applies it
    to every target of a build, packages included, which project settings don't reach. Nothing is
    written into the project, and outside a run nothing changes.
-8. **The Xcode app** (B-85). `hushrun build xcode on` installs a LaunchAgent that runs `hushrun
+8. **The Xcode app** (B-92). `hushrun build xcode on` installs a LaunchAgent that runs `hushrun
    build xcode serve` at login, on a socket at a fixed place, and sets `XCODE_XCCONFIG_FILE` for the
    login session (`launchctl setenv`), with the workspace's folder (`$(WORKSPACE_DIR)`) in the
    maps. It reads and writes the same cache as a run's, and asks no backend: a run downloads, the

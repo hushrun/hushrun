@@ -1,4 +1,4 @@
-//! Whether a run's COMMAND gets the service (B-77): a Mac, an Xcode project in the checkout,
+//! Whether a run's COMMAND gets the service (B-84): a Mac, an Xcode project in the checkout,
 //! and an Xcode whose cache protocol and prefix mapping hushrun knows.
 
 use std::ffi::OsString;
@@ -40,7 +40,7 @@ pub struct Xcode {
 }
 
 impl Xcode {
-    /// The platform of its manifest (B-83): `xcode-` and its build, lower case. Values of one
+    /// The platform of its manifest (B-90): `xcode-` and its build, lower case. Values of one
     /// Xcode build are what another machine with it may reuse.
     pub fn platform(&self) -> String {
         format!("xcode-{}", self.build.to_ascii_lowercase())
@@ -190,7 +190,7 @@ pub fn decide(
 mod tests {
     use super::*;
 
-    // covers: B-77
+    // covers: B-84
     #[test]
     fn xcodebuilds_version_is_read() {
         let xcode = parse_version("Xcode 27.2\nBuild version 27C5032a\n").unwrap();
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(parse_version("nonsense"), None);
     }
 
-    // covers: B-77
+    // covers: B-84
     #[test]
     fn a_project_is_found_a_few_folders_down_and_not_in_dependencies() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-//! An Xcode block (B-80): one value Xcode put, and every object it reaches, as one block of kind
+//! An Xcode block (B-87): one value Xcode put, and every object it reaches, as one block of kind
 //! `xcode/1` in hushrun's store. Objects are content-addressed ([`super::cas::id`]), so a block
 //! is the unit that travels: a download brings a compile's value and its outputs together, and
 //! the lookups Xcode then makes for those objects are answered here, with no further request.
@@ -319,7 +319,7 @@ mod tests {
             .unwrap()
     }
 
-    // covers: B-80
+    // covers: B-87
     #[test]
     fn a_block_holds_a_value_and_everything_it_reaches() {
         let here = tempfile::tempdir().unwrap();
@@ -387,7 +387,7 @@ mod tests {
         ));
     }
 
-    // covers: B-80
+    // covers: B-87
     #[test]
     fn a_value_that_names_nothing_found_or_reaches_a_missing_object_stays_here() {
         let here = tempfile::tempdir().unwrap();
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(closure(&bare, &cache, now).unwrap().len(), 1);
     }
 
-    // covers: B-80
+    // covers: B-87
     #[test]
     fn a_folder_of_this_machine_in_an_output_is_found() {
         let objects = [Object {

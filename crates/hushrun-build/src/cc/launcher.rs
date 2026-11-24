@@ -278,6 +278,7 @@ fn entry(outcome: Outcome) -> Entry {
         go: None,
         xcode: None,
         cc: None,
+        gradle: None,
     }
 }
 

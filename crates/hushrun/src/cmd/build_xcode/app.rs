@@ -1,4 +1,4 @@
-//! B-85: `hushrun build xcode on|off|status`, Xcode's compilation cache for the Xcode app on this
+//! B-92: `hushrun build xcode on|off|status`, Xcode's compilation cache for the Xcode app on this
 //! Mac. The app builds outside any `hushrun run`, so its service is a LaunchAgent of the person's
 //! (`hushrun build xcode serve`, kept running by launchd), on a socket at a fixed place; and the
 //! app learns of it through `XCODE_XCCONFIG_FILE`, which the agent sets in the login session's
@@ -342,7 +342,7 @@ fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
-    // covers: B-85
+    // covers: B-92
     #[test]
     fn the_apps_service_has_fixed_places_and_a_short_socket() {
         let places = Places::of(
@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(long.socket, Path::new("/tmp/hushrun-xcode-501/xcode.sock"));
     }
 
-    // covers: B-85
+    // covers: B-92
     #[test]
     fn the_agent_runs_serve_and_the_settings_map_the_workspace() {
         let text = plist(

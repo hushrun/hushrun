@@ -78,7 +78,7 @@ fn service(dir: &Path) -> Service {
     })
 }
 
-// covers: B-78
+// covers: B-85
 #[test]
 fn the_plugin_puts_objects_and_a_value_and_gets_them_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -124,7 +124,7 @@ fn the_plugin_puts_objects_and_a_value_and_gets_them_back() {
     assert_eq!(counts.put, 1);
 }
 
-// covers: B-78
+// covers: B-85
 #[test]
 fn a_large_object_asked_for_on_disk_comes_as_a_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,7 +149,7 @@ fn a_large_object_asked_for_on_disk_comes_as_a_file() {
     assert_eq!(got.unwrap().blob, Blob::Data(large));
 }
 
-// covers: B-78
+// covers: B-85
 #[test]
 fn what_the_service_cant_answer_is_a_status_the_plugin_reads_as_a_miss() {
     let dir = tempfile::tempdir().unwrap();
@@ -162,7 +162,7 @@ fn what_the_service_cant_answer_is_a_status_the_plugin_reads_as_a_miss() {
     assert_eq!(status, code::INVALID_ARGUMENT);
 }
 
-// covers: B-78
+// covers: B-85
 #[test]
 fn a_frame_holds_one_whole_message() {
     assert_eq!(unframe(&frame(b"abc")), Ok(&b"abc"[..]));

@@ -785,7 +785,8 @@ A check that runs can still skip compiling what this machine already compiled fr
 inputs, in any worktree or clone: `hushrun build on` turns that on for the builds `hushrun run`
 runs. Rust crates go through cargo's `RUSTC_WRAPPER`, and the C and C++ objects of a CMake build
 through CMake's compiler launcher. Go's own build cache already does this on one machine, so hushrun
-adds Go only where an org shares compiled code through its backend. On your machine it is off until
+adds Go only where an org shares compiled code through its backend, and Gradle's tasks (Kotlin,
+Java, Android) the same way, as the build's remote build cache. On your machine it is off until
 you turn it on, once, for every repository; `hushrun build` shows the mode, the store and its size,
 and `hushrun build observe` compiles everything as usual and says what would have been reused.
 
@@ -813,6 +814,30 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   store saves disk only when you delete target folders you would otherwise keep. `du` and
   `hushrun build status` count a cloned file in full in each place. A block not used for 15 days is
   deleted, and nothing is stored while the disk has less than 10 GB free.
+
+- **Gradle, and so Android.** Where the org shares, `hushrun run` is the remote build cache of a
+  Gradle build: a branch's first CI job takes from main's what main's CI already ran, and a laptop
+  takes what CI ran, with no cache server of your own. It needs the line `hushrun init` proposes in
+  the settings file (`if (System.getenv("HUSHRUN_GRADLE")) apply from:
+  System.getenv("HUSHRUN_GRADLE")`, or `System.getenv("HUSHRUN_GRADLE")?.let { apply(from = it) }`
+  in `settings.gradle.kts`) and the build's own `org.gradle.caching=true` in `gradle.properties`;
+  the run says which is missing. Gradle's local cache stays Gradle's, so a plain `./gradlew` is as
+  warm as before; a remote the build sets up itself, such as Develocity's, stays, and hushrun steps
+  aside. `--offline` turns Gradle's remote cache off, and hushrun's with it. Tasks that Gradle
+  can't cache, or whose keys hold absolute paths, run on every machine as before (the Android
+  Cache Fix plugin covers the Android plugin's known ones), and an entry that holds your checkout's
+  folder or your home folder never leaves the machine. The summary counts tasks apart:
+
+  ```text
+  $ hushrun run build -- ./gradlew assembleDebug
+  hushrun: build: gradle: 214 tasks: 198 from hushrun's cache (198 from the shared store), 16 run and stored, saving about 3m 40s
+  ```
+
+  Gradle's outputs needn't be the same from one run of a task to the next, so hushrun can't
+  compare an entry with a fresh run as it does compiled code: what a machine reads is only as
+  trustworthy as the machines that write what it reads. Trusted copies come only from CI on the
+  branches hushrun.yaml's backend lists; a person's entries reach that person, or the team where
+  the org pools them.
 
 - **Baked into an image.** `hushrun build bake --out DIR` writes the crates, Go packages and C and
   C++ objects the last run of each check here used (`--check NAME` narrows it) into a folder of
@@ -947,7 +972,7 @@ hushrun: build: xcode: 412 compiles asked: 405 from this Mac's cache, 0 reused, 
 - **Your own xcconfig.** An `XCODE_XCCONFIG_FILE` you set is included first; settings you pass on
   `xcodebuild`'s command line still win.
 
-This is new and its rules are a draft ([ADR 0104](../adr/0104-xcode-compilation-cache.md)): the
+This is new and its rules are a draft ([ADR 0105](../adr/0105-xcode-compilation-cache.md)): the
 ADR lists what a first build on a real Mac should confirm.
 
 `hushrun guide` says the rest, such as how to read each line, and the rules are

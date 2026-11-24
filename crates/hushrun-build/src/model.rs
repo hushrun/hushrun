@@ -108,9 +108,12 @@ pub enum Kind {
     /// The C and C++ launcher's objects, kind `cc/1` (B-60), with a manifest of their own per
     /// check and target triple.
     Cc,
-    /// The Xcode service's values and the objects they reach, kind `xcode/1` (B-80), with a
+    /// The Xcode service's values and the objects they reach, kind `xcode/1` (B-87), with a
     /// manifest of their own per check and Xcode build.
     Xcode,
+    /// Gradle's task outputs, served to Gradle as its remote build cache, kind `gradle/1`
+    /// (B-77), with a manifest of their own per check.
+    Gradle,
 }
 
 impl Kind {
@@ -121,6 +124,7 @@ impl Kind {
             Kind::Go => "go/1",
             Kind::Cc => crate::cc::KIND,
             Kind::Xcode => crate::xcode::KIND,
+            Kind::Gradle => crate::gradle::KIND,
         }
     }
 
@@ -131,6 +135,7 @@ impl Kind {
             Some(word) if word == Kind::Go.word() => Kind::Go,
             Some(word) if word == Kind::Cc.word() => Kind::Cc,
             Some(word) if word == Kind::Xcode.word() => Kind::Xcode,
+            Some(word) if word == Kind::Gradle.word() => Kind::Gradle,
             _ => Kind::Rustc,
         }
     }

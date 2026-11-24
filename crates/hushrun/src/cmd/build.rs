@@ -2644,7 +2644,7 @@ fn set(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
 }
 
 /// `hushrun build status`, and `hushrun build` alone.
-/// `hushrun build xcode` (B-85).
+/// `hushrun build xcode` (B-92).
 fn xcode(place: &Place, command: &crate::cli::BuildXcodeCommand) -> CmdResult {
     use crate::cli::BuildXcodeCommand;
     use crate::cmd::build_xcode::app;

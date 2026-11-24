@@ -40,7 +40,7 @@ pub(crate) fn bind(
     bind_as(session_folder, SOCKET, env)
 }
 
-/// [`bind`], for a socket named `name`: the Xcode service's (B-78) beside the relay's.
+/// [`bind`], for a socket named `name`: the Xcode service's (B-85) beside the relay's.
 #[cfg(unix)]
 pub(crate) fn bind_as(
     session_folder: &Path,

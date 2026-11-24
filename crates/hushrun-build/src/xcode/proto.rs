@@ -1,4 +1,4 @@
-//! The messages of Xcode's compilation-cache service (B-78), in protobuf's wire format, by hand:
+//! The messages of Xcode's compilation-cache service (B-85), in protobuf's wire format, by hand:
 //! `compilation_cache_service.cas.v1` (`CASDBService`: `Get`, `Put`, `Load`, `Save`) and
 //! `compilation_cache_service.keyvalue.v1` (`KeyValueDB`: `GetValue`, `PutValue`), as LLVM's
 //! `llvm/lib/RemoteCachingService/RemoteCacheProto/*.proto` define them (Apple's fork of LLVM,
@@ -565,7 +565,7 @@ mod tests {
     use super::client;
     use super::*;
 
-    // covers: B-78
+    // covers: B-85
     #[test]
     fn an_object_reads_back_as_written() {
         let object = Object {
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(read_object(&encode_object(&path)).unwrap(), path);
     }
 
-    // covers: B-78
+    // covers: B-85
     #[test]
     fn every_request_reads_as_its_method() {
         let id = vec![7u8; 32];
@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(Request::read("/other.Service/Method", b""), None);
     }
 
-    // covers: B-78
+    // covers: B-85
     #[test]
     fn a_value_has_one_encoding_whatever_the_order_it_came_in() {
         // Two entries written in the order a's map might give them, then read: the same value,
@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(encode_value(&value), two);
     }
 
-    // covers: B-78
+    // covers: B-85
     #[test]
     fn unknown_fields_are_skipped_and_broken_ones_refused() {
         let mut bytes = client::kv_get(b"key");
@@ -679,7 +679,7 @@ mod tests {
         assert!(matches!(Request::read(path::KV_GET, &[0x0b]), Some(Err(_))));
     }
 
-    // covers: B-78
+    // covers: B-85
     #[test]
     fn replies_read_back_by_a_client() {
         let object = Object {

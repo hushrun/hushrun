@@ -286,6 +286,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         go: None,
         xcode: None,
         cc: None,
+        gradle: None,
     }
 }
 
