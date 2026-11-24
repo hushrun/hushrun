@@ -32,7 +32,10 @@ use super::db::{Edge, HintKnown};
 use super::facts::FactsFile;
 use super::shared::{Asker, List, Shared};
 use super::store::Map;
-use super::{Seen, bats, cargo, ctest, gotest, gradle, jest, maven, pytest, swift, vitest};
+use super::{
+    Seen, bats, cargo, ctest, exunit, gotest, gradle, jest, maven, mocha, node_test, pytest, swift,
+    vitest,
+};
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
 /// the adapter can't load safely, which the run says once.
@@ -50,10 +53,13 @@ pub const RECOGNIZED: &[Recognize] = &[
     gotest::recognized,
     vitest::recognized,
     jest::recognized,
+    node_test::recognized,
+    mocha::recognized,
     maven::recognized,
     gradle::recognized,
     // \[ADR 0115\] Bats, by its name or a path: before the adapters that take wrappers.
     bats::recognized,
+    exunit::recognized,
     ctest::recognized,
     swift::recognized,
 ];

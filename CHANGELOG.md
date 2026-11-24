@@ -12,6 +12,29 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Kotlin Multiplatform's test tasks are test files** (C-94 to C-97, B-210, ADR 0117): the
+  Gradle adapter follows Kotlin/JS, Kotlin/Wasm and Kotlin/Native test tasks (`jsNodeTest`,
+  `wasmJsNodeTest`, `linuxX64Test`…) as it follows `Test` tasks, each class named by the file
+  that declares it and left out, whole or test by test, through Gradle's filter, so a
+  `commonTest` class is one test file on every platform. Kotest's specs are pinned as units left
+  out whole. `hushrun init` takes `allTests`, `jvmTest`, `jsTest`, `testDebugUnitTest` and `testReleaseUnitTest` as
+  test checks. The Gradle cache's line of tasks that stay on the machine names them, such as
+  kapt's `kaptGenerateStubsKotlin`, whose stubs hold their sources' paths.
+- **Node's test runner and Mocha reuse test files and tests** (C-54 to C-57, ADR 0107): with
+  `tests: reuse`, `node --test` (Node 22.15 or later) and Mocha 10 and 11 skip the test files, and
+  with `unit: test` the single tests, that already passed on the files they read, loaded through
+  `NODE_OPTIONS` with no file of the repository changed. Node's runner is watched per test file's
+  process and chooses its files by its own patterns; Mocha loads every spec file as usual and has
+  the reused tests taken out of their suites before any hook runs, a spec file with a root hook
+  being read by all. `--watch`, `--test-isolation=none`, Mocha's `--parallel` and `--dry-run` run
+  as written and say why. Plain JavaScript has no compile step to reuse: no build-block kind.
+- **`mix test` reuses ExUnit's test files** (C-114 to C-117, ADR 0122). With `tests` on, an
+  Elixir project's `mix test`, an umbrella's included, loads hushrun's ExUnit adapter through
+  `ERL_LIBS` and `ELIXIR_ERL_OPTIONS`, with nothing of the repository changed: each test file read
+  what its code references to the end (Elixir's lexical tracker and Mix's compile manifests), what
+  its own processes called (call counters by process), and the project's configuration, and the
+  test files that already passed on those files are left out through ExUnit's own `exclude`
+  filter. By test file only; `mix compile` shares nothing yet.
 - **TypeScript compiles reused and shared, kind `tsc/1`** (B-100 to B-109, ADR 0106, a draft):
   inside `hushrun run`, in a checkout with a `package.json`, `NODE_OPTIONS` gets a hook
   (`--require`, added to what it had) and `HUSHRUN_TSC` the helper `hushrun-tsc`. A `tsc`,
