@@ -3500,6 +3500,7 @@ fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_buil
         cc: None,
         gradle: None,
         maven: None,
+        tsc: None,
     }
 }
 

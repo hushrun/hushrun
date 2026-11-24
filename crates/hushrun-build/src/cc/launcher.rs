@@ -280,6 +280,7 @@ fn entry(outcome: Outcome) -> Entry {
         cc: None,
         gradle: None,
         maven: None,
+        tsc: None,
     }
 }
 

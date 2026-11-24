@@ -194,6 +194,17 @@ pub fn parts_of(entries: &[Entry], slot: &Slot) -> Vec<SavedPart> {
             Kind::Gradle => continue,
             // Nor are Maven's (B-176).
             Kind::Maven => continue,
+            // B-108: per Node platform, those that may leave the machine.
+            Kind::Tsc => {
+                let Some(tsc) = entry
+                    .tsc
+                    .as_ref()
+                    .filter(|tsc| tsc.local.is_empty() && !tsc.platform.is_empty())
+                else {
+                    continue;
+                };
+                (Kind::Tsc, tsc.platform.clone())
+            }
         };
         if !seen.insert((kind, platform.clone(), step, key)) {
             continue;
@@ -535,6 +546,7 @@ mod tests {
             cc: None,
             gradle: None,
             maven: None,
+            tsc: None,
         }
     }
 
@@ -794,6 +806,7 @@ mod leftovers {
             cc: None,
             gradle: None,
             maven: None,
+            tsc: None,
         }
     }
 

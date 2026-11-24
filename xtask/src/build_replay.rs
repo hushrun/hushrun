@@ -2049,6 +2049,7 @@ mod tests {
             cc: None,
             gradle: None,
             maven: None,
+            tsc: None,
         }
     }
 

@@ -1471,6 +1471,7 @@ fn go_entry(outcome: Outcome, key: &Digest) -> Entry {
         cc: None,
         gradle: None,
         maven: None,
+        tsc: None,
     }
 }
 

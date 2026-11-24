@@ -882,6 +882,7 @@ fn maven_entry(outcome: Outcome, key: &Digest, module: &str) -> Entry {
         cc: None,
         gradle: None,
         maven: Some(MavenEntry::default()),
+        tsc: None,
     }
 }
 

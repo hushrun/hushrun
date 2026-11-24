@@ -117,6 +117,8 @@ pub enum Kind {
     /// Maven's modules, served to Apache's build cache extension as its remote cache, kind
     /// `maven/1` (B-170), with a manifest of their own per check.
     Maven,
+    /// The TypeScript helper's compiles, kind `tsc/1` (B-108).
+    Tsc,
 }
 
 impl Kind {
@@ -129,6 +131,7 @@ impl Kind {
             Kind::Xcode => crate::xcode::KIND,
             Kind::Gradle => crate::gradle::KIND,
             Kind::Maven => crate::maven::KIND,
+            Kind::Tsc => crate::tsc::KIND,
         }
     }
 
@@ -141,6 +144,7 @@ impl Kind {
             Some(word) if word == Kind::Xcode.word() => Kind::Xcode,
             Some(word) if word == Kind::Gradle.word() => Kind::Gradle,
             Some(word) if word == Kind::Maven.word() => Kind::Maven,
+            Some(word) if word == Kind::Tsc.word() => Kind::Tsc,
             _ => Kind::Rustc,
         }
     }

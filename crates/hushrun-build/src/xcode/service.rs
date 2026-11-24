@@ -831,6 +831,7 @@ impl Service {
         Entry {
             gradle: None,
             maven: None,
+            tsc: None,
             outcome,
             class: Some(Class::Library),
             crate_name: String::new(),

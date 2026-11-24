@@ -288,6 +288,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         cc: None,
         gradle: None,
         maven: None,
+        tsc: None,
     }
 }
 
