@@ -127,8 +127,10 @@ impl Ran {
                 let rest = l
                     .strip_prefix("Passed ")
                     .or_else(|| l.strip_prefix("Failed "))?;
-                let name = rest.rsplit_once(" [").map_or(rest, |(n, _)| n);
-                Some(name.to_string())
+                let name = rest.rsplit_once(" [").map_or(rest, |(n, _)| n).trim();
+                // Under load VSTest's console lines can come out cut: a name it didn't print is
+                // no test's.
+                (!name.is_empty()).then(|| name.to_string())
             })
             .collect();
         out.sort();
