@@ -185,7 +185,9 @@ fn an_entry_gradle_stores_is_a_block_served_back_in_its_canonical_form() {
     let other = format!("{}{}", crate::gradle::PATH, "ab".repeat(16));
     assert_eq!(cache.answer(&request("HEAD", &other, TOKEN, b"")).0, 404);
 
+    // The PUT and the GET: the HEADs logged nothing.
     let log = machine.log();
+    assert_eq!(log.len(), 2, "{log:?}");
     assert_eq!(log[0].outcome, Outcome::BuiltAndStored);
     assert_eq!(log[0].crate_name, ":compileJava");
     assert_eq!(log[0].kind(), Kind::Gradle);
@@ -194,7 +196,7 @@ fn an_entry_gradle_stores_is_a_block_served_back_in_its_canonical_form() {
     let summary = crate::session::Summary::of(Mode::On, 0, &log);
     assert!(
         summary.lines()[0]
-            .starts_with("build: gradle: 3 tasks: 2 from hushrun's cache, 1 run and stored"),
+            .starts_with("build: gradle: 2 tasks: 1 from hushrun's cache, 1 run and stored"),
         "{:?}",
         summary.lines()
     );
