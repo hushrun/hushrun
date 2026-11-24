@@ -108,6 +108,9 @@ pub enum Kind {
     /// The C and C++ launcher's objects, kind `cc/1` (B-60), with a manifest of their own per
     /// check and target triple.
     Cc,
+    /// Gradle's task outputs, served to Gradle as its remote build cache, kind `gradle/1`
+    /// (B-77), with a manifest of their own per check.
+    Gradle,
 }
 
 impl Kind {
@@ -117,6 +120,7 @@ impl Kind {
             Kind::Rustc => "rustc/1",
             Kind::Go => "go/1",
             Kind::Cc => crate::cc::KIND,
+            Kind::Gradle => crate::gradle::KIND,
         }
     }
 
@@ -126,6 +130,7 @@ impl Kind {
         match description.get("kind").and_then(serde_json::Value::as_str) {
             Some(word) if word == Kind::Go.word() => Kind::Go,
             Some(word) if word == Kind::Cc.word() => Kind::Cc,
+            Some(word) if word == Kind::Gradle.word() => Kind::Gradle,
             _ => Kind::Rustc,
         }
     }

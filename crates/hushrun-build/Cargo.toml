@@ -20,6 +20,9 @@ memchr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# \[B-78\] Gradle's build cache entries are gzip streams: zlib-rs inflates them, pure Rust, which
+# the binary already builds for gix and hushrun-core's hints.
+zlib-rs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

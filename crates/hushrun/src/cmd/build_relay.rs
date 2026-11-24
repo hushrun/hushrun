@@ -310,6 +310,9 @@ struct Check {
     /// B-45: the platform of the check's Go command (`GOOS_GOARCH`), when COMMAND is a Go
     /// module's and gets the cache program: its Go manifest is asked for and closed apart.
     go: Option<String>,
+    /// B-82: COMMAND's Gradle is served hushrun's cache: its `gradle/1` manifest is asked for and
+    /// closed apart.
+    gradle: bool,
 }
 
 /// The check's Go manifest (B-45): asked once `open` answered, kept until the first Go fetch
@@ -350,6 +353,10 @@ struct State {
     go_manifest: GoManifest,
     /// The prefetch of the Go manifest is looking up what it names.
     go_prefetching: bool,
+    /// B-82: the check's `gradle/1` manifest, as the Go one is kept.
+    gradle_manifest: GoManifest,
+    /// The prefetch of the Gradle manifest is looking up what it names.
+    gradle_prefetching: bool,
     /// The check's `cc/1` manifests, by target triple (B-60).
     cc_manifests: HashMap<String, CcManifest>,
     /// The prefetch of a `cc/1` manifest is looking up what it names.
@@ -406,6 +413,22 @@ struct State {
 }
 
 impl State {
+    /// The check's manifest of `kind` that a fetch must name (B-45, B-82): Gradle's, else Go's.
+    fn named_manifest(&mut self, kind: Kind) -> &mut GoManifest {
+        match kind {
+            Kind::Gradle => &mut self.gradle_manifest,
+            _ => &mut self.go_manifest,
+        }
+    }
+
+    /// Whether the prefetch of that manifest is looking up what it names.
+    fn named_prefetching(&mut self, kind: Kind) -> &mut bool {
+        match kind {
+            Kind::Gradle => &mut self.gradle_prefetching,
+            _ => &mut self.go_prefetching,
+        }
+    }
+
     /// The phase now: a rest whose time is up is over.
     fn phase_now(&mut self, now: Instant) -> &Phase {
         if let Phase::Resting(until) = self.phase
@@ -672,6 +695,8 @@ impl Relay {
                 manifest: None,
                 go_manifest: GoManifest::NotAsked,
                 go_prefetching: false,
+                gradle_manifest: GoManifest::NotAsked,
+                gradle_prefetching: false,
                 cc_manifests: HashMap::new(),
                 cc_prefetching: 0,
                 cc_told: HashSet::new(),
@@ -726,6 +751,7 @@ impl Relay {
         session_folder: &Path,
         check: Option<Hex32>,
         go: Option<String>,
+        gradle: bool,
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Result<Share, String> {
         let bound = socket::bind(session_folder, env)
@@ -752,8 +778,10 @@ impl Relay {
                 socket: bound,
                 stop_serving,
                 go,
+                gradle,
             });
             state.go_manifest = GoManifest::NotAsked;
+            state.gradle_manifest = GoManifest::NotAsked;
             state.cc_manifests.clear();
             if !matches!(state.phase, Phase::Stopped(_)) {
                 state.phase = Phase::Opening;
@@ -777,8 +805,19 @@ impl Relay {
             };
             if let Some(platform) = go_platform {
                 let relay = self.clone();
-                self.runtime
-                    .spawn(async move { relay.go_open(check, platform).await });
+                self.runtime.spawn(async move {
+                    relay.manifest_open(Kind::Go, check, platform).await;
+                });
+            }
+            // B-82: and Gradle's, the same way, under one platform for every machine.
+            if gradle {
+                self.state().gradle_manifest = GoManifest::Asking;
+                let relay = self.clone();
+                self.runtime.spawn(async move {
+                    relay
+                        .manifest_open(Kind::Gradle, check, hushrun_build::gradle::PLATFORM.into())
+                        .await;
+                });
             }
             let relay = self.clone();
             self.runtime.spawn(async move { relay.uploads().await });
@@ -895,7 +934,7 @@ impl Relay {
                 self.report_problem(Kind::Rustc, key, problem).await;
                 Answer::Ok
             }
-            Request::GoFetch { key, local_ms } => self.go_fetch(key, local_ms).await,
+            Request::GoFetch { key, local_ms } => self.named_fetch(Kind::Go, key, local_ms).await,
             Request::GoVouch { key, outputs } => self.vouch(Kind::Go, key, outputs).await,
             Request::GoBuilt { .. } => {
                 self.built(request);
@@ -926,6 +965,19 @@ impl Relay {
             Request::CcReport { key, problem } => {
                 // As Go's: answered once the record is read, so the launcher may discard it.
                 self.report_problem_soon(Kind::Cc, key, problem);
+                Answer::Ok
+            }
+            Request::GradleFetch { key, local_ms } => {
+                self.named_fetch(Kind::Gradle, key, local_ms).await
+            }
+            Request::GradleVouch { key, outputs } => self.vouch(Kind::Gradle, key, outputs).await,
+            Request::GradleBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::GradleReport { key, problem } => {
+                // As Go's: answered once the record is read, so the cache may discard it.
+                self.report_problem_soon(Kind::Gradle, key, problem);
                 Answer::Ok
             }
         }
@@ -1072,12 +1124,13 @@ impl Relay {
         self.state().manifest = Some(manifest);
     }
 
-    /// B-45: `open` for the check's Go command, kind `go/1`, for its manifest alone: the policy
-    /// is the one the check's own `open` answers, sent at the same time. A failure leaves no manifest, and so no Go
-    /// download, and changes nothing else.
-    async fn go_open(&self, check: Option<Hex32>, platform: String) {
+    /// B-45, B-82: `open` for the check's Go command (kind `go/1`) or its Gradle (`gradle/1`),
+    /// for its manifest alone: the policy is the one the check's own `open` answers, sent at the
+    /// same time. A failure leaves no manifest, and so no download of the kind, and changes
+    /// nothing else.
+    async fn manifest_open(&self, kind: Kind, check: Option<Hex32>, platform: String) {
         let body = OpenRequest {
-            kind: Kind::Go.word().to_string(),
+            kind: kind.word().to_string(),
             repository: self.config.repository.clone(),
             commit: self.config.commit.clone(),
             check,
@@ -1092,8 +1145,9 @@ impl Relay {
             Err(_) => Vec::new(),
         };
         let mut state = self.state();
-        if state.go_manifest == GoManifest::Asking {
-            state.go_manifest = GoManifest::Got(manifest);
+        let kept = state.named_manifest(kind);
+        if *kept == GoManifest::Asking {
+            *kept = GoManifest::Got(manifest);
         }
     }
 
@@ -1103,16 +1157,24 @@ impl Relay {
     /// manifest names (a warm machine, whose `go` finds everything in its own cache, asks
     /// nothing and downloads nothing); one that comes while it looks up waits for it, within
     /// half what this machine's own last compile of the key took, and at most a second.
-    async fn go_fetch(self: Arc<Relay>, key: Digest, local_ms: Option<u64>) -> Answer {
+    ///
+    /// B-80: Gradle's cache asks the same way, for an entry of kind `gradle/1` the check's Gradle
+    /// manifest names: Gradle asks about every task its own cache misses.
+    async fn named_fetch(
+        self: Arc<Relay>,
+        kind: Kind,
+        key: Digest,
+        local_ms: Option<u64>,
+    ) -> Answer {
         let manifest = {
             let mut state = self.state();
             let now = Instant::now();
             if !state.serving(now) || state.sharing != Sharing::On {
                 return Answer::None;
             }
-            let got = matches!(state.go_manifest, GoManifest::Got(_));
+            let got = matches!(state.named_manifest(kind), GoManifest::Got(_));
             if got && state.answering(now) {
-                match std::mem::replace(&mut state.go_manifest, GoManifest::Taken) {
+                match std::mem::replace(state.named_manifest(kind), GoManifest::Taken) {
                     GoManifest::Got(manifest) => Some(manifest),
                     _ => None,
                 }
@@ -1121,11 +1183,11 @@ impl Relay {
             }
         };
         if let Some(manifest) = manifest {
-            self.state().go_prefetching = true;
-            self.clone().prefetch_in(Kind::Go, manifest).await;
-            self.state().go_prefetching = false;
+            *self.state().named_prefetching(kind) = true;
+            self.clone().prefetch_in(kind, manifest).await;
+            *self.state().named_prefetching(kind) = false;
         }
-        let address = Relay::address_in(Kind::Go, &key);
+        let address = Relay::address_in(kind, &key);
         let wait = local_ms
             .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
             .min(GO_PREFETCH_WAIT);
@@ -1139,13 +1201,17 @@ impl Relay {
                 if state.fetches.contains_key(&address) || state.found.contains_key(&address) {
                     break;
                 }
-                if !state.go_prefetching || Instant::now() >= until {
+                let prefetching = match kind {
+                    Kind::Gradle => state.gradle_prefetching,
+                    _ => state.go_prefetching,
+                };
+                if !prefetching || Instant::now() >= until {
                     return Answer::None;
                 }
             }
             tokio::time::sleep(self.config.tuning.tick).await;
         }
-        self.wait_for(Kind::Go, key, key, address, local_ms).await
+        self.wait_for(kind, key, key, address, local_ms).await
     }
 
     /// B-60: `open` for the check's C and C++ compiles for the target triple `platform`, kind
@@ -2221,7 +2287,7 @@ impl Relay {
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        for kind in [Kind::Rustc, Kind::Go, Kind::Cc] {
+        for kind in [Kind::Rustc, Kind::Go, Kind::Cc, Kind::Gradle] {
             let keys: Vec<Digest> = keys
                 .iter()
                 .filter(|(k, _)| *k == kind)
@@ -2447,6 +2513,17 @@ impl Relay {
                 false,
                 *cost_ms,
             ),
+            // B-81: a Gradle entry is a library whose first key is its key, and the cache tells
+            // only of ones that may leave (B-79).
+            Request::GradleBuilt { key, cost_ms } => (
+                Kind::Gradle,
+                *key,
+                *key,
+                LocalClass::Library,
+                true,
+                false,
+                *cost_ms,
+            ),
             // B-60: a C or C++ object is a library.
             Request::CcBuilt {
                 key,
@@ -2521,8 +2598,10 @@ impl Relay {
                 }
             }
         }
-        // B-33: every class is compared, a linked output among them (B-16).
-        if sharing == Sharing::Observe {
+        // B-33: every class is compared, a linked output among them (B-16); a Gradle entry
+        // never is, since Gradle's outputs needn't be the same from one execution to the next
+        // (B-81).
+        if sharing == Sharing::Observe && kind != Kind::Gradle {
             let relay = self.clone();
             let linked = class != LocalClass::Library;
             self.runtime
@@ -2863,6 +2942,9 @@ impl Relay {
             // B-45: the check's Go command closes apart, with its own manifest and run.
             let go = (check.go.is_some() && entries.iter().any(|e| e.kind() == Kind::Go))
                 .then(|| self.close_request(Kind::Go, check, entries));
+            // B-82: and its Gradle, with its own manifest and run.
+            let gradle = (check.gradle && entries.iter().any(|e| e.kind() == Kind::Gradle))
+                .then(|| self.close_request(Kind::Gradle, check, entries));
             // B-60: and its C and C++ compiles, once for each target triple they were for.
             let cc: Vec<CloseRequest> = cc_platforms(entries)
                 .into_iter()
@@ -2877,10 +2959,10 @@ impl Relay {
                     None,
                 );
                 let go = async {
-                    if let Some(go) = &go {
+                    for close in go.iter().chain(gradle.iter()) {
                         let _ = relay
                             .client
-                            .post::<_, serde_json::Value>(blocks::CLOSE_PATH, go, left, None)
+                            .post::<_, serde_json::Value>(blocks::CLOSE_PATH, close, left, None)
                             .await;
                     }
                 };
@@ -3060,12 +3142,14 @@ impl Relay {
         let rust_stays = |e: &Entry| {
             e.go.is_none()
                 && e.cc.is_none()
+                && e.gradle.is_none()
                 && e.portable
                     .as_ref()
                     .is_some_and(|p| !(p.portable || (from_a_job && p.bound_only())))
         };
         let kept_here = |e: &Entry| {
             e.go.as_ref().is_some_and(|go| go.local.is_some())
+                || e.gradle.as_ref().is_some_and(|g| g.local.is_some())
                 || e.cc.as_ref().is_some_and(|cc| !goes_up(&cc.local))
                 || rust_stays(e)
         };
@@ -3109,16 +3193,20 @@ impl Relay {
                 counts,
             };
         }
-        if kind == Kind::Go {
-            let mut bytes = [0u8; 32 + 5];
-            bytes[..32].copy_from_slice(&check.run.0);
-            bytes[32..].copy_from_slice(b"go/1\n");
+        if kind == Kind::Go || kind == Kind::Gradle {
+            let mut bytes = check.run.0.to_vec();
+            bytes.extend_from_slice(format!("{}\n", kind.word()).as_bytes());
+            let platform = if kind == Kind::Gradle {
+                hushrun_build::gradle::PLATFORM.to_string()
+            } else {
+                check.go.clone().unwrap_or_default()
+            };
             return CloseRequest {
                 kind: kind.word().to_string(),
                 run: Hex32::sha256(&bytes),
                 repository: self.config.repository.clone(),
                 check: check.check,
-                platform: check.go.clone().unwrap_or_default(),
+                platform,
                 commit: self.config.commit.clone(),
                 manifest,
                 counts,

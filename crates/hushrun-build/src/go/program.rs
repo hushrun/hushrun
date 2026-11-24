@@ -1468,6 +1468,7 @@ fn go_entry(outcome: Outcome, key: &Digest) -> Entry {
         baked: false,
         go: Some(GoEntry::default()),
         cc: None,
+        gradle: None,
     }
 }
 
