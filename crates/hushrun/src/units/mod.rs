@@ -29,6 +29,7 @@ pub mod cargo;
 pub mod command;
 pub mod ctest;
 pub mod db;
+pub mod exunit;
 pub mod facts;
 pub mod gotest;
 pub mod gradle;
