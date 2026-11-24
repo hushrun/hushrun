@@ -20,6 +20,8 @@ use super::store::Map;
 const SHIM: &str = include_str!("hushrun_pytest.py");
 /// The adapter.
 const ADAPTER: &str = include_str!("hushrun_pytest_impl.py");
+/// \[ADR 0110\] The observer the adapter drives, which unittest's adapter drives too.
+pub const OBSERVE: &str = include_str!("hushrun_observe.py");
 /// The module `-p` names.
 pub const MODULE: &str = "hushrun_pytest";
 /// The adapter's word (C-36).
@@ -32,13 +34,14 @@ pub const SOURCE_KINDS: &[&str] = &[".py"];
 /// The directory that holds the plugin for this binary, written whole when it isn't there yet:
 /// `<cache dir>/adapters/pytest-<first 16 hex of its SHA-256>`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
-    let digest = hushrun_core::Digest::of(format!("{SHIM}\0{ADAPTER}").as_bytes()).hex();
+    let digest = hushrun_core::Digest::of(format!("{SHIM}\0{ADAPTER}\0{OBSERVE}").as_bytes()).hex();
     let dir = cache
         .join("adapters")
         .join(format!("pytest-{}", &digest[..16]));
     for (name, text) in [
         ("hushrun_pytest.py", SHIM),
         ("hushrun_pytest_impl.py", ADAPTER),
+        ("hushrun_observe.py", OBSERVE),
     ] {
         let path = dir.join(name);
         if std::fs::read(&path).ok().as_deref() != Some(text.as_bytes()) {
@@ -253,8 +256,9 @@ pub fn is_test_file(patterns: &[String], path: &str) -> Option<bool> {
     Some(path.ends_with(".py") && patterns.iter().any(|p| fnmatch(p, name)))
 }
 
-/// Python's `fnmatch` on a file name: `*`, `?`, `[seq]` and `[!seq]`.
-fn fnmatch(pattern: &str, name: &str) -> bool {
+/// Python's `fnmatch` on a file name: `*`, `?`, `[seq]` and `[!seq]`; \[ADR 0110\] unittest's
+/// discovery matches its pattern so too.
+pub(super) fn fnmatch(pattern: &str, name: &str) -> bool {
     fn go(p: &[char], n: &[char]) -> bool {
         match p.first() {
             None => n.is_empty(),

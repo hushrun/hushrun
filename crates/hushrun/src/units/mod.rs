@@ -41,6 +41,7 @@ pub mod runner;
 pub mod shared;
 pub mod store;
 pub mod swift;
+pub mod unittest;
 pub mod vitest;
 pub mod why;
 
@@ -3182,6 +3183,7 @@ fn describe(why: &str) -> String {
         "unreadable-build-output" => "a build script's output it couldn't read".into(),
         "unreadable-generated-file" => "a file a build script made that it couldn't read".into(),
         "python-files" => "pytest's python_files".into(),
+        "unittest-pattern" => "unittest's discovery pattern".into(),
         "adapter-error" => "an error of hushrun's adapter".into(),
         "outside-scope" => "a file outside the check's scope".into(),
         "test-main" => "a TestMain".into(),
