@@ -32,7 +32,7 @@ use super::db::{Edge, HintKnown};
 use super::facts::FactsFile;
 use super::shared::{Asker, List, Shared};
 use super::store::Map;
-use super::{Seen, cargo, ctest, gotest, gradle, jest, maven, pytest, swift, vitest};
+use super::{Seen, cargo, ctest, gotest, gradle, jest, maven, mesontest, pytest, swift, vitest};
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
 /// the adapter can't load safely, which the run says once.
@@ -53,12 +53,13 @@ pub const RECOGNIZED: &[Recognize] = &[
     maven::recognized,
     gradle::recognized,
     ctest::recognized,
+    mesontest::recognized,
     swift::recognized,
 ];
 
 /// How many of [`RECOGNIZED`], at its end, load through `PATH` and take wrapper COMMANDs too:
-/// CTest's and Swift's, which came after pytest took every COMMAND nobody else did.
-pub const THROUGH_PATH: usize = 2;
+/// CTest's, Meson's and Swift's, which came after pytest took every COMMAND nobody else did.
+pub const THROUGH_PATH: usize = 3;
 
 /// \[C-32\] The one adapter a run of `command` in `cwd` gets: the first of [`RECOGNIZED`] that
 /// takes it, else pytest's; `Err` says why the one it would get can't load safely.

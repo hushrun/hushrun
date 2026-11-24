@@ -60,6 +60,7 @@ pub trait Program: Sync {
 /// \[ADR 0080\] The programs adapters put on `PATH`, by name. A new one is one entry here.
 pub const PROGRAMS: &[&dyn Program] = &[
     &super::ctest::Ctest,
+    &super::mesontest::Meson,
     &super::swift::SWIFT,
     &super::swift::SWIFT_TEST,
 ];

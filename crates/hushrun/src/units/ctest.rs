@@ -18,10 +18,10 @@
 //!   directory, which hushrun's `ctest` checks again before it leaves anything out.
 
 mod args;
-mod build;
+pub(super) mod build;
 mod junit;
 mod run;
-mod select;
+pub(super) mod select;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

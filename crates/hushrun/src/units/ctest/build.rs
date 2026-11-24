@@ -328,7 +328,14 @@ impl<'a> Walker<'a> {
 
     fn open(&mut self, build: &Path) -> Dir {
         let dir = super::select::build_dir(build);
-        match dir.generator.as_str() {
+        // \[C-103\] A build folder Meson set up is a Ninja build too, whose rules Meson names.
+        let meson = is_meson(build);
+        let generator = if meson {
+            "Ninja"
+        } else {
+            dir.generator.as_str()
+        };
+        match generator {
             "Ninja" => {
                 let ninja = Some(PathBuf::from(&dir.make_program))
                     .filter(|p| p.is_file())
@@ -348,13 +355,21 @@ impl<'a> Walker<'a> {
                 let mut extras = Extras::default();
                 let mut outputs = BTreeSet::new();
                 for (output, rule) in out.lines().filter_map(|line| line.rsplit_once(": ")) {
+                    // Meson's: `c_LINKER`, `cpp_LINKER` (and `_RSP`) for programs and shared
+                    // libraries alike, `STATIC_LINKER` for a static one.
+                    let meson_program = meson
+                        && rule != "STATIC_LINKER"
+                        && (rule.ends_with("_LINKER") || rule.ends_with("_LINKER_RSP"));
                     if rule.contains("EXECUTABLE_LINKER")
                         || rule.contains("MODULE_LIBRARY_LINKER")
                         || rule.contains("SHARED_LIBRARY_LINKER")
+                        || meson_program
                     {
                         extras.programs.insert(output.to_string());
                         extras.linked.insert(output.to_string());
-                    } else if rule.contains("STATIC_LIBRARY_LINKER") {
+                    } else if rule.contains("STATIC_LIBRARY_LINKER")
+                        || (meson && rule == "STATIC_LINKER")
+                    {
                         extras.linked.insert(output.to_string());
                     } else if rule == "phony" {
                         extras.phony.insert(output.to_string());
@@ -858,6 +873,11 @@ fn fetched(rel: &str) -> bool {
 /// record names.
 fn cmake_own(rel: &str) -> bool {
     rel.contains("/cmake_pch") || rel.contains("/Unity/unity_")
+}
+
+/// \[C-103\] Whether Meson set the build folder up.
+pub fn is_meson(build: &Path) -> bool {
+    build.join("meson-private").is_dir()
 }
 
 fn is_object(name: &str) -> bool {
@@ -1678,7 +1698,12 @@ impl Walker<'_> {
         if let Some(known) = self.trees.get(build) {
             return known.clone();
         }
-        let configured_at = self.time(&build.join("CMakeFiles/cmake.check_cache"));
+        let configured_at = if is_meson(build) {
+            // \[C-103\] What Meson writes each time it sets the folder up or regenerates it.
+            self.time(&build.join("meson-private/coredata.dat"))
+        } else {
+            self.time(&build.join("CMakeFiles/cmake.check_cache"))
+        };
         let configure = match self.dirs.get(build) {
             Some(Dir::Ninja { ninja, .. }) => {
                 let ninja = ninja.clone();
