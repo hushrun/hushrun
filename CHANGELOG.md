@@ -12,6 +12,14 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Svelte's tests reuse** (C-62 to C-65, ADR 0109). With Vitest, `.svelte` components are
+  sources, vite-plugin-svelte's, SvelteKit's and Testing Library's `svelteTesting()` plugins are
+  known, what a Svelte preprocessor reads (its `dependencies`) is read by whoever runs the
+  component, the Svelte config and what it imports are config files, and SvelteKit's env entry and
+  `.env` files are too, so SvelteKit 2's `$env/*` and `__sveltekit/*` modules no longer make a test
+  file `not observed`. Before, every test file of a Svelte project was `not observed`. Fixed on
+  the way, for every framework: a Vitest test in jsdom or happy-dom failed to load hushrun's setup
+  file (`Cannot find module '/@fs/…'`), which Vite now serves (`server.fs.allow`).
 - **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
   in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
   `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to

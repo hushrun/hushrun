@@ -25,6 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as svelte from './hushrun-vitest-svelte.mjs';
 
 const SCHEMA = 'hushrun.unit-facts/v0';
 const RUN_SCHEMA = 'hushrun.units/v0';
@@ -202,12 +203,22 @@ export default function hushrun() {
     },
     configResolved(resolved) {
       guard('configResolved', () => {
+        // [ADR 0109] Vite serves a module to a worker whose environment isn't Node (jsdom,
+        // happy-dom) through `/@fs/` only from `server.fs.allow`, which holds the workspace (or
+        // what a plugin set, SvelteKit's list): hushrun's setup file is outside it.
+        const allow = resolved.server && resolved.server.fs && resolved.server.fs.allow;
+        if (Array.isArray(allow) && !allow.includes(path.dirname(SETUP))) {
+          allow.push(path.dirname(SETUP));
+        }
         for (const file of [resolved.configFile, ...(resolved.configFileDependencies || [])]) {
           if (file) state.configFiles.add(path.resolve(file));
         }
+        // [ADR 0109] The Svelte config and what SvelteKit generates its env modules from.
+        for (const file of svelte.resolved(resolved)) state.configFiles.add(path.resolve(file));
         const unknown = resolved.plugins
           .map((p) => p.name)
-          .filter((n) => !KNOWN_NAMES.has(n) && !KNOWN_PREFIXES.some((p) => n.startsWith(p)));
+          .filter((n) => !KNOWN_NAMES.has(n) && !KNOWN_PREFIXES.some((p) => n.startsWith(p)))
+          .filter((n) => !svelte.known(n));
         state.projects.set(resolved.root, { plugins: unknown });
       });
     },
@@ -223,11 +234,20 @@ export default function hushrun() {
         state.errors.push(`reexports: ${err && err.message ? err.message : String(err)}`.slice(0, 500));
       }
       return guard('transform', () => {
+        // [ADR 0109] What a Svelte preprocessor read for this module: whoever runs the module
+        // reads it, as it reads what a barrel re-exports.
+        const deps = svelte.dependencies(id);
+        reexports = [...new Set([...reexports, ...deps])];
+        // A SvelteKit module made from its config files, which every test file reads already.
+        const ids = svelte.fromConfig(id) ? deps : [id, ...deps];
+        const seen = ids.length
+          ? `;(globalThis.__hushrun_vitest_seen ||= []).push(${ids.map((i) => JSON.stringify(i)).join(', ')});`
+          : '';
         const told = reexports.length
           ? `;(globalThis.__hushrun_vitest_reexports ||= {})[${JSON.stringify(id)}] = ${JSON.stringify(reexports)};`
           : '';
         return {
-          code: `${code}\n;(globalThis.__hushrun_vitest_seen ||= []).push(${JSON.stringify(id)});${told}`,
+          code: `${code}\n${seen}${told}`,
           map: null,
         };
       });

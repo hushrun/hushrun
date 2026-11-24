@@ -27,9 +27,12 @@ use super::facts::{FactsFile, MergedTest, TestFacts, Unfollowed};
 pub const ADAPTER: &str = "vitest";
 /// The adapter's name in a worker's facts file.
 pub const WORKER: &str = "vitest-worker";
-/// What the adapter observes being read: its sources (C-30). Vue, Svelte and other kinds a
-/// plugin compiles are in the rest set.
-pub const SOURCE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
+/// What the adapter observes being read: its sources (C-30). \[ADR 0109\] `.svelte`, which
+/// vite-plugin-svelte compiles from that one file (C-62); Vue and other kinds a plugin compiles
+/// are in the rest set.
+pub const SOURCE_KINDS: &[&str] = &[
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".svelte",
+];
 /// The variable the config line loads the plugin from.
 pub const VARIABLE: &str = "HUSHRUN_VITEST";
 /// The line a repository's Vitest config needs, in its `plugins`. \[ADR 0084, amended\] A
@@ -41,6 +44,8 @@ pub const CONFIG_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(pro
 const PLUGIN: &str = include_str!("hushrun_vitest.mjs");
 /// The setup file the plugin puts first, in each worker.
 const SETUP: &str = include_str!("hushrun_vitest_setup.mjs");
+/// \[ADR 0109\] What the plugin knows of Svelte's and SvelteKit's plugins, which it imports.
+const SVELTE: &str = include_str!("hushrun_vitest_svelte.mjs");
 /// The config files Vitest looks for, in the order it does.
 const CONFIG_NAMES: &[&str] = &[
     "vitest.config.ts",
@@ -288,13 +293,14 @@ fn unobservable(text: &str) -> Option<&'static str> {
 /// The directory that holds the plugin and its setup file for this binary, written whole when
 /// they aren't there yet: `<cache dir>/adapters/vitest-<first 16 hex of their SHA-256>`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
-    let digest = hushrun_core::Digest::of(format!("{PLUGIN}\0{SETUP}").as_bytes()).hex();
+    let digest = hushrun_core::Digest::of(format!("{PLUGIN}\0{SETUP}\0{SVELTE}").as_bytes()).hex();
     let dir = cache
         .join("adapters")
         .join(format!("vitest-{}", &digest[..16]));
     for (name, text) in [
         ("hushrun-vitest.mjs", PLUGIN),
         ("hushrun-vitest-setup.mjs", SETUP),
+        ("hushrun-vitest-svelte.mjs", SVELTE),
     ] {
         let path = dir.join(name);
         if std::fs::read(&path).ok().as_deref() != Some(text.as_bytes()) {

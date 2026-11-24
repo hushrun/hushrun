@@ -967,6 +967,8 @@ fn vitest_hazards_miss_no_failure() {
 /// The plugin and its setup file, as hushrun writes them.
 const PLUGIN: &str = include_str!("../src/units/hushrun_vitest.mjs");
 const SETUP: &str = include_str!("../src/units/hushrun_vitest_setup.mjs");
+/// \[ADR 0109\] The module the plugin imports, beside it.
+const SVELTE: &str = include_str!("../src/units/hushrun_vitest_svelte.mjs");
 
 /// What Vitest with hushrun's plugin did, with tests told one by one.
 struct Told {
@@ -1091,6 +1093,7 @@ fn tests_vitest(
     std::fs::create_dir_all(&adapter).unwrap();
     std::fs::write(adapter.join("hushrun-vitest.mjs"), PLUGIN).unwrap();
     std::fs::write(adapter.join("hushrun-vitest-setup.mjs"), SETUP).unwrap();
+    std::fs::write(adapter.join("hushrun-vitest-svelte.mjs"), SVELTE).unwrap();
     let mut cmd = Command::new(r.repo.join("node_modules/.bin/vitest"));
     Repo::clean(&mut cmd);
     let out = cmd

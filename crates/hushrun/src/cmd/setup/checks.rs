@@ -532,6 +532,14 @@ pub const ROWS: &[Row] = &[
     check("JavaScript", "jest", &[], "test", "jest --ci"),
     lint(check("JavaScript", "eslint", &[], "lint", "eslint .")),
     lint(check("JavaScript", "tsc", &[], "typecheck", "tsc --noEmit")),
+    // \[ADR 0109\] Svelte's type checker, a check that reuses whole.
+    lint(check(
+        "JavaScript",
+        "svelte-check",
+        &[],
+        "svelte-check",
+        "svelte-check --fail-on-warnings",
+    )),
     check(
         "JavaScript",
         "playwright",
@@ -1470,6 +1478,7 @@ mod tests {
             "mypy src",
             "npx eslint .",
             "tsc --noEmit",
+            "npx svelte-check --threshold error",
             "bundle exec rubocop",
             "mix credo --strict",
             "terraform validate",
