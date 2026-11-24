@@ -320,48 +320,74 @@ if [[ -n ${HUSHRUN_BATS_EXE-} && -n ${HUSHRUN_UNITS-} && -z ${__hushrun_bats_loa
     return 0
   }
 
-  # Which process this is.
-  if [[ -z ${HUSHRUN_BATS_INSIDE-} ]]; then
-    if [[ -z ${HUSHRUN_BATS_RUN-} ]]; then
-      if [[ ${0##*/} == bats && -f ${0%/*}/bats-exec-suite && -f ${0%/*}/bats-exec-test ]]; then
-        __hushrun_bats_main
-      fi
-    elif [[ -n ${HUSHRUN_BATS_LIBEXEC-} && ${0%/*} -ef $HUSHRUN_BATS_LIBEXEC ]]; then
-      __hushrun_bats_plan
-      case ${0##*/} in
-      bats-exec-suite)
-        __hushrun_bats_role=suite
-        __hushrun_bats_wanted='bats_debug_trap bats_suite_exit_trap'
-        __hushrun_bats_write "$HUSHRUN_BATS_RUN/version" "${BATS_VERSION-}"
-        ;;
-      bats-exec-file)
-        __hushrun_bats_role=file
-        __hushrun_bats_wanted='bats_debug_trap bats_file_exit_trap'
-        __hushrun_bats_file "$@"
-        ;;
-      bats-exec-test)
-        __hushrun_bats_role=test
-        __hushrun_bats_wanted='bats_debug_trap bats_exit_trap'
-        __hushrun_bats_test "$@"
-        ;;
-      bats)
-        # bats started again inside this run (from setup_file or setup_suite): what it runs is
-        # read by what started it.
+  # Which process this is, from its script's name and arguments: at its first command, not while
+  # bash reads `BASH_ENV`, before which bash 3.2 has yet to set `$0` and the arguments.
+  __hushrun_bats_start() {
+    if [[ -z ${HUSHRUN_BATS_INSIDE-} ]]; then
+      if [[ -z ${HUSHRUN_BATS_RUN-} ]]; then
+        if [[ ${0##*/} == bats && -f ${0%/*}/bats-exec-suite && -f ${0%/*}/bats-exec-test ]]; then
+          __hushrun_bats_main
+        fi
+      elif [[ -n ${HUSHRUN_BATS_LIBEXEC-} && ${0%/*} -ef $HUSHRUN_BATS_LIBEXEC ]]; then
+        __hushrun_bats_plan
+        case ${0##*/} in
+        bats-exec-suite)
+          __hushrun_bats_role=suite
+          __hushrun_bats_wanted='bats_debug_trap bats_suite_exit_trap'
+          __hushrun_bats_write "$HUSHRUN_BATS_RUN/version" "${BATS_VERSION-}"
+          ;;
+        bats-exec-file)
+          __hushrun_bats_role=file
+          __hushrun_bats_wanted='bats_debug_trap bats_file_exit_trap'
+          __hushrun_bats_file "$@"
+          ;;
+        bats-exec-test)
+          __hushrun_bats_role=test
+          __hushrun_bats_wanted='bats_debug_trap bats_exit_trap'
+          __hushrun_bats_test "$@"
+          ;;
+        bats)
+          # bats started again inside this run (from setup_file or setup_suite): what it runs is
+          # read by what started it.
+          export HUSHRUN_BATS_INSIDE=1
+          ;;
+        esac
+      elif [[ ${0##*/} == bats && -f ${0%/*}/bats-exec-suite ]]; then
         export HUSHRUN_BATS_INSIDE=1
-        ;;
-      esac
-    elif [[ ${0##*/} == bats && -f ${0%/*}/bats-exec-suite ]]; then
-      export HUSHRUN_BATS_INSIDE=1
+      fi
     fi
-  fi
 
-  # A script bash runs is read whole before its first command: a script that can't parse still
-  # read itself.
+    # A script bash runs is read whole before its first command.
+    if [[ -z ${BASH_EXECUTION_STRING-} && -f $0 ]]; then
+      __hushrun_bats_note "$0"
+    fi
+  }
+
+  # hushrun's first DEBUG trap: the script's own arguments, then `$_`. At the first command that
+  # isn't this file's, nor of a file it is sourcing, it says which process this is, and from then
+  # on hushrun's DEBUG trap is the one that takes `$_` alone.
+  __hushrun_bats_first() {
+    local i n=$#
+    for ((i = 1; i < ${#BASH_SOURCE[@]}; i++)); do
+      [[ ${BASH_SOURCE[i]} != "$__hushrun_bats_self" ]] || return 0
+    done
+    builtin trap -- '__hushrun_bats_debug "$_"' DEBUG
+    if ((n > 1)); then
+      __hushrun_bats_start "${@:1:n-1}"
+    else
+      __hushrun_bats_start
+    fi
+    __hushrun_bats_at 1
+    return 0
+  }
+
+  # Where bash has set `$0` already (4 and later), a script that can't parse still read itself.
   if [[ -z ${BASH_EXECUTION_STRING-} && -f $0 ]]; then
     __hushrun_bats_note "$0"
   fi
   set -T
-  builtin trap -- '__hushrun_bats_debug "$_"' DEBUG
+  # `${1+"$@"}`: bash 3.2's `"$@"` with no arguments fails under `set -u`.
+  builtin trap -- '__hushrun_bats_first ${1+"$@"} "$_"' DEBUG
 fi
 
 # The BASH_ENV COMMAND's environment had, read as bash would have.

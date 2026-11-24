@@ -534,8 +534,21 @@ fn hook_writes_facts(bats: &Path) {
                     .to_string()
             })
             .unwrap_or_default();
+        // What this bash has for `$0` and the arguments while it reads `BASH_ENV`, and after.
+        let probe = p.root.join("probe.bash");
+        let script = p.root.join("probe-script");
+        std::fs::write(&probe, "echo \"while BASH_ENV: \\$0=$0 \\$#=$#\"\n").unwrap();
+        std::fs::write(&script, "echo \"after: \\$0=$0 \\$#=$#\"\n").unwrap();
+        let zero = Command::new("bash")
+            .arg(&script)
+            .arg("one")
+            .env("PATH", &p.path)
+            .env("BASH_ENV", &probe)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
         let says = format!(
-            "bats in {}, {bash}\nexit {:?}\n{}{}\n{}",
+            "bats in {}, {bash}\n{zero}exit {:?}\n{}{}\n{}",
             bats.display(),
             out.status.code(),
             String::from_utf8_lossy(&out.stdout),
