@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-24
-- **Rules:** C-106 to C-108, B-240 to B-242; relies on C-30 to C-34, C-39, C-49, B-51, B-55,
+- **Rules:** C-106 to C-108, B-241 to B-243; relies on C-30 to C-34, C-39, C-49, B-51, B-55,
   ADR 0080, 0090, 0097
 
 ## Context
@@ -83,7 +83,7 @@ compiler launcher compiles. An audit on a real project (GoogleTest 1.14, Catch2 
    takes nothing from the environment; and **Catch2 2** or a Catch2 3 that reads no `BAZEL_TEST`,
    each with the advice to run it through `ctest` with its `*_discover_tests`, which ADR 0090
    observes.
-6. **An empty module map is no argument** (B-240). A response file holding nothing but white
+6. **An empty module map is no argument** (B-241). A response file holding nothing but white
    space adds no argument: the compile is the one without it, keyed and stored as any other.
    CMake's map of a source that imports and exports no module is empty with clang; one that names
    a module (`-fmodule-file=`, `-x c++-module`) passes through as `modules`, as does any other
@@ -91,12 +91,12 @@ compiler launcher compiles. An audit on a real project (GoogleTest 1.14, Catch2 
    CMake gives every one `-fmodules-ts -fmodule-mapper=<map> -fdeps-format=p1689r5`, and with
    `-fdeps-format` and no `-fdeps-file` GCC 14 writes a second file, `<object stem>.ddi`, beside
    the object (ran), which a stored object can't give back.
-7. **Precompiled headers stay passed through, counted as such** (B-241). Keying a precompiled
+7. **Precompiled headers stay passed through, counted as such** (B-242). Keying a precompiled
    header's users by what the header read, and not by its bytes (GCC's `.gch` is a memory image,
    different on every build), is new machinery ADR 0097 left open; nothing here needs it to be
    sound. `-Xclang -include-pch` (and any `-Xclang` before a flag B-51 counts as `pch` or
    `modules`) is counted as `pch`.
-8. **The include graph only from a clang that takes it** (B-242). The compiler's identity asks
+8. **The include graph only from a clang that takes it** (B-243). The compiler's identity asks
    once, through `/usr/bin/env` with the graph's three variables, whether the driver preprocesses
    `/dev/null` with them; only one that does gets them. The memo's schema moves to
    `hushrun.cc-compiler-memo/3`, so that every compiler is asked again once.

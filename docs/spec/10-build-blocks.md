@@ -3403,7 +3403,7 @@ reading it for the app's builds. *Breaks if:* it doesn't: the spike says.
 
 ## C++20 modules and precompiled headers
 
-**B-240 An empty response file.** [ADR 0120] An `@file` argument whose file, from the compile's
+**B-241 An empty response file.** [ADR 0120] An `@file` argument whose file, from the compile's
 folder, holds nothing but white space adds no argument: B-51 classifies the call without it, and
 B-53 keys it so, as the same compile written without it. CMake 3.28 and later give every scanned
 C++20 compile `@<object>.modmap`, empty with clang for a source that imports and exports no
@@ -3413,13 +3413,13 @@ file, or one that can't be read, as `response-file`. GCC's scanned compiles pass
 words being the only thing it adds, and an empty one none. *Breaks if:* a compiler read a response
 file's name for anything else.
 
-**B-241 Precompiled headers.** [ADR 0120] A precompiled header made or used passes through as
+**B-242 Precompiled headers.** [ADR 0120] A precompiled header made or used passes through as
 `pch` (B-51), and so does `-Xclang` before a flag B-51 counts as `pch` or `modules`, as that flag
 would: CMake's `target_precompile_headers` with clang passes `-Xclang -include-pch -Xclang
 <header>.pch`. Every other `-Xclang` is `loads-code`. Nothing a precompiled header's user or a
 module's importer compiles is stored.
 
-**B-242 A clang that takes the include graph.** [ADR 0120] A clang compile gets B-55's
+**B-243 A clang that takes the include graph.** [ADR 0120] A clang compile gets B-55's
 variables only when the compiler's identity says its driver takes them: asked once with the
 identity (B-52), as `/usr/bin/env CC_PRINT_HEADERS_FORMAT=json
 CC_PRINT_HEADERS_FILTERING=direct-per-file CC_PRINT_HEADERS_FILE=/dev/null <compiler> -x <lang>

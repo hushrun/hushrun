@@ -75,7 +75,7 @@ pub struct Identity {
     pub digest: Digest,
     /// The driver is clang's: it writes the include graph when asked (B-55).
     pub clang: bool,
-    /// \[B-242\] This clang takes the graph's variables: clang 15 to 18 know
+    /// \[B-243\] This clang takes the graph's variables: clang 15 to 18 know
     /// `CC_PRINT_HEADERS_FILTERING` but not `direct-per-file`, and fail every compile given it.
     #[serde(default)]
     pub graph: bool,
@@ -377,7 +377,7 @@ fn ask_identity(
         .filter(|s| s.success)
         .ok_or(NoIdentity::Driver("-###"))?;
     let clang = driver.stderr.contains("\"-cc1\"");
-    // \[B-242\] Asked once, as the compile would be: through `env`, with the graph's variables.
+    // \[B-243\] Asked once, as the compile would be: through `env`, with the graph's variables.
     let graph = clang
         && ask(
             Path::new("/usr/bin/env"),

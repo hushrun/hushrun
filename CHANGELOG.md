@@ -18,8 +18,8 @@ project's new branch starts from what main's CI already ran.
   `GTEST_FILTER` or Catch2's `TESTBRIDGE_TEST_ONLY` and reading GoogleTest's XML or Catch2's
   JUnit file, with COMMAND as written. doctest and Catch2 2 programs are said not to be observed.
   C++20 sources that import no module are now stored and reused with clang (an empty CMake module
-  map adds nothing, B-240), clang's precompiled header is counted as `pch` (B-241), and clang 15
-  to 18, whose compiles all failed through the launcher, get no include-graph variables (B-242).
+  map adds nothing, B-241), clang's precompiled header is counted as `pch` (B-242), and clang 15
+  to 18, whose compiles all failed through the launcher, get no include-graph variables (B-243).
 - **unittest and Django's `manage.py test`, reused by test module and by test** (C-66 to C-69,
   [ADR 0110](docs/adr/0110-unittest.md)). `python -m unittest …`, `manage.py test …`,
   `django-admin test` and `python -m django test`, also after `uv run`, `poetry run` and the like

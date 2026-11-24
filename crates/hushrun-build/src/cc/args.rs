@@ -245,7 +245,7 @@ const TAKES_VALUE: &[&str] = &[
     "--config",
 ];
 
-/// What a response file (`@file`) holds, for B-240.
+/// What a response file (`@file`) holds, for B-241.
 #[derive(Debug, PartialEq, Eq)]
 enum Response {
     /// Nothing but white space: it adds no argument.
@@ -256,7 +256,7 @@ enum Response {
     Other,
 }
 
-/// \[B-240\] What the response file `file`, from the compile's folder, holds.
+/// \[B-241\] What the response file `file`, from the compile's folder, holds.
 fn response_file(file: &str) -> Response {
     match std::fs::read(file) {
         Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Response::Empty,
@@ -483,7 +483,7 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
     while i < args.len() {
         let arg = args[i].as_str();
         if let Some(file) = arg.strip_prefix('@') {
-            // \[B-240\] CMake's module map of a source that imports no module and is none
+            // \[B-241\] CMake's module map of a source that imports no module and is none
             // (CMake 3.28 and later scan every C++20 source): empty, so the compile is the
             // same one without it. Any other response file passes through.
             match response_file(file) {
@@ -495,7 +495,7 @@ fn parse(compiler: OsString, args: Vec<String>) -> Classified {
                 Response::Other => return PassThrough("response-file"),
             }
         }
-        // \[B-241\] `-Xclang -include-pch`: CMake's precompiled header on Clang.
+        // \[B-242\] `-Xclang -include-pch`: CMake's precompiled header on Clang.
         if arg == "-Xclang"
             && let Some(why) = args
                 .get(i + 1)
@@ -825,7 +825,7 @@ mod tests {
         assert_eq!(d.dep.path(&d.output).as_deref(), Some("out/a.d"));
     }
 
-    // covers: B-240, B-241
+    // covers: B-241, B-242
     #[test]
     fn an_empty_module_map_adds_nothing_and_a_full_one_is_modules() {
         let dir = tempfile::tempdir().unwrap();

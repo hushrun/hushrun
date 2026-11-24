@@ -1,5 +1,5 @@
 //! \[ADR 0120\] C++20 modules and precompiled headers in a CMake build through the launcher
-//! (B-240 to B-242), end to end with clang: CMake 3.28 and later scan every C++20 source and give
+//! (B-241 to B-243), end to end with clang: CMake 3.28 and later scan every C++20 source and give
 //! each compile a module map; one that imports no module gets an empty map, and its object is
 //! stored and reused as any other, while a compile that reads a module's interface, or a
 //! precompiled header, passes through. And a clang that doesn't take the include graph's
@@ -150,7 +150,7 @@ fn cc_line(stderr: &str) -> String {
         .join("\n")
 }
 
-// covers: B-240, B-241, B-242
+// covers: B-241, B-242, B-243
 #[test]
 fn a_cxx20_source_that_imports_no_module_is_reused_and_modules_and_pchs_pass_through() {
     if !wanted() {
@@ -163,7 +163,7 @@ fn a_cxx20_source_that_imports_no_module_is_reused_and_modules_and_pchs_pass_thr
         "build",
         &format!("{configure} && cmake --build build && ./build/app && ./build/pch_app"),
     );
-    // Every compile succeeds through the launcher, whichever clang this is (B-242).
+    // Every compile succeeds through the launcher, whichever clang this is (B-243).
     assert_eq!(code, 0, "{out}{err}");
     let first = cc_line(&err);
     assert!(first.contains("0 reused"), "{first}");
