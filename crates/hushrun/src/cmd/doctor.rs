@@ -21,6 +21,8 @@ use crate::context::{Content, Source};
 use crate::exit::{CmdResult, Exit};
 use crate::output::{self, Format};
 
+mod sandbox;
+
 /// Clock skew beyond this is a warning: P-6 compares `passed` and `failed` within 60 s.
 const SKEW_WARNING: Duration = Duration::from_secs(30);
 /// Bytes of source scanned for baked configuration (A-7).
@@ -71,6 +73,10 @@ pub fn run(app: &App<'_>, args: &DoctorArgs) -> CmdResult {
         "ci",
         Level::Ok,
         match app.run.provider {
+            Provider::Local if hushrun_ci::sandbox(&app.env).is_some() => format!(
+                "local run (not CI): {}'s sandbox",
+                hushrun_ci::sandbox(&app.env).map_or("an agent", |p| p.name)
+            ),
             Provider::Local if app.env.agent_set() => {
                 "local run (not CI), as HUSHRUN_AGENT says".to_string()
             }
@@ -95,12 +101,16 @@ pub fn run(app: &App<'_>, args: &DoctorArgs) -> CmdResult {
 
     // Where `hushrun run` records results, and as whom (C-17): before hushrun.yaml, which a
     // repository that only uses `hushrun run` doesn't have.
-    let (good, detail) = crate::cmd::whoami::Identity::read(app.global).line(app.now.millis());
+    let identity = crate::cmd::whoami::Identity::read(app.global);
+    let (good, detail) = identity.line(app.now.millis());
     report.add(
         "results",
         if good { Level::Ok } else { Level::Warning },
         detail,
     );
+    // \[ADR 0140\] In a coding agent's sandbox, or with --hosts: the platform, the credential's
+    // source, the hosts, the allowlist's entry and what is shared (C-140).
+    sandbox::check(&mut report, &app.env, identity.place.as_ref(), args.hosts);
 
     // Configuration.
     let content = match Content::open(app.global, Source::Repo(Snapshot::default())) {

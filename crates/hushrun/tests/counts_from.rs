@@ -51,6 +51,11 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
 ];
 
 /// What a test's PATH holds beside its tools.
@@ -107,9 +112,12 @@ impl Repo {
         git::init(&repo, "sha1");
         let path = std::env::var_os("PATH").expect("PATH");
         for program in PROGRAMS {
+            // The program itself, not a wrapper script ahead of it on PATH, whose interpreter or
+            // whose own PATH this one wouldn't hold.
             let found = std::env::split_paths(&path)
                 .map(|dir| dir.join(program))
-                .find(|file| file.is_file())
+                .filter(|file| file.is_file())
+                .find(|file| std::fs::read(file).is_ok_and(|bytes| !bytes.starts_with(b"#!")))
                 .unwrap_or_else(|| panic!("no {program}"));
             std::os::unix::fs::symlink(found, bin.join(program)).expect("link");
         }
@@ -469,7 +477,7 @@ fn what_is_measured_after_the_command_decides() {
         &format!("rm {}\n", r.bin.join("go").display()),
     );
     let out = r.hushrun(&["run", "unit", "--", "leaves"]);
-    assert_eq!(code(&out), 0);
+    assert_eq!(code(&out), 0, "{}", err(&out));
     assert!(!err(&out).contains("running: this run won't count"));
     assert!(
         last_line(&out).ends_with("it won't count: needs go 1.25, and go isn't here"),
@@ -1280,9 +1288,8 @@ fn a_cache_that_keeps_nothing_doesnt_ask_for_ever() {
     r.go("1.24.3");
     let file = r.root.join("a-file");
     std::fs::write(&file, "").expect("write");
-    let locked = r.root.join("locked");
-    std::fs::create_dir(&locked).expect("mkdir");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    // A folder no one can make, root included, whom a read-only folder doesn't stop.
+    let locked = r.root.join("a-file").join("locked");
     let (file, locked) = (
         file.to_str().expect("utf-8"),
         locked.to_str().expect("utf-8"),
@@ -1319,7 +1326,6 @@ fn a_cache_that_keeps_nothing_doesnt_ask_for_ever() {
     );
     let report: Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(report["checks"][0]["state"], "missing", "{report:#}");
-    std::fs::set_permissions(locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 }
 
 // covers: C-22, C-25

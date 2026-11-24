@@ -201,6 +201,10 @@ say so instead of trying to sign in, which `HUSHRUN_AGENT` refuses anyway.
   nothing, and are worth running when results aren't shared and nobody knows why.
 - `hushrun login`, `hushrun logout` and `hushrun token` sign in, sign out and make agent tokens:
   they are the person's. Don't run them unless the person asks.
+- `hushrun flush` sends the results that waited on this machine while the backend was out of
+  reach. Run it before you finish. `hushrun fetch` is for a sandbox's setup script: it keeps the
+  newest result of each check, and compiled code, for runs that later have no network.
+  `hushrun login --session`, in a sandbox, swaps the sandbox's credential for a short session.
 - The commands for deploys, such as `plan`, `attest` and `artifact`, are CI's: `hushrun --help`
   lists them.
 

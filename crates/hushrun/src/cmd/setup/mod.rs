@@ -85,6 +85,9 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
     // A dry run's plan as one JSON document (C-15), in place of all of its text.
     let json = args.dry_run && global.format == Format::Json;
     let mut look = Look::at(&root)?;
+    // \[ADR 0142\] Which agent clouds the team uses: what the flag says, else what a person at a
+    // terminal answers, else what the repository already has (C-145).
+    look.clouds = agents::chosen(args, &root, json)?;
     if !json {
         look.print();
     }
@@ -387,6 +390,8 @@ struct Look {
     /// B-69: the long-lived branches hushrun.yaml's `build: baked: branches:` names, which the
     /// bake job bakes into their own tags.
     bake_branches: Vec<String>,
+    /// \[ADR 0142\] The agent clouds the team uses, whose files init writes (C-145).
+    clouds: Vec<agents::Cloud>,
     /// The backend package.json or hushrun.yaml names.
     backend: Option<String>,
     /// \[ADR 0047\] The checks hushrun.yaml lets CI skip when a later step reads their reports
@@ -572,6 +577,7 @@ impl Look {
             &placing,
         );
         let mut look = Look {
+            clouds: agents::clouds_in(root),
             root: root.to_path_buf(),
             repository: repository_id(root),
             workspace: placing.workspace,
@@ -968,6 +974,15 @@ impl Look {
 }
 
 impl Package {
+    /// \[ADR 0142\] Its package.json holds hushrun's npm package, so hooks start it through npx.
+    fn holds_hushrun(&self) -> bool {
+        let (name, _) = name_and_range(&npm_package());
+        json::value(self.doc.text()).is_ok_and(|value| {
+            ["dependencies", "devDependencies"]
+                .iter()
+                .any(|key| value[key].get(&name).is_some())
+        })
+    }
     /// \[ADR 0051\] Whether a script of it runs through hushrun once init is done.
     fn wraps(&self) -> bool {
         self.checks
@@ -1175,7 +1190,11 @@ impl AgentTools {
             (json::value(&text).ok()? == expected).then_some((text, change))
         });
         AgentTools {
-            files: agents::plan(&look.root),
+            files: agents::plan(
+                &look.root,
+                &look.clouds,
+                look.package.as_ref().is_some_and(Package::holds_hushrun),
+            ),
             hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
             prepare,
             binary: look.binary_directory(),
@@ -1454,7 +1473,11 @@ impl Plan {
             ledger: ledger::Preview::Unknown,
             promotion: Vec::new(),
             tools: AgentTools {
-                files: agents::plan(&look.root),
+                files: agents::plan(
+                    &look.root,
+                    &look.clouds,
+                    look.package.as_ref().is_some_and(Package::holds_hushrun),
+                ),
                 hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
                 prepare: None,
                 binary: look.binary_directory(),
@@ -1776,6 +1799,8 @@ impl Plan {
                     json::quote(&range)
                 ));
                 self.dependency = Some(spec);
+                // \[ADR 0142\] package.json gets hushrun: its hooks start it through npx.
+                self.tools.files = agents::plan(&look.root, &look.clouds, true);
             }
         }
         let script = package.manager.after_install();
@@ -3885,6 +3910,7 @@ mod tests {
             org: None,
             local: false,
             bake: false,
+            agent_clouds: None,
             pipeline: false,
             force: false,
             repository: None,
