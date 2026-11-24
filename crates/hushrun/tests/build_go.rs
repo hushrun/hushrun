@@ -191,6 +191,24 @@ impl Machine {
 
     /// `hushrun run build -- sh -c SCRIPT`, held a moment after the script so that the uploads
     /// of a build this short get their turn.
+    /// [`Machine::run`], then again while a block of it waits to upload: on a loaded machine the
+    /// end of the command can cut an upload off (B-29), which then waits in the store's outbox
+    /// for the next run, as on a person's machine, and is left out of the check's manifest, so
+    /// another machine builds it. The next run in the store sends it. The first run's exit code
+    /// and stderr.
+    fn run_uploaded(&self, fake: &FakeBuild, script: &str) -> (i32, String) {
+        let (code, _, stderr) = self.run(fake, script);
+        let mut last = stderr.clone();
+        for _ in 0..3 {
+            if !last.contains("for the next run") {
+                break;
+            }
+            last = self.run(fake, script).2;
+        }
+        assert!(!last.contains("for the next run"), "{stderr}\n{last}");
+        (code, stderr)
+    }
+
     fn run(&self, fake: &FakeBuild, script: &str) -> (i32, String, String) {
         self.run_with(fake, script, |_| {})
     }
@@ -606,7 +624,7 @@ fn plain(m: &Machine, script: &str) -> std::process::Output {
 /// B, served A's blocks once: two machines that share a store's worth of the runtime and `lib`.
 fn two_machines(dir: &Path, fake: &FakeBuild, files: &[(&str, &str)]) -> (Machine, Machine) {
     let a = Machine::new(dir, "a", None, files);
-    let (code, _, stderr) = a.run(fake, "go build -o /dev/null ./cmd/app");
+    let (code, stderr) = a.run_uploaded(fake, "go build -o /dev/null ./cmd/app");
     assert_eq!(code, 0, "{stderr}");
     let b = Machine::new(dir, "b", Some(&a.repo), &[]);
     let (code, _, stderr) = b.run(fake, "go build -o /dev/null ./cmd/app");
@@ -633,7 +651,7 @@ fn every_package_of_a_pure_go_command_is_reused_on_the_other_machine_runtime_too
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let a = Machine::new(dir.path(), "a", None, &[]);
-    let (code, _, stderr) = a.run(&fake, "go build -o /dev/null ./cmd/app");
+    let (code, stderr) = a.run_uploaded(&fake, "go build -o /dev/null ./cmd/app");
     assert_eq!(code, 0, "{stderr}");
     assert!(!stderr.contains("stay on this machine"), "{stderr}");
     let b = Machine::new(dir.path(), "b", Some(&a.repo), &[]);
