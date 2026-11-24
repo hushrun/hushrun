@@ -3263,6 +3263,12 @@ gradle: N tasks: X from hushrun's cache (Y from the shared store), Z run and sto
 about T` from the served tasks' execution times; and, when some stay, `build: gradle: N tasks run
 here stay on this machine (…)`, by B-79's reason. Gradle's own output is unchanged.
 
+**B-210 Which tasks stay (Gradle).** [ADR 0117] B-83's line of entries that stay ends with the
+tasks they are of, by Gradle's name, each once, in the order first seen, three at most, then `and
+<n> more`: `build: gradle: 1 task run here stays on this machine (1: its outputs hold the
+checkout's folder): :kapt:kaptGenerateStubsKotlin`. hushrun changes no byte of an entry to let it
+leave.
+
 ## Xcode (draft)
 
 > Draft, from [ADR 0105](../adr/0105-xcode-compilation-cache.md) (proposed). Built, and not yet
