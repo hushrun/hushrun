@@ -39,12 +39,18 @@ const BY_NAME: &[(&str, &str)] = &[
     ("npx vitest run", "vitest"),
     ("npx jest", "jest"),
     ("node node_modules/jest/bin/jest.js --ci", "jest"),
+    ("node --test", "node-test"),
+    ("node --test-reporter=dot --test test/", "node-test"),
+    ("npx mocha", "mocha"),
+    ("mocha --recursive", "mocha"),
     ("mvn test", "maven"),
     ("./mvnw verify", "maven"),
     ("gradle test", "gradle"),
     ("./gradlew test", "gradle"),
     ("ctest --test-dir build", "ctest"),
     ("swift test", "swift"),
+    ("mix test", "exunit"),
+    ("mix test --trace test/a_test.exs", "exunit"),
     ("bundle exec rspec", "ruby"),
     ("bin/rails test", "ruby"),
     ("pytest -q", "pytest"),
@@ -52,7 +58,7 @@ const BY_NAME: &[(&str, &str)] = &[
 
 #[test]
 fn each_adapter_gets_the_command_that_names_its_program() {
-    assert_eq!(RECOGNIZED.len(), 9);
+    assert_eq!(RECOGNIZED.len(), 12);
     let dir = loads_all();
     for (command, adapter) in BY_NAME {
         assert_eq!(
@@ -199,6 +205,7 @@ fn a_program_is_known_by_its_name_whatever_its_directory_and_windows_extension()
         ("mvn.cmd test", "maven"),
         ("gradlew.BAT test", "gradle"),
         ("ctest.bat --test-dir build", "ctest"),
+        ("C:\\elixir\\bin\\mix.bat test", "exunit"),
     ] {
         assert_eq!(
             chosen(&words(command), dir.path()),
@@ -239,6 +246,7 @@ fn each_runner_is_named_as_people_write_it() {
         ("ctest", "CTest"),
         ("npx vitest run", "Vitest"),
         ("npx jest", "Jest"),
+        ("mix test", "ExUnit"),
     ] {
         let adapter = choose(&words(command), dir.path()).unwrap();
         assert_eq!(adapter.runner(), runner, "{command}");
