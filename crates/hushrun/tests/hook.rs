@@ -42,6 +42,11 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
 ];
 
 const PACKAGE: &str = r#"{
@@ -932,7 +937,7 @@ fn a_failure_here_outranks_an_earlier_pass_nothing_recorded() {
     assert!(!r.push("feature", AGENT).status.success());
 }
 
-// covers: C-23
+// covers: C-23, C-140
 #[test]
 fn a_push_of_something_else_is_left_alone() {
     let fake = FakeResults::start();
@@ -966,11 +971,30 @@ fn a_push_of_something_else_is_left_alone() {
     let refused = r.push("feature", AGENT);
     assert!(!refused.status.success());
 
-    // A CI job pushes for its own reasons, and a sandbox that says it isn't one doesn't.
+    // ADR 0140: an agent's sandbox that sets only CI=true isn't CI, and is refused.
     assert!(
-        r.push("feature", &[("CI", "true"), ("CLAUDECODE", "1")])
+        !r.push("feature", &[("CI", "true"), ("CLAUDECODE", "1")])
             .status
             .success()
+    );
+    assert!(
+        !r.push("feature", &[("CLAUDE_CODE_REMOTE", "true"), ("CI", "true")])
+            .status
+            .success()
+    );
+
+    // A CI job (last: once pushed, the branch has nothing more to push) pushes for its own reasons, an agent's step in one included.
+    assert!(
+        r.push(
+            "feature",
+            &[
+                ("CI", "true"),
+                ("GITHUB_ACTIONS", "true"),
+                ("CLAUDECODE", "1")
+            ]
+        )
+        .status
+        .success()
     );
 
     // Another repository's remote: a fork or a mirror has CI of its own.
@@ -1546,18 +1570,21 @@ fn a_package_managers_install_keeps_the_mode_someone_chose() {
 fn a_clone_that_cant_take_the_hook_runs_as_if_nothing_happened() {
     let fake = FakeResults::start();
     let r = Repo::new(&fake.url());
+    // A file where the hooks folder goes: no hook can be written there, even by root, whom a
+    // read-only folder doesn't stop.
     let hooks = r.repo.join(".git/hooks");
-    std::fs::create_dir_all(&hooks).expect("mkdir");
-    std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    if hooks.exists() {
+        std::fs::remove_dir_all(&hooks).expect("rm");
+    }
+    std::fs::write(&hooks, "").expect("write");
 
     let report = r.ready_here();
     let run = r.hushrun(&["run", "unit", "--", "sh", "checks/test.sh"]);
-    std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     assert_eq!(report.status.code(), Some(10), "{}", stderr(&report));
     assert_eq!(stderr(&report), "");
     assert!(run.status.success(), "{}", stderr(&run));
     assert!(!stderr(&run).contains("pre-push"), "{}", stderr(&run));
-    assert!(!r.hook().exists());
+    assert!(hooks.is_file());
 }
 
 // covers: C-23

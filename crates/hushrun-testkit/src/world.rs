@@ -97,6 +97,11 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
     // `hushrun run`'s backend and its credentials (C-11, C-13): doctor asks the backend who it
     // is, so a test never reaches a developer's own.
     "HUSHRUN_BACKEND",

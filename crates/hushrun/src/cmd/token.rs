@@ -107,6 +107,9 @@ fn create(global: &GlobalOpts, args: &TokenCreateArgs) -> CmdResult {
     };
     let org = OrgBackend::find(global, &args.target)?;
     let client = org.client()?;
+    if args.bearer {
+        return create_bearer(global, args, &org, &client, repository, hours);
+    }
     let machine = agent_machine(&org.org, &args.agent)?;
     let mut body = json!({
         "name": args.agent,
@@ -220,6 +223,63 @@ fn create(global: &GlobalOpts, args: &TokenCreateArgs) -> CmdResult {
         "\nEvery sandbox of agent:{} signs its results and events with this key, which count while the token does. Its public key:\n  {}",
         row.name,
         machine.public_key()
+    );
+    Ok(Exit::Ok)
+}
+
+/// \[ADR 0141\] `token create --bearer` (C-141): a token with no key. Stdout is the token alone, as
+/// for any token; stderr says where it goes. With `--format json`, `hushrun.token/v1` with no
+/// `machine_key` or `hushrun_agent`.
+fn create_bearer(
+    global: &GlobalOpts,
+    args: &TokenCreateArgs,
+    org: &OrgBackend,
+    client: &HttpLedger,
+    repository: Option<String>,
+    hours: u64,
+) -> CmdResult {
+    let mut body = json!({
+        "name": args.agent,
+        "repository": repository,
+        "expires_in_hours": hours,
+        "signing": "bearer",
+    });
+    if let Some(rate) = args.rate {
+        body["results_per_minute"] = json!(rate);
+    }
+    let created = org.request(
+        client,
+        "POST",
+        "v0/agent-tokens",
+        Some(&body),
+        "creating an agent token",
+    )?;
+    let token = created["token"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| anyhow!("{}: the answer holds no token", org.base))?
+        .to_string();
+    if created["signing"].as_str() != Some("bearer") {
+        eprintln!(
+            "warning: {} didn't say the token is a bearer token: an older server makes only tokens with a key, and refuses this one's results",
+            org.base
+        );
+    }
+    if global.format == Format::Json {
+        let out = json!({
+            "schema": "hushrun.token/v1",
+            "token": token,
+            "backend": created["backend"],
+            "agent_token": created,
+        });
+        output::print_json(&out)?;
+        return Ok(Exit::Ok);
+    }
+    println!("{token}");
+    eprintln!(
+        "Bearer token for agent:{}, with no key: store it as a secret the sandbox's network adds to requests for {}, and set HUSHRUN_AUTH=proxy there; or set HUSHRUN_TOKEN to it with HUSHRUN_AUTH=bearer; or swap it for a session with hushrun login --session. It isn't shown again.",
+        args.agent,
+        created["backend"].as_str().unwrap_or(&org.base)
     );
     Ok(Exit::Ok)
 }

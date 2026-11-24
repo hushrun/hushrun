@@ -6,9 +6,23 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+hushrun in agent clouds ([ADR 0140](docs/adr/0140-hosted-agents-sandboxes-are-local.md)): a
+hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says what it needs.
+
 Gradle's tasks shared between machines ([ADR 0104](docs/adr/0104-gradle-build-blocks.md)): in a
 run that shares, hushrun is the remote build cache of a Gradle build, so an Android or JVM
 project's new branch starts from what main's CI already ran.
+
+### Changed
+
+- **`hushrun.whoami/v1`'s `credential`** adds `session`, `bearer` and `proxy`.
+- **A hosted platform's own variable makes a sandbox** (C-140): `CLAUDE_CODE_REMOTE` (Claude Code on
+  the web), `CURSOR_AGENT_SOCKET` (Cursor's cloud agents), `COPILOT_AGENT_SESSION_ID` (Copilot's
+  cloud agent, unconfirmed) and `CODEX_PROXY_CERT` (Codex cloud, unconfirmed) make a run local
+  beside `CI=true` and beside a named CI's variable, such as `GITHUB_ACTIONS`. An explicit
+  `HUSHRUN_PROVIDER` still wins. A coding agent's own variable, such as `CLAUDECODE`, makes a run
+  local beside a bare `CI=true` only. In such a sandbox, GitHub's ID-token variables read as unset:
+  a sandbox never records as CI.
 
 ### Added
 
@@ -21,6 +35,31 @@ project's new branch starts from what main's CI already ran.
   the way, for every framework: a Vitest test in jsdom or happy-dom failed to load hushrun's setup
   file (`Cannot find module '/@fs/…'`), which Vite now serves (`server.fs.allow`, as ADR 0108
   has it).
+- **`hushrun build pull`** (B-240, [ADR 0143](docs/adr/0143-a-baked-store-pulled-into-a-fixed-sandbox.md)):
+  the repository's newest baked store from the backend's registry, checked (and its signature, when
+  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`.
+- **Recipes per agent cloud** in `recipes/agent-clouds/`, and a Dev Container Feature in
+  `features/src/hushrun`, to publish as `ghcr.io/hushrun/features/hushrun`.
+- **A results outbox** (C-143, [ADR 0142](docs/adr/0142-results-that-wait-and-what-a-sandbox-fetches.md)):
+  outside CI, a result whose backend couldn't be reached waits in `<cache dir>/outbox/` for 7 days,
+  and the next run, `hushrun ready` or the new `hushrun flush` sends it. While the backend is out of
+  reach, lookups read it, so a check this machine passed still skips.
+- **`hushrun fetch`** (C-144): for a setup script, the newest result of every check of the tree, kept
+  for 24 hours, and the compiled code `hushrun build fetch` fetches.
+- **`hushrun init --agent-clouds`** (C-145): end-of-session hooks that run `hushrun flush` for Claude
+  Code, Cursor and Copilot, Copilot's setup steps and a dev container's feature, for the clouds the
+  team uses. The AGENTS.md block says to run `hushrun flush` before finishing.
+- **Sessions** (C-142, [ADR 0141](docs/adr/0141-credentials-a-sandboxs-network-adds-and-sessions.md)):
+  `hushrun login --session` swaps an agent token, a Cursor cloud agent's ID token (minted over
+  `CURSOR_AGENT_SOCKET`) or a GitHub Actions job's ID token for a session of one repository, saved
+  in `sessions.json` beside the credentials, which runs then use. A Cursor cloud agent's run gets
+  one by itself.
+- **`HUSHRUN_AUTH=proxy` and `HUSHRUN_AUTH=bearer`** (C-141): a sandbox whose network adds the
+  credential, and a bearer agent token with no key. `hushrun token create --bearer` makes one. In a
+  hosted sandbox, a placeholder in `HUSHRUN_TOKEN` is sent as it is.
+- **`hushrun doctor` in a sandbox** (C-140), or with `--hosts`: the platform, where the credential
+  comes from, whether each host answers over TLS, the allowlist's exact entry and what is shared.
+- **`scripts/agent-cloud-probe.sh`**: what a sandbox looks like to hushrun, with variable names only.
 - **unittest and Django's `manage.py test`, reused by test module and by test** (C-66 to C-69,
   [ADR 0110](docs/adr/0110-unittest.md)). `python -m unittest …`, `manage.py test …`,
   `django-admin test` and `python -m django test`, also after `uv run`, `poetry run` and the like
@@ -85,6 +124,14 @@ project's new branch starts from what main's CI already ran.
   replayed. `cargo nextest run --archive-file`, and a `--partition` other than `hash:`, now say why
   their test files aren't observed instead of building the workspace or shifting tests between
   jobs.
+- **`dotnet test` reuses test projects, and test methods one by one** (C-98 to C-101,
+  [ADR 0118](docs/adr/0118-dotnet-test.md)). With `tests: reuse`, a C#, F# or Visual Basic test
+  project (xUnit, NUnit, MSTest, through VSTest) that already passed on the files it and the
+  projects it references compile is neither built nor tested again, and with `unit: test` only its
+  tests that didn't pass run. hushrun names its own VSTest targets through `VSTestTargets`, so
+  COMMAND, its `--filter` and its loggers stay as written. Microsoft.Testing.Platform projects and
+  `dotnet test` of an assembly run unobserved, and the run says so. Compiles aren't reused: the
+  SDK writes the commit into every assembly (ADR 0118, decision 11).
 - **Gradle's remote build cache, kind `gradle/1`** (B-77 to B-83, draft). In a run with a relay,
   in a Gradle build whose settings file has ADR 0087's line, `hushrun run` serves Gradle's
   `HttpBuildCache` protocol on the loopback, at a port and with a token the store keeps from run to
@@ -130,6 +177,7 @@ project's new branch starts from what main's CI already ran.
 - **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
   find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
   holds; the plugin now adds its own directory there.
+
 
 ## [0.19.1] - 2026-11-23
 

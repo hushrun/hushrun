@@ -150,6 +150,12 @@ fn describe(credential: &Credential) -> String {
         Credential::Agent => "HUSHRUN_AGENT, an agent token".to_string(),
         Credential::Login { email } => format!("the token hushrun login saved for {email}"),
         Credential::GithubOidc => "this job's GitHub Actions ID token".to_string(),
+        Credential::Session { saved: true } => {
+            "the session hushrun login --session saved".to_string()
+        }
+        Credential::Session { saved: false } => "HUSHRUN_TOKEN, a session token".to_string(),
+        Credential::Bearer => "HUSHRUN_TOKEN, sent with no key".to_string(),
+        Credential::Proxy => "the credential this network adds (HUSHRUN_AUTH=proxy)".to_string(),
         Credential::Nothing => "no token".to_string(),
     }
 }
@@ -339,6 +345,9 @@ fn json(identity: &Identity) -> Value {
                 Credential::Token { agent: false } => "token",
                 Credential::Login { .. } => "login",
                 Credential::GithubOidc => "github_oidc",
+                Credential::Session { .. } => "session",
+                Credential::Bearer => "bearer",
+                Credential::Proxy => "proxy",
                 Credential::Nothing => "none",
             },
             *withheld,
