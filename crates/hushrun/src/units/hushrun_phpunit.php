@@ -399,7 +399,6 @@ final class State
             if ($reflection->hasProperty('__filename')) {
                 $property = $reflection->getProperty('__filename');
                 if ($property->isStatic()) {
-                    $property->setAccessible(true);
                     $value = $property->getValue();
                     if (is_string($value)) {
                         $file = $value;
