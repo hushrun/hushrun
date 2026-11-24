@@ -171,6 +171,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/vue-jest" --no-audit --no-fund --ignore-scripts --legacy-peer-deps jest@29.7.0 jest-environment-jsdom@29.7.0 @vue/vue3-jest@29.2.6 babel-jest@29.7.0 @babel/core@7.29.13 @babel/preset-env@7.29.14 vue@3.5.46 @vue/test-utils@2.6.0 typescript@5.9.3
           echo "HUSHRUN_TEST_VUE=$RUNNER_TEMP/vue/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_VUE_JEST=$RUNNER_TEMP/vue-jest/node_modules" >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -319,6 +324,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/vue-jest" --no-audit --no-fund --ignore-scripts --legacy-peer-deps jest@29.7.0 jest-environment-jsdom@29.7.0 @vue/vue3-jest@29.2.6 babel-jest@29.7.0 @babel/core@7.29.13 @babel/preset-env@7.29.14 vue@3.5.46 @vue/test-utils@2.6.0 typescript@5.9.3
           echo "HUSHRUN_TEST_VUE=$RUNNER_TEMP/vue/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_VUE_JEST=$RUNNER_TEMP/vue-jest/node_modules" >> "$GITHUB_ENV"
+      # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
+      - name: Install TypeScript for the tsc build-block tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
+          echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
