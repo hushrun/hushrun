@@ -37,6 +37,7 @@ pub mod gradle;
 pub mod jest;
 pub mod jvm;
 pub mod maven;
+pub mod mesontest;
 pub mod mocha;
 pub mod node_test;
 pub mod program;

@@ -7,6 +7,10 @@
 //! `HUSHRUN_CC` names a link `hushrun-cc` beside `hushrun-rustc`, and CMake's build starts
 //! `hushrun-cc <compiler> <arguments>` for each translation unit ([`launcher`]).
 //!
+//! Builds without CMake reach the same launcher ([`programs`], [`meson`], B-230 to B-238): GNU
+//! Make's commands and a handwritten `build.ninja`'s through programs named as the compilers they
+//! start, on `PATH` for those commands alone, and Meson through `CC` and `CXX` at `meson setup`.
+//!
 //! For each call the launcher ends in one outcome: **reused** (the object, its depfile and its
 //! messages were put in place and the compiler did not start), **built and stored**, **built,
 //! not stored** (with the reason) or **passed through** (the compiler ran exactly as asked, with
@@ -32,7 +36,9 @@ pub mod graph;
 pub mod key;
 pub mod launcher;
 pub mod memo;
+pub mod meson;
 pub mod places;
+pub mod programs;
 pub mod share;
 pub mod text;
 

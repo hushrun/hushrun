@@ -26,6 +26,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **C and C++ without CMake, and `meson test`** (B-230 to B-238, C-102 to C-105, ADR 0119). Inside
+  `hushrun run`, GNU Make's commands (plain Makefiles and autotools ones) find hushrun's compiler
+  programs first on `PATH` through `MAKEFILES`, a `ninja` COMMAND on a handwritten `build.ninja`
+  gets them too, and `meson setup` in a Meson repository names its compilers through CMake's
+  launcher indirection: their objects are reused and shared as `cc/1` blocks. `cmake` and `meson`
+  started from make's commands, and the Rust linker, never see the programs; autoconf's and
+  Meson's configure checks aren't stored. With `tests: reuse`, `meson test` reuses test programs
+  and tests one by one, as CTest does. New variables COMMAND gets: `MAKEFILES` (the hook first,
+  the person's after it) and, in a Meson repository, `PATH` with hushrun's `meson` first.
 - **`xcodebuild test`'s test targets and tests** (C-110 to C-113, ADR 0121): with `tests: mode:
   reuse` on macOS, an Xcode project's unit-test and UI-test bundles are units, read from
   `project.pbxproj` (build phases, synchronized folders, local packages, the targets they depend on
