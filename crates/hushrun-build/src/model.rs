@@ -108,6 +108,9 @@ pub enum Kind {
     /// The C and C++ launcher's objects, kind `cc/1` (B-60), with a manifest of their own per
     /// check and target triple.
     Cc,
+    /// The Xcode service's values and the objects they reach, kind `xcode/1` (B-80), with a
+    /// manifest of their own per check and Xcode build.
+    Xcode,
 }
 
 impl Kind {
@@ -117,6 +120,7 @@ impl Kind {
             Kind::Rustc => "rustc/1",
             Kind::Go => "go/1",
             Kind::Cc => crate::cc::KIND,
+            Kind::Xcode => crate::xcode::KIND,
         }
     }
 
@@ -126,8 +130,15 @@ impl Kind {
         match description.get("kind").and_then(serde_json::Value::as_str) {
             Some(word) if word == Kind::Go.word() => Kind::Go,
             Some(word) if word == Kind::Cc.word() => Kind::Cc,
+            Some(word) if word == Kind::Xcode.word() => Kind::Xcode,
             _ => Kind::Rustc,
         }
+    }
+
+    /// Whether a block's first key is its key, with no hints: Go's and Xcode's, whose tools
+    /// compute the key from everything a compile read.
+    pub fn self_keyed(self) -> bool {
+        matches!(self, Kind::Go | Kind::Xcode)
     }
 
     /// Whether it is `rustc`, the default, which a line leaves out.

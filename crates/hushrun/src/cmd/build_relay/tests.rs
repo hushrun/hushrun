@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use hushrun_attest::SigningKey;
-use hushrun_build::model::{Class as LocalClass, Mode};
+use hushrun_build::model::{Class as LocalClass, Kind, Mode};
 use hushrun_build::origin::{Identity, Origin, Vouch, fingerprint};
 use hushrun_build::outbox::{Marker, Outbox};
 use hushrun_build::relay::{Answer, Request};
@@ -3492,6 +3492,7 @@ fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_buil
         downloaded: false,
         baked: false,
         go: Some(hushrun_build::session::GoEntry::default()),
+        xcode: None,
         cc: None,
     }
 }
@@ -3759,6 +3760,7 @@ fn cc_entry(
     hushrun_build::session::Entry {
         go: None,
         step: Some(step),
+        xcode: None,
         cc: Some(hushrun_build::cc::launcher::CcEntry {
             platform: platform.into(),
             ..Default::default()
@@ -3879,7 +3881,10 @@ fn a_cold_build_s_questions_wait_for_the_manifest_once_and_never_for_the_network
     assert!(took < Duration::from_millis(1_100), "{took:?}");
     until("the cc manifest", || {
         matches!(
-            relay.state().cc_manifests.get(LINUX),
+            relay
+                .state()
+                .cc_manifests
+                .get(&(Kind::Cc, LINUX.to_string())),
             Some(super::CcManifest::Got { .. })
         )
     });
@@ -4127,12 +4132,12 @@ fn a_cc_open_that_answers_after_its_check_ended_is_not_taken_for_the_next_check_
     relay
         .state()
         .cc_manifests
-        .insert(LINUX.into(), super::CcManifest::Asking);
+        .insert((Kind::Cc, LINUX.into()), super::CcManifest::Asking);
     let late = {
         let asking = relay.clone();
         relay
             .runtime
-            .spawn(async move { asking.cc_open(LINUX.into()).await })
+            .spawn(async move { asking.platform_open(Kind::Cc, LINUX.into()).await })
     };
     std::thread::sleep(Duration::from_millis(100));
     relay.end_check(&[]);
@@ -4141,10 +4146,14 @@ fn a_cc_open_that_answers_after_its_check_ended_is_not_taken_for_the_next_check_
     relay
         .state()
         .cc_manifests
-        .insert(LINUX.into(), super::CcManifest::Asking);
+        .insert((Kind::Cc, LINUX.into()), super::CcManifest::Asking);
     relay.runtime.block_on(late).unwrap();
     assert!(
-        relay.state().cc_manifests.get(LINUX) == Some(&super::CcManifest::Asking),
+        relay
+            .state()
+            .cc_manifests
+            .get(&(Kind::Cc, LINUX.to_string()))
+            == Some(&super::CcManifest::Asking),
         "the first check's manifest was kept for the second"
     );
     relay.end_check(&[]);
@@ -5015,4 +5024,130 @@ fn two_trusted_scopes_in_open_s_answer_vouch_for_nothing() {
     begin(&relay, &b);
     assert!(relay.check_baked(&stored, Duration::from_secs(5)).is_none());
     relay.end_check(&[]);
+}
+
+/// An Xcode value's block in `store`, built here by `by`: kind `xcode/1`, its first key itself.
+fn xcode_block(store: &Store, seed: u8, by: Option<Identity>) -> Digest {
+    let key = hushrun_build::xcode::key(&[seed, 10]);
+    let dir = store.root().with_file_name(format!("xcode-src-{seed}"));
+    std::fs::create_dir_all(dir.join("objects")).unwrap();
+    let value = dir.join("value");
+    std::fs::write(&value, [seed; 64]).unwrap();
+    let object = dir.join("objects").join("o");
+    let bytes: Vec<u8> = (0..20_000)
+        .map(|i| Digest::of(&[seed, (i / 32) as u8]).as_bytes()[i % 32])
+        .collect();
+    std::fs::write(&object, &bytes).unwrap();
+    let description = json!({"schema": "hushrun.xcode-block/v1", "kind": "xcode/1", "step": key,
+        "class": "library", "key": hushrun_core::digest::to_hex(&[seed, 10]), "value": key.hex(),
+        "objects": 1, "platform": XCODE, "repository": null, "rustc_ms": 1000});
+    store
+        .publish_with_origin(
+            &key,
+            &description,
+            &[
+                NewFile {
+                    name: "value".into(),
+                    source: value,
+                },
+                NewFile {
+                    name: format!("objects/{}", key.hex()),
+                    source: object,
+                },
+            ],
+            &Origin::built_here("1-1", by),
+            SystemTime::now(),
+        )
+        .unwrap();
+    key
+}
+
+fn xcode_address(key: &Digest) -> Hex32 {
+    blocks::address("xcode/1", key.as_bytes())
+}
+
+const XCODE: &str = "xcode-27c5032a";
+
+// covers: B-83
+#[test]
+fn an_xcode_question_asks_the_server_only_about_what_the_checks_xcode_manifest_names() {
+    let fake = FakeBuild::start();
+    let a = machine();
+    let named = xcode_block(&a.store, 91, Some(me(&fake)));
+    let other = xcode_block(&a.store, 92, Some(me(&fake)));
+    for key in [named, other] {
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            xcode_address(&key),
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Library,
+        );
+    }
+    fake.set_manifest(vec![Pair(xcode_address(&named), xcode_address(&named))]);
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    // No `xcode/1` open until the service asks: only it knows the Xcode build.
+    assert!(fake.opens().iter().all(|o| o.kind != "xcode/1"));
+    let fetch = |key| Request::XcodeFetch {
+        key,
+        platform: XCODE.into(),
+        local_ms: Some(60_000),
+    };
+    let lookups = fake.count(route::LOOKUP);
+    // A key the manifest doesn't name asks nothing.
+    assert_eq!(ask(&relay, fetch(other)), Answer::None);
+    assert_eq!(fake.count(route::LOOKUP), lookups);
+    let open = fake
+        .opens()
+        .into_iter()
+        .find(|o| o.kind == "xcode/1")
+        .unwrap();
+    assert_eq!(open.platform, XCODE);
+    // One it names: downloaded, as an Xcode block.
+    assert_eq!(ask(&relay, fetch(named)), Answer::Ready { key: named });
+    let block = b.store.block(&named).unwrap().unwrap();
+    assert_eq!(
+        hushrun_build::model::Kind::of_description(&block.description),
+        hushrun_build::model::Kind::Xcode
+    );
+    assert!(b.store.origin(&named).unwrap().downloaded_only());
+    assert!(b.store.block(&other).unwrap().is_none());
+    relay.end_check(&[]);
+}
+
+// covers: B-83
+#[test]
+fn a_check_closes_its_xcode_values_once_for_each_xcode_build() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let shared = Digest::of(b"shared value");
+    let kept = Digest::of(b"kept value");
+    let entry = |key: Digest, local: Option<&str>| hushrun_build::session::Entry {
+        go: None,
+        xcode: Some(hushrun_build::session::XcodeEntry {
+            platform: XCODE.into(),
+            local: local.map(str::to_string),
+            ..Default::default()
+        }),
+        ..go_entry(key, hushrun_build::model::Outcome::BuiltAndStored)
+    };
+    relay.end_check(&[entry(shared, None), entry(kept, Some("holds-path"))]);
+    let close = fake
+        .closes()
+        .into_iter()
+        .find(|c| c.kind == "xcode/1")
+        .expect("an Xcode close");
+    assert_eq!(close.platform, XCODE);
+    assert_eq!(
+        close.manifest,
+        vec![Pair(xcode_address(&shared), xcode_address(&shared))]
+    );
 }

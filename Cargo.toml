@@ -108,6 +108,10 @@ rustls = { version = "0.23.36", default-features = false, features = ["ring", "s
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "time", "sync"] }
 # OCI promotion (M5): the registry client, without a crypto provider like reqwest above.
 bytes = "1.12"
+# [B-78] The Xcode compilation-cache service: gRPC over HTTP/2 on a Unix socket. Both already part
+# of the binary's build, through reqwest.
+h2 = "0.4.20"
+http = "1.5"
 oci-client = { version = "0.18.0", default-features = false, features = ["rustls-tls-no-provider"] }
 
 # Keyless signing and timestamps (M10, ADR 0013). ECDSA P-256 and certificate

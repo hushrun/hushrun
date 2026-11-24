@@ -88,6 +88,7 @@ pub mod store;
 pub mod sweep;
 pub mod unit;
 pub mod wrapper;
+pub mod xcode;
 
 #[cfg(test)]
 mod flow_tests;

@@ -918,6 +918,38 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### Xcode
+
+Xcode apps (iOS, iPadOS, macOS) reuse compiles through Xcode's own compilation cache, which hushrun
+serves. Inside `hushrun run`, an `xcodebuild` in a checkout that holds an Xcode project, workspace
+or Swift package gets it with nothing to set up: hushrun starts the cache's service beside the
+command and gives Xcode an xcconfig file that turns caching on and maps the checkout's folder, so a
+second worktree, a new branch's clone or another machine computes the same keys. Swift, C, C++,
+Objective-C and Clang modules are cached; linking, asset catalogs and code signing aren't.
+
+```text
+$ hushrun run build -- xcodebuild -scheme App build      # in a second worktree
+hushrun: build: xcode: 412 compiles asked: 405 from this Mac's cache, 0 reused, 7 compiled
+```
+
+- **Xcode 27.** Older versions crash on cached, prefix-mapped diagnostics, and get nothing; a run
+  with an Xcode hushrun doesn't know yet says so in one line. `HUSHRUN_BUILD_XCODE=0` turns it off
+  for a run.
+- **On this Mac,** what any checkout compiled is kept in the store's `xcode` folder, so a new
+  branch's worktree doesn't start from an empty DerivedData.
+- **Between machines and in CI,** an org that shares compiled code shares Xcode's compiles too:
+  a new branch's CI job reuses what `main`'s CI compiled with the same Xcode build. A compile
+  whose output holds your home folder or your checkout's path stays on your Mac.
+- **The Xcode app.** `hushrun build xcode on` makes the app's own builds use the same cache: a
+  LaunchAgent serves it and sets `XCODE_XCCONFIG_FILE` for the apps you open, so quit and reopen
+  Xcode once. `hushrun build xcode status` says whether it is on; `off` undoes it. The app reuses
+  what is on this Mac and downloads nothing: a `hushrun run … xcodebuild` is what downloads.
+- **Your own xcconfig.** An `XCODE_XCCONFIG_FILE` you set is included first; settings you pass on
+  `xcodebuild`'s command line still win.
+
+This is new and its rules are a draft ([ADR 0104](../adr/0104-xcode-compilation-cache.md)): the
+ADR lists what a first build on a real Mac should confirm.
+
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
 

@@ -397,6 +397,25 @@ pub enum BuildCommand {
     /// publish now, its parts, its platform and the image tags it maps to. For a program that
     /// watches for new images.
     Manifest(BuildManifestArgs),
+    /// Xcode's compilation cache for the Xcode app on this Mac. `hushrun run` serves it to
+    /// xcodebuild on its own; this is for the builds the app starts.
+    #[command(subcommand)]
+    Xcode(BuildXcodeCommand),
+}
+
+/// `hushrun build xcode` (B-85).
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum BuildXcodeCommand {
+    /// Make the Xcode app's builds use hushrun's compilation cache, the one `hushrun run` fills:
+    /// a LaunchAgent serves it, and sets XCODE_XCCONFIG_FILE for the apps you open. Xcode 27.
+    On,
+    /// Stop it: the agent goes, and XCODE_XCCONFIG_FILE is unset when it is hushrun's.
+    Off,
+    /// Show whether it is on, where its files are and how much is cached.
+    Status,
+    /// Serve the cache until stopped: what the LaunchAgent runs.
+    #[command(hide = true)]
+    Serve,
 }
 
 /// `hushrun build manifest` (B-68).

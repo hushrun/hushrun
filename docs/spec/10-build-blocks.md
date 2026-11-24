@@ -3153,3 +3153,117 @@ checks count nowhere. The compiler's own output is unchanged.
 **B-62 Without a session.** A launcher that finds no usable session (a build that outlived its
 run, `HUSHRUN_CC` set by hand) replaces itself with the compiler and the arguments as given, and
 reads nothing else. *Rests on:* nothing.
+
+## Xcode (draft)
+
+> Draft, from [ADR 0104](../adr/0104-xcode-compilation-cache.md) (proposed). Built, and not yet
+> run against a real Xcode: the ADR's Mac spike decides what stays.
+
+From Xcode 26, Swift and Clang key each compile by its content and ask a **compilation-cache
+service** for its result before compiling, over gRPC on the Unix socket
+`COMPILATION_CACHE_REMOTE_SERVICE_PATH` names. hushrun's service keeps what Xcode puts in a cache
+of its own on the machine, and shares a **value** (what Xcode put under one key) with every object
+it reaches as a block of kind `xcode/1`, through the same store, relay, records and outbox as the
+other kinds (B-13, B-14, B-26 to B-34). Xcode checks nothing it is served: every check below is the
+only guard there is.
+
+**B-77 The entry.** When the mode is not `off`, `hushrun run` starts the service for COMMAND when
+all of these hold: macOS; `HUSHRUN_BUILD_XCODE` isn't `0`, `off`, `false` or `no`; the checkout's
+root or the folder COMMAND runs in holds, within four folders (none hidden, none of `node_modules`,
+`Pods`, `Carthage`, `DerivedData`, `build`, `target`, `vendor`), a `.xcodeproj`, a `.xcworkspace`
+or a `Package.swift`; and `xcodebuild -version`, asked once within 10 seconds under COMMAND's
+`DEVELOPER_DIR`, names a major version hushrun knows (27). Another major is said in one line;
+every other reason for none is silent. The service listens on `xcode.sock` in the session's folder
+(or a private folder under `XDG_RUNTIME_DIR`, `TMPDIR` or `/tmp` when that path is too long), and
+COMMAND gets `XCODE_XCCONFIG_FILE` naming `xcode.xcconfig` beside it: `#include?` of the file the
+person's `XCODE_XCCONFIG_FILE` named, unless hushrun wrote it; `COMPILATION_CACHE_ENABLE_CACHING`,
+`COMPILATION_CACHE_ENABLE_PLUGIN` (`YES`) and `COMPILATION_CACHE_REMOTE_SERVICE_PATH` (the socket);
+`SWIFT_ENABLE_PREFIX_MAPPING`, `CLANG_ENABLE_PREFIX_MAPPING`, `SWIFT_ENABLE_PROJECT_PREFIX_MAPPING`,
+`CLANG_ENABLE_PROJECT_PREFIX_MAPPING` (`YES`); `SWIFT_OTHER_PREFIX_MAPPINGS` and
+`CLANG_OTHER_PREFIX_MAPPINGS` mapping `$(PROJECT_TEMP_DIR)` to `/^derived`, `$(BUILT_PRODUCTS_DIR)`
+to `/^built`, `$(OBJROOT)/../..` to `/^dd` and the checkout's root to `/^workspace`; and an empty
+`CLANG_MODULES_BUILD_SESSION_FILE`. A root with white space or `=` in its path gets no maps, and
+one line says its keys are its own. The service stops when the run's session ends, before its
+relay ends the check. *Rests on:* Xcode reading `XCODE_XCCONFIG_FILE` from the environment and
+applying it to every target of the build, a package's included; Xcode 27 mapping those prefixes
+before it computes a key (x8, verified against Xcode 27). *Breaks if:* Xcode stops reading the
+variable, or a new major changes the protocol or the settings: hushrun names the majors it knows.
+
+**B-78 The protocol.** The service answers `compilation_cache_service.cas.v1.CASDBService`
+(`Get`, `Put`, `Load`, `Save`) and `compilation_cache_service.keyvalue.v1.KeyValueDB` (`GetValue`,
+`PutValue`) as Apple's LLVM defines them, one HTTP/2 stream a call, one uncompressed message each
+way, `grpc-status` 0 in the trailers. A method it doesn't have and a compressed message are
+`UNIMPLEMENTED`, a message it can't read `INVALID_ARGUMENT`, one over 2 GiB `RESOURCE_EXHAUSTED`:
+the plugin takes each as a miss or a failed put, and Xcode compiles. An object a `Get` or `Load`
+asked for on disk (`write_to_disk`) is handed as a file of its own when it holds 1 MiB or more,
+since gRPC clients refuse messages over 4 MiB by default; a `Put` or `Save` may name a file, read
+up to 2 GiB. A `Put` whose reference is no id of 32 bytes, or names an object the cache doesn't
+hold, is refused. *Rests on:* the plugin's taking a reply's file, and falling back to a compile on
+any error.
+
+**B-79 The cache.** The service keeps every object and value Xcode puts in the store's `xcode/`
+folder: an object at `objects/<2 hex>/<id>`, as `hushrun.xcode-object-file/v1`, the number of its
+references (8 bytes, big-endian), each reference and its bytes; a value at `values/<2 hex>/<the
+SHA-256 of Xcode's key>`, as `hushrun.xcode-value/v1` and its entries sorted by name. An object's
+**id** is the SHA-256 of `hushrun.xcode-object/v1\n`, the number of its references (8 bytes,
+big-endian), each reference and its bytes. Files are written whole and renamed into place; one
+that doesn't read, or an object whose bytes aren't its id, is removed and is a miss. A `GetValue`
+is answered from the cache first, when every object the value reaches is there (a value whose
+outputs the service can't name, B-80, as it was put), else the value is removed. A file is dated
+when used, at most once an hour; the end of a service removes, at most once a day, what nobody
+used for the store's kept days, and temporary and handed files a day old.
+
+**B-80 A block.** A value's **roots** are the references of the `CASObject` under its entry
+`value`, and any entry of exactly 32 bytes that names an object the cache holds; everything they
+reach, all the way down, is its closure. A block of kind `xcode/1` holds `value` (its one encoding)
+and `objects/<id hex>` for each object of the closure, its description `key` (Xcode's, hex),
+`value` (the SHA-256 of its encoding), `objects`, `platform` and the store's usual fields. Opening
+a block reads every file against its record (B-14), every object against the id its name gives,
+the value against its description, and that every object the value reaches is in the block or the
+cache; only then are its objects kept and its value served. A block that fails is discarded; one
+only downloaded is first reported `rejected` and its key suspended for the kept days.
+
+**B-81 The key (Xcode).** The key of the value under Xcode's key `k` is the SHA-256 of the JCS
+form of `{"key": <k, hex>, "schema": "hushrun.xcode-key/v1"}`, its own first key, with no hints.
+*Rests on:* Xcode's key holding the compiler's version, its arguments and the content of every
+input, as LLVM's and Swift's cache keys do. *Breaks if:* a compiler reads an input its key doesn't
+hold: the audit (B-84) is the net.
+
+**B-82 What may leave (Xcode).** A value put in a run with a session becomes a block, and may
+leave the machine, only when: its roots can be found (`unknown-value`); every object of its closure
+is in the cache (`incomplete`); the closure holds at most 256 MiB and 20,000 objects (`large`);
+and, outside CI, no object holds the home folder or the checkout's root in its given or resolved
+form, as raw bytes (`holds-path`). Else it stays in the cache alone, reused on this machine, and
+the log names why. A block is stored as built here by this run (B-32), and told to the relay.
+
+**B-83 Sharing (Xcode).** The platform of an Xcode block is `xcode-` and `xcodebuild -version`'s
+build, lower case. A `GetValue` the cache and the store don't answer is asked of the run's baked
+store (B-64), then, in a run that shares `on`, of the relay, within 10 seconds or half this
+machine's last compile of the key. The relay asks the server only for a key the check's `xcode/1`
+manifest for the platform names (asked with `open` at the first such question, as B-60's), and the
+first key it names starts the prefetch of the rest. A check closes once for each Xcode build its
+values were compiled with, under a run made from the check's, the kind and the platform, with the
+pairs of its reuses and its blocks in the order logged, leaving out what stays (B-82). *Rests
+on:* the server taking any kind `is_kind` reads and keeping manifests per kind and platform (no
+server change).
+
+**B-84 The audit and what a run says (Xcode).** A block served from the store or a download is,
+one time in fifty, one in ten at a downloaded block's first reuse, every time in `observe` and
+with `HUSHRUN_BUILD_AUDIT=every`, never with `none`, never twice for one key in a run, answered as
+a miss on purpose; the value Xcode puts next under the key is compared with it by digest, and a
+difference suspends the key for the kept days and reports a download `differs`. A value put
+under a key whose block is in the store already is compared the same way, and one only downloaded
+gives way to it. The run's summary says, when Xcode asked anything: `build: xcode: N compiles
+asked: X from this Mac's cache, Y reused (Z from the shared store), W compiled, V kept to share`,
+and how many differed.
+
+**B-85 The Xcode app.** `hushrun build xcode on` (macOS) writes `hushrun.xcconfig` in
+`xcode-app/` under hushrun's cache directory, with B-77's settings, the socket `xcode-app/xcode.sock`
+(or `/tmp/hushrun-xcode-<uid>/xcode.sock` when too long) and `$(WORKSPACE_DIR)` for the checkout;
+writes the LaunchAgent `com.hushrun.xcode-cache` running `hushrun build xcode serve` at login, kept
+alive; loads it; and sets `XCODE_XCCONFIG_FILE` for the login session with `launchctl setenv`,
+which the agent does again at every start. The service reads and writes the store's cache (B-79)
+with no session: it asks no backend and keeps no block. `off` unloads and removes the agent,
+unsets the variable only when it names hushrun's file, and removes the file. `status` says which
+of these hold. *Rests on:* apps opened after `launchctl setenv` getting the variable, and Xcode
+reading it for the app's builds. *Breaks if:* it doesn't: the spike says.

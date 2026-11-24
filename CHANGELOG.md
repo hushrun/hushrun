@@ -6,6 +6,17 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Added
+
+- **Xcode's compilation cache, served by hushrun** (B-77 to B-85, ADR 0104, a draft): inside
+  `hushrun run`, `xcodebuild` in a checkout with an Xcode project, workspace or Swift package gets
+  Xcode 27's compilation cache through a service of the run (`XCODE_XCCONFIG_FILE`, with prefix
+  maps for the checkout), kept on the Mac across checkouts and branches, and shared as blocks of
+  kind `xcode/1` through the backend when the org shares compiled code, one manifest per Xcode
+  build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
+  LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
+  the ADR lists what the first build on a Mac checks.
+
 ## [0.19.1] - 2026-11-23
 
 What the first real bake found ([ADR 0103](docs/adr/0103-what-the-first-real-bake-found.md)): a

@@ -169,8 +169,8 @@ fn kept_here(kind: Kind, description: &serde_json::Value) -> Option<String> {
                     .to_string()
             })
         }
-        // A Go block is stored only when it may travel (B-42).
-        Kind::Go => None,
+        // A Go block is stored only when it may travel (B-42), and so is an Xcode one (B-82).
+        Kind::Go | Kind::Xcode => None,
         Kind::Cc => description
             .get("local")
             .and_then(serde_json::Value::as_array)

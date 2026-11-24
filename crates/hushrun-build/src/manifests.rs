@@ -180,6 +180,16 @@ pub fn parts_of(entries: &[Entry], slot: &Slot) -> Vec<SavedPart> {
                 };
                 (Kind::Cc, cc.platform.clone())
             }
+            Kind::Xcode => {
+                let Some(xcode) = entry
+                    .xcode
+                    .as_ref()
+                    .filter(|xcode| xcode.local.is_none() && !xcode.platform.is_empty())
+                else {
+                    continue;
+                };
+                (Kind::Xcode, xcode.platform.clone())
+            }
         };
         if !seen.insert((kind, platform.clone(), step, key)) {
             continue;
@@ -517,6 +527,7 @@ mod tests {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
         }
     }
@@ -532,6 +543,7 @@ mod tests {
 
     fn cc(step: u8, key: u8, platform: &str) -> Entry {
         Entry {
+            xcode: None,
             cc: Some(crate::cc::launcher::CcEntry {
                 platform: platform.into(),
                 ..Default::default()
@@ -772,6 +784,7 @@ mod leftovers {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
         }
     }
