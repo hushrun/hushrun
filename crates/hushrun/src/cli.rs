@@ -378,7 +378,7 @@ pub enum BuildCommand {
     /// Put this repository's newest baked store where runs read one (HUSHRUN_BUILD_LOWER, or
     /// /hushrun), from the backend's registry: for a sandbox whose image is fixed.
     ///
-    /// It pulls <registry>/<org>/<name>:hushrun-<platform>-latest with a pull token in
+    /// It pulls `<registry>/<org>/<name>:hushrun-<platform>-latest` with a pull token in
     /// HUSHRUN_REGISTRY_TOKEN, the backend's credential here, or nothing for a public
     /// repository; checks the store, and its signature when hushrun.yaml names signers of baked
     /// stores; and only then replaces what was there.
@@ -560,7 +560,7 @@ pub struct BuildPullArgs {
     /// The image, `<host>/<org>/<name>` [default: this repository's on its backend's registry].
     #[arg(long, value_name = "REPOSITORY")]
     pub image: Option<String>,
-    /// The tag [default: hushrun-<platform>-latest].
+    /// The tag, by default `hushrun-<platform>-latest`.
     #[arg(long, value_name = "TAG")]
     pub tag: Option<String>,
     /// The platform, as tags name it, such as linux-x64 [default: this machine's].
