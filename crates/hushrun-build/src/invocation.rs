@@ -213,6 +213,8 @@ impl DebugFlags {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
     rustc: String,
+    /// \[ADR 0112\] B-161: the driver cargo runs rustc through (`clippy-driver`), when any.
+    driver: Option<String>,
     args: Vec<String>,
     tokens: Vec<Token>,
     crate_name: String,
@@ -349,7 +351,17 @@ pub fn parse(argv: &[OsString], env: &Env, cwd: &Path) -> Parsed {
 }
 
 fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, PassedThrough> {
-    let (compiler, rest) = argv.split_first().ok_or(PassedThrough::NotRustc)?;
+    let (mut compiler, mut rest) = argv.split_first().ok_or(PassedThrough::NotRustc)?;
+    // \[ADR 0112\] B-161: `cargo clippy` runs each workspace member's compile as
+    // `clippy-driver <rustc> <arguments>` (its `RUSTC_WORKSPACE_WRAPPER`, behind this one).
+    let mut driver = None;
+    if is_clippy_driver(compiler)
+        && let Some((inner, inner_rest)) = rest.split_first()
+    {
+        driver = Some(utf8(compiler)?);
+        compiler = inner;
+        rest = inner_rest;
+    }
     if !is_rustc(compiler) {
         return Err(PassedThrough::NotRustc);
     }
@@ -368,7 +380,16 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
     if seen.crate_types.len() > 1 {
         return Err(PassedThrough::CrateTypes);
     }
-    let class = classify(&crate_name, seen.crate_types.first(), seen.test)?;
+    if seen.emits.is_empty() {
+        seen.emits.push(Emit::Link);
+    }
+    let links = seen.emits.contains(&Emit::Link);
+    let class = classify(&crate_name, seen.crate_types.first(), seen.test, links)?;
+    // A driver's linked outputs (a workspace member's build script or proc macro under clippy)
+    // pass through as before: only its metadata-only compiles are blocks (B-161).
+    if driver.is_some() && class != Class::Library {
+        return Err(PassedThrough::NotRustc);
+    }
     let out_dir = seen.out_dir.ok_or(PassedThrough::NoOutDir)?;
     let extra_filename = seen.extra_filename.ok_or(PassedThrough::NoExtraFilename)?;
     if !seen
@@ -380,11 +401,8 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         return Err(PassedThrough::NoArtifacts);
     }
     let source = seen.source.ok_or(PassedThrough::Malformed)?;
-    if seen.emits.is_empty() {
-        seen.emits.push(Emit::Link);
-    }
 
-    let (keyed_env, package) = read_env(env, class)?;
+    let (keyed_env, package) = read_env(env, class, driver.is_some())?;
     let form = crate::messages::Form::new(
         seen.error_format.as_deref(),
         (!seen.json.is_empty())
@@ -407,6 +425,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
 
     Ok(Invocation {
         rustc,
+        driver,
         args,
         tokens,
         crate_name,
@@ -439,6 +458,25 @@ impl Invocation {
     /// The compiler's path, as cargo gave it.
     pub fn rustc(&self) -> &str {
         &self.rustc
+    }
+
+    /// The driver cargo runs rustc through (`clippy-driver`), as cargo gave it (B-161).
+    pub fn driver(&self) -> Option<&str> {
+        self.driver.as_deref()
+    }
+
+    /// What starts the compile and its arguments, given rustc's: rustc itself, or the driver
+    /// with rustc's path first (B-161).
+    pub fn launch(&self, args: Vec<OsString>) -> (OsString, Vec<OsString>) {
+        match &self.driver {
+            None => (OsString::from(&self.rustc), args),
+            Some(driver) => {
+                let mut all = Vec::with_capacity(args.len() + 1);
+                all.push(OsString::from(&self.rustc));
+                all.extend(args);
+                (OsString::from(driver), all)
+            }
+        }
     }
 
     /// The arguments after the compiler's path, as cargo gave them.
@@ -666,6 +704,11 @@ impl Invocation {
         out.extend(extra.iter().cloned());
         out
     }
+}
+
+fn is_clippy_driver(path: &OsStr) -> bool {
+    let name = Path::new(path).file_name();
+    name == Some(OsStr::new("clippy-driver")) || name == Some(OsStr::new("clippy-driver.exe"))
 }
 
 fn is_rustc(path: &OsStr) -> bool {
@@ -1202,11 +1245,28 @@ fn parse_search(value: &str) -> SearchPath {
     }
 }
 
-fn classify(name: &str, crate_type: Option<&String>, test: bool) -> Result<Class, PassedThrough> {
+/// \[ADR 0112\] B-160: a compile that emits no `link` (what `cargo check` and `cargo clippy` ask
+/// for every target) links nothing and writes what a library's check writes, `lib<name><extra
+/// filename>.rmeta` and the dep-info, whatever its crate type: it is a library's metadata-only
+/// compile, keyed and stored as one, never a linked output.
+fn classify(
+    name: &str,
+    crate_type: Option<&String>,
+    test: bool,
+    links: bool,
+) -> Result<Class, PassedThrough> {
+    let crate_type = crate_type.map(String::as_str);
     if test {
-        return Ok(Class::Program);
+        return Ok(if links {
+            Class::Program
+        } else {
+            Class::Library
+        });
     }
-    match crate_type.map(String::as_str) {
+    if !links && matches!(crate_type, Some("lib" | "rlib" | "proc-macro" | "bin")) {
+        return Ok(Class::Library);
+    }
+    match crate_type {
         None => Err(PassedThrough::NoCrateType),
         Some("lib" | "rlib") => Ok(Class::Library),
         Some("proc-macro") => Ok(Class::ProcMacro),
@@ -1216,7 +1276,11 @@ fn classify(name: &str, crate_type: Option<&String>, test: bool) -> Result<Class
     }
 }
 
-fn read_env(env: &Env, class: Class) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
+fn read_env(
+    env: &Env,
+    class: Class,
+    driver: bool,
+) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
     if env.unreadable_cargo_name {
         return Err(PassedThrough::NotUtf8);
     }
@@ -1227,7 +1291,11 @@ fn read_env(env: &Env, class: Class) -> Result<(BTreeMap<String, String>, Packag
         let linker_only = class == Class::Library && LINKER_ONLY.contains(&name.as_str());
         // A linked output: every variable the linker reads from its own environment.
         let linker = class != Class::Library && linker_reads(name);
-        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str()) || linker) && !linker_only {
+        // B-161: under clippy's driver, every variable clippy reads by its own prefix.
+        let clippy = driver && (name.starts_with("CLIPPY_") || name.starts_with("__CLIPPY_"));
+        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str()) || linker || clippy)
+            && !linker_only
+        {
             keyed.insert(name.clone(), utf8(value)?);
         }
     }
@@ -1811,19 +1879,96 @@ pub(crate) mod tests {
         );
     }
 
-    // covers: B-4
+    // covers: B-4, B-161
     #[test]
     fn clippy_and_other_drivers_pass_through() {
+        let driver = OsString::from("/home/dev/.rustup/toolchains/1.94.0/bin/clippy-driver");
+        // \[ADR 0112\] B-161: clippy's driver before rustc is read, for a metadata-only compile.
         let mut clippy = check();
-        clippy.insert(
-            0,
-            OsString::from("/home/dev/.rustup/toolchains/1.94.0/bin/clippy-driver"),
-        );
-        assert_eq!(why(&clippy), Some(PassedThrough::NotRustc));
+        clippy.insert(0, driver.clone());
+        assert_eq!(why(&clippy), None);
+        // Its linked outputs pass through as before, and so does a driver handed no rustc.
+        let mut linked = proc_macro();
+        linked.insert(0, driver.clone());
+        assert_eq!(why(&linked), Some(PassedThrough::NotRustc));
+        let mut alone = check();
+        alone[0] = driver.clone();
+        assert_eq!(why(&alone), Some(PassedThrough::NotRustc));
+        let mut other = check();
+        other.insert(0, OsString::from("/usr/bin/sccache"));
+        assert_eq!(why(&other), Some(PassedThrough::NotRustc));
         assert_eq!(why(&[]), Some(PassedThrough::NotRustc));
         let renamed = minimal("").replace(RUSTC, "/usr/bin/rustc-1.94");
         assert_eq!(line_why(&renamed), Some(PassedThrough::NotRustc));
         assert_eq!(line_why(&minimal("").replace(RUSTC, "rustc")), None);
+    }
+
+    // covers: B-160
+    #[test]
+    fn a_compile_that_links_nothing_is_a_librarys_check_whatever_its_crate_type() {
+        let metadata_only = |args: Vec<OsString>| -> Vec<OsString> {
+            args.into_iter()
+                .map(|arg| {
+                    let text = arg.to_string_lossy().into_owned();
+                    match text.as_str() {
+                        "--emit=dep-info,link" => OsString::from("--emit=dep-info,metadata"),
+                        _ => arg,
+                    }
+                })
+                .collect()
+        };
+        // `cargo check` of a proc macro's own crate, of a test target and of a program.
+        let inv = handled(&metadata_only(proc_macro()), &Env::default());
+        assert_eq!(inv.class(), Class::Library);
+        let check_of = |line: String| {
+            line.replace("--emit=dep-info,metadata,link", "--emit=dep-info,metadata")
+        };
+        let test = check_of(minimal("--test").replace("--crate-type lib ", ""));
+        let inv = handled(&argv(&test), &Env::default());
+        assert_eq!(inv.class(), Class::Library);
+        assert!(inv.key_args().contains(&"--test".to_string()));
+        let bin = check_of(minimal("").replace("--crate-type lib", "--crate-type bin"));
+        assert_eq!(
+            handled(&argv(&bin), &Env::default()).class(),
+            Class::Library
+        );
+        // What links stays what it was, and a crate type no library's check is stays refused.
+        assert_eq!(
+            handled(&test_binary(), &Env::default()).class(),
+            Class::Program
+        );
+        let cdylib = check_of(minimal("").replace("--crate-type lib", "--crate-type cdylib"));
+        assert_eq!(line_why(&cdylib), Some(PassedThrough::CrateType));
+        // A library's check keys no variable only a linker reads (B-5).
+        let env = Env::from_vars([("LD_RUN_PATH", "/opt/lib"), ("CARGO_PKG_NAME", "x")]);
+        let inv = handled(&argv(&bin), &env);
+        assert!(!inv.key_env().contains_key("LD_RUN_PATH"));
+    }
+
+    // covers: B-161
+    #[test]
+    fn clippys_variables_are_keyed_under_its_driver_alone() {
+        let env = Env::from_vars([
+            ("CLIPPY_DISABLE_DOCS_LINKS", "1"),
+            ("__CLIPPY_INTERNAL_TESTS", "1"),
+        ]);
+        let inv = handled(&check(), &env);
+        assert_eq!(inv.driver(), None);
+        assert!(!inv.key_env().contains_key("CLIPPY_DISABLE_DOCS_LINKS"));
+        let (program, args) = inv.launch(vec![OsString::from("-x")]);
+        assert_eq!(program, OsString::from(RUSTC));
+        assert_eq!(args, [OsString::from("-x")]);
+        let mut clippy = check();
+        clippy.insert(0, OsString::from("/t/bin/clippy-driver"));
+        let inv = handled(&clippy, &env);
+        assert_eq!(inv.driver(), Some("/t/bin/clippy-driver"));
+        assert_eq!(inv.rustc(), RUSTC);
+        assert!(inv.key_env().contains_key("CLIPPY_DISABLE_DOCS_LINKS"));
+        assert!(inv.key_env().contains_key("__CLIPPY_INTERNAL_TESTS"));
+        // The driver starts the compile, rustc's path its first argument, as cargo started it.
+        let (program, args) = inv.launch(vec![OsString::from("-x")]);
+        assert_eq!(program, OsString::from("/t/bin/clippy-driver"));
+        assert_eq!(args, [OsString::from(RUSTC), OsString::from("-x")]);
     }
 
     // covers: B-4
