@@ -137,6 +137,13 @@ const TABLE: &[Entry] = &[
     },
 ];
 
+/// \[ADR 0112\] B-161: the names clippy's driver looks for in each folder, walking up, in the
+/// order it looks (`clippy_config::lookup_conf_file`).
+pub const CLIPPY_CONFIG: [&str; 2] = [".clippy.toml", "clippy.toml"];
+/// The variable that names the folder clippy's driver starts that search from, in place of the
+/// package's.
+pub const CLIPPY_CONF_DIR: &str = "CLIPPY_CONF_DIR";
+
 /// What to add for a compile whose direct `--extern` crates are `externs` (their names, not
 /// paths). Places may overlap (the package can be the workspace); the wrapper takes each
 /// resolved path once.
