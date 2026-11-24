@@ -429,7 +429,11 @@ fn an_autotools_project_reuses_its_objects_and_configure_names_the_compiler_by_n
     });
     let build = ["sh", "-c", "./configure -q && make"];
     let first = w.run("a", &build, &bin);
-    assert_eq!(counts(&first), (0, 4), "{}", text(&first));
+    // Three compiles stored. The link is the compiler's as asked: through the launcher under GNU
+    // Make 4, or past it under GNU Make 3, whose Makefile from configure sets SHELL to /bin/sh
+    // again and starts the line itself (B-232).
+    assert_eq!(counts(&first).0, 0, "{}", text(&first));
+    assert_eq!(stored(&first), 3, "{}", text(&first));
     // A clone dates every file anew, so make in the second worktree runs automake, autoconf and
     // configure again first: their checks compile as asked, none stored or reused.
     let second = w.run("b", &build, &bin);
