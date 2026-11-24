@@ -61,8 +61,8 @@ pub const RECOGNIZED: &[Recognize] = &[
     gradle::recognized,
     dotnet::recognized,
     exunit::recognized,
-    unittest::recognized,
     testprogram::recognized,
+    unittest::recognized,
     ctest::recognized,
     swift::recognized,
 ];
