@@ -3403,6 +3403,31 @@ unsets the variable only when it names hushrun's file, and removes the file. `st
 of these hold. *Rests on:* apps opened after `launchctl setenv` getting the variable, and Xcode
 reading it for the app's builds. *Breaks if:* it doesn't: the spike says.
 
+## C++20 modules and precompiled headers
+
+**B-241 An empty response file.** [ADR 0120] An `@file` argument whose file, from the compile's
+folder, holds nothing but white space adds no argument: B-51 classifies the call without it, and
+B-53 keys it so, as the same compile written without it. CMake 3.28 and later give every scanned
+C++20 compile `@<object>.modmap`, empty with clang for a source that imports and exports no
+module. A `.modmap` that holds anything passes the call through as `modules`; any other response
+file, or one that can't be read, as `response-file`. GCC's scanned compiles pass through as
+`modules` by their `-fmodules-ts` and `-fmodule-mapper=` (B-51). *Rests on:* a response file's
+words being the only thing it adds, and an empty one none. *Breaks if:* a compiler read a response
+file's name for anything else.
+
+**B-242 Precompiled headers.** [ADR 0120] A precompiled header made or used passes through as
+`pch` (B-51), and so does `-Xclang` before a flag B-51 counts as `pch` or `modules`, as that flag
+would: CMake's `target_precompile_headers` with clang passes `-Xclang -include-pch -Xclang
+<header>.pch`. Every other `-Xclang` is `loads-code`. Nothing a precompiled header's user or a
+module's importer compiles is stored.
+
+**B-243 A clang that takes the include graph.** [ADR 0120] A clang compile gets B-55's
+variables only when the compiler's identity says its driver takes them: asked once with the
+identity (B-52), as `/usr/bin/env CC_PRINT_HEADERS_FORMAT=json
+CC_PRINT_HEADERS_FILTERING=direct-per-file CC_PRINT_HEADERS_FILE=/dev/null <compiler> -x <lang>
+-E /dev/null -o /dev/null`, which must exit 0. clang 15 to 18 know the filtering variable but not
+`direct-per-file`, and fail every compile given it; they compile with B-54's fallback, as GCC
+does. The identity's memo is `hushrun.cc-compiler-memo/3`, so that each compiler is asked again.
 ## TypeScript (draft)
 
 > Draft, from [ADR 0106](../adr/0106-typescript-build-blocks.md) (proposed). Built: local reuse

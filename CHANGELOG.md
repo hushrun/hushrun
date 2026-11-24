@@ -26,6 +26,14 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **C++ test programs started directly, test by test** (C-106 to C-108, ADR 0120). `hushrun run
+  NAME -- build/tests/t_calc` with a GoogleTest or Catch2 3 program of a CMake build directory
+  reuses each test that passed on the files the program is built from, leaving tests out through
+  `GTEST_FILTER` or Catch2's `TESTBRIDGE_TEST_ONLY` and reading GoogleTest's XML or Catch2's
+  JUnit file, with COMMAND as written. doctest and Catch2 2 programs are said not to be observed.
+  C++20 sources that import no module are now stored and reused with clang (an empty CMake module
+  map adds nothing, B-241), clang's precompiled header is counted as `pch` (B-242), and clang 15
+  to 18, whose compiles all failed through the launcher, get no include-graph variables (B-243).
 - **`hushrun build pull`** (B-240, [ADR 0143](docs/adr/0143-a-baked-store-pulled-into-a-fixed-sandbox.md)):
   the repository's newest baked store from the backend's registry, checked (and its signature, when
   `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`.
