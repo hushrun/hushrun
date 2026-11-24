@@ -980,7 +980,9 @@ ADR lists what a first build on a real Mac should confirm.
 
 ### .NET
 
-`dotnet build`'s compiles aren't reused yet: hushrun reuses .NET's tests, not its assemblies. With
+`dotnet build`'s compiles aren't reused: since .NET 8 the SDK writes the commit into every
+assembly, so no compile could be reused across commits ([ADR 0118](../adr/0118-dotnet-test.md),
+decision 11). hushrun reuses .NET's tests, not its assemblies. With
 `tests: reuse`, `hushrun run unit -- dotnet test` leaves out each test project that already passed
 on the files it and the projects it references compile, unbuilt, and with `unit: test` the tests
 that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on

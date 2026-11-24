@@ -90,20 +90,39 @@ on the .NET 8 SDK (8.0.134, MSBuild 17.8) with xUnit 2, NUnit 4 and MSTest 3 pro
 10. **Tests one by one** (C-39): with `unit: test` the adapter reports each test and leaves out the
     ones `reuseTests` lists; a test can't be watched (`reads: test` runs as `reads: file`): each test
     read what its project compiles.
-11. **Compiled code isn't reused yet** (no B rule). `dotnet build`'s compiles could be reused
-    between worktrees and CI as C and C++ objects are (ADR 0097): the spike proved that MSBuild's
-    `Csc` task starts a program `CscToolPath` and `CscToolExe` name, from the environment, as
-    `<program> /noconfig @<response file>`, the whole compile in the file. What that takes, and why
-    it isn't in this decision: a `csc/1` launcher that keys a compile by its options and the bytes
-    of each source, reference, analyzer, additional file and resource, and restores the assembly,
-    its reference assembly, PDB and documentation; MSBuild then no longer uses the compiler server
-    (`VBCSCompiler`), so a compile not reused starts a cold compiler, about a second per project;
-    and an assembly's PDB holds each source's absolute path unless `PathMap` or
-    `DeterministicSourcePaths` maps the root, so a block is portable between worktrees only with
-    them, as `-ffile-prefix-map` for C (B-55). MSBuild's project cache plugins
-    (Microsoft.Build.ProjectCache, as microsoft/MSBuildCache uses) would cache whole projects, but
-    load a .NET assembly hushrun would have to build and ship for every SDK. Left to its own
-    decision, with its block kind and the backend's.
+11. **Compiled code isn't reused** (no B rule; B-220 to B-229 stay reserved for it). A spike on the
+    same SDK measured what a `csc/1` kind, a compiler launcher in the shape of C and C++'s
+    (ADR 0097), would get, and found the SDK defeats its main use:
+    - **The way in works, and its cost can be avoided.** MSBuild's `Csc` task starts the program
+      `CscToolPath` and `CscToolExe` name, from the environment, as `<program> /noconfig
+      @<response file>`, the whole compile in the file. It then no longer uses the compiler server
+      (`VBCSCompiler`): a launcher that starts the compiler as given made a warm clean build of
+      five projects take 8 s instead of 1.6 s, about 1.3 s more for each compile not reused. With
+      `/shared` added, the compile goes to the server, and the build took 2.0 s.
+    - **A block leaves its folder only with `ContinuousIntegrationBuild`.** Two git checkouts at
+      different paths, each built with `ContinuousIntegrationBuild=true` (the SDK then maps the
+      repository's root, from SourceLink), gave byte-identical assemblies and PDBs. Without it, the
+      assembly holds its PDB's absolute path, and a block would be tied to its folder (B-56), as on
+      a CI runner, whose path is the same for every job.
+    - **Every commit changes every compile.** Since .NET 8 the SDK writes the commit into each
+      assembly: `IncludeSourceRevisionInInformationalVersion`, on by default in a git checkout,
+      makes the generated `AssemblyInfo.cs` hold `AssemblyInformationalVersion("1.0.0+<commit>")`,
+      and SourceLink's JSON, another input of the compile, names the commit too. A key of the
+      bytes the compiler reads, the only sound one, so changes for every project at every commit,
+      and a block is never reused across commits: not by a branch's first CI job from `main`'s,
+      nor by a worktree on another commit. What would still be reused is the same commit built
+      again: in another worktree or clone, a re-run CI job, a return to a commit, and the
+      repositories that turn the stamp and SourceLink off.
+    - **hushrun doesn't change what a build makes.** Leaving the commit out of the key, or
+      setting the property for COMMAND, would restore blocks whose version string and source
+      links name another commit than the one built, or change every assembly's version string.
+    - MSBuild's project cache plugins (`Microsoft.Build.ProjectCache`, as microsoft/MSBuildCache
+      uses) would cache whole projects, but load a .NET assembly that hushrun would have to build
+      and ship for every SDK, and meet the same stamp.
+
+    Reuse of the same commit alone doesn't justify a launcher, key and store kind of C and C++'s
+    size. Test projects are still reused (decisions 1 to 10), and an unchanged test project isn't
+    even built.
 
 ## Consequences
 
@@ -120,6 +139,7 @@ on the .NET 8 SDK (8.0.134, MSBuild 17.8) with xUnit 2, NUnit 4 and MSTest 3 pro
   whenever their project does.
 - Microsoft.Testing.Platform projects, `dotnet test` of an assembly and .NET 10's Microsoft.Testing
   .Platform mode run as COMMAND says, unobserved, and the run says so.
+- `dotnet build` compiles as before, inside a run or not: no compile is reused (decision 11).
 
 ## Alternatives considered
 
