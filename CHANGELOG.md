@@ -20,6 +20,13 @@ project's new branch starts from what main's CI already ran.
   out whole. `hushrun init` takes `allTests`, `jvmTest`, `jsTest`, `testDebugUnitTest` and `testReleaseUnitTest` as
   test checks. The Gradle cache's line of tasks that stay on the machine names them, such as
   kapt's `kaptGenerateStubsKotlin`, whose stubs hold their sources' paths.
+- **`mix test` reuses ExUnit's test files** (C-114 to C-117, ADR 0122). With `tests` on, an
+  Elixir project's `mix test`, an umbrella's included, loads hushrun's ExUnit adapter through
+  `ERL_LIBS` and `ELIXIR_ERL_OPTIONS`, with nothing of the repository changed: each test file read
+  what its code references to the end (Elixir's lexical tracker and Mix's compile manifests), what
+  its own processes called (call counters by process), and the project's configuration, and the
+  test files that already passed on those files are left out through ExUnit's own `exclude`
+  filter. By test file only; `mix compile` shares nothing yet.
 - **TypeScript compiles reused and shared, kind `tsc/1`** (B-100 to B-109, ADR 0106, a draft):
   inside `hushrun run`, in a checkout with a `package.json`, `NODE_OPTIONS` gets a hook
   (`--require`, added to what it had) and `HUSHRUN_TSC` the helper `hushrun-tsc`. A `tsc`,
