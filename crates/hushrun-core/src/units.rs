@@ -520,6 +520,8 @@ pub struct FileWatch<'a> {
     pub imports: &'a BTreeMap<String, BTreeSet<String>>,
     /// \[C-40\] The files each file re-exports from (`export * from`, `export { x } from`): a test
     /// that reads a file reads what it re-exports, followed to the end through re-exports only.
+    /// \[ADR 0108\] And the files a module was compiled from without their code running: a Vue
+    /// component's imported types, its blocks' `src=` files.
     pub reexports: &'a BTreeMap<String, BTreeSet<String>>,
     /// The files each module opened from its own code, read once and perhaps kept (RFC 0003 §3.3).
     pub opens: &'a BTreeMap<String, BTreeSet<String>>,

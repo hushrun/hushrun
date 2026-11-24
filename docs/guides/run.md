@@ -1073,6 +1073,33 @@ This is new and its rules are a draft ([ADR 0106](../adr/0106-typescript-build-b
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
 
+### Vue
+
+Vue's compiles get no build blocks: `vue-tsc --noEmit` is a check that a whole run already skips
+on code that passed, and `vite build` compiles each component inside one bundler process, with no
+per-file compile or cache protocol for hushrun to stand in for. What hushrun does for a Vue project
+is its tests: with `tests` on, a component (`.vue`) is a source like a `.ts` file, under Vitest
+(`@vitejs/plugin-vue`) and Jest (`@vue/vue3-jest`), so a change to one component runs only the
+test files that mounted it.
+
+```text
+$ hushrun run unit -- vitest run        # after editing src/Badge.vue
+hushrun: unit: 1 of 40 test files run; 39 already passed on the files they read
+```
+
+- **What a component is made of** counts as read with it: its `src=` blocks, and, under Vitest,
+  the files the types of `defineProps<Props>()` and the other macros came from, whose code never
+  runs. A type change that breaks a component runs its tests.
+- **`jsdom` and `happy-dom`** environments work: hushrun lets Vite serve its setup file.
+- **Rest.** A CSS, HTML or image file a component names, and `tsconfig.json`, run every test file
+  when they change. Under Jest, a run whose cache is cold with ts-jest or `lang="ts"` components
+  reads everything below the directories `tsconfig.json` includes, so its test files reuse only
+  after a run with Jest's cache warm.
+- **Not followed.** Nuxt's `@nuxt/test-utils` environment makes modules from no file: its test
+  files always run. `@vitejs/plugin-vue-jsx` with `resolveType` reads types hushrun doesn't see.
+
+The rules are C-58 to C-61 ([ADR 0108](../adr/0108-vue-components.md)).
+
 ### Kotlin
 
 Kotlin's tests and builds go through Gradle, with the same line in the settings file. Beside

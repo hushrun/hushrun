@@ -219,6 +219,10 @@ try {
 function wholeFile() {
   const reads = new Set(state.reads);
   for (const id of globalThis.__hushrun_vitest_seen || []) reads.add(String(id));
+  // [ADR 0108] What a component's compile read besides itself, for each component that ran.
+  for (const files of Object.values(globalThis.__hushrun_vitest_compiled || {})) {
+    if (Array.isArray(files)) for (const f of files) reads.add(String(f));
+  }
   const require = module.createRequire(import.meta.url);
   for (const id of Object.keys(require.cache || {})) reads.add(id);
   return {
@@ -872,6 +876,16 @@ function testsFacts(F) {
       const from = p && p !== SELF ? at(p) : null;
       if (from === null || !Array.isArray(targets)) continue;
       const to = many(targets.map(idPath).filter(Boolean)).filter((i) => i !== from);
+      if (to.length) facts.reexports[String(from)] = to;
+    }
+    // [ADR 0108] A component's compile read its imported types, whose code never runs: a test that
+    // reads the component reads them, told as the files the component re-exports from are.
+    for (const [id, targets] of Object.entries(globalThis.__hushrun_vitest_compiled || {})) {
+      const p = idPath(id);
+      const from = p && p !== SELF ? at(p) : null;
+      if (from === null || !Array.isArray(targets)) continue;
+      const to = [...new Set([...(facts.reexports[String(from)] || []),
+        ...many(targets.map(idPath).filter(Boolean))])].filter((i) => i !== from).sort((a, b) => a - b);
       if (to.length) facts.reexports[String(from)] = to;
     }
     facts.opens = {};

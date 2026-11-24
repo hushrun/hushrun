@@ -168,6 +168,14 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # Vue: Vitest with @vitejs/plugin-vue and Jest with @vue/vue3-jest, for the tests of Vue's
+      # components (ADR 0108). --legacy-peer-deps: Vitest's optional peers trip npm's resolver.
+      - name: Install Vue's test tools for the component tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/vue" --no-audit --no-fund --ignore-scripts --legacy-peer-deps vitest@4.1.12 vue@3.5.46 @vitejs/plugin-vue@6.0.11 @vue/test-utils@2.6.0 jsdom@26.1.0 typescript@5.9.3
+          npm install --prefix "$RUNNER_TEMP/vue-jest" --no-audit --no-fund --ignore-scripts --legacy-peer-deps jest@29.7.0 jest-environment-jsdom@29.7.0 @vue/vue3-jest@29.2.6 babel-jest@29.7.0 @babel/core@7.29.13 @babel/preset-env@7.29.14 vue@3.5.46 @vue/test-utils@2.6.0 typescript@5.9.3
+          echo "HUSHRUN_TEST_VUE=$RUNNER_TEMP/vue/node_modules" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_VUE_JEST=$RUNNER_TEMP/vue-jest/node_modules" >> "$GITHUB_ENV"
       # JavaScript: Node 22 and 24, pinned, from nodejs.org beside the Node 20 above, and Mocha 10
       # and 11, for the tests of the adapters for Node's test runner and Mocha (ADR 0107).
       - name: Install Node 22 and 24 and Mocha for the test-file tests
@@ -339,6 +347,14 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
           echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
+      # Vue: Vitest with @vitejs/plugin-vue and Jest with @vue/vue3-jest, for the tests of Vue's
+      # components (ADR 0108). --legacy-peer-deps: Vitest's optional peers trip npm's resolver.
+      - name: Install Vue's test tools for the component tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/vue" --no-audit --no-fund --ignore-scripts --legacy-peer-deps vitest@4.1.12 vue@3.5.46 @vitejs/plugin-vue@6.0.11 @vue/test-utils@2.6.0 jsdom@26.1.0 typescript@5.9.3
+          npm install --prefix "$RUNNER_TEMP/vue-jest" --no-audit --no-fund --ignore-scripts --legacy-peer-deps jest@29.7.0 jest-environment-jsdom@29.7.0 @vue/vue3-jest@29.2.6 babel-jest@29.7.0 @babel/core@7.29.13 @babel/preset-env@7.29.14 vue@3.5.46 @vue/test-utils@2.6.0 typescript@5.9.3
+          echo "HUSHRUN_TEST_VUE=$RUNNER_TEMP/vue/node_modules" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_VUE_JEST=$RUNNER_TEMP/vue-jest/node_modules" >> "$GITHUB_ENV"
       # JavaScript: Node 22 and 24, pinned, from nodejs.org beside the Node 20 above, and Mocha 10
       # and 11, for the tests of the adapters for Node's test runner and Mocha (ADR 0107).
       - name: Install Node 22 and 24 and Mocha for the test-file tests
