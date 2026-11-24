@@ -12,6 +12,14 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Node's test runner and Mocha reuse test files and tests** (C-54 to C-57, ADR 0107): with
+  `tests: reuse`, `node --test` (Node 22.15 or later) and Mocha 10 and 11 skip the test files, and
+  with `unit: test` the single tests, that already passed on the files they read, loaded through
+  `NODE_OPTIONS` with no file of the repository changed. Node's runner is watched per test file's
+  process and chooses its files by its own patterns; Mocha loads every spec file as usual and has
+  the reused tests taken out of their suites before any hook runs, a spec file with a root hook
+  being read by all. `--watch`, `--test-isolation=none`, Mocha's `--parallel` and `--dry-run` run
+  as written and say why. Plain JavaScript has no compile step to reuse: no build-block kind.
 - **`mix test` reuses ExUnit's test files** (C-114 to C-117, ADR 0122). With `tests` on, an
   Elixir project's `mix test`, an umbrella's included, loads hushrun's ExUnit adapter through
   `ERL_LIBS` and `ELIXIR_ERL_OPTIONS`, with nothing of the repository changed: each test file read

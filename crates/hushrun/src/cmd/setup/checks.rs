@@ -530,6 +530,7 @@ pub const ROWS: &[Row] = &[
     // package.json init doesn't edit: one in a subdirectory of the repository.
     check("JavaScript", "vitest", &["run"], "test", "vitest run"),
     check("JavaScript", "jest", &[], "test", "jest --ci"),
+    check("JavaScript", "mocha", &[], "test", "mocha"),
     lint(check("JavaScript", "eslint", &[], "lint", "eslint .")),
     lint(check("JavaScript", "tsc", &[], "typecheck", "tsc --noEmit")),
     check(
