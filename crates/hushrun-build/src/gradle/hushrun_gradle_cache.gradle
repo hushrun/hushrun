@@ -1,0 +1,25 @@
+// [B-77] hushrun's remote build cache for Gradle. When HUSHRUN_GRADLE_CACHE names one (hushrun
+// run sets it, with HUSHRUN_GRADLE_CACHE_TOKEN, in a run that shares), the build gets it as its
+// remote cache once the settings file is evaluated, unless the build set a remote of its own,
+// which stays as it is. Both values are the same from run to run, so the configuration cache
+// holds. Gradle's own local cache is untouched, and the build cache is used only where the build
+// turns it on (org.gradle.caching=true, or --build-cache).
+settings.gradle.settingsEvaluated { s ->
+    try {
+        String hushrunCache = System.getenv("HUSHRUN_GRADLE_CACHE")
+        if (hushrunCache == null || hushrunCache.trim().isEmpty()) return
+        if (s.buildCache.remote != null) return
+        String hushrunToken = System.getenv("HUSHRUN_GRADLE_CACHE_TOKEN") ?: ""
+        s.buildCache.remote(org.gradle.caching.http.HttpBuildCache) {
+            url = hushrunCache.trim()
+            allowInsecureProtocol = true
+            push = true
+            credentials {
+                username = "hushrun"
+                password = hushrunToken
+            }
+        }
+    } catch (Throwable ignored) {
+        // A failure here leaves the build as it would be without hushrun.
+    }
+}

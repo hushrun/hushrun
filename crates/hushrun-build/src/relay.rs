@@ -132,6 +132,78 @@ pub enum Request {
     /// The launcher's [`Request::Report`]: answered once the block's record is read, so the
     /// launcher may then discard it.
     CcReport { key: Digest, problem: Problem },
+    /// The Xcode service's [`Request::Fetch`] (B-90): the block of the value under `key`, of
+    /// kind `xcode/1`, whose first key is itself. The relay looks it up only when the check's
+    /// `xcode/1` manifest for `platform` (the Xcode build) names it: Xcode asks for every
+    /// compile's key, and most of them are ones no server holds.
+    XcodeFetch {
+        key: Digest,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The service's [`Request::Vouch`]: whether a server still serves the downloaded block
+    /// `key` with these `outputs`.
+    XcodeVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// The service's [`Request::Built`]: a value Xcode put in this run, stored as a block under
+    /// `key` that may leave the machine (B-82).
+    XcodeBuilt { key: Digest, cost_ms: u64 },
+    /// The service's [`Request::Report`]: answered once the block's record is read, so the
+    /// service may then discard it.
+    XcodeReport { key: Digest, problem: Problem },
+    /// Gradle's cache's [`Request::Fetch`] (B-80): the entry under `key`, of kind `gradle/1`,
+    /// whose first key is itself. Looked up only when the check's `gradle/1` manifest names it,
+    /// as Go's are: Gradle asks about every task its own cache misses.
+    GradleFetch {
+        key: Digest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// Gradle's cache's [`Request::Vouch`].
+    GradleVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// Gradle's cache's [`Request::Built`] (B-81): an entry this run's Gradle stored under
+    /// `key`, which may leave the machine (B-79).
+    GradleBuilt { key: Digest, cost_ms: u64 },
+    /// Gradle's cache's [`Request::Report`].
+    GradleReport { key: Digest, problem: Problem },
+    /// The TypeScript helper's [`Request::CcHints`] (B-108): the hints of first key `step`, a
+    /// compile for Node's platform `platform`, looked up only when the check's `tsc/1` manifest
+    /// for it names the first key.
+    TscHints {
+        step: Digest,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The helper's [`Request::CcFetch`]: one of `keys`, of a first key the check's `tsc/1`
+    /// manifest for `platform` names.
+    TscFetch {
+        step: Digest,
+        keys: Vec<Digest>,
+        platform: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The helper's [`Request::Vouch`].
+    TscVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// The helper's [`Request::Built`]: a compile this run stored under `key`, which may leave
+    /// the machine.
+    TscBuilt {
+        key: Digest,
+        step: Digest,
+        cost_ms: u64,
+    },
+    /// The helper's [`Request::Report`].
+    TscReport { key: Digest, problem: Problem },
 }
 
 impl Request {
@@ -145,6 +217,9 @@ impl Request {
                 | Request::GoBuilt { .. }
                 | Request::GoReport { .. }
                 | Request::CcBuilt { .. }
+                | Request::XcodeBuilt { .. }
+                | Request::GradleBuilt { .. }
+                | Request::TscBuilt { .. }
         )
     }
 }

@@ -56,6 +56,7 @@ pub mod decide;
 pub mod depinfo;
 pub mod description;
 pub mod go;
+pub mod gradle;
 pub mod inputs;
 pub mod invocation;
 pub mod key;
@@ -86,8 +87,10 @@ pub mod share;
 pub mod sidecar;
 pub mod store;
 pub mod sweep;
+pub mod tsc;
 pub mod unit;
 pub mod wrapper;
+pub mod xcode;
 
 #[cfg(test)]
 mod flow_tests;

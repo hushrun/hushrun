@@ -6,7 +6,9 @@
 > that runs: a crate the compiler already built from the same inputs is not compiled again, in
 > this worktree or in another one on the same machine. For Go (B-39 to B-47), a package archive
 > another machine compiled is reused through Go's own cache program, beside Go's own cache. For C
-> and C++ (B-50 to B-62, a draft), an object is reused through CMake's compiler launcher. Nothing here changes what a check's result
+> and C++ (B-50 to B-62, a draft), an object is reused through CMake's compiler launcher; for
+> TypeScript (B-100 to B-109, a draft), what `tsc` wrote and printed, through a hook in its Node
+> process. Nothing here changes what a check's result
 > is. Nothing leaves the machine unless the org shares build blocks through its backend and the
 > person lets this machine take part (B-25 to B-35): then a portable block (B-24) goes up sealed
 > with its own key, and another machine reuses it only after the same checks as a block of its own.
@@ -2710,9 +2712,9 @@ puts under `Subkey(action, "stdout")` just before the archive, was empty (`print
 prints a compile's output again only from its own cache); and the bytes say so
 (`archive::portable`): an `ar` archive whose first member is `__.PKGDEF` and every other member a
 Go object, `_go_.o` or an object the assembler made for a standard library package (flags
-`ObjFlagFromAssembly` and `ObjFlagStd`, read after the object's text header, whose end `\n!\n` is
+`ObjFlagFromAssembly` and `ObjFlagStd`, [ADR 0111] or before Go 1.27 B-150's mark, read after the object's text header, whose end `\n!\n` is
 looked for over the whole member: the runtime's header on macOS runs past 4096 bytes): a cgo object or a `.syso` is `native`, assembly of any
-other package `assembly` (F1: its includes are outside Go's id; Go 1.24's assembler sets `ObjFlagStd` on no object, so there the standard library's assembly is `assembly` too, and stays: Go 1.25 and later mark it); its build ID, read where Go's
+other package `assembly` (F1: its includes are outside Go's id); its build ID, read where Go's
 `buildid.ReadFile` reads it, is `<action>/<content>` with `<action>` Go's `HashToString` of the
 action id it is put under (`build-id`); and `<content>` is the SHA-256 of the bytes with every
 occurrence of the build ID zeroed, as Go's `FindAndHash` computes it (`content-id`, F2). A
@@ -2776,7 +2778,9 @@ counted and not listed. A Go fetch is looked up only when that manifest names it
 about every entry its cache misses, most of them local ones no server holds. The first Go fetch
 of the check starts the prefetch of what the manifest names that the store lacks (a machine
 whose `go` finds everything in its own cache asks nothing and downloads nothing); a fetch that
-comes while that lookup runs waits for it, at most a second or half its local cost. *Rests on:*
+comes while that lookup runs waits for it, at most a second or half its local cost; [ADR 0111] so
+does one that comes while the check's `open` or its `go/1` `open` is still under way, within the
+same bound, which it then shares with the lookup (Go asks for its first packages as COMMAND starts). *Rests on:*
 the server keeping manifests per repository, check, platform and kind, and taking any kind that
 `is_kind` reads (no server change). *Breaks if:* a check's manifest names other packages than
 its next run asks for: they compile here, a cost and never a wrong block.
@@ -2795,6 +2799,20 @@ the same from Go 1.10, and leaves hushrun's store out: nothing is served from it
 One with a version B-39 names serves the store under that toolchain's own identity (B-43). One
 with no usable `GOCACHE` answers every `get` as a miss, keeps every body in its own folder until
 `close`, and fails nothing. *Rests on:* nothing.
+
+**B-150 The standard library's assembly before Go 1.27.** [ADR 0111] An object the assembler made
+(`ObjFlagFromAssembly`) is a standard library package's, for B-42, when its own header says
+`ObjFlagStd`, or when the archive's `_go_.o`, the compiler's object of the same package, says
+`ObjFlagStd` and not `ObjFlagFromAssembly`. The compiler marks its object so under `-std`, which
+the `go` command gives the compile of a standard package, and of no other, in every version B-39
+names; `-std` in `-gcflags` is B-42's `altered`. Go's assembler takes `-std`, and marks its own
+objects, only from Go 1.27: with Go 1.24 to 1.26 `runtime`, `internal/bytealg` and every other
+standard package with assembly were `assembly` and never left the machine (8 of the 24 packages
+of a small program on amd64). *Rests on:* `cmd/go` adding `-std` to a compile's flags exactly when the package is
+standard (`gc.go`, `p.Standard`), and `cmd/compile` setting `ObjFlagStd` from it (read in Go
+1.24.7's and 1.27.4's source; the two-machine tests pass on 1.24.7, 1.25.0, 1.26.0 and 1.27.4).
+*Breaks if:* a Go release gives `-std` to a package outside the standard library: B-43's identity
+hashes only the toolchain's headers, and such a package's assembly could include others.
 
 ## C and C++ (draft)
 
@@ -3155,3 +3173,392 @@ run, `HUSHRUN_CC` set by hand) replaces itself with the compiler and the argumen
 reads nothing else. *Rests on:* nothing.
 
 **B-240 `hushrun build pull`.** [ADR 0143] It puts the repository's newest baked store where runs read one. The image is `--image`, else `<registry host of the backend's origin>/<org>/<image name of the repository>` (B-70), and the tag `--tag`, else `hushrun-<platform>-latest` for `--platform` or this machine's (B-66). The credential, as Basic `hushrun:<token>`: `HUSHRUN_REGISTRY_TOKEN`, else the backend's token here when the image is on that backend's registry, else none (a public repository's image). It reads the manifest and each layer, each checked against its digest and at most 8 GiB, and unpacks from them only entries under `hushrun/`, regular files and folders, into a folder beside the destination; an entry outside the folder, a link or a device stops it. That folder must be a baked store (B-63, `baked.json` read, names and bytes checked), and when `hushrun.yaml` names signers of baked stores, its signature must verify (B-67). Only then does it replace the destination, `--to`, else `HUSHRUN_BUILD_LOWER`, else `/hushrun`, by renames: what was there stays when the swap fails. It says `hushrun: pulled <image>:<tag> (<digest>) into <folder>: <signed by … | why a run won't trust it unasked>`. A tag that names nothing, a store that doesn't check, or a registry that refuses exits 1, and replaces nothing. A run still decides what it trusts as it begins (B-63, B-64).
+
+## Gradle (draft)
+
+> Draft, from [ADR 0104](../adr/0104-gradle-build-blocks.md) (proposed). Built: sharing through
+> the relay. Not built: Gradle blocks in baked stores (B-63) and in `hushrun build fetch` (B-36).
+
+Gradle keys each cacheable task by its own **build cache key** (the hash of the task's
+implementation, its inputs by content and its paths as the task normalizes them), keeps entries in
+a local cache of its own, and on a miss asks a **remote** cache over HTTP: `GET {url}{key}`, and
+`PUT {url}{key}` once it has run the task. hushrun is that remote in a run that shares: entries
+are blocks of kind `gradle/1` in the same store, through the same relay, records and outbox as the
+other kinds (B-13, B-14, B-26 to B-34). Gradle's local cache stays Gradle's. hushrun computes none
+of the key, and Gradle doesn't ask a task's outputs to be the same from one execution to the next:
+every check below is the only guard there is, and none of them proves an entry's bytes are what
+its inputs make.
+
+**B-77 Hushrun's cache for Gradle.** In a run that has a relay (B-26), `hushrun run` serves a
+cache to Gradle when the folder COMMAND runs in, or one above it up to the checkout's (the nearest
+folder holding `.git`), holds `settings.gradle` or `settings.gradle.kts`, and that file holds the
+text `HUSHRUN_GRADLE` (ADR 0087's line); a settings file without it is said once, `build: Gradle's
+tasks aren't shared in this run: <file> doesn't load hushrun's script; add `<line>` after any
+pluginManagement {} and plugins {} block`, and nothing more is done. Windows and an isolated check
+get nothing. The cache listens on `127.0.0.1` at the store's port (`<store>/gradle/endpoint.json`,
+mode 0600: a port from 20000 to 31999 and 64 hex characters of token, made once from
+`/dev/urandom`), else, when another process holds that port, at one the system picks, with the
+line `build: gradle: another run is using this store's Gradle cache port, so this run's Gradle
+can't reuse its configuration cache`. It answers `GET`, `HEAD` and `PUT` of `/cache/<key>` with
+Basic authentication `hushrun:<token>` (compared in constant time; anything else is 401), a key of
+32 to 128 lowercase hex characters (else 404), HTTP/1.1 with `Content-Length` or chunked bodies,
+`Expect: 100-continue` and kept connections, 64 at once, idle ones closed after 120 seconds, and a
+peer that isn't the loopback refused. COMMAND gets `HUSHRUN_GRADLE_CACHE`
+(`http://127.0.0.1:<port>/cache/`) and `HUSHRUN_GRADLE_CACHE_TOKEN`, and `HUSHRUN_GRADLE` naming
+`<store>/gradle/cache-<16 hex>.gradle` unless the run's environment sets it; ADR 0087's test script,
+which a check that observes tests sets instead, ends with the same text. That script, once the
+settings file is evaluated, gives the build an `HttpBuildCache` remote at that URL with push on
+and `allowInsecureProtocol`, unless the build set a remote of its own, which stays; any failure
+leaves the build as it was. The cache is used only where the build turns Gradle's build cache on;
+where neither the user's `gradle.properties` (Gradle's user home) nor the build's says
+`org.gradle.caching=true`, the run says `build: gradle: the build cache is off for this build, so
+Gradle asks hushrun's cache nothing: set `org.gradle.caching=true` in gradle.properties, or pass
+--build-cache`. *Rests on:* Gradle recording each variable a settings script reads as an input of
+its configuration cache, so a URL and a token that are the same from run to run keep it; a remote
+set in `settingsEvaluated` surviving a reused configuration cache (both seen on Gradle 8.14.3);
+`--offline` turning the remote off, which is Gradle's.
+
+**B-78 Keys and the canonical entry.** A block's key is the SHA-256 of `hushrun.gradle-key/v1\n`
+followed by Gradle's key, and its first key is itself. Its one file, `entry.tar`, is the entry in
+its **canonical form**: a ustar tar of the entry's members in Gradle's order, each with its name,
+type (a file or a folder), permission bits and bytes, owner, group and dates 0, a name over 100
+bytes in a PAX header (`path`), ended by two zero blocks; `METADATA`'s `key=value` lines sorted,
+comments dropped, `buildInvocationId=hushrunhushrunhushrunhushr`, `creationTime=0`,
+`executionTime=0`. Its record holds Gradle's key (`gradle_key`), the task (`task`, unescaped), the
+Gradle version (`gradle`) and the task's execution time (`rustc_ms`, from `METADATA`). An entry
+Gradle sends is refused unless it is one gzip member (no trailing bytes, its CRC-32 and length
+right), a tar whose headers' checksums hold, every member a file or a folder (PAX extended and
+global headers and GNU long names read past), every name relative, its parts neither empty, `.`
+nor `..`, with no backslash or NUL, exactly one `METADATA`, a file, whose `buildCacheKey` is the key
+it was sent under, and at most 1 GiB unpacked; a body over 512 MiB is read and dropped. A block is
+served only when its record names `gradle/1` and the key asked, its one file's size and SHA-256 are
+its record's, and its bytes are read as an entry of that key whose canonical form is those bytes;
+Gradle is sent them as a gzip stream of stored deflate blocks. *Rests on:* Gradle reading an
+entry's `METADATA` for its origin alone and dating each file it unpacks with the time it writes it
+(seen on Gradle 8.14.3).
+
+**B-79 What may leave.** An entry Gradle stores whose members' names or bytes (`METADATA` aside)
+hold, as bytes anywhere, the checkout's folder (as given and resolved), Gradle's user home
+(`GRADLE_USER_HOME`, else `$HOME/.gradle`), the store's folder or the home folder, tried in that
+order, is not stored: it stays in Gradle's own cache, and its line says which (`checkout`,
+`gradle-home`, `store`, `home`). A folder of one character is never searched for. *Rests on:* the
+same search as B-10's; a value the task read and wrote in another form is in the bytes and not
+found, as B-24 says of every kind.
+
+**B-80 A `GET`.** For a key whose block is suspended (B-15): 404. A block in the store is served
+as B-78 says once `Current::may_reuse` allows it (B-34), the question to the relay being
+`gradle_vouch`. Else, in a run whose mode is `on`, the cache asks the relay `gradle_fetch`, which
+answers only while sharing is on and the check's `gradle/1` manifest (B-82) names the key, as a Go
+fetch is answered (B-45): the first such question starts the manifest's prefetch, and one asked
+while it looks up waits for it at most a second, and at most half what this machine's own last
+execution took; then the download is waited for within half the cost (B-26). Every other answer is
+404, and Gradle runs the task. A download that fails B-78's checks is reported `rejected` to the
+scope it came from, its key suspended for the kept days, and removed. A served block's use is dated
+(B-14), and a download's first reuse here is recorded (B-32). A relay that doesn't answer once is
+asked nothing more by the cache for the rest of the run. A `HEAD` is 200 when the store holds a block of the key that
+isn't suspended, else 404, with no body: it downloads nothing and logs nothing.
+
+**B-81 A `PUT`.** Answered 200 whatever becomes of the entry. A canonical entry B-79 doesn't keep
+here is stored as a block built by this run (B-32) and told to the relay (`gradle_built`, with the
+task's execution time as its cost), which uploads it where the run may write, as for every kind
+(B-29): what the server's scopes let the caller write, a CI job's own scope or `protected/<id>`,
+a person's machine its own or `team`. Not stored: a key suspended, a store below B-22's floor. A
+block there already that was only downloaded gives way to this execution, which is then told to
+the relay; one built here stays. Gradle's entries are never audited (B-16) and never compared in
+shared `observe` (B-33): a difference is no sign of a forged entry when a task may make other bytes
+each time (a test report's dates, a jar's file dates); it is logged (`differed`) and nothing else.
+
+**B-82 Manifest and close.** A check whose run serves the cache asks `open` of kind `gradle/1` and
+platform `jvm` beside its own `open`, for its manifest alone, as a Go command's does (B-45), and,
+when it logged a Gradle line, sends `close` of kind `gradle/1`, platform `jvm`, under a run that is
+the SHA-256 of the check's run followed by `gradle/1\n`, with a manifest of its entries' pairs in
+the order logged, leaving out those B-79 kept here and those whose upload hasn't gone. Gradle's
+blocks are in no saved manifest, and `hushrun build bake` leaves them out. *Rests on:* the server
+taking any kind and keeping manifests per kind (no server change); Gradle's keys holding the
+operating system wherever a task's outputs depend on it, so one platform serves every machine.
+
+**B-83 What a run says (Gradle).** The cache's lines go into the run's log beside the other
+kinds', the task by Gradle's name in `crate_name`, and the summary counts them apart: `build:
+gradle: N tasks: X from hushrun's cache (Y from the shared store), Z run and stored`, with `saving
+about T` from the served tasks' execution times; and, when some stay, `build: gradle: N tasks run
+here stay on this machine (…)`, by B-79's reason. Gradle's own output is unchanged.
+
+**B-210 Which tasks stay (Gradle).** [ADR 0117] B-83's line of entries that stay ends with the
+tasks they are of, by Gradle's name, each once, in the order first seen, three at most, then `and
+<n> more`: `build: gradle: 1 task run here stays on this machine (1: its outputs hold the
+checkout's folder): :kapt:kaptGenerateStubsKotlin`. hushrun changes no byte of an entry to let it
+leave.
+
+## Xcode (draft)
+
+> Draft, from [ADR 0105](../adr/0105-xcode-compilation-cache.md) (proposed). Built, and not yet
+> run against a real Xcode: the ADR's Mac spike decides what stays.
+
+From Xcode 26, Swift and Clang key each compile by its content and ask a **compilation-cache
+service** for its result before compiling, over gRPC on the Unix socket
+`COMPILATION_CACHE_REMOTE_SERVICE_PATH` names. hushrun's service keeps what Xcode puts in a cache
+of its own on the machine, and shares a **value** (what Xcode put under one key) with every object
+it reaches as a block of kind `xcode/1`, through the same store, relay, records and outbox as the
+other kinds (B-13, B-14, B-26 to B-34). Xcode checks nothing it is served: every check below is the
+only guard there is.
+
+**B-84 The entry.** When the mode is not `off`, `hushrun run` starts the service for COMMAND when
+all of these hold: macOS; `HUSHRUN_BUILD_XCODE` isn't `0`, `off`, `false` or `no`; the checkout's
+root or the folder COMMAND runs in holds, within four folders (none hidden, none of `node_modules`,
+`Pods`, `Carthage`, `DerivedData`, `build`, `target`, `vendor`), a `.xcodeproj`, a `.xcworkspace`
+or a `Package.swift`; and `xcodebuild -version`, asked once within 10 seconds under COMMAND's
+`DEVELOPER_DIR`, names a major version hushrun knows (27). Another major is said in one line;
+every other reason for none is silent. The service listens on `xcode.sock` in the session's folder
+(or a private folder under `XDG_RUNTIME_DIR`, `TMPDIR` or `/tmp` when that path is too long), and
+COMMAND gets `XCODE_XCCONFIG_FILE` naming `xcode.xcconfig` beside it: `#include?` of the file the
+person's `XCODE_XCCONFIG_FILE` named, unless hushrun wrote it; `COMPILATION_CACHE_ENABLE_CACHING`,
+`COMPILATION_CACHE_ENABLE_PLUGIN` (`YES`) and `COMPILATION_CACHE_REMOTE_SERVICE_PATH` (the socket);
+`SWIFT_ENABLE_PREFIX_MAPPING`, `CLANG_ENABLE_PREFIX_MAPPING`, `SWIFT_ENABLE_PROJECT_PREFIX_MAPPING`,
+`CLANG_ENABLE_PROJECT_PREFIX_MAPPING` (`YES`); `SWIFT_OTHER_PREFIX_MAPPINGS` and
+`CLANG_OTHER_PREFIX_MAPPINGS` mapping `$(PROJECT_TEMP_DIR)` to `/^derived`, `$(BUILT_PRODUCTS_DIR)`
+to `/^built`, `$(OBJROOT)/../..` to `/^dd` and the checkout's root to `/^workspace`; and an empty
+`CLANG_MODULES_BUILD_SESSION_FILE`. A root with white space or `=` in its path gets no maps, and
+one line says its keys are its own. The service stops when the run's session ends, before its
+relay ends the check. *Rests on:* Xcode reading `XCODE_XCCONFIG_FILE` from the environment and
+applying it to every target of the build, a package's included; Xcode 27 mapping those prefixes
+before it computes a key (x8, verified against Xcode 27). *Breaks if:* Xcode stops reading the
+variable, or a new major changes the protocol or the settings: hushrun names the majors it knows.
+
+**B-85 The protocol.** The service answers `compilation_cache_service.cas.v1.CASDBService`
+(`Get`, `Put`, `Load`, `Save`) and `compilation_cache_service.keyvalue.v1.KeyValueDB` (`GetValue`,
+`PutValue`) as Apple's LLVM defines them, one HTTP/2 stream a call, one uncompressed message each
+way, `grpc-status` 0 in the trailers. A method it doesn't have and a compressed message are
+`UNIMPLEMENTED`, a message it can't read `INVALID_ARGUMENT`, one over 2 GiB `RESOURCE_EXHAUSTED`:
+the plugin takes each as a miss or a failed put, and Xcode compiles. An object a `Get` or `Load`
+asked for on disk (`write_to_disk`) is handed as a file of its own when it holds 1 MiB or more,
+since gRPC clients refuse messages over 4 MiB by default; a `Put` or `Save` may name a file, read
+up to 2 GiB. A `Put` whose reference is no id of 32 bytes, or names an object the cache doesn't
+hold, is refused. *Rests on:* the plugin's taking a reply's file, and falling back to a compile on
+any error.
+
+**B-86 The cache.** The service keeps every object and value Xcode puts in the store's `xcode/`
+folder: an object at `objects/<2 hex>/<id>`, as `hushrun.xcode-object-file/v1`, the number of its
+references (8 bytes, big-endian), each reference and its bytes; a value at `values/<2 hex>/<the
+SHA-256 of Xcode's key>`, as `hushrun.xcode-value/v1` and its entries sorted by name. An object's
+**id** is the SHA-256 of `hushrun.xcode-object/v1\n`, the number of its references (8 bytes,
+big-endian), each reference and its bytes. Files are written whole and renamed into place; one
+that doesn't read, or an object whose bytes aren't its id, is removed and is a miss. A `GetValue`
+is answered from the cache first, when every object the value reaches is there (a value whose
+outputs the service can't name, B-87, as it was put), else the value is removed. A file is dated
+when used, at most once an hour; the end of a service removes, at most once a day, what nobody
+used for the store's kept days, and temporary and handed files a day old.
+
+**B-87 A block.** A value's **roots** are the references of the `CASObject` under its entry
+`value`, and any entry of exactly 32 bytes that names an object the cache holds; everything they
+reach, all the way down, is its closure. A block of kind `xcode/1` holds `value` (its one encoding)
+and `objects/<id hex>` for each object of the closure, its description `key` (Xcode's, hex),
+`value` (the SHA-256 of its encoding), `objects`, `platform` and the store's usual fields. Opening
+a block reads every file against its record (B-14), every object against the id its name gives,
+the value against its description, and that every object the value reaches is in the block or the
+cache; only then are its objects kept and its value served. A block that fails is discarded; one
+only downloaded is first reported `rejected` and its key suspended for the kept days.
+
+**B-88 The key (Xcode).** The key of the value under Xcode's key `k` is the SHA-256 of the JCS
+form of `{"key": <k, hex>, "schema": "hushrun.xcode-key/v1"}`, its own first key, with no hints.
+*Rests on:* Xcode's key holding the compiler's version, its arguments and the content of every
+input, as LLVM's and Swift's cache keys do. *Breaks if:* a compiler reads an input its key doesn't
+hold: the audit (B-91) is the net.
+
+**B-89 What may leave (Xcode).** A value put in a run with a session becomes a block, and may
+leave the machine, only when: its roots can be found (`unknown-value`); every object of its closure
+is in the cache (`incomplete`); the closure holds at most 256 MiB and 20,000 objects (`large`);
+and, outside CI, no object holds the home folder or the checkout's root in its given or resolved
+form, as raw bytes (`holds-path`). Else it stays in the cache alone, reused on this machine, and
+the log names why. A block is stored as built here by this run (B-32), and told to the relay.
+
+**B-90 Sharing (Xcode).** The platform of an Xcode block is `xcode-` and `xcodebuild -version`'s
+build, lower case. A `GetValue` the cache and the store don't answer is asked of the run's baked
+store (B-64), then, in a run that shares `on`, of the relay, within 10 seconds or half this
+machine's last compile of the key. The relay asks the server only for a key the check's `xcode/1`
+manifest for the platform names (asked with `open` at the first such question, as B-60's), and the
+first key it names starts the prefetch of the rest. A check closes once for each Xcode build its
+values were compiled with, under a run made from the check's, the kind and the platform, with the
+pairs of its reuses and its blocks in the order logged, leaving out what stays (B-89). *Rests
+on:* the server taking any kind `is_kind` reads and keeping manifests per kind and platform (no
+server change).
+
+**B-91 The audit and what a run says (Xcode).** A block served from the store or a download is,
+one time in fifty, one in ten at a downloaded block's first reuse, every time in `observe` and
+with `HUSHRUN_BUILD_AUDIT=every`, never with `none`, never twice for one key in a run, answered as
+a miss on purpose; the value Xcode puts next under the key is compared with it by digest, and a
+difference suspends the key for the kept days and reports a download `differs`. A value put
+under a key whose block is in the store already is compared the same way, and one only downloaded
+gives way to it. The run's summary says, when Xcode asked anything: `build: xcode: N compiles
+asked: X from this Mac's cache, Y reused (Z from the shared store), W compiled, V kept to share`,
+and how many differed.
+
+**B-92 The Xcode app.** `hushrun build xcode on` (macOS) writes `hushrun.xcconfig` in
+`xcode-app/` under hushrun's cache directory, with B-84's settings, the socket `xcode-app/xcode.sock`
+(or `/tmp/hushrun-xcode-<uid>/xcode.sock` when too long) and `$(WORKSPACE_DIR)` for the checkout;
+writes the LaunchAgent `com.hushrun.xcode-cache` running `hushrun build xcode serve` at login, kept
+alive; loads it; and sets `XCODE_XCCONFIG_FILE` for the login session with `launchctl setenv`,
+which the agent does again at every start. The service reads and writes the store's cache (B-86)
+with no session: it asks no backend and keeps no block. `off` unloads and removes the agent,
+unsets the variable only when it names hushrun's file, and removes the file. `status` says which
+of these hold. *Rests on:* apps opened after `launchctl setenv` getting the variable, and Xcode
+reading it for the app's builds. *Breaks if:* it doesn't: the spike says.
+
+## TypeScript (draft)
+
+> Draft, from [ADR 0106](../adr/0106-typescript-build-blocks.md) (proposed). Built: local reuse
+> between worktrees and runs, and sharing through the relay. TypeScript 4 to 6 only: TypeScript 7
+> and later compile in native code `bin/tsc` starts, whose reads a Node process can't see, and pass
+> through.
+
+A **compile** here is one run of the TypeScript compiler's `tsc` in a Node process: a plain
+`tsc`, `tsc -p <config>`, `tsc --noEmit` or `tsc --build` over project references, one process
+whatever the number of projects. A compile's **block**, kind `tsc/1`, holds every file it wrote,
+its standard output and error, and its exit status, in the same store, through the same relay,
+records and outbox as the `rustc` wrapper's (B-13, B-14, B-26 to B-34). A **root** is the
+repository's folder as B-50 names it, in its given and resolved forms.
+
+**B-100 The hook.** When the mode is not `off`, `hushrun run` begins the session as B-2 says and,
+in a folder at or under a `package.json` of its checkout, writes the hook (`hushrun-tsc-<digest>.cjs`,
+named by its content) into the store's `tsc/` folder, sets `NODE_OPTIONS` for COMMAND to what
+COMMAND's environment had followed by `--require <hook>` (the path in double quotes, backslashes
+doubled, when it holds white space; a path with a quote sets nothing and costs a line), and
+`HUSHRUN_TSC` to a link named `hushrun-tsc` beside the wrapper's (B-2), pointing at the hushrun
+binary. Nothing on Windows or for an isolated check. The hook does nothing in a Node process without
+`HUSHRUN_TSC`, in a worker thread, or whose main file, after links, isn't a compiler its table
+names: TypeScript's `bin/tsc` or `lib/tsc.js` in a package named `typescript` of major version 4
+to 6. Every other Node process pays one test of its main file's name. A test adapter that sets
+`NODE_OPTIONS` (C-44's Jest) adds to the hook's, never over it (C-50).
+
+**B-101 Passed through.** The compiler runs as asked, nothing stored, and the run's log says why,
+for `--watch` or `-w` (`watch`); `--init`, `--help`, `--all`, `--version`, `--showConfig`
+(`prints`); `--diagnostics`, `--extendedDiagnostics` (`timings`); `--generateTrace`,
+`--generateCpuProfile` (`trace`); `--build` with `--verbose`, `--dry` or `--clean` (`build-mode`);
+a working folder outside every root (`cwd-outside-roots`); a compiler file that can't be read
+(`compiler`); a store that can't be read (`store-read`). Options are matched as the compiler
+matches them, in any case, after one or two dashes. Every other argument is keyed by its text.
+
+**B-102 The first key.** The SHA-256 of the JCS form of: the kind, the compiler's row and the
+version its `package.json` names; the compiler's identity, the SHA-256 of the file its row names
+(`lib/_tsc.js`, else `lib/tsc.js`), memoised under the store by path, size, dates, inode and device;
+each argument with every root's text replaced by `{root}`; the working folder from the root; Node's
+`process.platform`; whether file names keep case, as the compiler decides it (its own file not
+found under its name with every letter's case swapped); whether standard output is a terminal (the
+compiler's default for `--pretty`); the values of `NO_COLOR`, `FORCE_COLOR` and `NODE_ENV` that are
+set; and the person's and the repository's keyed variables (B-5, B-35).
+
+**B-103 The second key.** While the compiler runs, the hook records what it did through Node's
+`fs`, Node's own calls inside a call left out: each file read, with the SHA-256 of the very bytes
+it was given; each path looked at (`statSync`, `lstatSync`, `existsSync`, `accessSync`) as a file,
+a folder, another kind or absent; each folder listed, by its entries' names and kinds; each path
+resolved (`realpathSync` and its `native`), by where it led. What the compile wrote earlier in the
+same process (one project's declarations that `--build` reads for the next) is left out of all
+four. Paths under a root are recorded from it (`{root}/src/a.ts`). A path outside every root
+looked at and absent, below a folder above the root (the compiler's walk up for `package.json` and
+`node_modules`), is kept as its name below that folder, and holds where that name is absent below
+every folder above the root of the checkout that looks it up, whatever its depth. Any other path
+outside every root is kept as it is, and ties the block (B-104). The compiler's look at its own
+file under swapped case is in the first key, not here. The **hint**, written under the first key,
+holds the four lists sorted, and the second key is the SHA-256 of the first key, the hint and the
+reads' digests in its order. A lookup takes the hints of the first key, the newest first, and the
+first whose every kind, listing, link and absence holds here and whose reads, hashed now, give a
+key the store holds, is the block. A hint is never trusted: a wrong one gives a key nothing holds.
+
+**B-104 Not stored.** A compile is stored only when the hook recorded no error of its own
+(`hook-error`) and nothing a block can't hold or key, each said by its name: reading through a
+file descriptor (`read-fd`), an asynchronous call or a watch (`async-…`), and removing, renaming,
+copying, linking, appending to, truncating or re-dating a file (`unlink`, `rename`, …); when it
+ended with the compiler's own status 0, 1 or 2 (`status`); when every file it wrote is under a
+root and there when it ended (`write-outside-roots`, `output-gone`); when its messages hold no
+`{root}` of their own (`placeholder`); for `--build`, when it read no `.tsbuildinfo`
+(`build-over-outputs`): the compiler then decides by the dates of outputs it finds, which no key
+holds, so only a build that found none is stored; and when the store's volume has the space B-22
+asks. A block whose written files hold a root's text, or whose hint names a path outside the
+roots, is **tied**: stored under the SHA-256 of its key and the roots, so only a checkout at the same
+folder finds it, and it never leaves the machine. Every root's text in the messages is stored as
+`{root}`.
+
+**B-105 Restore.** A block found, vouched for (B-108) and not picked by the audit is put in place
+before the compiler loads: each file, checked against the size and SHA-256 its record holds and
+written under a temporary name in its folder (made when missing) and renamed into place, dated
+now; then the hook prints its standard output and error, the roots replaced by this checkout's,
+and ends the process with its status. A file that fails its check, or a write that fails, runs the
+compiler as asked, which writes over whatever was put in place (`restore`). A plain `tsc --build`
+after a restore finds every project up to date, its outputs newer than its sources. In `observe`,
+and for a compile the audit picks (B-16: one time in fifty, one in ten at a download's first reuse,
+`HUSHRUN_BUILD_AUDIT`), the compiler runs, and what it wrote and printed is compared, file by path
+and digest, with the block found: a difference suspends the first key for the kept days and says
+so, and a downloaded block that differs is reported `differs`.
+
+**B-106 Fallback.** Nothing the hook or the helper does changes what the compiler does unless a
+block is put in place whole: a missing session, a helper that can't be started or answers
+anything else, a panic, a store that can't be written, each runs the compiler exactly as asked.
+The compiler's standard output and error pass through as it writes them; the hook keeps a copy.
+The helper is asked twice: before the compiler loads (`hushrun-tsc lookup`, the call on standard
+input, its answer on standard output) and as the process ends (`hushrun-tsc store <plan>`), whose
+outcome never changes the process's status.
+
+**B-107 Type checks.** A compile that writes nothing, `tsc --noEmit` among them, is a block of its
+messages and status alone: a type check whose program read the same bytes, kinds, listings and
+links prints the same errors and ends with the same status without the compiler starting, in any
+checkout.
+
+**B-108 Sharing.** In a run that shares (B-25), a block that isn't tied goes up as kind `tsc/1`
+under its first key, class `library`, its platform Node's `process.platform`, when the helper tells
+the relay it was built; a check closes once for each platform its compiles ran on, with the pairs
+of its reuses and blocks, as B-60's. A lookup that finds nothing here asks the relay for the first
+key's hints only when the check's `tsc/1` manifest for the platform names it (asked with `open` at
+the first such question), within 10 seconds or half this machine's last compile of the key, and
+fetches one of at most eight second keys the downloaded hints lead to. A downloaded hint is followed
+only when every path it names is under `{root}` or a name above it, with at most 200,000 paths.
+A downloaded block is served only as `Shared::may_reuse` says (B-34), its files' sizes and SHA-256
+checked as B-105's, every path under `{root}`, and its messages with every control character but a
+newline, a tab and SGR colour taken out; one that fails is reported `rejected`, its first key
+suspended for the kept days and the block removed. TypeScript blocks aren't baked (B-63). *Rests
+on:* the server taking any kind `is_kind` reads (no server change).
+
+**B-109 What a run says (TypeScript).** The run's summary says, when the hook asked anything:
+`build: typescript: N compiles: X reused (Y from the shared store), Z built`, with what reuse saved
+from a second on and how many were compared and differed; and `build: typescript: N compiles run as
+asked or not stored (<count> <reason>, …)`, the three most frequent reasons first.
+
+## Rust's checks and clippy
+
+[ADR 0112] `cargo check` and `cargo clippy` ask rustc for metadata only, for every target, and
+`cargo clippy` runs each workspace member's compile through clippy's driver. These rules extend
+B-4 to B-6 for them; every other rule reads as it does for a library.
+
+**B-160 A compile that links nothing.** A compile whose `--emit` has no `link` (with `--emit`
+absent, rustc's default is `link`) writes what a library's check writes, `lib<crate name><extra
+filename>.rmeta` and the dep-info, whatever its crate type (`lib`, `rlib`, `proc-macro` or
+`bin`) and with `--test` too: it is class `library` (B-3's log, B-5's variables, B-6's native
+folders, B-24), never a linked output, and gets no `--print=link-args` (B-9). `cargo check
+--all-targets` and `cargo clippy --all-targets` ask this of every program, example, test, bench
+and proc macro's own crate, which were each `built, not stored` (`link-inputs`) before. A crate
+type B-4 passes through (`cdylib`, `dylib`, `staticlib`, or more than one) still does. *Rests on:*
+rustc writing no object and running no linker for `--emit=dep-info,metadata` (1.94.0: a program's
+and a test's check write the `.rmeta` and the `.d` alone). *Breaks if:* a rustc ran the linker for
+a metadata-only compile.
+
+**B-161 Clippy's driver.** A call whose first argument's file name is `clippy-driver` (or
+`clippy-driver.exe`) and whose second is rustc (B-4) is read as the rustc call after the driver
+when B-160 makes it a library; it passes through as `not-rustc` otherwise, as every call through a
+driver did before: a workspace member's build script and proc macro under `cargo clippy`. The
+wrapper starts the compile, and each audit, place check and comparison of it, as cargo did:
+the driver, then rustc's path, then the arguments. The compiler's identity in the first key is
+the SHA-256 of the JCS form of `{"schema": "hushrun.build.driver/1", "compiler": <B-17's
+identity>, "driver": {"name": <its file name>, "sha256": <its bytes'>}}`, the driver's bytes read
+once per install (a memo in the compiler memos, `driver-<digest>.json`, named by its path, size
+and dates); a driver that can't be read passes the call through (`compiler`). The first key's
+variables add every variable whose name starts with `CLIPPY_` or `__CLIPPY_` (`CLIPPY_ARGS`, the
+lints `cargo clippy -- …` gives; `CLIPPY_CONF_DIR`; `CLIPPY_DISABLE_DOCS_LINKS`), with roots
+replaced. The driver lists in the dep-info the configuration it read (`clippy.toml` or
+`.clippy.toml`), the package's `Cargo.toml`, and `CLIPPY_ARGS` and `CLIPPY_CONF_DIR` as
+`env-dep` lines, but not the places it looked for a configuration and found none: B-6's
+`declared` holds each of `.clippy.toml` and `clippy.toml` as an upward search, as a macro's
+`.env` is held, from `CLIPPY_CONF_DIR` when it is set and not empty, else from the package
+folder; so a configuration that appears where the driver would find it first changes the key.
+The diagnostics, clippy's lints among them, are stored and replayed as rustc's are (B-12).
+*Rests on:* the driver linking the toolchain's `rustc_driver` (in B-17's identity) and reading
+nothing else that changes its output than its arguments, those variables and the files above
+(clippy 0.1.94: `clippy_config::lookup_conf_file`, `clippy_driver::track_files`). *Breaks if:* a
+clippy read another file or variable without listing it.

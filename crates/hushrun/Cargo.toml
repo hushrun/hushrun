@@ -63,7 +63,12 @@ rustls.workspace = true
 semver.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
+# \[B-85\] The Xcode compilation-cache service: an HTTP/2 server on a Unix socket, and the
+# bytes it sends. All three already part of the binary's build, through reqwest.
+h2.workspace = true
+http.workspace = true
+bytes.workspace = true
 # A PUT of a build block's pack streams it from its file (B-29): the stream reqwest's body takes.
 # Already part of the binary's build through the ledger's HTTP client.
 futures-util.workspace = true
@@ -97,7 +102,7 @@ tempfile.workspace = true
 [target.'cfg(unix)'.dependencies]
 # \[ADR 0089\] `pty` and `termios`: the pseudo-terminal hushrun's `swift` copies `swift test`'s
 # output through, so that it colors as on the person's terminal.
-rustix = { workspace = true, features = ["pty", "termios"] }
+rustix = { workspace = true, features = ["pty", "termios", "process"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # A terminal for tests of what hushrun says only on one.

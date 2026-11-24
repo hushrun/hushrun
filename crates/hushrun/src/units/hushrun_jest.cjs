@@ -104,6 +104,8 @@ function install(S) {
     typeAware: false,
     tsJest: false,
     tsCompilerSeen: false,
+    // Calls into ts-jest's ConfigSet resolving tsconfig, open now.
+    tsConfigParse: 0,
   });
 
   function note(what, err) {
@@ -243,6 +245,10 @@ function install(S) {
     if (to) to.open ? to.open(r) : to.opened.add(r);
   };
   const listed = (p) => {
+    // [ADR 0085] TypeScript listing tsconfig's `include` for ts-jest's ConfigSet: what it finds
+    // compiles nothing when ts-jest compiles each file alone, and a language service reads every
+    // file of code anyway (`typeAware`), so it is no test file's read.
+    if (S.tsConfigParse > 0) return;
     const r = rel(p);
     const to = r && sink();
     if (to) to.list ? to.list(r) : to.dirs.add(r);
@@ -311,6 +317,25 @@ function install(S) {
       if (!filename.startsWith('file:') && !path.isAbsolute(filename)) return; // '@jest/globals'
       const r = rel(filename);
       if (r) S.session.load(r);
+      if (r && r.endsWith('.vue')) guard('vue', () => vueBlocks(S.session, r, filename));
+    };
+    // [ADR 0108] A Vue component Jest compiled (@vue/vue3-jest, @vue/vue2-jest) is made from the
+    // files its blocks name with `src=` too, which the transformer reads only when Jest's cache
+    // doesn't hold the component, and whose change that cache doesn't see: the component's text
+    // says them, so they are read with it, every time. A `src=` read where there is none (an
+    // image's in a template) only widens the list.
+    const vueBlocks = (session, r, filename) => {
+      const file = filename.startsWith('file:') ? fileURLToPath(filename) : filename;
+      const text = own.readFileSync(file, 'utf8');
+      for (const m of text.matchAll(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+        const src = m[1] ?? m[2];
+        if (!src || /^[a-z][a-z0-9+.-]*:/i.test(src)) continue;
+        const to = rel(path.resolve(path.dirname(file), src));
+        if (!to || to === r || !own.existsSync(path.join(root, to))) continue;
+        session.reads.add(to);
+        session.edge(r, to);
+        session.reexport(r, to);
+      }
     };
     if (!WRAPPED.has(vm.Script)) {
       const OriginalScript = vm.Script;
@@ -1179,6 +1204,24 @@ function install(S) {
     proto._createLanguageService = typeof create === 'function' ? carry(wrapped, create) : wrapped;
   }
 
+  // [ADR 0085] ts-jest's ConfigSet: while it resolves tsconfig, TypeScript lists the directories
+  // of its `include` to find the project's files, which isn't a test file reading them.
+  const TS_CONFIG_DONE = Symbol.for('hushrun.jest.ts-config-set');
+  function patchTsConfigSet(C) {
+    const proto = C.prototype;
+    if (Object.prototype.hasOwnProperty.call(proto, TS_CONFIG_DONE)) return;
+    proto[TS_CONFIG_DONE] = true;
+    const resolve = proto._resolveTsConfig;
+    proto._resolveTsConfig = carry({ _resolveTsConfig(...args) {
+      S.tsConfigParse += 1;
+      try {
+        return resolve.apply(this, args);
+      } finally {
+        S.tsConfigParse -= 1;
+      }
+    } }._resolveTsConfig, resolve);
+  }
+
   // ---------------------------------------------------------------- the main process
   S.main = null;
   function claimMain() {
@@ -1494,7 +1537,7 @@ function install(S) {
     if (!exp || (typeof exp !== 'object' && typeof exp !== 'function') || seen.has(exp)) return;
     seen.add(exp);
     const candidates = [exp];
-    for (const k of ['default', 'TestEnvironment', 'TsCompiler']) {
+    for (const k of ['default', 'TestEnvironment', 'TsCompiler', 'ConfigSet']) {
       const d = Object.getOwnPropertyDescriptor(exp, k);
       if (d && 'value' in d && d.value) candidates.push(d.value);
     }
@@ -1509,6 +1552,8 @@ function install(S) {
         patchSequencer(c);
       } else if (typeof p._createLanguageService === 'function') {
         patchTsCompiler(c);
+      } else if (typeof p._resolveTsConfig === 'function') {
+        patchTsConfigSet(c);
       }
     }
     if (typeof exp === 'object') {

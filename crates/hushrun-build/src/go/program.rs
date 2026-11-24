@@ -1467,7 +1467,10 @@ fn go_entry(outcome: Outcome, key: &Digest) -> Entry {
         downloaded: false,
         baked: false,
         go: Some(GoEntry::default()),
+        xcode: None,
         cc: None,
+        gradle: None,
+        tsc: None,
     }
 }
 

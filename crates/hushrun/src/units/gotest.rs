@@ -138,6 +138,42 @@ pub struct Recognized {
     /// \[ADR 0086\] COMMAND's own `-run` or `-skip`, by its flag: which tests ran is then Go's
     /// matching, and its tests are reused by package.
     pub chooses: Option<&'static str>,
+    /// \[ADR 0111\] (C-71) COMMAND's own coverage flag (`-cover`, `-coverprofile`, `-coverpkg`,
+    /// `-covermode`, or `-test.coverprofile` or `-test.gocoverdir` after `-args`), by its name.
+    pub coverage: Option<&'static str>,
+}
+
+/// \[ADR 0111\] (C-71) Why nothing of a Go check is reused while its coverage is on.
+pub const COVERAGE: &str =
+    "go test's coverage is on, and a partial run's coverage would read as a drop";
+
+/// \[ADR 0111\] (C-71) The coverage flag `flag` turns on, a flag's name without its dashes and
+/// `inline` its value after `=`: `-cover=false` turns none on.
+fn coverage_flag(name: &str, inline: Option<&str>) -> Option<&'static str> {
+    match name {
+        "cover" if go_bool(inline) != Some(false) => Some("-cover"),
+        "coverprofile" => Some("-coverprofile"),
+        "coverpkg" => Some("-coverpkg"),
+        "covermode" => Some("-covermode"),
+        "test.coverprofile" => Some("-test.coverprofile"),
+        "test.gocoverdir" => Some("-test.gocoverdir"),
+        _ => None,
+    }
+}
+
+/// \[ADR 0111\] (C-71) The coverage flag `GOFLAGS`, as `go env` gives it, turns on for every `go
+/// test`: `None` when it turns none on, or can't be read (then COMMAND fails as Go reads it).
+pub fn coverage_in_goflags(goflags: &str) -> Option<&'static str> {
+    split_quoted(goflags)?.iter().find_map(|entry| {
+        let flag = entry
+            .strip_prefix("--")
+            .or_else(|| entry.strip_prefix('-'))?;
+        let (name, inline) = match flag.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (flag, None),
+        };
+        coverage_flag(name, inline)
+    })
 }
 
 /// Build flags `go test` takes with no value, and whether `go list` takes them too because they
@@ -217,6 +253,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
         build: Vec::new(),
         packages: Vec::new(),
         chooses: None,
+        coverage: None,
     };
     let mut words = command[2..].iter();
     let mut first = true;
@@ -226,7 +263,13 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             // \[ADR 0086\] What follows goes to each test binary as it is: its own `-test.run`.
             for word in words.by_ref() {
                 let name = word.trim_start_matches('-');
-                let name = name.split_once('=').map_or(name, |(name, _)| name);
+                let (name, inline) = match name.split_once('=') {
+                    Some((name, value)) => (name, Some(value)),
+                    None => (name, None),
+                };
+                if name.starts_with("test.") {
+                    out.coverage = out.coverage.or(coverage_flag(name, inline));
+                }
                 match name {
                     "test.run" => out.chooses = out.chooses.or(Some("-run")),
                     "test.skip" => out.chooses = out.chooses.or(Some("-skip")),
@@ -280,6 +323,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             _ => {}
         }
         if let Some((_, listed)) = BOOL_FLAGS.iter().find(|(n, _)| *n == name) {
+            out.coverage = out.coverage.or(coverage_flag(name, inline.as_deref()));
             if *listed {
                 out.build.push(word.clone());
             }
@@ -296,6 +340,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             if *listed {
                 out.build.push(format!("-{name}={value}"));
             }
+            out.coverage = out.coverage.or(coverage_flag(name, Some(&value)));
             match name {
                 "run" => out.chooses = out.chooses.or(Some("-run")),
                 "skip" => out.chooses = out.chooses.or(Some("-skip")),
@@ -308,6 +353,21 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
         )));
     }
     Some(Ok(out))
+}
+
+/// \[ADR 0111\] `go env GOFLAGS` in COMMAND's environment, which holds the user's go env file:
+/// `None` when it can't be asked.
+fn goflags(recognized: &Recognized, cwd: &Path, assigned: &[(String, String)]) -> Option<String> {
+    let output = go(recognized, cwd, assigned)
+        .args(["env", "GOFLAGS"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// What `go env` says, in COMMAND's environment.
@@ -502,9 +562,6 @@ pub struct Listed {
     pub units: BTreeMap<String, ListedUnit>,
     /// The unit rule: every test file of a tested package (C-30).
     pub unit_files: BTreeSet<String>,
-    /// The `.go` files `go list` says a listed package of the repository is built from: the
-    /// sources (C-30).
-    pub named: BTreeSet<String>,
     /// \[ADR 0072\] Which package of the repository imports which, by their directories.
     pub edges: BTreeSet<super::db::Edge>,
 }
@@ -620,9 +677,6 @@ fn read_list(packages: Vec<Package>, root: &Path) -> Listed {
     let mut out = Listed::default();
     let unit_of = |dir: String| if dir.is_empty() { ".".to_string() } else { dir };
     for p in packages.iter().filter(|p| in_repo(p)) {
-        for name in p.go_files.iter().chain(&p.cgo_files) {
-            out.named.extend(relative(&p.dir.join(name)));
-        }
         let Some(from) = relative(&p.dir).map(unit_of) else {
             continue;
         };
@@ -726,9 +780,6 @@ fn read_list(packages: Vec<Package>, root: &Path) -> Listed {
                 });
             }
             reads.extend(files_of(dep).iter().filter_map(|f| relative(f)));
-            for name in dep.go_files.iter().chain(&dep.cgo_files) {
-                out.named.extend(relative(&dep.dir.join(name)));
-            }
         }
         out.units.insert(
             unit,
@@ -743,20 +794,22 @@ fn read_list(packages: Vec<Package>, root: &Path) -> Listed {
     out
 }
 
-/// \[ADR 0086, amended\] The sets of a Go check: its test files, and its sources, as `go list`
-/// named them (`unit_files`, `named`) under COMMAND's tags and environment; any other file of the
-/// tree, a file with a build tag the tags leave out included, is in the rest set. The run, its plan
-/// and `hushrun why` all ask this one function.
-pub fn sets_of(
-    tree: &Tree,
-    unit_files: &BTreeSet<String>,
-    named: &BTreeSet<String>,
-    ignore: &[Pattern],
-) -> Sets {
+/// \[ADR 0086, amended\] The sets of a Go check: its test files, as `go list` named them
+/// (`unit_files`) under COMMAND's tags and environment; its sources; and any other file of the
+/// tree in the rest set. The run, its plan and `hushrun why` all ask this one function.
+///
+/// \[ADR 0111\] (C-70) The sources are every other `.go` file of the tree, whatever `go list`
+/// named: another package's test files, a file the build tags leave out, a sibling module's of a
+/// `go.work`, an unimported package's. No test binary of COMMAND's is built from one but as `go
+/// list` names it before each run, and what it names is in every key the plan makes (a file that
+/// starts being compiled changes its packages' keys, and a new or deleted one the sources' shape);
+/// a test that opens one, its test log says. A change to one then reruns the packages that read
+/// it, not every package.
+pub fn sets_of(tree: &Tree, unit_files: &BTreeSet<String>, ignore: &[Pattern]) -> Sets {
     units::classify(
         tree.paths(),
         &|path| unit_files.contains(path),
-        Sources::Named(named, SOURCE_KINDS),
+        Sources::Kinds(SOURCE_KINDS),
         ignore,
     )
 }
@@ -766,7 +819,6 @@ pub fn sets_of(
 pub struct Observed {
     pub units: BTreeMap<String, super::Seen>,
     pub unit_files: BTreeSet<String>,
-    pub named: BTreeSet<String>,
     /// Each unit's test files.
     pub own: BTreeMap<String, Vec<String>>,
     /// The directories each unit's tests listed, from the root.
@@ -816,7 +868,6 @@ pub fn observe(
     }
     let mut out = Observed {
         unit_files: listed.unit_files,
-        named: listed.named,
         edges: listed.edges,
         ..Observed::default()
     };
@@ -1560,9 +1611,18 @@ impl Adapter for Recognized {
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
+        // \[ADR 0111\] (C-71) Coverage on: every package runs whole, and is observed.
+        if self.coverage.is_some()
+            || goflags(self, at.cwd, at.assigned)
+                .as_deref()
+                .and_then(coverage_in_goflags)
+                .is_some()
+        {
+            return Err(COVERAGE.into());
+        }
         let listed = list(self, at.root, at.cwd, at.assigned)?;
         let getenv = Getenv::of_command(at.root, at.assigned);
-        let sets = sets_of(at.tree, &listed.unit_files, &listed.named, at.ignore);
+        let sets = sets_of(at.tree, &listed.unit_files, at.ignore);
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let known = listed
             .units
@@ -1616,7 +1676,7 @@ impl Adapter for Recognized {
             }
             seen.outside = getenv.outside(&seen.getenv);
         }
-        let sets = sets_of(at.tree, &observed.unit_files, &observed.named, at.ignore);
+        let sets = sets_of(at.tree, &observed.unit_files, at.ignore);
         let unit_files = Some(observed.unit_files.clone());
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let planned = observed
@@ -1669,12 +1729,12 @@ impl Adapter for Recognized {
     /// takes each `_test.go` file of a package it knows for a test file.
     fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
         if !at.map.unit_files.is_empty() {
-            return sets_of(at.tree, &at.map.unit_files, &at.map.sources, at.ignore);
+            return sets_of(at.tree, &at.map.unit_files, at.ignore);
         }
         units::classify(
             at.tree.paths(),
             &|p| p.ends_with("_test.go") && at.map.units.contains_key(&package_of(p)),
-            Sources::Named(&at.map.sources, SOURCE_KINDS),
+            Sources::Kinds(SOURCE_KINDS),
             at.ignore,
         )
     }
@@ -1764,6 +1824,101 @@ mod tests {
         assert!(recognize(&words("go vet ./...")).is_none());
         assert!(recognize(&words("gotestsum -- ./...")).is_none());
         assert!(recognize(&words("make test")).is_none());
+    }
+
+    // covers: C-71
+    #[test]
+    fn coverage_is_read_from_commands_flags_its_args_and_goflags() {
+        let coverage = |command: &str| recognize(&words(command)).unwrap().unwrap().coverage;
+        for (command, flag) in [
+            ("go test -cover ./...", Some("-cover")),
+            ("go test -cover=true ./...", Some("-cover")),
+            ("go test --cover ./...", Some("-cover")),
+            ("go test -cover=false ./...", None),
+            ("go test -coverprofile=c.out ./...", Some("-coverprofile")),
+            ("go test -coverprofile c.out ./...", Some("-coverprofile")),
+            ("go test -coverpkg=./... ./...", Some("-coverpkg")),
+            ("go test -covermode atomic ./...", Some("-covermode")),
+            (
+                "go test ./... -args -test.coverprofile=c.out",
+                Some("-test.coverprofile"),
+            ),
+            (
+                "go test . -args -test.gocoverdir /tmp/c",
+                Some("-test.gocoverdir"),
+            ),
+            // A test's own flag after -args is the test's.
+            ("go test . -args -cover", None),
+            ("go test -race -v ./...", None),
+        ] {
+            assert_eq!(coverage(command), flag, "{command}");
+        }
+        assert_eq!(coverage_in_goflags("-cover"), Some("-cover"));
+        assert_eq!(
+            coverage_in_goflags("-mod=mod '-coverpkg=./...'"),
+            Some("-coverpkg")
+        );
+        assert_eq!(coverage_in_goflags("-cover=false -tags=x"), None);
+        assert_eq!(coverage_in_goflags(""), None);
+        assert_eq!(coverage_in_goflags("'-cover"), None);
+    }
+
+    // covers: C-70
+    #[test]
+    fn every_go_file_but_a_tested_packages_test_file_is_a_source() {
+        use hushrun_core::units::Set;
+        let mut paths = vec![
+            "go.mod",
+            "go.work",
+            "main.go",
+            "cart/cart.go",
+            "cart/cart_test.go",
+            "cart/integ_test.go",
+            "cart/cart_windows.go",
+            "cart/asm_amd64.s",
+            "price/price.go",
+            "price/price_test.go",
+            "unused/unused.go",
+            "lib/lib.go",
+            "lib/lib_test.go",
+            "fuzz/testdata/fuzz/FuzzX/seed",
+            "testdata/golden.go",
+        ];
+        paths.sort_unstable();
+        let manifest: String = paths
+            .iter()
+            .map(|p| format!("f {} {p}\0", "0".repeat(64)))
+            .collect();
+        let tree = Tree::from_manifest(
+            format!("{}\n{manifest}", hushrun_core::CANONICALIZATION).as_bytes(),
+        )
+        .expect("a tree");
+        let unit_files: BTreeSet<String> = ["cart/cart_test.go".to_string()].into();
+        let sets = sets_of(&tree, &unit_files, &[]);
+        assert_eq!(sets.of("cart/cart_test.go"), Some(Set::Units));
+        for source in [
+            "main.go",
+            "cart/cart.go",
+            // A test file the tags leave out, and one of a package the check doesn't test.
+            "cart/integ_test.go",
+            "price/price_test.go",
+            // A file the tags leave out, an unimported package's, another module's.
+            "cart/cart_windows.go",
+            "unused/unused.go",
+            "lib/lib.go",
+            "lib/lib_test.go",
+            "testdata/golden.go",
+        ] {
+            assert_eq!(sets.of(source), Some(Set::Sources), "{source}");
+        }
+        for rest in [
+            "go.mod",
+            "go.work",
+            "cart/asm_amd64.s",
+            "fuzz/testdata/fuzz/FuzzX/seed",
+        ] {
+            assert_eq!(sets.of(rest), Some(Set::Rest), "{rest}");
+        }
     }
 
     // covers: C-32

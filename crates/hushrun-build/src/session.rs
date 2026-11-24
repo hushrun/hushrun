@@ -81,6 +81,8 @@ pub struct Session {
     go: Option<crate::go::probe::Go>,
     /// Whether the run asked for Go's cache program already, given one or not: it asks once.
     go_asked: bool,
+    /// The xcconfig file COMMAND's Xcode reads (B-84), when the run serves Xcode's cache.
+    xcode: Option<PathBuf>,
     /// Another compiler wrapper is set (B-2): COMMAND gets no `RUSTC_WRAPPER` of hushrun's, and
     /// the session serves Go alone.
     rustc_left_out: bool,
@@ -91,6 +93,12 @@ pub struct Session {
     cc_maps_setting: bool,
     /// Which manifest the run leaves in the store when it ends (B-63), when it is a check's.
     slot: Option<crate::manifests::Slot>,
+    /// What COMMAND gets for Gradle (B-77): the script, the cache's URL and its token.
+    gradle_env: Vec<(OsString, OsString)>,
+    /// hushrun's Gradle cache while it serves (B-77): it stops with the session.
+    gradle_cache: Option<crate::gradle::cache::Running>,
+    /// What COMMAND gets for TypeScript (B-100): `NODE_OPTIONS` with the hook, and `HUSHRUN_TSC`.
+    tsc_env: Vec<(OsString, OsString)>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -159,6 +167,12 @@ pub struct Current {
     /// What the C and C++ launcher reads (B-50): absent, it passes every call through (B-62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc: Option<crate::cc::CcRun>,
+    /// What hushrun's Gradle cache reads (B-79): absent, the run serves Gradle nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradle: Option<crate::gradle::GradleRun>,
+    /// What the TypeScript helper reads (B-100): absent, it passes every call through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsc: Option<crate::tsc::TscRun>,
     /// The baked store the run reads underneath its store (B-63, B-64), as its state said when
     /// the run began. Absent: none, or one the run ignores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,6 +509,24 @@ pub struct Entry {
     /// A C or C++ object's line, logged by the launcher (B-61): absent for the others'.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc: Option<crate::cc::launcher::CcEntry>,
+    /// The Xcode service's line (B-91), when it logged it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xcode: Option<XcodeEntry>,
+    /// A Gradle task's entry's line, logged by hushrun's Gradle cache (B-83): absent for the
+    /// others'. Its task is in `crate_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradle: Option<GradleEntry>,
+    /// A TypeScript compile's line, logged by the helper (B-109): absent for the others'.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsc: Option<crate::tsc::helper::TscEntry>,
+}
+
+/// What a Gradle entry's line says beside the rest (B-83).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GradleEntry {
+    /// Why it stays on this machine, when Gradle stored it and it doesn't go up (B-79).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<crate::gradle::Local>,
 }
 
 /// What a Go package archive's line says beside the rest (B-46).
@@ -509,13 +541,41 @@ pub struct GoEntry {
     pub local: Option<crate::go::archive::Local>,
 }
 
+/// What an Xcode value's line says beside the rest (B-91).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XcodeEntry {
+    /// It was served from the service's own cache on this machine ([`crate::xcode::cas`]): what
+    /// another checkout, branch or the Xcode app compiled here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_cache: bool,
+    /// Why it stays on this machine, when Xcode put it and it doesn't go up (B-89).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+    /// How many objects its block holds.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub objects: u64,
+    /// The Xcode build it was compiled with, as its manifest's platform (B-90).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub platform: String,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 impl Entry {
     /// Which adapter logged the line.
     pub fn kind(&self) -> crate::model::Kind {
-        if self.go.is_some() {
+        if self.xcode.is_some() {
+            crate::model::Kind::Xcode
+        } else if self.go.is_some() {
             crate::model::Kind::Go
         } else if self.cc.is_some() {
             crate::model::Kind::Cc
+        } else if self.gradle.is_some() {
+            crate::model::Kind::Gradle
+        } else if self.tsc.is_some() {
+            crate::model::Kind::Tsc
         } else {
             crate::model::Kind::Rustc
         }
@@ -655,6 +715,227 @@ pub struct Counts {
     pub go: GoCounts,
     /// What the C and C++ launcher's lines came to (B-61), counted apart from the crates.
     pub cc: CcCounts,
+    /// What the TypeScript helper's lines came to (B-109), counted apart from the crates.
+    pub tsc: TscCounts,
+    /// What hushrun's Gradle cache's lines came to (B-83), counted apart from the crates.
+    pub gradle: GradleCounts,
+}
+
+/// What a run's Gradle entries came to (B-83).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GradleCounts {
+    /// Entries Gradle asked hushrun's cache for and found, or stored in it.
+    pub tasks: u64,
+    /// Served to Gradle from hushrun's store.
+    pub reused: u64,
+    /// Of those, downloaded from the shared store for it.
+    pub downloaded: u64,
+    /// Stored by Gradle after it ran the task.
+    pub built: u64,
+    /// Milliseconds the tasks served took where they were run.
+    pub saved_ms: u64,
+    /// Entries Gradle stored that stay on this machine, by reason, in the order first seen.
+    pub local: Vec<(crate::gradle::Local, u64)>,
+    /// \[B-210\] The tasks of those, by Gradle's name, in the order first seen, each once.
+    #[serde(skip)]
+    pub local_tasks: Vec<String>,
+}
+
+impl GradleCounts {
+    fn add(&mut self, entry: &Entry) {
+        let Some(gradle) = &entry.gradle else {
+            return;
+        };
+        self.tasks += 1;
+        match entry.outcome {
+            Outcome::Reused => {
+                self.reused += 1;
+                self.downloaded += u64::from(entry.downloaded);
+                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
+            }
+            Outcome::BuiltAndStored | Outcome::BuiltNotStored(_) | Outcome::PassedThrough(_) => {
+                self.built += 1;
+            }
+        }
+        if let Some(local) = gradle.local {
+            match self.local.iter_mut().find(|(seen, _)| *seen == local) {
+                Some((_, n)) => *n += 1,
+                None => self.local.push((local, 1)),
+            }
+            if !entry.crate_name.is_empty() && !self.local_tasks.contains(&entry.crate_name) {
+                self.local_tasks.push(entry.crate_name.clone());
+            }
+        }
+    }
+
+    /// B-83's lines for Gradle, without a prefix. Empty when Gradle asked nothing.
+    pub fn lines(&self) -> Vec<String> {
+        if self.tasks == 0 {
+            return Vec::new();
+        }
+        let tasks = |n: u64| {
+            if n == 1 {
+                "1 task".to_string()
+            } else {
+                format!("{n} tasks")
+            }
+        };
+        let mut parts = Vec::new();
+        if self.reused > 0 {
+            let mut part = format!("{} from hushrun's cache", self.reused);
+            part.push_str(&from_where(self.downloaded, 0));
+            parts.push(part);
+        }
+        if self.built > 0 {
+            parts.push(format!("{} run and stored", self.built));
+        }
+        let mut first = format!("build: gradle: {}: {}", tasks(self.tasks), parts.join(", "));
+        if self.saved_ms >= 1_000 {
+            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
+        }
+        let mut lines = vec![first];
+        let kept: u64 = self.local.iter().map(|(_, n)| n).sum();
+        if kept > 0 {
+            let why: Vec<String> = self
+                .local
+                .iter()
+                .map(|(local, n)| format!("{n}: {}", local.words()))
+                .collect();
+            let mut line = format!(
+                "build: gradle: {} run here {} on this machine ({})",
+                tasks(kept),
+                if kept == 1 { "stays" } else { "stay" },
+                why.join(", ")
+            );
+            // \[B-210\] Which, so that a build can tell its own task from a plugin's (kapt's
+            // stubs hold their sources' paths): three at most, and how many more.
+            if !self.local_tasks.is_empty() {
+                let shown: Vec<&str> = self
+                    .local_tasks
+                    .iter()
+                    .take(3)
+                    .map(String::as_str)
+                    .collect();
+                line.push_str(&format!(": {}", shown.join(", ")));
+                let more = self.local_tasks.len() - shown.len();
+                if more > 0 {
+                    line.push_str(&format!(" and {more} more"));
+                }
+            }
+            lines.push(line);
+        }
+        lines
+    }
+}
+
+/// What a run's TypeScript compiles came to (B-109).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TscCounts {
+    /// Compiler calls the helper saw.
+    pub calls: u64,
+    /// Put in place without a compile.
+    pub reused: u64,
+    /// Of those, downloaded from the shared store for it (B-108).
+    pub downloaded: u64,
+    /// Compiles that ran, stored or not, passed through or not.
+    pub built: u64,
+    /// Compiles compared with a block found for them (an audit, `observe`).
+    pub compared: u64,
+    /// Of those, the ones that wrote other files: the key is suspended.
+    pub differed: u64,
+    /// Compiles that found a block: in `observe`, the ones that would have been reused.
+    pub found: u64,
+    /// Milliseconds reuse saved.
+    pub saved_ms: u64,
+    /// Passed through or not stored, by the helper's reason, in the order first seen.
+    pub reasons: Vec<(String, u64)>,
+}
+
+impl TscCounts {
+    fn add(&mut self, entry: &Entry) {
+        let Some(tsc) = &entry.tsc else {
+            return;
+        };
+        self.calls += 1;
+        match entry.outcome {
+            Outcome::Reused => {
+                self.reused += 1;
+                self.downloaded += u64::from(entry.downloaded);
+                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
+            }
+            _ => self.built += 1,
+        }
+        self.found += u64::from(entry.found);
+        if entry.found && entry.outcome != Outcome::Reused {
+            self.compared += 1;
+        }
+        self.differed += u64::from(entry.differed);
+        let counted = matches!(
+            entry.outcome,
+            Outcome::PassedThrough(_) | Outcome::BuiltNotStored(_)
+        );
+        if let Some(why) = tsc.why.as_deref().filter(|_| counted) {
+            match self.reasons.iter_mut().find(|(seen, _)| seen == why) {
+                Some((_, n)) => *n += 1,
+                None => self.reasons.push((why.to_string(), 1)),
+            }
+        }
+    }
+
+    /// B-109's lines for TypeScript, without a prefix. Empty when the helper logged nothing.
+    pub fn lines(&self, mode: Mode) -> Vec<String> {
+        if self.calls == 0 {
+            return Vec::new();
+        }
+        let compiles = |n: u64| {
+            if n == 1 {
+                "1 compile".to_string()
+            } else {
+                format!("{n} compiles")
+            }
+        };
+        let mut first = if mode == Mode::Observe {
+            format!(
+                "build: typescript: observing: {} of {} would have been reused",
+                self.found,
+                compiles(self.calls)
+            )
+        } else {
+            format!(
+                "build: typescript: {}: {} reused{}, {} built",
+                compiles(self.calls),
+                self.reused,
+                from_where(self.downloaded, 0),
+                self.built
+            )
+        };
+        if mode != Mode::Observe && self.saved_ms >= 1_000 {
+            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
+        }
+        if self.compared > 0 {
+            first.push_str(&format!(
+                ", {} compared with their blocks, {} differed",
+                self.compared, self.differed
+            ));
+        }
+        let mut lines = vec![first];
+        if !self.reasons.is_empty() {
+            let shown: Vec<String> = self
+                .reasons
+                .iter()
+                .take(3)
+                .map(|(why, n)| format!("{n} {why}"))
+                .collect();
+            let all: u64 = self.reasons.iter().map(|(_, n)| n).sum();
+            let more = if self.reasons.len() > 3 { ", …" } else { "" };
+            lines.push(format!(
+                "build: typescript: {} run as asked or not stored ({}{more})",
+                compiles(all),
+                shown.join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 /// What a run's C and C++ objects came to (B-61).
@@ -960,6 +1241,14 @@ impl Counts {
                 counts.cc.add(entry);
                 continue;
             }
+            if entry.gradle.is_some() {
+                counts.gradle.add(entry);
+                continue;
+            }
+            if entry.tsc.is_some() {
+                counts.tsc.add(entry);
+                continue;
+            }
             counts.compiles += 1;
             match entry.outcome {
                 Outcome::Reused => {
@@ -1067,6 +1356,8 @@ fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
     let mut lines = rust_lines(counts, rebuilt);
     lines.extend(counts.go.lines());
     lines.extend(counts.cc.lines(counts.mode));
+    lines.extend(counts.gradle.lines());
+    lines.extend(counts.tsc.lines(counts.mode));
     lines
 }
 
@@ -1294,6 +1585,8 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         share: Shared::Off,
         share_setting: settings.share,
         cc: None,
+        gradle: None,
+        tsc: None,
         lower: None,
         stub: None,
     };
@@ -1306,10 +1599,14 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         more: Vec::new(),
         go: None,
         go_asked: false,
+        xcode: None,
         rustc_left_out: false,
         cc_env: Vec::new(),
         cc_maps_setting: settings.cc_maps,
         slot: None,
+        gradle_env: Vec::new(),
+        gradle_cache: None,
+        tsc_env: Vec::new(),
     })
 }
 
@@ -1445,7 +1742,63 @@ impl Session {
             env.push((crate::go::GOCACHEPROG.into(), go.value.clone().into()));
         }
         env.extend(self.cc_env.iter().cloned());
+        env.extend(self.gradle_env.iter().cloned());
+        env.extend(self.tsc_env.iter().cloned());
+        if let Some(xcconfig) = &self.xcode {
+            env.push((
+                crate::xcode::XCCONFIG_VAR.into(),
+                xcconfig.clone().into_os_string(),
+            ));
+        }
         env
+    }
+
+    /// Gives COMMAND the xcconfig file that points Xcode's compilation cache at the run's
+    /// service (B-84).
+    pub fn set_xcode(&mut self, xcconfig: PathBuf) {
+        self.xcode = Some(xcconfig);
+    }
+
+    /// The xcconfig file COMMAND gets, when the run serves Xcode's cache.
+    pub fn xcode(&self) -> Option<&Path> {
+        self.xcode.as_deref()
+    }
+
+    /// B-77: serves Gradle hushrun's cache for this run, on `bound`, and gives COMMAND what
+    /// loads it: `HUSHRUN_GRADLE` naming `script` unless `env` has one already (ADR 0087's
+    /// adapter sets its own, whose script ends with the same text), the cache's URL and its
+    /// token. `run` is what the cache searches entries for (B-79), written into `session.json`
+    /// before COMMAND starts. Called once the session shares (B-26): the cache asks its relay.
+    /// The URL Gradle is given.
+    pub fn set_gradle(
+        &mut self,
+        run: crate::gradle::GradleRun,
+        script: &Path,
+        bound: crate::gradle::endpoint::Bound,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> std::io::Result<String> {
+        self.current.gradle = Some(run);
+        write_current(&self.current)?;
+        let url = bound.url();
+        let token = bound.endpoint.token.clone();
+        let cache = crate::gradle::cache::Cache::new(self.current.clone(), &token);
+        self.gradle_cache = Some(crate::gradle::cache::start(bound.listener, cache)?);
+        let mut gradle_env: Vec<(OsString, OsString)> = Vec::new();
+        if env(crate::gradle::SCRIPT_VARIABLE).is_none_or(|v| v.is_empty()) {
+            gradle_env.push((
+                crate::gradle::SCRIPT_VARIABLE.into(),
+                script.as_os_str().to_os_string(),
+            ));
+        }
+        gradle_env.push((crate::gradle::CACHE_VARIABLE.into(), url.clone().into()));
+        gradle_env.push((crate::gradle::TOKEN_VARIABLE.into(), token.into()));
+        self.gradle_env = gradle_env;
+        Ok(url)
+    }
+
+    /// Whether the run serves Gradle hushrun's cache (B-77).
+    pub fn serves_gradle(&self) -> bool {
+        self.gradle_cache.is_some()
     }
 
     /// Gives COMMAND the C and C++ launcher (B-50): `checkout` is the repository's folder as the
@@ -1482,6 +1835,44 @@ impl Session {
             .collect();
         cc_env.push((crate::cc::HUSHRUN_CC.into(), link.into_os_string()));
         self.cc_env = cc_env;
+        Ok(())
+    }
+
+    /// Gives COMMAND the TypeScript hook (B-100): `checkout` is the repository's folder as the
+    /// run found it (its given form; the resolved one is added), `env` the run's environment,
+    /// where COMMAND's `NODE_OPTIONS` would be. The hook is written into the store's folder,
+    /// `NODE_OPTIONS` gets `--require <hook>` after what it had, and `HUSHRUN_TSC` the link
+    /// `hushrun-tsc`. Written into `session.json` before COMMAND starts. Nothing on Windows.
+    pub fn set_tsc(
+        &mut self,
+        checkout: &Path,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> std::io::Result<()> {
+        if cfg!(windows) {
+            return Ok(());
+        }
+        let link = self.sibling_link(crate::tsc::PROGRAM_NAME)?;
+        let hook = crate::tsc::install_preload(&self.current.store)?;
+        let options =
+            crate::tsc::node_options(env("NODE_OPTIONS").as_deref(), &hook).ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "the hook's path, {}, has a quote, which NODE_OPTIONS can't hold",
+                    hook.display()
+                ))
+            })?;
+        let given = checkout.to_string_lossy().into_owned();
+        let mut roots = vec![given.clone()];
+        if let Some(resolved) = crate::roots::resolve_on_disk(&given)
+            && resolved != given
+        {
+            roots.push(resolved);
+        }
+        self.current.tsc = Some(crate::tsc::TscRun { roots });
+        write_current(&self.current)?;
+        self.tsc_env = vec![
+            ("NODE_OPTIONS".into(), options),
+            (crate::tsc::HUSHRUN_TSC.into(), link.into_os_string()),
+        ];
         Ok(())
     }
 
@@ -1689,7 +2080,11 @@ fn remove_dangling_links(store: &Path) {
         if is_link && dangling {
             let _ = fs::remove_file(&link);
             // Go's cache program's link and the C launcher's point at the same binary.
-            for name in [crate::go::PROGRAM_NAME, crate::cc::LAUNCHER_NAME] {
+            for name in [
+                crate::go::PROGRAM_NAME,
+                crate::cc::LAUNCHER_NAME,
+                crate::tsc::PROGRAM_NAME,
+            ] {
                 let program = folder.join(name);
                 if fs::symlink_metadata(&program).is_ok_and(|meta| meta.file_type().is_symlink()) {
                     let _ = fs::remove_file(&program);
@@ -1885,7 +2280,10 @@ mod tests {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
+            gradle: None,
+            tsc: None,
         };
         found.log(&entry);
         found.log(&entry);
@@ -1999,7 +2397,10 @@ mod tests {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
+            gradle: None,
+            tsc: None,
         }
     }
 
@@ -2853,11 +3254,72 @@ mod tests {
         assert!(live.exists());
     }
 
+    // covers: B-109
+    #[test]
+    fn typescript_compiles_are_counted_apart_and_said_in_their_own_lines() {
+        use crate::tsc::helper::TscEntry;
+        let tsc = |outcome: Outcome, why: Option<&str>| Entry {
+            tsc: Some(TscEntry {
+                why: why.map(str::to_string),
+                ..TscEntry::default()
+            }),
+            ..entry(outcome)
+        };
+        let entries = vec![
+            entry(Outcome::BuiltAndStored),
+            Entry {
+                saved_ms: 2_500,
+                downloaded: true,
+                ..tsc(Outcome::Reused, None)
+            },
+            tsc(Outcome::BuiltAndStored, None),
+            tsc(
+                Outcome::PassedThrough(PassedThrough::UnknownArgument),
+                Some("watch"),
+            ),
+            tsc(
+                Outcome::BuiltNotStored(NotStored::Unkeyable),
+                Some("build-over-outputs"),
+            ),
+            tsc(
+                Outcome::BuiltNotStored(NotStored::Unkeyable),
+                Some("build-over-outputs"),
+            ),
+        ];
+        let summary = Summary::of(Mode::On, 10, &entries);
+        assert_eq!(
+            summary.counts().compiles,
+            1,
+            "one crate, the compiles apart"
+        );
+        let lines: Vec<&String> = summary
+            .lines()
+            .iter()
+            .filter(|l| l.contains("typescript"))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "build: typescript: 5 compiles: 1 reused (1 from the shared store), 4 built, saving about 2s",
+                "build: typescript: 3 compiles run as asked or not stored (1 watch, 2 build-over-outputs)",
+            ]
+        );
+        let observing = Summary::of(Mode::Observe, 10, &entries);
+        assert!(
+            observing.lines().iter().any(
+                |l| l == "build: typescript: observing: 0 of 5 compiles would have been reused"
+            ),
+            "{:?}",
+            observing.lines()
+        );
+    }
+
     // covers: B-61
     #[test]
     fn c_objects_are_counted_apart_from_crates_and_said_in_their_own_lines() {
         use crate::cc::launcher::CcEntry;
         let cc = |outcome: Outcome, why: Option<&str>| Entry {
+            xcode: None,
             cc: Some(CcEntry {
                 why: why.map(str::to_string),
                 ..CcEntry::default()
@@ -2865,6 +3327,7 @@ mod tests {
             ..entry(outcome)
         };
         let probe = Entry {
+            xcode: None,
             cc: Some(CcEntry {
                 why: Some("cmake-probe".into()),
                 probe: true,
@@ -2947,6 +3410,7 @@ mod tests {
     fn objects_a_run_that_shares_keeps_here_are_said_with_why_and_downloads_counted() {
         use crate::cc::launcher::CcEntry;
         let stored = |local: &[&str], shared: bool| Entry {
+            xcode: None,
             cc: Some(CcEntry {
                 local: local.iter().map(|s| s.to_string()).collect(),
                 shared,
@@ -2964,6 +3428,7 @@ mod tests {
             Entry {
                 downloaded: true,
                 saved_ms: 4_000,
+                xcode: None,
                 cc: Some(CcEntry::default()),
                 ..entry(Outcome::Reused)
             },
@@ -2981,6 +3446,7 @@ mod tests {
     #[test]
     fn a_c_object_s_line_is_of_kind_cc_and_its_blocks_name_it() {
         let line = Entry {
+            xcode: None,
             cc: Some(crate::cc::launcher::CcEntry::default()),
             ..entry(Outcome::Reused)
         };

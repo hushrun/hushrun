@@ -108,6 +108,14 @@ pub enum Kind {
     /// The C and C++ launcher's objects, kind `cc/1` (B-60), with a manifest of their own per
     /// check and target triple.
     Cc,
+    /// The Xcode service's values and the objects they reach, kind `xcode/1` (B-87), with a
+    /// manifest of their own per check and Xcode build.
+    Xcode,
+    /// Gradle's task outputs, served to Gradle as its remote build cache, kind `gradle/1`
+    /// (B-77), with a manifest of their own per check.
+    Gradle,
+    /// The TypeScript helper's compiles, kind `tsc/1` (B-108).
+    Tsc,
 }
 
 impl Kind {
@@ -117,6 +125,9 @@ impl Kind {
             Kind::Rustc => "rustc/1",
             Kind::Go => "go/1",
             Kind::Cc => crate::cc::KIND,
+            Kind::Xcode => crate::xcode::KIND,
+            Kind::Gradle => crate::gradle::KIND,
+            Kind::Tsc => crate::tsc::KIND,
         }
     }
 
@@ -126,8 +137,17 @@ impl Kind {
         match description.get("kind").and_then(serde_json::Value::as_str) {
             Some(word) if word == Kind::Go.word() => Kind::Go,
             Some(word) if word == Kind::Cc.word() => Kind::Cc,
+            Some(word) if word == Kind::Xcode.word() => Kind::Xcode,
+            Some(word) if word == Kind::Gradle.word() => Kind::Gradle,
+            Some(word) if word == Kind::Tsc.word() => Kind::Tsc,
             _ => Kind::Rustc,
         }
+    }
+
+    /// Whether a block's first key is its key, with no hints: Go's and Xcode's, whose tools
+    /// compute the key from everything a compile read.
+    pub fn self_keyed(self) -> bool {
+        matches!(self, Kind::Go | Kind::Xcode)
     }
 
     /// Whether it is `rustc`, the default, which a line leaves out.
@@ -140,7 +160,8 @@ impl Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Class {
-    /// A `lib` or `rlib`, also the metadata-only one `cargo check` asks for.
+    /// A `lib` or `rlib`, also the metadata-only one `cargo check` asks for, and any compile that
+    /// emits no `link`, of whatever crate type (B-160).
     Library,
     /// A `proc-macro`, loaded by the compiler itself.
     ProcMacro,

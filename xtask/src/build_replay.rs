@@ -2045,7 +2045,10 @@ mod tests {
             downloaded: false,
             baked: false,
             go: None,
+            xcode: None,
             cc: None,
+            gradle: None,
+            tsc: None,
         }
     }
 

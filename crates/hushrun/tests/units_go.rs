@@ -973,6 +973,51 @@ fn hazards() -> Vec<Hazard> {
             },
             flags: &[],
         },
+        // \[ADR 0111\] (C-70) A file the tags leave out is a source, as the file they select is:
+        // swapping their tags, with no file added or removed, keeps the sources' shape, and only
+        // the packages' keys, from what go list says they are built from now, tell the change.
+        Hazard {
+            name: "two files' build tags swapped, no file added or removed",
+            files: vec![
+                file(
+                    "osdep/on.go",
+                    "//go:build special\n\npackage osdep\n\nfunc V() int { return 2 }\n",
+                ),
+                file(
+                    "osdep/off.go",
+                    "//go:build !special\n\npackage osdep\n\nfunc V() int { return 1 }\n",
+                ),
+                file(
+                    "osdep/osdep_test.go",
+                    "package osdep\n\nimport \"testing\"\n\nfunc TestV(t *testing.T) {\n\tif V() != 1 {\n\t\tt.Fatal(\"v\")\n\t}\n}\n",
+                ),
+            ],
+            change: |r| {
+                r.write(
+                    "osdep/on.go",
+                    "//go:build !special\n\npackage osdep\n\nfunc V() int { return 2 }\n",
+                );
+                r.write(
+                    "osdep/off.go",
+                    "//go:build special\n\npackage osdep\n\nfunc V() int { return 1 }\n",
+                );
+            },
+            flags: &[],
+        },
+        Hazard {
+            name: "a test file the tags leave out, its tag removed",
+            files: vec![file(
+                "greet/integ_test.go",
+                "//go:build integ\n\npackage greet\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) {\n\tif Hello() != \"hello\" {\n\t\tt.Fatal(\"integ\")\n\t}\n}\n",
+            )],
+            change: |r| {
+                r.write(
+                    "greet/integ_test.go",
+                    "//go:build !integ\n\npackage greet\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) {\n\tif Hello() != \"hello\" {\n\t\tt.Fatal(\"integ\")\n\t}\n}\n",
+                );
+            },
+            flags: &[],
+        },
     ]
 }
 
@@ -1973,4 +2018,146 @@ fn why_decides_from_the_files_go_list_names_under_commands_tags() {
             again.stderr
         );
     }
+}
+
+// covers: C-70
+#[test]
+fn a_go_file_no_test_binary_is_built_from_reruns_only_the_packages_that_read_it() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // A check that tests two packages of a go.work's main module: cart, which imports pricing,
+    // and greet. pricing's own test, a package nothing imports, a file the tags leave out and the
+    // other module of the workspace are no test binary's of it.
+    let mut files = shop("observe");
+    files.extend([
+        file("go.work", "go 1.21\n\nuse (\n\t.\n\t./lib\n)\n"),
+        file("lib/go.mod", "module example.com/lib\n\ngo 1.21\n"),
+        file("lib/lib.go", "package lib\n\nfunc N() int { return 1 }\n"),
+        file(
+            "lib/lib_test.go",
+            "package lib\n\nimport \"testing\"\n\nfunc TestN(t *testing.T) {\n\tif N() != 1 {\n\t\tt.Fatal(\"n\")\n\t}\n}\n",
+        ),
+        file("unused/unused.go", "package unused\n\nfunc U() int { return 1 }\n"),
+        file(
+            "greet/integ_test.go",
+            "//go:build integ\n\npackage greet\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) {}\n",
+        ),
+    ]);
+    let r = Repo::new(&files);
+    let command = &[
+        "run", "unit", "--", "go", "test", "-json", "./cart/", "./greet/",
+    ];
+    let first = r.run(command, &[]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    for (path, text) in [
+        (
+            "pricing/pricing_test.go",
+            "package pricing\n\nimport \"testing\"\n\nfunc TestPrice(t *testing.T) {}\n",
+        ),
+        (
+            "unused/unused.go",
+            "package unused\n\nfunc U() int { return 2 }\n",
+        ),
+        (
+            "greet/integ_test.go",
+            "//go:build integ\n\npackage greet\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) { t.Fatal(\"x\") }\n",
+        ),
+        ("lib/lib.go", "package lib\n\nfunc N() int { return 2 }\n"),
+        (
+            "lib/lib_test.go",
+            "package lib\n\nimport \"testing\"\n\nfunc TestN(t *testing.T) {}\n",
+        ),
+    ] {
+        r.write(path, text);
+        let ran = r.run(command, &[]);
+        assert_eq!(ran.code, 0, "{path}: {}", ran.stderr);
+        assert_eq!(
+            hushrun_testkit::lines::without_saving(ran.observe_line()),
+            "hushrun: unit: with `tests: reuse`, 0 of 2 packages would have run; 2 already passed on the files they read",
+            "{path}"
+        );
+    }
+    // A source cart's binary is built from still reruns it, and only it.
+    r.write(
+        "pricing/pricing.go",
+        "package pricing\n\nfunc Price(x int) int { return x + x }\n",
+    );
+    let ran = r.run(command, &[]);
+    assert_eq!(
+        hushrun_testkit::lines::without_saving(ran.observe_line()),
+        "hushrun: unit: with `tests: reuse`, 1 of 2 packages would have run; 1 already passed on the files it read"
+    );
+    // `hushrun why` classes the files as the run does.
+    let why = r.run(&["why", "unit", "greet"], &[]);
+    assert!(
+        why.stdout.starts_with(
+            "greet would be reused with `tests: reuse`: it passed on the files it read"
+        ),
+        "{}",
+        why.stdout
+    );
+}
+
+// covers: C-71
+#[test]
+fn with_go_tests_coverage_on_every_package_runs_and_its_profile_is_whole() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let r = Repo::new(&shop("reuse"));
+    let covered = &[
+        "run",
+        "unit",
+        "--",
+        "go",
+        "test",
+        "-json",
+        "-coverprofile=c.out",
+        "./...",
+    ];
+    let line = "hushrun: unit: every package runs: go test's coverage is on, and a partial run's coverage would read as a drop";
+    let first = r.run(covered, &[]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let whole = std::fs::read_to_string(r.repo.join("c.out")).unwrap();
+    r.write(
+        "pricing/pricing.go",
+        "package pricing\n\nfunc Price(x int) int { return x + x }\n",
+    );
+    let second = r.run(covered, &[]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(second.plan_line(), line);
+    let ran = packages(&second.stdout);
+    assert_eq!(ran.values().filter(|p| p.ran).count(), 3, "{ran:?}");
+    let profile = std::fs::read_to_string(r.repo.join("c.out")).unwrap();
+    for package in ["pricing", "cart", "greet"] {
+        assert!(
+            profile.contains(&format!("{MODULE}/{package}/")),
+            "{package}: {profile}\nfirst: {whole}"
+        );
+    }
+    // Coverage from GOFLAGS, which COMMAND doesn't show, is coverage too.
+    r.write(
+        "pricing/pricing.go",
+        "package pricing\n\nfunc Price(x int) int { return 2 * x }\n",
+    );
+    let flags = r.run(GO_TEST, &[("GOFLAGS", "-cover")]);
+    assert_eq!(flags.code, 0, "{}", flags.stderr);
+    assert_eq!(flags.plan_line(), line);
+    // Without coverage the same check reuses.
+    r.write(
+        "pricing/pricing.go",
+        "package pricing\n\nfunc Price(x int) int { return x * 2 }\n",
+    );
+    assert_eq!(r.run(GO_TEST, &[]).code, 0);
+    r.write(
+        "greet/greet.go",
+        "package greet\n\nfunc Hello() string { return \"h\" + \"i\" }\n",
+    );
+    let plain = r.run(GO_TEST, &[]);
+    assert!(
+        plain.plan_line().contains("already passed on the files"),
+        "{}",
+        plain.stderr
+    );
 }

@@ -793,13 +793,42 @@ hushrun says why in one line, and runs the check anyway:
 | ``not recorded: set `HUSHRUN_MACHINE_KEY` to the key `hushrun token create --agent` printed`` | The sandbox has no key, or one that isn't its token's: set `HUSHRUN_MACHINE_KEY` to the key shown with the token, or make a new token if nobody kept it |
 | `HUSHRUN_TOKEN isn't sent to …` | The backend isn't on hushrun's host: use `HUSHRUN_AGENT`, or set `HUSHRUN_BACKEND` or `HUSHRUN_HOST` (above) |
 
+## Tests with Node's test runner and Mocha
+
+With `tests: {mode: reuse}` on a check, `node --test` and Mocha reuse test files, and with
+`unit: test` single tests, that already passed on the files they read, as Vitest and Jest do. No
+file changes: hushrun adds its adapter to `NODE_OPTIONS` (keep what a script's `NODE_OPTIONS=` had,
+`NODE_OPTIONS="$NODE_OPTIONS …"`, or the adapter is dropped and the run says so).
+
+```yaml
+checks:
+  unit:
+    tests: {mode: reuse, unit: test}
+```
+
+```text
+$ hushrun run unit -- node --test
+hushrun: unit: 3 of 41 tests run, in 2 of 12 test files; 38 already passed on the files they read
+```
+
+- **Node's test runner** needs Node 22.15 or later. Each test file's process is watched from its
+  start to its exit, so what a test file read is exact; a left-out test shows as skipped with
+  `hushrun: passed before on the files it read`. `--watch`, `--test-isolation=none` and coverage
+  run everything; `--test-shard` leaves single tests out but no whole test file.
+- **Mocha** 10 or 11, on Node 22.15 or later. Every spec file still loads, so its root hooks and
+  what its top level does are as without hushrun; the tests that passed are taken out before the
+  run starts, and a suite left with none runs no hook. A spec file that defines a root hook is
+  read by every spec file and always runs. `--parallel` and `--watch` run as written.
+- What a test reads is its test file's list (`reads: test` runs as `reads: file`).
+
 ## Compiled code
 
 A check that runs can still skip compiling what this machine already compiled from the same
 inputs, in any worktree or clone: `hushrun build on` turns that on for the builds `hushrun run`
 runs. Rust crates go through cargo's `RUSTC_WRAPPER`, and the C and C++ objects of a CMake build
 through CMake's compiler launcher. Go's own build cache already does this on one machine, so hushrun
-adds Go only where an org shares compiled code through its backend. On your machine it is off until
+adds Go only where an org shares compiled code through its backend, and Gradle's tasks (Kotlin,
+Java, Android) the same way, as the build's remote build cache. On your machine it is off until
 you turn it on, once, for every repository; `hushrun build` shows the mode, the store and its size,
 and `hushrun build observe` compiles everything as usual and says what would have been reused.
 
@@ -827,6 +856,30 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   store saves disk only when you delete target folders you would otherwise keep. `du` and
   `hushrun build status` count a cloned file in full in each place. A block not used for 15 days is
   deleted, and nothing is stored while the disk has less than 10 GB free.
+
+- **Gradle, and so Android.** Where the org shares, `hushrun run` is the remote build cache of a
+  Gradle build: a branch's first CI job takes from main's what main's CI already ran, and a laptop
+  takes what CI ran, with no cache server of your own. It needs the line `hushrun init` proposes in
+  the settings file (`if (System.getenv("HUSHRUN_GRADLE")) apply from:
+  System.getenv("HUSHRUN_GRADLE")`, or `System.getenv("HUSHRUN_GRADLE")?.let { apply(from = it) }`
+  in `settings.gradle.kts`) and the build's own `org.gradle.caching=true` in `gradle.properties`;
+  the run says which is missing. Gradle's local cache stays Gradle's, so a plain `./gradlew` is as
+  warm as before; a remote the build sets up itself, such as Develocity's, stays, and hushrun steps
+  aside. `--offline` turns Gradle's remote cache off, and hushrun's with it. Tasks that Gradle
+  can't cache, or whose keys hold absolute paths, run on every machine as before (the Android
+  Cache Fix plugin covers the Android plugin's known ones), and an entry that holds your checkout's
+  folder or your home folder never leaves the machine. The summary counts tasks apart:
+
+  ```text
+  $ hushrun run build -- ./gradlew assembleDebug
+  hushrun: build: gradle: 214 tasks: 198 from hushrun's cache (198 from the shared store), 16 run and stored, saving about 3m 40s
+  ```
+
+  Gradle's outputs needn't be the same from one run of a task to the next, so hushrun can't
+  compare an entry with a fresh run as it does compiled code: what a machine reads is only as
+  trustworthy as the machines that write what it reads. Trusted copies come only from CI on the
+  branches hushrun.yaml's backend lists; a person's entries reach that person, or the team where
+  the org pools them.
 
 - **Baked into an image.** `hushrun build bake --out DIR` writes the crates, Go packages and C and
   C++ objects the last run of each check here used (`--check NAME` narrows it) into a folder of
@@ -932,8 +985,160 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### Rust: clippy, checks and doctests
+
+`cargo check` and `cargo clippy` go through the same store as `cargo build`: every target's
+check is kept, the programs', tests' and benches' with `--all-targets` too, and a workspace
+member's check under clippy is kept apart from rustc's, with its lints, which a reuse prints again.
+A `clippy.toml` added where clippy would find it first, or another clippy, compiles the crate again.
+
+```text
+$ hushrun run clippy -- cargo clippy --workspace --all-targets -- -D warnings   # a new worktree
+hushrun: build: 4 of 9 crates reused, 5 built
+```
+
+With `tests: reuse`, `cargo test --doc` runs only the doctests of the libraries whose files
+changed: a library's doctests are a unit under its root file (`crates/core/src/lib.rs`), and one
+that already passed on what it read isn't handed to rustdoc at all, so nothing of it compiles. What
+they read is what the library's unit tests read, its dev-dependencies' sources included, and
+`RUSTDOCFLAGS`. Doctests inside a plain `cargo test` still run every time; run them as a check of
+their own, as a project that uses nextest already does.
+
+```text
+$ hushrun run doctest -- cargo test --workspace --doc --locked
+hushrun: doctest: 2 of 5 doctest crates run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check
+```
+
+hushrun says why and runs the command as it was when it can't tell what a command ran: a
+`RUSTDOC` or `build.rustdoc` of your own, `cargo nextest run --archive-file` (its binaries were
+built elsewhere), and `--partition count:M/N`, which a binary left out would shift between jobs.
+`--partition hash:M/N` gives each test its job by name, and works.
+
+### Xcode
+
+Xcode apps (iOS, iPadOS, macOS) reuse compiles through Xcode's own compilation cache, which hushrun
+serves. Inside `hushrun run`, an `xcodebuild` in a checkout that holds an Xcode project, workspace
+or Swift package gets it with nothing to set up: hushrun starts the cache's service beside the
+command and gives Xcode an xcconfig file that turns caching on and maps the checkout's folder, so a
+second worktree, a new branch's clone or another machine computes the same keys. Swift, C, C++,
+Objective-C and Clang modules are cached; linking, asset catalogs and code signing aren't.
+
+```text
+$ hushrun run build -- xcodebuild -scheme App build      # in a second worktree
+hushrun: build: xcode: 412 compiles asked: 405 from this Mac's cache, 0 reused, 7 compiled
+```
+
+- **Xcode 27.** Older versions crash on cached, prefix-mapped diagnostics, and get nothing; a run
+  with an Xcode hushrun doesn't know yet says so in one line. `HUSHRUN_BUILD_XCODE=0` turns it off
+  for a run.
+- **On this Mac,** what any checkout compiled is kept in the store's `xcode` folder, so a new
+  branch's worktree doesn't start from an empty DerivedData.
+- **Between machines and in CI,** an org that shares compiled code shares Xcode's compiles too:
+  a new branch's CI job reuses what `main`'s CI compiled with the same Xcode build. A compile
+  whose output holds your home folder or your checkout's path stays on your Mac.
+- **The Xcode app.** `hushrun build xcode on` makes the app's own builds use the same cache: a
+  LaunchAgent serves it and sets `XCODE_XCCONFIG_FILE` for the apps you open, so quit and reopen
+  Xcode once. `hushrun build xcode status` says whether it is on; `off` undoes it. The app reuses
+  what is on this Mac and downloads nothing: a `hushrun run … xcodebuild` is what downloads.
+- **Your own xcconfig.** An `XCODE_XCCONFIG_FILE` you set is included first; settings you pass on
+  `xcodebuild`'s command line still win.
+
+This is new and its rules are a draft ([ADR 0105](../adr/0105-xcode-compilation-cache.md)): the
+ADR lists what a first build on a real Mac should confirm.
+
+### TypeScript
+
+`tsc` reuses what it wrote and printed before, in another worktree, a new branch's clone or CI.
+Inside `hushrun run`, in a checkout with a `package.json`, hushrun adds a small hook to
+`NODE_OPTIONS`; in a Node process that runs TypeScript's `tsc`, the hook looks for a block before
+the compiler loads, and on a miss records what the compiler read, looked at, listed and wrote. A
+plain `tsc`, `tsc -p tsconfig.build.json`, `tsc --build` over project references and `tsc
+--noEmit` all work, through `npm run`, `npx` or a script:
+
+```text
+$ hushrun run build -- npm run build      # "build": "tsc -b", in a second worktree
+hushrun: build: typescript: 1 compile: 1 reused, 0 built, saving about 14s
+```
+
+- **Keyed by what it read.** The compiler's own file, its arguments and folder, and every file of
+  the program by its bytes: sources, declarations under `node_modules`, `lib.*.d.ts`, each
+  `tsconfig` of an `extends` chain, each `package.json` it looked at. A file appearing where the
+  compiler looked for one and found nothing (a `package.json` with `"type": "module"`, a
+  `paths` target) and a new file in a folder an `include` lists both make it compile again.
+- **Type checks too.** `tsc --noEmit` prints the same errors and ends with the same status
+  without starting, when nothing it read changed.
+- **Put in place as files dated now.** A plain `tsc --build` afterwards finds every project up to
+  date.
+- **`--build` stores only a build from scratch.** Over earlier `.tsbuildinfo` files the compiler
+  decides by file dates, which no key holds, so such a build runs as usual and isn't stored: the
+  first build of a fresh worktree or CI job is the one shared.
+- **Between machines and in CI,** an org that shares compiled code shares these blocks too, by
+  Node's platform. A compile whose output names your checkout's path (an absolute `sourceRoot`),
+  or that read a file outside the checkout (a `tsc` installed globally, a `node_modules` linked in
+  from elsewhere), stays on this machine.
+- **TypeScript 4 to 6.** TypeScript 7's `tsc` is native code whose reads hushrun can't see from
+  Node yet: it runs as usual. `--watch`, `--extendedDiagnostics`, `--generateTrace` and `tsc -b
+  --verbose` run as usual too, and the run's summary says why.
+- **A script that sets `NODE_OPTIONS` without what it had** (`NODE_OPTIONS=--max-old-space-size=8192
+  tsc`) drops the hook: keep it (`NODE_OPTIONS="$NODE_OPTIONS --max-old-space-size=8192"`).
+
+This is new and its rules are a draft ([ADR 0106](../adr/0106-typescript-build-blocks.md)).
+
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
+
+### Vue
+
+Vue's compiles get no build blocks: `vue-tsc --noEmit` is a check that a whole run already skips
+on code that passed, and `vite build` compiles each component inside one bundler process, with no
+per-file compile or cache protocol for hushrun to stand in for. What hushrun does for a Vue project
+is its tests: with `tests` on, a component (`.vue`) is a source like a `.ts` file, under Vitest
+(`@vitejs/plugin-vue`) and Jest (`@vue/vue3-jest`), so a change to one component runs only the
+test files that mounted it.
+
+```text
+$ hushrun run unit -- vitest run        # after editing src/Badge.vue
+hushrun: unit: 1 of 40 test files run; 39 already passed on the files they read
+```
+
+- **What a component is made of** counts as read with it: its `src=` blocks, and, under Vitest,
+  the files the types of `defineProps<Props>()` and the other macros came from, whose code never
+  runs. A type change that breaks a component runs its tests.
+- **`jsdom` and `happy-dom`** environments work: hushrun lets Vite serve its setup file.
+- **Rest.** A CSS, HTML or image file a component names, and `tsconfig.json`, run every test file
+  when they change. Under Jest, a run whose cache is cold with ts-jest or `lang="ts"` components
+  reads everything below the directories `tsconfig.json` includes, so its test files reuse only
+  after a run with Jest's cache warm.
+- **Not followed.** Nuxt's `@nuxt/test-utils` environment makes modules from no file: its test
+  files always run. `@vitejs/plugin-vue-jsx` with `resolveType` reads types hushrun doesn't see.
+
+The rules are C-58 to C-61 ([ADR 0108](../adr/0108-vue-components.md)).
+
+### Kotlin
+
+Kotlin's tests and builds go through Gradle, with the same line in the settings file. Beside
+`test`, `jvmTest` and Android's `testDebugUnitTest`, hushrun follows Kotlin Multiplatform's own
+test tasks, `jsNodeTest`, `jsBrowserTest`, `wasmJsNodeTest` and native ones such as
+`linuxX64Test`: a test class is the file that declares it, so a `commonTest` class is one test
+file for every platform it runs on, and a class or test that already passed on the files it read
+is left out on all of them, through Gradle's own test filter. Kotest's specs are test files too,
+left out whole; their tests, which have no method to name, always run when their spec does.
+
+```text
+$ hushrun run unit -- ./gradlew allTests
+hushrun: unit: 3 of 12 tests run, in 2 of 5 test classes; 9 already passed on the files they read
+```
+
+For compiled code, Kotlin's compile tasks, KSP's and kapt's annotation processing are cacheable and
+relocatable, and are shared like any other Gradle task. kapt's stub generation writes its
+sources' absolute paths into its output, so it stays on the machine, and the summary names it:
+
+```text
+hushrun: build: gradle: 1 task run here stays on this machine (1: its outputs hold the checkout's folder): :app:kaptGenerateStubsDebugKotlin
+```
+
+KSP has no such step. A Kotlin/JS or native task leaves out at most 250 tests one by one, and no
+class of the default package.
 
 ## When hushrun runs anyway
 

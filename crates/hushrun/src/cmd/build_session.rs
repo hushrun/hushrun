@@ -100,6 +100,12 @@ pub(crate) fn begin(
             go: session.go().map(|go| go.platform.clone()),
         });
     }
+    // B-84: Xcode's compilation cache, through a service of this run, last: the service reads
+    // the session as it now stands (its relay, its baked store).
+    if let (Some(folder), Some(root)) = (folder.as_deref(), checkout.as_deref()) {
+        let in_ci = crate::gitlab_job::in_ci(&Env::from_process());
+        crate::cmd::build_xcode::give(&mut session, folder, root, in_ci, &env);
+    }
     let cargo = std::env::current_dir().ok().is_some_and(|folder| {
         folder
             .ancestors()
@@ -539,6 +545,37 @@ fn give_cc(session: &mut Session, here: &Here<'_>) {
     }
 }
 
+/// B-100: gives COMMAND the TypeScript hook, for the checkout the run is in, where the folder
+/// is a Node package's or below one. A hook that can't be set up costs a line, never the run.
+fn give_tsc(session: &mut Session, here: &Here<'_>) {
+    let Some(folder) = &here.folder else {
+        return;
+    };
+    if !node_project(folder) {
+        return;
+    }
+    let root = checkout_root(folder, here.env);
+    if let Err(err) = session.set_tsc(&root, here.env) {
+        session.add_line(format!(
+            "build: TypeScript compiles aren't reused in this run: {err}"
+        ));
+    }
+}
+
+/// Whether `folder` or a folder above it, up to its checkout, holds a `package.json`: where
+/// COMMAND may run `tsc` (B-100).
+fn node_project(folder: &Path) -> bool {
+    for dir in folder.ancestors() {
+        if dir.join("package.json").is_file() {
+            return true;
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    false
+}
+
 /// The line of a Go module's run whose Rust crates aren't reused because `RUSTC_WRAPPER` is set
 /// already, said in an org that shares, where the folder is a cargo project's too.
 const RUST_LEFT_OUT: &str =
@@ -708,7 +745,7 @@ fn begin_from_saved(
     let Some(Ok(relay)) = crate::cmd::build_relay::Relay::get_or_start(config) else {
         return Ok(session);
     };
-    match relay.begin_check(&current.folder, None, None, here.env) {
+    match relay.begin_check(&current.folder, None, None, false, here.env) {
         Ok(share) => {
             if let Err(err) = session.set_share(share) {
                 session.add_line(format!("build: sharing is off for this run: {err}"));
@@ -736,6 +773,7 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
         session.leave_out_rustc();
     }
     give_cc(&mut session, here);
+    give_tsc(&mut session, here);
     if let Some(folder) = &here.folder {
         session.check(folder, Some(Instant::now() + CHECK_BUDGET));
         if let Some(sysroot) = (here.sysroot)(folder) {
@@ -1415,12 +1453,122 @@ fn start_sharing(
         session.set_go(go);
     }
     let go = session.go().map(|go| go.platform.clone());
-    let share = relay.begin_check(&current.folder, Some(check), go, env)?;
+    // B-77: a Gradle build's COMMAND is served hushrun's cache, and the check asks for its
+    // Gradle manifest apart.
+    let gradle = gradle_build(session, env);
+    let share = relay.begin_check(&current.folder, Some(check), go, gradle.is_some(), env)?;
     if let Err(err) = session.set_share(share) {
         relay.end_check(&[]);
         return Err(Some(format!("build: sharing is off for this run: {err}")));
     }
+    if let Some(build) = gradle {
+        give_gradle(session, &build, env);
+    }
     Ok(relay)
+}
+
+/// B-77: the Gradle build COMMAND runs in, when its settings file loads hushrun's script: the
+/// nearest folder at or above the one COMMAND runs in, up to the checkout's, that holds
+/// `settings.gradle` or `settings.gradle.kts`. A settings file without the line is said in one
+/// line, with the line to add; a folder in no Gradle build is silent.
+fn gradle_build(session: &mut Session, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if cfg!(not(unix)) {
+        return None;
+    }
+    let folder = std::env::current_dir().ok()?;
+    let checkout = checkout_root(&folder, env);
+    let build = folder
+        .ancestors()
+        .take_while(|dir| dir.starts_with(&checkout) || *dir == checkout)
+        .find(|dir| {
+            ["settings.gradle", "settings.gradle.kts"]
+                .iter()
+                .any(|name| dir.join(name).is_file())
+        })?
+        .to_path_buf();
+    let (file, line) = ["settings.gradle.kts", "settings.gradle"]
+        .iter()
+        .map(|name| build.join(name))
+        .find(|path| path.is_file())
+        .map(|path| {
+            let line = if path.extension().is_some_and(|e| e == "kts") {
+                crate::units::gradle::KOTLIN_LINE
+            } else {
+                crate::units::gradle::GROOVY_LINE
+            };
+            (path, line)
+        })?;
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    if !text.contains(hushrun_build::gradle::SCRIPT_VARIABLE) {
+        session.add_line(format!(
+            "build: Gradle's tasks aren't shared in this run: {} doesn't load hushrun's script; add `{line}` after any pluginManagement {{}} and plugins {{}} block",
+            file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        ));
+        return None;
+    }
+    Some(build)
+}
+
+/// B-77: starts hushrun's Gradle cache for the session and gives COMMAND what loads it. What
+/// can't be done is one line, and the run goes on without it.
+fn give_gradle(session: &mut Session, build: &Path, env: &dyn Fn(&str) -> Option<OsString>) {
+    let current = session.current().clone();
+    let checkout = checkout_root(build, env);
+    let given = checkout.to_string_lossy().into_owned();
+    let mut roots = vec![given.clone()];
+    if let Ok(resolved) = std::fs::canonicalize(&checkout)
+        && resolved != checkout
+    {
+        roots.push(resolved.to_string_lossy().into_owned());
+    }
+    let user_home = env("GRADLE_USER_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".gradle")));
+    let run = hushrun_build::gradle::GradleRun {
+        roots,
+        user_home: user_home.as_ref().map(|p| p.to_string_lossy().into_owned()),
+    };
+    let started = hushrun_build::gradle::install_script(&current.store).and_then(|script| {
+        let bound = hushrun_build::gradle::endpoint::bind(&current.store)?;
+        let stable = bound.stable;
+        session.set_gradle(run, &script, bound, env).map(|_| stable)
+    });
+    match started {
+        Ok(stable) => {
+            if !stable {
+                session.add_line(
+                    "build: gradle: another run is using this store's Gradle cache port, so this run's Gradle can't reuse its configuration cache".to_string(),
+                );
+            }
+            if !caching_on(build, user_home.as_deref()) {
+                session.add_line(
+                    "build: gradle: the build cache is off for this build, so Gradle asks hushrun's cache nothing: set `org.gradle.caching=true` in gradle.properties, or pass --build-cache".to_string(),
+                );
+            }
+        }
+        Err(err) => session.add_line(format!(
+            "build: Gradle's tasks aren't shared in this run: {err}"
+        )),
+    }
+}
+
+/// Whether Gradle's build cache is on for the build at `build` by its `gradle.properties` or
+/// the user's (`org.gradle.caching=true`): the user's wins, as Gradle reads them. A command line
+/// with `--build-cache` turns it on too, which this can't see.
+fn caching_on(build: &Path, user_home: Option<&Path>) -> bool {
+    let read = |path: PathBuf| -> Option<bool> {
+        let text = std::fs::read_to_string(path).ok()?;
+        text.lines()
+            .filter_map(|line| line.trim().strip_prefix("org.gradle.caching"))
+            .filter_map(|rest| rest.trim_start().strip_prefix(['=', ':']))
+            .map(|value| value.trim().eq_ignore_ascii_case("true"))
+            .next_back()
+    };
+    user_home
+        .and_then(|home| read(home.join("gradle.properties")))
+        .or_else(|| read(build.join("gradle.properties")))
+        .unwrap_or(false)
 }
 
 /// B-39: Go's cache program for COMMAND, when the folder COMMAND runs in is a Go module's whose
@@ -1491,6 +1639,8 @@ pub(crate) fn finish_as(
     now: SystemTime,
     ending: crate::cmd::build_relay::Ending,
 ) -> hushrun_build::session::Summary {
+    // B-91: the Xcode service first, so the check's `close` holds what it stored.
+    crate::cmd::build_xcode::end(&mut session);
     if session.current().share.relay().is_some()
         && let Some(relay) = crate::cmd::build_relay::Relay::running()
     {
@@ -1642,6 +1792,7 @@ fn begin_with(
         session.leave_out_rustc();
     }
     give_cc(&mut session, here);
+    give_tsc(&mut session, here);
     // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {

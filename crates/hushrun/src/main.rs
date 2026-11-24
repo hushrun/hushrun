@@ -72,6 +72,14 @@ fn main() -> ExitCode {
         cmd::build_relay::baked::install();
         return hushrun_build::cc::main();
     }
+    // B-100: called by the TypeScript helper's name, it answers the hook in a compiler's Node
+    // process (`lookup`, `store`) and does nothing else.
+    if std::env::args_os()
+        .next()
+        .is_some_and(|name| hushrun_build::tsc::called_as_helper(&name))
+    {
+        return hushrun_build::tsc::main();
+    }
     // \[ADR 0068\] As the target runner Cargo starts a test binary through, hushrun is no command
     // of its own: it runs the binary and passes everything through, before anything else.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();

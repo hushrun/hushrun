@@ -29,7 +29,7 @@ pub(crate) mod hosted;
 mod http;
 mod pack;
 pub(crate) mod saved;
-mod socket;
+pub(crate) mod socket;
 mod upload;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -310,11 +310,15 @@ struct Check {
     /// B-45: the platform of the check's Go command (`GOOS_GOARCH`), when COMMAND is a Go
     /// module's and gets the cache program: its Go manifest is asked for and closed apart.
     go: Option<String>,
+    /// B-82: COMMAND's Gradle is served hushrun's cache: its `gradle/1` manifest is asked for and
+    /// closed apart.
+    gradle: bool,
 }
 
 /// The check's Go manifest (B-45): asked once `open` answered, kept until the first Go fetch
-/// takes it for the prefetch. Until it has answered, a Go fetch is a miss, and a Go fetch for an
-/// archive the manifest doesn't name never asks the server.
+/// takes it for the prefetch. A Go fetch that comes before it has answered waits for it, within
+/// the fetch's own bound (ADR 0111), and is a miss past it; a Go fetch for an archive the manifest
+/// doesn't name never asks the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GoManifest {
     /// No Go command in the check, or `open` hasn't answered yet.
@@ -350,8 +354,13 @@ struct State {
     go_manifest: GoManifest,
     /// The prefetch of the Go manifest is looking up what it names.
     go_prefetching: bool,
-    /// The check's `cc/1` manifests, by target triple (B-60).
-    cc_manifests: HashMap<String, CcManifest>,
+    /// B-82: the check's `gradle/1` manifest, as the Go one is kept.
+    gradle_manifest: GoManifest,
+    /// The prefetch of the Gradle manifest is looking up what it names.
+    gradle_prefetching: bool,
+    /// The check's `cc/1` manifests, by target triple (B-60), and its `xcode/1` manifests, by
+    /// Xcode build (B-90): by kind and platform.
+    cc_manifests: HashMap<(Kind, String), CcManifest>,
     /// The prefetch of a `cc/1` manifest is looking up what it names.
     cc_prefetching: usize,
     /// The C and C++ objects a launcher told of (B-60): the run's log names the others at the
@@ -406,6 +415,22 @@ struct State {
 }
 
 impl State {
+    /// The check's manifest of `kind` that a fetch must name (B-45, B-82): Gradle's, else Go's.
+    fn named_manifest(&mut self, kind: Kind) -> &mut GoManifest {
+        match kind {
+            Kind::Gradle => &mut self.gradle_manifest,
+            _ => &mut self.go_manifest,
+        }
+    }
+
+    /// Whether the prefetch of that manifest is looking up what it names.
+    fn named_prefetching(&mut self, kind: Kind) -> &mut bool {
+        match kind {
+            Kind::Gradle => &mut self.gradle_prefetching,
+            _ => &mut self.go_prefetching,
+        }
+    }
+
     /// The phase now: a rest whose time is up is over.
     fn phase_now(&mut self, now: Instant) -> &Phase {
         if let Phase::Resting(until) = self.phase
@@ -672,6 +697,8 @@ impl Relay {
                 manifest: None,
                 go_manifest: GoManifest::NotAsked,
                 go_prefetching: false,
+                gradle_manifest: GoManifest::NotAsked,
+                gradle_prefetching: false,
                 cc_manifests: HashMap::new(),
                 cc_prefetching: 0,
                 cc_told: HashSet::new(),
@@ -726,6 +753,7 @@ impl Relay {
         session_folder: &Path,
         check: Option<Hex32>,
         go: Option<String>,
+        gradle: bool,
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Result<Share, String> {
         let bound = socket::bind(session_folder, env)
@@ -752,8 +780,10 @@ impl Relay {
                 socket: bound,
                 stop_serving,
                 go,
+                gradle,
             });
             state.go_manifest = GoManifest::NotAsked;
+            state.gradle_manifest = GoManifest::NotAsked;
             state.cc_manifests.clear();
             if !matches!(state.phase, Phase::Stopped(_)) {
                 state.phase = Phase::Opening;
@@ -777,8 +807,19 @@ impl Relay {
             };
             if let Some(platform) = go_platform {
                 let relay = self.clone();
-                self.runtime
-                    .spawn(async move { relay.go_open(check, platform).await });
+                self.runtime.spawn(async move {
+                    relay.manifest_open(Kind::Go, check, platform).await;
+                });
+            }
+            // B-82: and Gradle's, the same way, under one platform for every machine.
+            if gradle {
+                self.state().gradle_manifest = GoManifest::Asking;
+                let relay = self.clone();
+                self.runtime.spawn(async move {
+                    relay
+                        .manifest_open(Kind::Gradle, check, hushrun_build::gradle::PLATFORM.into())
+                        .await;
+                });
             }
             let relay = self.clone();
             self.runtime.spawn(async move { relay.uploads().await });
@@ -895,7 +936,7 @@ impl Relay {
                 self.report_problem(Kind::Rustc, key, problem).await;
                 Answer::Ok
             }
-            Request::GoFetch { key, local_ms } => self.go_fetch(key, local_ms).await,
+            Request::GoFetch { key, local_ms } => self.named_fetch(Kind::Go, key, local_ms).await,
             Request::GoVouch { key, outputs } => self.vouch(Kind::Go, key, outputs).await,
             Request::GoBuilt { .. } => {
                 self.built(request);
@@ -911,13 +952,16 @@ impl Relay {
                 step,
                 platform,
                 local_ms,
-            } => self.cc_hints(step, platform, local_ms).await,
+            } => self.cc_hints(Kind::Cc, step, platform, local_ms).await,
             Request::CcFetch {
                 step,
                 keys,
                 platform,
                 local_ms,
-            } => self.cc_fetch(step, keys, platform, local_ms).await,
+            } => {
+                self.cc_fetch(Kind::Cc, step, keys, platform, local_ms)
+                    .await
+            }
             Request::CcVouch { key, outputs } => self.vouch(Kind::Cc, key, outputs).await,
             Request::CcBuilt { .. } => {
                 self.built(request);
@@ -926,6 +970,58 @@ impl Relay {
             Request::CcReport { key, problem } => {
                 // As Go's: answered once the record is read, so the launcher may discard it.
                 self.report_problem_soon(Kind::Cc, key, problem);
+                Answer::Ok
+            }
+            Request::XcodeFetch {
+                key,
+                platform,
+                local_ms,
+            } => self.xcode_fetch(key, platform, local_ms).await,
+            Request::XcodeVouch { key, outputs } => self.vouch(Kind::Xcode, key, outputs).await,
+            Request::XcodeBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::XcodeReport { key, problem } => {
+                self.report_problem_soon(Kind::Xcode, key, problem);
+                Answer::Ok
+            }
+            Request::GradleFetch { key, local_ms } => {
+                self.named_fetch(Kind::Gradle, key, local_ms).await
+            }
+            Request::GradleVouch { key, outputs } => self.vouch(Kind::Gradle, key, outputs).await,
+            Request::GradleBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::GradleReport { key, problem } => {
+                // As Go's: answered once the record is read, so the cache may discard it.
+                self.report_problem_soon(Kind::Gradle, key, problem);
+                Answer::Ok
+            }
+            // B-108: the TypeScript helper's, as the C and C++ launcher's, by its own kind and
+            // manifest.
+            Request::TscHints {
+                step,
+                platform,
+                local_ms,
+            } => self.cc_hints(Kind::Tsc, step, platform, local_ms).await,
+            Request::TscFetch {
+                step,
+                keys,
+                platform,
+                local_ms,
+            } => {
+                self.cc_fetch(Kind::Tsc, step, keys, platform, local_ms)
+                    .await
+            }
+            Request::TscVouch { key, outputs } => self.vouch(Kind::Tsc, key, outputs).await,
+            Request::TscBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::TscReport { key, problem } => {
+                self.report_problem_soon(Kind::Tsc, key, problem);
                 Answer::Ok
             }
         }
@@ -1072,12 +1168,13 @@ impl Relay {
         self.state().manifest = Some(manifest);
     }
 
-    /// B-45: `open` for the check's Go command, kind `go/1`, for its manifest alone: the policy
-    /// is the one the check's own `open` answers, sent at the same time. A failure leaves no manifest, and so no Go
-    /// download, and changes nothing else.
-    async fn go_open(&self, check: Option<Hex32>, platform: String) {
+    /// B-45, B-82: `open` for the check's Go command (kind `go/1`) or its Gradle (`gradle/1`),
+    /// for its manifest alone: the policy is the one the check's own `open` answers, sent at the
+    /// same time. A failure leaves no manifest, and so no download of the kind, and changes
+    /// nothing else.
+    async fn manifest_open(&self, kind: Kind, check: Option<Hex32>, platform: String) {
         let body = OpenRequest {
-            kind: Kind::Go.word().to_string(),
+            kind: kind.word().to_string(),
             repository: self.config.repository.clone(),
             commit: self.config.commit.clone(),
             check,
@@ -1092,8 +1189,9 @@ impl Relay {
             Err(_) => Vec::new(),
         };
         let mut state = self.state();
-        if state.go_manifest == GoManifest::Asking {
-            state.go_manifest = GoManifest::Got(manifest);
+        let kept = state.named_manifest(kind);
+        if *kept == GoManifest::Asking {
+            *kept = GoManifest::Got(manifest);
         }
     }
 
@@ -1103,16 +1201,44 @@ impl Relay {
     /// manifest names (a warm machine, whose `go` finds everything in its own cache, asks
     /// nothing and downloads nothing); one that comes while it looks up waits for it, within
     /// half what this machine's own last compile of the key took, and at most a second.
-    async fn go_fetch(self: Arc<Relay>, key: Digest, local_ms: Option<u64>) -> Answer {
+    ///
+    /// B-80: Gradle's cache asks the same way, for an entry of kind `gradle/1` the check's Gradle
+    /// manifest names: Gradle asks about every task its own cache misses.
+    async fn named_fetch(
+        self: Arc<Relay>,
+        kind: Kind,
+        key: Digest,
+        local_ms: Option<u64>,
+    ) -> Answer {
+        let wait = local_ms
+            .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
+            .min(GO_PREFETCH_WAIT);
+        let until = Instant::now() + wait;
+        // \[ADR 0111\] The cache program starts with COMMAND, as the check's `open`s go out: a
+        // fetch that comes while one is under way (the policy, or this kind's manifest) waits for
+        // it within the same bound as for the lookup below, else Go's first packages compiled
+        // on a slow link whatever the manifest named.
+        loop {
+            {
+                let mut state = self.state();
+                let now = Instant::now();
+                let opening = matches!(state.phase_now(now), Phase::Opening);
+                let asking = *state.named_manifest(kind) == GoManifest::Asking;
+                if !(opening || asking) || now >= until {
+                    break;
+                }
+            }
+            tokio::time::sleep(self.config.tuning.tick).await;
+        }
         let manifest = {
             let mut state = self.state();
             let now = Instant::now();
             if !state.serving(now) || state.sharing != Sharing::On {
                 return Answer::None;
             }
-            let got = matches!(state.go_manifest, GoManifest::Got(_));
+            let got = matches!(state.named_manifest(kind), GoManifest::Got(_));
             if got && state.answering(now) {
-                match std::mem::replace(&mut state.go_manifest, GoManifest::Taken) {
+                match std::mem::replace(state.named_manifest(kind), GoManifest::Taken) {
                     GoManifest::Got(manifest) => Some(manifest),
                     _ => None,
                 }
@@ -1121,15 +1247,11 @@ impl Relay {
             }
         };
         if let Some(manifest) = manifest {
-            self.state().go_prefetching = true;
-            self.clone().prefetch_in(Kind::Go, manifest).await;
-            self.state().go_prefetching = false;
+            *self.state().named_prefetching(kind) = true;
+            self.clone().prefetch_in(kind, manifest).await;
+            *self.state().named_prefetching(kind) = false;
         }
-        let address = Relay::address_in(Kind::Go, &key);
-        let wait = local_ms
-            .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
-            .min(GO_PREFETCH_WAIT);
-        let until = Instant::now() + wait;
+        let address = Relay::address_in(kind, &key);
         loop {
             {
                 let state = self.state();
@@ -1139,18 +1261,22 @@ impl Relay {
                 if state.fetches.contains_key(&address) || state.found.contains_key(&address) {
                     break;
                 }
-                if !state.go_prefetching || Instant::now() >= until {
+                let prefetching = match kind {
+                    Kind::Gradle => state.gradle_prefetching,
+                    _ => state.go_prefetching,
+                };
+                if !prefetching || Instant::now() >= until {
                     return Answer::None;
                 }
             }
             tokio::time::sleep(self.config.tuning.tick).await;
         }
-        self.wait_for(Kind::Go, key, key, address, local_ms).await
+        self.wait_for(kind, key, key, address, local_ms).await
     }
 
     /// B-60: `open` for the check's C and C++ compiles for the target triple `platform`, kind
     /// `cc/1`, for its manifest alone. A failure leaves an empty manifest, and so no download.
-    async fn cc_open(&self, platform: String) {
+    async fn platform_open(&self, kind: Kind, platform: String) {
         // The check this `open` is for: a relay that runs several checks keeps an answer only
         // for the check still running when it comes.
         let (run, check) = {
@@ -1159,7 +1285,7 @@ impl Relay {
             (at.map(|c| c.run), at.and_then(|c| c.check))
         };
         let body = OpenRequest {
-            kind: Kind::Cc.word().to_string(),
+            kind: kind.word().to_string(),
             repository: self.config.repository.clone(),
             commit: self.config.commit.clone(),
             check,
@@ -1175,10 +1301,10 @@ impl Relay {
         };
         let mut state = self.state();
         if state.check.as_ref().map(|c| c.run) == run
-            && state.cc_manifests.get(&platform) == Some(&CcManifest::Asking)
+            && state.cc_manifests.get(&(kind, platform.clone())) == Some(&CcManifest::Asking)
         {
             state.cc_manifests.insert(
-                platform,
+                (kind, platform),
                 CcManifest::Got {
                     named: manifest.iter().fold(HashMap::new(), |mut named, pair| {
                         named
@@ -1200,8 +1326,9 @@ impl Relay {
     /// names starts the prefetch of what it names, and waits for its lookups. `false`, at once,
     /// for a run that doesn't share `on`, a manifest that doesn't name it, or one that hasn't
     /// answered within the wait.
-    async fn cc_names(
+    async fn platform_names(
         self: &Arc<Relay>,
+        kind: Kind,
         step: &Digest,
         platform: &str,
         local_ms: Option<u64>,
@@ -1209,7 +1336,8 @@ impl Relay {
         if !blocks::is_platform(platform) {
             return false;
         }
-        let address = Relay::address_in(Kind::Cc, step);
+        let address = Relay::address_in(kind, step);
+        let slot = (kind, platform.to_string());
         let wait = local_ms
             .map_or(cc_manifest_wait(), |ms| Duration::from_millis(ms) / 2)
             .min(cc_manifest_wait());
@@ -1222,23 +1350,26 @@ impl Relay {
                 if !opening && (!state.serving(now) || state.sharing != Sharing::On) {
                     return false;
                 }
-                if !state.cc_manifests.contains_key(platform) {
+                if !state.cc_manifests.contains_key(&slot) {
                     // Resting, nothing new is asked (B-26).
                     let may_ask = opening || state.answering(now);
-                    if state.cc_manifests.len() >= MOST_CC_PLATFORMS || self.saved || !may_ask {
+                    let of_kind = state
+                        .cc_manifests
+                        .keys()
+                        .filter(|(k, _)| *k == kind)
+                        .count();
+                    if of_kind >= MOST_CC_PLATFORMS || self.saved || !may_ask {
                         return false;
                     }
-                    state
-                        .cc_manifests
-                        .insert(platform.to_string(), CcManifest::Asking);
+                    state.cc_manifests.insert(slot.clone(), CcManifest::Asking);
                     let relay = self.clone();
                     let platform = platform.to_string();
                     self.runtime
-                        .spawn(async move { relay.cc_open(platform).await });
+                        .spawn(async move { relay.platform_open(kind, platform).await });
                 }
                 if !opening
                     && let Some(CcManifest::Got { named, pairs }) =
-                        state.cc_manifests.get_mut(platform)
+                        state.cc_manifests.get_mut(&slot)
                 {
                     if !named.contains_key(&address) {
                         return false;
@@ -1258,7 +1389,7 @@ impl Relay {
         match pairs {
             Some(pairs) => {
                 // Answering: the prefetch's lookups are this question's.
-                self.clone().prefetch_in(Kind::Cc, pairs).await;
+                self.clone().prefetch_in(kind, pairs).await;
                 let mut state = self.state();
                 state.cc_prefetching = state.cc_prefetching.saturating_sub(1);
             }
@@ -1277,14 +1408,15 @@ impl Relay {
     /// manifest for the compile's platform names it.
     async fn cc_hints(
         self: Arc<Relay>,
+        kind: Kind,
         step: Digest,
         platform: String,
         local_ms: Option<u64>,
     ) -> Answer {
-        if !self.cc_names(&step, &platform, local_ms).await {
+        if !self.platform_names(kind, &step, &platform, local_ms).await {
             return Answer::None;
         }
-        self.hints_in(Kind::Cc, step).await
+        self.hints_in(kind, step).await
     }
 
     /// B-60: one of `keys`, the second keys a launcher's downloaded hints led to, as a `rustc`
@@ -1293,28 +1425,49 @@ impl Relay {
     /// would have, beside every portable one's) asks the server nothing.
     async fn cc_fetch(
         self: Arc<Relay>,
+        kind: Kind,
         step: Digest,
         keys: Vec<Digest>,
         platform: String,
         local_ms: Option<u64>,
     ) -> Answer {
-        if !self.cc_names(&step, &platform, local_ms).await {
+        if !self.platform_names(kind, &step, &platform, local_ms).await {
             return Answer::None;
         }
         let keys: Vec<Digest> = {
             let state = self.state();
-            let Some(CcManifest::Got { named, .. }) = state.cc_manifests.get(&platform) else {
+            let Some(CcManifest::Got { named, .. }) = state.cc_manifests.get(&(kind, platform))
+            else {
                 return Answer::None;
             };
-            let blocks = named.get(&Relay::address_in(Kind::Cc, &step));
+            let blocks = named.get(&Relay::address_in(kind, &step));
             keys.into_iter()
-                .filter(|key| blocks.is_some_and(|b| b.contains(&Relay::address_in(Kind::Cc, key))))
+                .filter(|key| blocks.is_some_and(|b| b.contains(&Relay::address_in(kind, key))))
                 .collect()
         };
         if keys.is_empty() {
             return Answer::None;
         }
-        self.fetch_in(Kind::Cc, step, keys, local_ms).await
+        self.fetch_in(kind, step, keys, local_ms).await
+    }
+
+    /// B-90: the block of an Xcode value the service asks for, only when the check's `xcode/1`
+    /// manifest for the Xcode build `platform` names it: the service asks about every compile
+    /// its cache misses, and most are ones no server holds. The first question about a key it
+    /// names starts the prefetch of what it names, as a C or C++ first key's does.
+    async fn xcode_fetch(
+        self: Arc<Relay>,
+        key: Digest,
+        platform: String,
+        local_ms: Option<u64>,
+    ) -> Answer {
+        if !self
+            .platform_names(Kind::Xcode, &key, &platform, local_ms)
+            .await
+        {
+            return Answer::None;
+        }
+        self.fetch_in(Kind::Xcode, key, vec![key], local_ms).await
     }
 
     /// C4, B-30: the prefetch starts at the first wrapper that asks the relay, once: a run whose
@@ -1360,7 +1513,7 @@ impl Relay {
                     .iter()
                     .map(|key| Relay::address_in(kind, key))
                     .collect();
-                if kind == Kind::Go {
+                if kind.self_keyed() {
                     return (blocks, HashSet::new(), HashSet::new());
                 }
                 let steps = store.steps();
@@ -1397,7 +1550,7 @@ impl Relay {
                 .map(Pair::block)
                 .filter(|a| !held_blocks.contains(a)),
         );
-        if kind != Kind::Go {
+        if !kind.self_keyed() {
             for batch in hints.chunks(limit) {
                 self.lookup_hints(kind, batch).await;
             }
@@ -2221,7 +2374,14 @@ impl Relay {
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        for kind in [Kind::Rustc, Kind::Go, Kind::Cc] {
+        for kind in [
+            Kind::Rustc,
+            Kind::Go,
+            Kind::Cc,
+            Kind::Gradle,
+            Kind::Xcode,
+            Kind::Tsc,
+        ] {
             let keys: Vec<Digest> = keys
                 .iter()
                 .filter(|(k, _)| *k == kind)
@@ -2447,6 +2607,17 @@ impl Relay {
                 false,
                 *cost_ms,
             ),
+            // B-81: a Gradle entry is a library whose first key is its key, and the cache tells
+            // only of ones that may leave (B-79).
+            Request::GradleBuilt { key, cost_ms } => (
+                Kind::Gradle,
+                *key,
+                *key,
+                LocalClass::Library,
+                true,
+                false,
+                *cost_ms,
+            ),
             // B-60: a C or C++ object is a library.
             Request::CcBuilt {
                 key,
@@ -2466,6 +2637,28 @@ impl Relay {
                     *cost_ms,
                 )
             }
+            // B-89: an Xcode block is a library whose first key is its key, and the service tells
+            // only of those that may leave the machine.
+            Request::XcodeBuilt { key, cost_ms } => (
+                Kind::Xcode,
+                *key,
+                *key,
+                LocalClass::Library,
+                true,
+                false,
+                *cost_ms,
+            ),
+            // B-108: a TypeScript block is a library, and the helper tells only of those that
+            // may leave the machine.
+            Request::TscBuilt { key, step, cost_ms } => (
+                Kind::Tsc,
+                *key,
+                *step,
+                LocalClass::Library,
+                true,
+                false,
+                *cost_ms,
+            ),
             _ => return,
         };
         let address = Relay::address_in(kind, &key);
@@ -2521,8 +2714,10 @@ impl Relay {
                 }
             }
         }
-        // B-33: every class is compared, a linked output among them (B-16).
-        if sharing == Sharing::Observe {
+        // B-33: every class is compared, a linked output among them (B-16); a Gradle entry
+        // never is, since Gradle's outputs needn't be the same from one execution to the next
+        // (B-81).
+        if sharing == Sharing::Observe && kind != Kind::Gradle {
             let relay = self.clone();
             let linked = class != LocalClass::Library;
             self.runtime
@@ -2863,11 +3058,26 @@ impl Relay {
             // B-45: the check's Go command closes apart, with its own manifest and run.
             let go = (check.go.is_some() && entries.iter().any(|e| e.kind() == Kind::Go))
                 .then(|| self.close_request(Kind::Go, check, entries));
+            // B-82: and its Gradle, with its own manifest and run.
+            let gradle = (check.gradle && entries.iter().any(|e| e.kind() == Kind::Gradle))
+                .then(|| self.close_request(Kind::Gradle, check, entries));
             // B-60: and its C and C++ compiles, once for each target triple they were for.
-            let cc: Vec<CloseRequest> = cc_platforms(entries)
+            let mut cc: Vec<CloseRequest> = cc_platforms(entries)
                 .into_iter()
-                .map(|platform| self.close_cc(check, entries, &platform))
+                .map(|platform| self.close_platform(Kind::Cc, check, entries, &platform))
                 .collect();
+            // B-108: and its TypeScript compiles, once for each Node platform.
+            cc.extend(
+                tsc_platforms(entries)
+                    .into_iter()
+                    .map(|platform| self.close_platform(Kind::Tsc, check, entries, &platform)),
+            );
+            // B-90: and its Xcode values, once for each Xcode build they were compiled with.
+            cc.extend(
+                xcode_platforms(entries)
+                    .into_iter()
+                    .map(|platform| self.close_platform(Kind::Xcode, check, entries, &platform)),
+            );
             let relay = self.clone();
             self.runtime.block_on(async move {
                 let rust = relay.client.post::<_, serde_json::Value>(
@@ -2877,10 +3087,10 @@ impl Relay {
                     None,
                 );
                 let go = async {
-                    if let Some(go) = &go {
+                    for close in go.iter().chain(gradle.iter()) {
                         let _ = relay
                             .client
-                            .post::<_, serde_json::Value>(blocks::CLOSE_PATH, go, left, None)
+                            .post::<_, serde_json::Value>(blocks::CLOSE_PATH, close, left, None)
                             .await;
                     }
                 };
@@ -3010,18 +3220,29 @@ impl Relay {
         }
     }
 
-    /// B-60: the check's `close` for its C and C++ objects compiled for `platform`, under a run
-    /// of its own made from the check's and the platform, with a manifest of their blocks in
-    /// the order the launcher logged them.
-    fn close_cc(&self, check: &Check, entries: &[Entry], platform: &str) -> CloseRequest {
+    /// B-60, B-90: the check's `close` for its C and C++ objects compiled for `platform`, or its
+    /// Xcode values compiled with the Xcode build `platform`, under a run of its own made from
+    /// the check's, the kind and the platform, with a manifest of their blocks in the order they
+    /// were logged.
+    fn close_platform(
+        &self,
+        kind: Kind,
+        check: &Check,
+        entries: &[Entry],
+        platform: &str,
+    ) -> CloseRequest {
         let entries: Vec<Entry> = entries
             .iter()
-            .filter(|e| e.cc.as_ref().is_some_and(|cc| cc.platform == platform))
+            .filter(|e| match kind {
+                Kind::Xcode => e.xcode.as_ref().is_some_and(|x| x.platform == platform),
+                Kind::Tsc => e.tsc.as_ref().is_some_and(|t| t.platform == platform),
+                _ => e.cc.as_ref().is_some_and(|cc| cc.platform == platform),
+            })
             .cloned()
             .collect();
-        let mut close = self.close_request(Kind::Cc, check, &entries);
+        let mut close = self.close_request(kind, check, &entries);
         let mut bytes = check.run.0.to_vec();
-        bytes.extend_from_slice(format!("{}\n{platform}\n", Kind::Cc.word()).as_bytes());
+        bytes.extend_from_slice(format!("{}\n{platform}\n", kind.word()).as_bytes());
         close.run = Hex32::sha256(&bytes);
         close.platform = platform.to_string();
         close
@@ -3060,13 +3281,19 @@ impl Relay {
         let rust_stays = |e: &Entry| {
             e.go.is_none()
                 && e.cc.is_none()
+                && e.xcode.is_none()
+                && e.gradle.is_none()
+                && e.tsc.is_none()
                 && e.portable
                     .as_ref()
                     .is_some_and(|p| !(p.portable || (from_a_job && p.bound_only())))
         };
         let kept_here = |e: &Entry| {
             e.go.as_ref().is_some_and(|go| go.local.is_some())
+                || e.xcode.as_ref().is_some_and(|x| x.local.is_some())
+                || e.gradle.as_ref().is_some_and(|g| g.local.is_some())
                 || e.cc.as_ref().is_some_and(|cc| !goes_up(&cc.local))
+                || e.tsc.as_ref().is_some_and(|t| !t.local.is_empty())
                 || rust_stays(e)
         };
         for entry in entries.iter().filter(|e| e.kind() == kind) {
@@ -3097,7 +3324,7 @@ impl Relay {
             counts.saved_ms = counts.saved_ms.saturating_add(entry.saved_ms);
         }
         let state = self.state();
-        if kind == Kind::Cc {
+        if matches!(kind, Kind::Cc | Kind::Xcode | Kind::Tsc) {
             return CloseRequest {
                 kind: kind.word().to_string(),
                 run: check.run,
@@ -3109,16 +3336,20 @@ impl Relay {
                 counts,
             };
         }
-        if kind == Kind::Go {
-            let mut bytes = [0u8; 32 + 5];
-            bytes[..32].copy_from_slice(&check.run.0);
-            bytes[32..].copy_from_slice(b"go/1\n");
+        if kind == Kind::Go || kind == Kind::Gradle {
+            let mut bytes = check.run.0.to_vec();
+            bytes.extend_from_slice(format!("{}\n", kind.word()).as_bytes());
+            let platform = if kind == Kind::Gradle {
+                hushrun_build::gradle::PLATFORM.to_string()
+            } else {
+                check.go.clone().unwrap_or_default()
+            };
             return CloseRequest {
                 kind: kind.word().to_string(),
                 run: Hex32::sha256(&bytes),
                 repository: self.config.repository.clone(),
                 check: check.check,
-                platform: check.go.clone().unwrap_or_default(),
+                platform,
                 commit: self.config.commit.clone(),
                 manifest,
                 counts,
@@ -3164,6 +3395,35 @@ fn cc_platforms(entries: &[Entry]) -> Vec<String> {
             && platforms.len() < MOST_CC_PLATFORMS
         {
             platforms.push(cc.platform.clone());
+        }
+    }
+    platforms
+}
+
+/// The Node platforms of a check's TypeScript compiles (B-108), in the order first logged: one
+/// `close` each.
+fn tsc_platforms(entries: &[Entry]) -> Vec<String> {
+    let mut platforms: Vec<String> = Vec::new();
+    for tsc in entries.iter().filter_map(|e| e.tsc.as_ref()) {
+        if blocks::is_platform(&tsc.platform)
+            && !platforms.contains(&tsc.platform)
+            && platforms.len() < MOST_CC_PLATFORMS
+        {
+            platforms.push(tsc.platform.clone());
+        }
+    }
+    platforms
+}
+
+/// The Xcode builds of a check's values (B-90), in the order first logged: one `close` each.
+fn xcode_platforms(entries: &[Entry]) -> Vec<String> {
+    let mut platforms: Vec<String> = Vec::new();
+    for xcode in entries.iter().filter_map(|e| e.xcode.as_ref()) {
+        if blocks::is_platform(&xcode.platform)
+            && !platforms.contains(&xcode.platform)
+            && platforms.len() < MOST_CC_PLATFORMS
+        {
+            platforms.push(xcode.platform.clone());
         }
     }
     platforms
