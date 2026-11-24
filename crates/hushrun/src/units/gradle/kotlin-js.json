@@ -1,0 +1,142 @@
+{
+    "schema": "hushrun.unit-facts/v1",
+    "adapter": "gradle",
+    "failuresByUnit": true,
+    "units": [],
+    "settings": {
+        "gradle": {
+            "schema": "hushrun.gradle-report/v1",
+            "gradle": "9.3.1",
+            "task": ":jsNodeTest",
+            "projectDir": ".",
+            "outcome": "executed",
+            "taskFailed": true,
+            "rootDone": true,
+            "leftOut": {
+                "classes": [],
+                "tests": [
+                    "p.CalcTest.adds"
+                ],
+                "notAttempted": [],
+                "how": "patterns",
+                "hook": []
+            },
+            "names": {
+                "p.CalcTest": "src/commonTest/kotlin/p/CalcTest.kt",
+                "p.MoreTest": "src/commonTest/kotlin/p/MoreTest.kt",
+                "p.OtherTest": "src/commonTest/kotlin/p/CalcTest.kt"
+            },
+            "invocations": [
+                {
+                    "c": "p.CalcTest",
+                    "n": "zero",
+                    "r": "SUCCESS",
+                    "ms": 2,
+                    "d": "zero[js, node]",
+                    "p": [
+                        [
+                            "jsNodeTest.p.CalcTest",
+                            "p.CalcTest"
+                        ]
+                    ]
+                },
+                {
+                    "c": "p.OtherTest",
+                    "n": "one",
+                    "r": "SUCCESS",
+                    "ms": 0,
+                    "d": "one[js, node]",
+                    "p": [
+                        [
+                            "jsNodeTest.p.OtherTest",
+                            "p.OtherTest"
+                        ]
+                    ]
+                },
+                {
+                    "c": "p.MoreTest",
+                    "n": "more",
+                    "r": "SUCCESS",
+                    "ms": 0,
+                    "d": "more[js, node]",
+                    "p": [
+                        [
+                            "jsNodeTest.p.MoreTest",
+                            "p.MoreTest"
+                        ]
+                    ]
+                },
+                {
+                    "c": "p.MoreTest",
+                    "n": "flips",
+                    "r": "FAILURE",
+                    "ms": 13,
+                    "d": "flips[js, node]",
+                    "p": [
+                        [
+                            "jsNodeTest.p.MoreTest",
+                            "p.MoreTest"
+                        ]
+                    ],
+                    "f": "org.jetbrains.kotlin.gradle.testing.KotlinTestFailure: AssertionError: Expected value to be true."
+                }
+            ],
+            "suiteFailures": [],
+            "narrowedBy": [],
+            "reads": {
+                "dirs": [
+                    "src/commonMain/kotlin",
+                    "src/commonMain/resources",
+                    "src/commonTest/kotlin",
+                    "src/commonTest/resources",
+                    "src/jsMain/kotlin",
+                    "src/jsMain/resources",
+                    "src/jsTest/kotlin",
+                    "src/jsTest/resources",
+                    "src/jvmMain/java",
+                    "src/jvmMain/kotlin",
+                    "src/jvmMain/resources",
+                    "src/jvmTest/java",
+                    "src/jvmTest/kotlin",
+                    "src/jvmTest/resources",
+                    "src/webMain/kotlin",
+                    "src/webMain/resources",
+                    "src/webTest/kotlin",
+                    "src/webTest/resources"
+                ],
+                "paths": []
+            },
+            "notFollowed": [],
+            "sourceDirsHow": "sourceSets+kotlin",
+            "eventsDir": null,
+            "framework": "kotlin-js",
+            "rootResult": "FAILURE",
+            "leaveOutAtMost": {
+                "most": 250,
+                "units": [
+                    "src/commonTest/kotlin/p/CalcTest.kt",
+                    "src/commonTest/kotlin/p/CalcTest.kt",
+                    "src/commonTest/kotlin/p/MoreTest.kt"
+                ]
+            },
+            "taskFailures": [
+                "Execution failed for task ':jsNodeTest'.",
+                "There were failing tests. See the report at: file:///work/kmp/build/reports/tests/jsNodeTest/index.html"
+            ],
+            "taskFailureTypes": [
+                "org.gradle.api.tasks.TaskExecutionException",
+                "org.gradle.api.internal.exceptions.MarkedVerificationException"
+            ]
+        },
+        "leaveOutAtMost": {
+            "most": 250,
+            "units": [
+                "src/commonTest/kotlin/p/CalcTest.kt",
+                "src/commonTest/kotlin/p/CalcTest.kt",
+                "src/commonTest/kotlin/p/MoreTest.kt"
+            ]
+        }
+    },
+    "errors": [],
+    "start": "8a125041-b9dc-4fa1-bd27-53785a66b921"
+}
