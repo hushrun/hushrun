@@ -38,6 +38,7 @@ pub mod maven;
 pub mod program;
 pub mod pytest;
 pub mod runner;
+pub mod rustdoc;
 pub mod shared;
 pub mod store;
 pub mod swift;
