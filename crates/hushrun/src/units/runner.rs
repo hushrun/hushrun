@@ -526,7 +526,7 @@ fn stdout_is_stderr() -> bool {
 
 /// \[ADR 0069\] Whether the run's `hushrun.json` reuses `binary`: it lists a binary at the same
 /// real path whose SHA-256 is that of `binary`'s bytes now. Anything that can't be read is no.
-fn reused(dir: &Path, binary: &Path) -> bool {
+pub(super) fn reused(dir: &Path, binary: &Path) -> bool {
     let Some(run) = std::fs::read(dir.join(facts::RUN_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<facts::RunFile>(&bytes).ok())
@@ -586,7 +586,7 @@ fn terse_list(bytes: &[u8]) -> Vec<String> {
 /// Writes one start's facts, whole, under a name no other start of this run has. A file that
 /// can't be written changes nothing for the test: hushrun then knows less, and records less.
 /// \[ADR 0086\] With `tests`, a Go package's tests one by one, the file is `v1`.
-fn record(
+pub(super) fn record(
     dir: &std::path::Path,
     invocation: Invocation,
     tests: Option<(String, Vec<facts::TestFacts>, Option<&'static str>)>,
