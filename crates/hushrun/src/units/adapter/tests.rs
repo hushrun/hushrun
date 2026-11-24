@@ -43,6 +43,8 @@ const BY_NAME: &[(&str, &str)] = &[
     ("./mvnw verify", "maven"),
     ("gradle test", "gradle"),
     ("./gradlew test", "gradle"),
+    ("vendor/bin/phpunit", "phpunit"),
+    ("php vendor/bin/pest --ci", "phpunit"),
     ("ctest --test-dir build", "ctest"),
     ("swift test", "swift"),
     ("pytest -q", "pytest"),
@@ -50,7 +52,7 @@ const BY_NAME: &[(&str, &str)] = &[
 
 #[test]
 fn each_adapter_gets_the_command_that_names_its_program() {
-    assert_eq!(RECOGNIZED.len(), 8);
+    assert_eq!(RECOGNIZED.len(), 9);
     let dir = loads_all();
     for (command, adapter) in BY_NAME {
         assert_eq!(
@@ -196,6 +198,7 @@ fn a_program_is_known_by_its_name_whatever_its_directory_and_windows_extension()
         ("jest.bat", "jest"),
         ("mvn.cmd test", "maven"),
         ("gradlew.BAT test", "gradle"),
+        ("vendor\\bin\\phpunit.bat", "phpunit"),
         ("ctest.bat --test-dir build", "ctest"),
     ] {
         assert_eq!(

@@ -35,6 +35,7 @@ pub mod gradle;
 pub mod jest;
 pub mod jvm;
 pub mod maven;
+pub mod phpunit;
 pub mod program;
 pub mod pytest;
 pub mod runner;
