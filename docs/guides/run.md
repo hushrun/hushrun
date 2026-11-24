@@ -978,6 +978,15 @@ ADR lists what a first build on a real Mac should confirm.
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
 
+### .NET
+
+`dotnet build`'s compiles aren't reused yet: hushrun reuses .NET's tests, not its assemblies. With
+`tests: reuse`, `hushrun run unit -- dotnet test` leaves out each test project that already passed
+on the files it and the projects it references compile, unbuilt, and with `unit: test` the tests
+that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on
+Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
+when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
+
 ## When hushrun runs anyway
 
 Whenever hushrun can't tell whether this code passed, it runs the command and says why:
