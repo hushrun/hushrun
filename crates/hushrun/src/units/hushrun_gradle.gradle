@@ -4,7 +4,8 @@
 //   settings.gradle:     if (System.getenv("HUSHRUN_GRADLE")) apply from: System.getenv("HUSHRUN_GRADLE")
 //   settings.gradle.kts: System.getenv("HUSHRUN_GRADLE")?.let { apply(from = it) }
 //
-// It reports facts and decides nothing: for each Test task, one file in $HUSHRUN_UNITS (schema
+// It reports facts and decides nothing: for each Test task (and each Kotlin/JS and Kotlin/Native
+// test task, ADR 0117), one file in $HUSHRUN_UNITS (schema
 // hushrun.unit-facts/v1, adapter "gradle"), whose settings.gradle is this script's report of the
 // task: Gradle's own test events as they came, how the task ended, the names of its test classes,
 // what it left out, and its classpath mapped to the build's projects. hushrun reads it.
@@ -212,6 +213,10 @@ class HushrunShared implements Serializable {
 
 /** One Test task, as configured. */
 class HushrunTaskInfo implements Serializable {
+    // "jvm" for a Test task; "kotlin-js" or "kotlin-native" for Kotlin Multiplatform's own test
+    // tasks (ADR 0117), which run no class file of the build: their classes are named by the
+    // source files that declare them, and left out by Gradle's filter patterns.
+    String kind = "jvm"
     String taskPath
     String projectDir
     String storedReport
@@ -261,7 +266,8 @@ class HushrunSelection {
             plan = HushrunPlan.read()
             if (plan?.error) errors << ("hushrun.json: " + plan.error)
             root = plan?.root ?: info.shared.buildRoot
-            info.classesDirs.files.each { File dir ->
+            if (info.kind != "jvm") HushrunNames.declared(this)
+            else info.classesDirs.files.each { File dir ->
                 if (!dir.isDirectory()) return
                 dir.eachFileRecurse(groovy.io.FileType.FILES) { File f ->
                     String p = dir.toPath().relativize(f.toPath()).toString().replace(File.separatorChar, '/' as char)
@@ -270,9 +276,14 @@ class HushrunSelection {
                     if (!cls.contains('$')) candidates.putIfAbsent(cls, f)
                 }
             }
-            HushrunNames.of(this)
+            if (info.kind == "jvm") HushrunNames.of(this)
             if (plan != null && plan.error == null) {
-                names.each { String outer, Map n -> if (plan.reuse.contains(n.name)) leftOutClasses << outer }
+                // [ADR 0117] A Kotlin/JS or Kotlin/Native class is left out by a filter pattern,
+                // which Gradle reads as a simple class name when it starts upper-case: a class
+                // of the default package (or of a package so named) runs.
+                names.each { String outer, Map n ->
+                    if (plan.reuse.contains(n.name) && (info.kind == "jvm" || HushrunNames.patternable(outer))) leftOutClasses << outer
+                }
                 Map<String, List<String>> byName = [:].withDefault { [] }
                 names.each { String outer, Map n -> byName[n.name as String] << outer }
                 plan.reuseTests.each { String unit, List<String> ids ->
@@ -353,7 +364,7 @@ class HushrunSelection {
                 }
             }
             String guh = shared.gradleUserHome
-            info.classpath.files.each { File f ->
+            (info.classpath?.files ?: []).each { File f ->
                 String p = HushrunRun.canonical(f.absolutePath)
                 if (f.name.startsWith("hushrun-test-jvm-hook")) return
                 String project = null
@@ -433,6 +444,49 @@ class HushrunNames {
             if (name == null) name = projectRel + "::" + outer
             s.names[outer] = [name: name, how: how]
         }
+    }
+
+    /**
+     * [ADR 0117] A Kotlin/JS or Kotlin/Native task's classes, which no class file names: each
+     * class a test source file of the project declares at its top level, by its package, named by
+     * that file when exactly one file declares it, else `<project directory>::<class>`.
+     */
+    static void declared(HushrunSelection s) {
+        Map<String, List<File>> byClass = [:].withDefault { [] }
+        s.info.testSourceDirs.each { String d ->
+            File dir = new File(d)
+            if (!dir.isDirectory()) return
+            dir.eachFileRecurse(groovy.io.FileType.FILES) { File f ->
+                if (!f.name.endsWith(".kt")) return
+                String text = f.getText("UTF-8")
+                def pm = (text =~ /(?m)^\s*package\s+([\w.`]+)/)
+                String pkg = pm.find() ? pm.group(1).replace('`', '') : ""
+                def cm = (text =~ /(?m)^(?:@[\w.]+(?:\([^)\n]*\))?\s+)*(?:(?:public|internal|private|abstract|open|final|data|sealed|expect|actual|value|annotation|enum)\s+)*class\s+(`[^`]+`|\w+)/)
+                while (cm.find()) {
+                    String cls = cm.group(1).replace('`', '')
+                    byClass[pkg ? pkg + "." + cls : cls] << f
+                }
+            }
+        }
+        String projectRel = HushrunRun.rel(s.root, s.info.projectDir) ?: s.info.projectDir
+        byClass.each { String cls, List<File> files ->
+            List<File> unique = files.unique(false) { it.canonicalPath }
+            if (unique.size() == 1) s.names[cls] = [name: HushrunRun.rel(s.root, HushrunRun.canonical(unique[0].path)) ?: projectRel + "::" + cls, how: "class declaration"]
+            else s.names[cls] = [name: projectRel + "::" + cls, how: unique.size() + " files declare it"]
+        }
+    }
+
+    /** [ADR 0117] Whether Gradle's filter pattern `<class>` names this class alone. */
+    static boolean patternable(String cls) { cls.contains('.') && !Character.isUpperCase(cls.charAt(0)) }
+
+    /**
+     * [ADR 0117] The name of a class a Kotlin/JS or Kotlin/Native task reported that no file
+     * declares at its top level (a nested class, `p.Outer.Inner`): its outer class's.
+     */
+    static Map nested(HushrunSelection s, String cls) {
+        String best = null
+        s.names.keySet().each { String k -> if (cls.startsWith(k + ".") && (best == null || k.length() > best.length())) best = k }
+        return best == null ? null : s.names[best]
     }
 
     static boolean declaresPackage(File f, String pkg) {
@@ -574,23 +628,29 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         rootDone = false
         written = false
         try {
-            Test test = (Test) t
             new File(info.storedReport).delete()   // a crash must not leave the last report looking current
-            String on = test.options.getClass().name
-            framework = on.contains("JUnitPlatformOptions") ? "junit-platform" :
-                    on.contains("TestNGOptions") ? "testng" :
-                    on.contains("JUnitOptions") ? "junit4" : null
+            AbstractTestTask test = (AbstractTestTask) t
+            if (info.kind != "jvm") framework = info.kind
+            else {
+                String on = ((Test) t).options.getClass().name
+                framework = on.contains("JUnitPlatformOptions") ? "junit-platform" :
+                        on.contains("TestNGOptions") ? "testng" :
+                        on.contains("JUnitOptions") ? "junit4" : null
+            }
             def filter = test.filter
             narrowedBy.addAll(filter.includePatterns)
             if (filter.hasProperty("commandLineIncludePatterns")) narrowedBy.addAll(filter.commandLineIncludePatterns)
-            if (test.includes) narrowedBy.addAll(test.includes.collect { "file:" + it })
+            if (test instanceof Test && test.includes) narrowedBy.addAll(test.includes.collect { "file:" + it })
             HushrunSelection s = HushrunSelection.get(info)
             List<String> hook = []
+            // [ADR 0117] Kotlin's own test tasks have no class files to exclude: a class left out
+            // whole is a filter pattern, which Kotlin's runners get with the task's own.
+            if (s != null && info.kind != "jvm") s.leftOutClasses.each { String c -> filter.excludeTestsMatching(c); filter.excludeTestsMatching(c + ".*") }
             if (s != null && !s.leftOutTests.isEmpty()) {
                 if (framework == "junit-platform" || framework == "testng") {
                     how = "hook"
                     s.leftOutTests.each { hook << (it[1] + "#" + it[2]); attempted << it[0] }
-                } else if (framework == "junit4") {
+                } else if (framework == "junit4" || framework == "kotlin-js" || framework == "kotlin-native") {
                     how = "patterns"
                     s.leftOutTests.sort(false) { it[0] }.eachWithIndex { List<String> it, int i ->
                         if (i >= HushrunRun.MOST_PATTERN_TESTS) { notAttempted << it[0]; return }
@@ -599,7 +659,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
                         // class of the default package (or a package so named) keeps its tests.
                         if (!it[1].contains('.') || Character.isUpperCase(it[1].charAt(0))) { notAttempted << it[0]; return }
                         filter.excludeTestsMatching(it[1] + "." + it[2])
-                        filter.excludeTestsMatching(it[1] + "." + it[2] + "[*]")   // Parameterized: "method[0: x=1]"
+                        if (framework == "junit4") filter.excludeTestsMatching(it[1] + "." + it[2] + "[*]")   // Parameterized: "method[0: x=1]"
                         attempted << it[0]
                     }
                 } else {
@@ -680,7 +740,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         HushrunReport.addNames(report, s, outers)
         // [ADR 0087, Amendment 15] What a plan needs to count only what a JUnit 4 task leaves out:
         // at most this many of its tests, taken in the order of their ids.
-        if (framework == "junit4") report.leaveOutAtMost = [most: HushrunRun.MOST_PATTERN_TESTS, units: new ArrayList(report.names.values()).sort()]
+        if (framework == "junit4" || framework == "kotlin-js" || framework == "kotlin-native") report.leaveOutAtMost = [most: HushrunRun.MOST_PATTERN_TESTS, units: new ArrayList(report.names.values()).sort()]
         if (framework == null) report.notFollowed << [why: "test-framework", detail: "a test framework hushrun doesn't know"]
         List<String> all = new ArrayList<>(errors)
         if (s != null) all.addAll(s.errors)
@@ -702,7 +762,7 @@ class HushrunReport {
                       notFollowed: new ArrayList(reads.notFollowed as List), sourceDirsHow: info.sourceDirsHow]
         // Where this run's test JVMs of the task write the hook's events, from HUSHRUN_UNITS now.
         File work = HushrunRun.work(info.shared.buildRoot, info.taskPath)
-        report.eventsDir = work == null ? null : new File(work, "events").path
+        report.eventsDir = work == null || info.kind != "jvm" ? null : new File(work, "events").path
         addNames(report, s, s?.leftOutClasses ?: [])
         (s?.leftOutTests ?: []).each { addNames(report, s, [HushrunRun.outerOf(it[1])]) }
         return report
@@ -710,7 +770,11 @@ class HushrunReport {
 
     static void addNames(Map report, HushrunSelection s, Collection<String> outers) {
         if (s == null) return
-        outers.each { String o -> Map n = s.names[o]; if (n != null) report.names[o] = n.name }
+        outers.each { String o ->
+            Map n = s.names[o]
+            if (n == null && s.info.kind != "jvm") n = HushrunNames.nested(s, o)
+            if (n != null) report.names[o] = n.name
+        }
     }
 
     /** Writes a task's report, to the run's directory and (`stored`) inside the task's outputs. */
@@ -905,7 +969,10 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
             events.onTaskCompletion(service)
             g.rootProject.allprojects { p ->
                 p.tasks.withType(AbstractTestTask).configureEach { AbstractTestTask t ->
-                    if (!(t instanceof Test)) unfollowed[t.path] = "a test task that isn't a JVM Test task (" + (t.class.name - "_Decorated") + ")"
+                    if (t instanceof Test) return
+                    String kind = kotlinKind(t)
+                    if (kind == null) unfollowed[t.path] = "a test task that isn't a JVM Test task (" + (t.class.name - "_Decorated") + ")"
+                    else try { configureKotlin(p, t, kind, shared, stored) } catch (Throwable ignored) {}
                 }
                 p.tasks.withType(Test).configureEach { Test t ->
                     try { configure(p, t, shared, stored, hookJar) } catch (Throwable ignored) {}
@@ -924,6 +991,40 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
             if (ip != null && (ip.hasProperty("get") ? ip.get() : ip) == true) return true
         } catch (Throwable ignored) {}
         return false
+    }
+
+    /** [ADR 0117] "kotlin-js" for a KotlinJsTest, "kotlin-native" for a KotlinNativeTest, else null. */
+    static String kotlinKind(AbstractTestTask t) {
+        for (Class c = t.class; c != null; c = c.superclass) {
+            if (c.name == "org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest") return "kotlin-js"
+            if (c.name == "org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeTest") return "kotlin-native"
+        }
+        return null
+    }
+
+    /**
+     * [ADR 0117] A Kotlin/JS or Kotlin/Native test task: what a Test task gets, but the class
+     * exclusion, the hook and its JVM arguments, since it runs no JVM and no class file.
+     */
+    static void configureKotlin(def p, AbstractTestTask t, String kind, HushrunShared shared, Map<String, String> storedReports) {
+        String stored = p.layout.buildDirectory.file("hushrun/" + t.name + ".json").get().asFile.absolutePath
+        HushrunTaskInfo info = new HushrunTaskInfo(kind: kind, taskPath: t.path, projectDir: p.projectDir.canonicalPath,
+                storedReport: stored, shared: shared,
+                testSourceDirs: shared.testSourceDirs[p.projectDir.canonicalPath] ?: [p.projectDir.canonicalPath],
+                sourceDirsHow: shared.sourceDirsHow[p.projectDir.canonicalPath] ?: "project directory")
+        storedReports[t.path] = stored
+        def unitsVar = p.providers.environmentVariable("HUSHRUN_UNITS")
+        t.inputs.property("hushrunLeftOut", unitsVar.map { String ignored -> HushrunInput.of(info) }.orElse(""))
+        t.outputs.file(stored).optional().withPropertyName("hushrunReport")
+        t.outputs.upToDateWhen(new HushrunForce(info: info, upToDate: true))
+        t.outputs.doNotCacheIf("hushrun learns this task's test classes under this check for the first time", new HushrunForce(info: info, upToDate: false))
+        if (t.hasProperty("failOnNoDiscoveredTests")) {
+            t.failOnNoDiscoveredTests.convention(unitsVar.map { String ignored -> HushrunInput.failsOnNone(info) }.orElse(true))
+        }
+        HushrunTaskListener l = new HushrunTaskListener(info: info)
+        t.doFirst(l)
+        t.addTestListener(l)
+        t.doLast(new HushrunAfter(listener: l))
     }
 
     static void configure(def p, Test t, HushrunShared shared, Map<String, String> storedReports, File hookJar) {

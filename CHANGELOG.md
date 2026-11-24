@@ -28,6 +28,29 @@ project's new branch starts from what main's CI already ran.
   and pytest-django's test database) is no file read. Python's C extensions get no build blocks:
   setuptools takes its compiler only from `CC`, which hushrun doesn't set, and pip's isolated
   builds replace `PYTHONPATH` (ADR 0110).
+- **Kotlin Multiplatform's test tasks are test files** (C-94 to C-97, B-210, ADR 0117): the
+  Gradle adapter follows Kotlin/JS, Kotlin/Wasm and Kotlin/Native test tasks (`jsNodeTest`,
+  `wasmJsNodeTest`, `linuxX64Test`…) as it follows `Test` tasks, each class named by the file
+  that declares it and left out, whole or test by test, through Gradle's filter, so a
+  `commonTest` class is one test file on every platform. Kotest's specs are pinned as units left
+  out whole. `hushrun init` takes `allTests`, `jvmTest`, `jsTest`, `testDebugUnitTest` and `testReleaseUnitTest` as
+  test checks. The Gradle cache's line of tasks that stay on the machine names them, such as
+  kapt's `kaptGenerateStubsKotlin`, whose stubs hold their sources' paths.
+- **Node's test runner and Mocha reuse test files and tests** (C-54 to C-57, ADR 0107): with
+  `tests: reuse`, `node --test` (Node 22.15 or later) and Mocha 10 and 11 skip the test files, and
+  with `unit: test` the single tests, that already passed on the files they read, loaded through
+  `NODE_OPTIONS` with no file of the repository changed. Node's runner is watched per test file's
+  process and chooses its files by its own patterns; Mocha loads every spec file as usual and has
+  the reused tests taken out of their suites before any hook runs, a spec file with a root hook
+  being read by all. `--watch`, `--test-isolation=none`, Mocha's `--parallel` and `--dry-run` run
+  as written and say why. Plain JavaScript has no compile step to reuse: no build-block kind.
+- **`mix test` reuses ExUnit's test files** (C-114 to C-117, ADR 0122). With `tests` on, an
+  Elixir project's `mix test`, an umbrella's included, loads hushrun's ExUnit adapter through
+  `ERL_LIBS` and `ELIXIR_ERL_OPTIONS`, with nothing of the repository changed: each test file read
+  what its code references to the end (Elixir's lexical tracker and Mix's compile manifests), what
+  its own processes called (call counters by process), and the project's configuration, and the
+  test files that already passed on those files are left out through ExUnit's own `exclude`
+  filter. By test file only; `mix compile` shares nothing yet.
 - **TypeScript compiles reused and shared, kind `tsc/1`** (B-100 to B-109, ADR 0106, a draft):
   inside `hushrun run`, in a checkout with a `package.json`, `NODE_OPTIONS` gets a hook
   (`--require`, added to what it had) and `HUSHRUN_TSC` the helper `hushrun-tsc`. A `tsc`,
@@ -73,6 +96,31 @@ project's new branch starts from what main's CI already ran.
   build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
   LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
   the ADR lists what the first build on a Mac checks.
+- **Go: coverage runs whole, files no test binary is built from rerun only what read them, and
+  `runtime` is shared before Go 1.27** (C-70, C-71, B-150, ADR 0111). A `go test` with `-cover`, `-coverprofile`, `-coverpkg` or
+  `-covermode` (in COMMAND, after `-args` or in `GOFLAGS`) now runs every package, as Jest and
+  Vitest do with coverage: a reused package wrote nothing to the profile, which then read as a
+  drop. And every `.go` file that isn't a tested package's test file is a source: editing another
+  package's tests, an unimported package, a file the tags leave out or another module of a
+  `go.work` no longer reruns every package. The first run of each Go check after upgrading
+  reruns every package once. With Go 1.24 to 1.26, whose assembler doesn't mark the standard
+  library's objects, `runtime` and the other standard packages with assembly now leave the machine
+  as build blocks, as they did with Go 1.27: they are known by their own package's compiled object.
+  A Go fetch that comes while the check's `open`s are still under way now waits for them, within
+  B-45's bound, so a slow server no longer makes Go's first packages compile on a machine that
+  could have downloaded them.
+- **Vue's components in test reuse** (C-58 to C-61, ADR 0108). `.vue` is a source of the Vitest and
+  Jest adapters, so a change to one component runs only the test files that mounted it. Under
+  Vitest, the files a component's `<script setup>` macros took their types from are read with it,
+  through the compiler `@vitejs/plugin-vue` holds, and plugin-vue's helper module no longer makes
+  every component's test file `not observed`; under Jest, a component's `src=` files are read with
+  it even when Jest's cache holds it.
+
+### Fixed
+
+- **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
+  find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
+  holds; the plugin now adds its own directory there.
 
 ## [0.19.1] - 2026-11-23
 
