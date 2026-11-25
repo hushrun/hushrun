@@ -1084,10 +1084,10 @@ impl Adapter for Recognized {
         Hints::Kinds(SOURCE_KINDS)
     }
 
-    // `binds`, `keys` and `start_variables` are the trait's defaults, written out: a call on this
-    // type then names this impl's own method, which the static test map follows to it alone,
-    // where the trait's would count every adapter that overrides it (CONTRIBUTING.md, "Which
-    // tests CI runs again").
+    // `binds`, `keys`, `not_by_test`, `not_watched` and `start_variables` are the trait's
+    // defaults, written out: a call on this type then names this impl's own method, which the
+    // static test map follows to it alone, where the trait's would count every adapter that
+    // overrides it (CONTRIBUTING.md, "Which tests CI runs again").
     fn binds(&self) -> bool {
         false
     }

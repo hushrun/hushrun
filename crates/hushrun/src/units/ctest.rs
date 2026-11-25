@@ -19,6 +19,7 @@
 
 pub(super) mod args;
 pub(super) mod build;
+pub(super) mod built;
 mod junit;
 pub(super) mod run;
 pub(super) mod select;
@@ -28,12 +29,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use serde::{Deserialize, Serialize};
+use hushrun_core::units::{self, Sets, Sources};
 
-use hushrun_core::units::{self, Facts, Set, Sets, Sources};
-
-use super::Seen;
-use super::adapter::{Adapter, Hints, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
+use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
 use super::command::{self, program_name};
 use super::facts;
 use super::program;
@@ -41,21 +39,10 @@ use super::program;
 pub use build::{Built, SOURCE_KINDS};
 pub use run::Ctest;
 
+use built::{Compiled, compiled_from, planning, read_built, write_plan};
+
 /// The adapter's word, in its facts files, this machine's store and a hint.
 pub const ADAPTER: &str = "ctest";
-/// The plan's file in the run's directory: what each unit's key was made from.
-const PLAN_FILE: &str = "ctest-plan.v1";
-const PLAN_SCHEMA: &str = "hushrun.ctest-plan/v1";
-
-/// What the plan keyed each unit by, for hushrun's `ctest` to check before it leaves any out.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct PlanFile {
-    schema: String,
-    /// Each unit's lists, each the files its key holds.
-    units: BTreeMap<String, Vec<Vec<String>>>,
-    /// The scope's C and C++ files of the sources and units sets: what a key can hold.
-    scope: Vec<String>,
-}
 
 /// Why nothing is seen of a CTest that a build tool starts by its full path.
 const BYPASSED: &str = "make test, ninja test and cmake --build … --target test start ctest by its full path, which hushrun's ctest on PATH can't stand in for; `ctest --test-dir <build directory>` can be observed";
@@ -75,17 +62,24 @@ pub struct Recognized {
 /// which bypass `PATH`. `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     let found = recognize(command, cwd)?;
-    Some(found.map(|direct| {
-        Box::new(Recognized {
-            direct,
-            dir: OnceLock::new(),
-        }) as Box<dyn Adapter>
+    Some(found.map(|adapter| Box::new(adapter) as Box<dyn Adapter>))
+}
+
+/// [`recognized`], as the adapter's own type: what a test of it calls, with no trait object.
+pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
+    let found = recognize_command(command, cwd)?;
+    Some(found.map(|direct| Recognized {
+        direct,
+        dir: OnceLock::new(),
     }))
 }
 
 /// What COMMAND is to the CTest adapter: `Some(Ok(Some(args)))` for `ctest …` itself,
 /// `Some(Ok(None))` for a COMMAND that starts it by name through something else.
-fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>, String>> {
+fn recognize_command(
+    command: &[String],
+    cwd: &Path,
+) -> Option<Result<Option<Vec<String>>, String>> {
     let first = command.first()?;
     let rest = &command[1..];
     match &*program_name(first) {
@@ -171,178 +165,6 @@ impl Recognized {
     }
 }
 
-/// \[ADR 0090, 0120\] What a plan's walk says each unit is built from, for the units `programs`
-/// names, each with whether every program of it is built here.
-pub(super) fn compiled_from(
-    programs: &BTreeMap<&str, bool>,
-    built: &BTreeMap<String, Built>,
-    tree: &units::Tree,
-) -> Compiled {
-    let mut out = Compiled::default();
-    let every: BTreeSet<String> = every_source(tree);
-    for (&unit, &built_here) in programs {
-        let Some(b) = built
-            .get(unit)
-            .filter(|b| built_here && b.refused.is_none())
-        else {
-            out.units.insert(unit.to_string(), None);
-            continue;
-        };
-        // \[C-30\] Only what the graph gives a program is a source (see `read`); a stale
-        // program's graph is the build's still, so its files keep their sets, and the run's
-        // line says what `hushrun why` says of them, from the map's.
-        out.named
-            .extend(b.reads.iter().filter(|f| build::is_source(f)).cloned());
-        out.unit_files.extend(b.own.iter().cloned());
-        // A stale program ran old code: it isn't keyed, so it runs.
-        if b.stale.is_some() {
-            out.units.insert(unit.to_string(), None);
-            continue;
-        }
-        let reads: BTreeSet<String> = if b.every_source {
-            every.clone()
-        } else {
-            b.reads.clone()
-        };
-        out.units
-            .insert(unit.to_string(), Some((reads, b.own.clone())));
-    }
-    out
-}
-
-/// The plan from the map (and hints), with what the build says now when it is known.
-pub(super) fn planning(at: &PlanAt<'_>, compiled: Option<&Compiled>) -> Planning {
-    let sets = match compiled {
-        Some(c) => units::classify(
-            at.tree.paths(),
-            &|p| c.unit_files.contains(p),
-            Sources::Named(&c.named, SOURCE_KINDS),
-            at.ignore,
-        ),
-        None => units::classify(
-            at.tree.paths(),
-            &|p| at.map.unit_files.contains(p),
-            Sources::Named(&at.map.sources, SOURCE_KINDS),
-            at.ignore,
-        ),
-    };
-    let shared = super::fetch(at.asker, Hints::Sources, &sets, at.tree, at.ignore);
-    let known = match compiled {
-        Some(c) => c
-            .units
-            .iter()
-            .map(|(unit, seen)| {
-                let lists = seen
-                    .as_ref()
-                    .filter(|(_, own)| own.iter().all(|f| at.tree.contains(f)))
-                    .and_then(|(reads, _)| {
-                        let compiled: BTreeSet<String> = reads
-                            .iter()
-                            .filter(|f| build::is_source(f))
-                            .cloned()
-                            .collect();
-                        super::shared::lists(
-                            unit,
-                            at.map.units.get(unit),
-                            &shared,
-                            at.tree,
-                            Some(&compiled),
-                            None,
-                        )
-                    });
-                (unit.clone(), lists)
-            })
-            .collect(),
-        None => at
-            .map
-            .units
-            .keys()
-            .map(|unit| {
-                let lists = super::shared::lists(
-                    unit,
-                    at.map.units.get(unit),
-                    &shared,
-                    at.tree,
-                    None,
-                    None,
-                );
-                (unit.clone(), lists)
-            })
-            .collect(),
-    };
-    Planning {
-        sets,
-        known,
-        received: shared.received,
-        ..Planning::default()
-    }
-}
-
-/// \[ADR 0090, 0120\] Writes, in the run's directory `dir`, the lists each unit's key was made
-/// from and the scope's C and C++ files, for the check before anything is left out.
-pub(super) fn write_plan(dir: &Path, planning: &Planning, tree: &units::Tree) {
-    let scope = tree
-        .paths()
-        .filter(|p| {
-            build::is_source(p) && matches!(planning.sets.of(p), Some(Set::Sources | Set::Units))
-        })
-        .map(str::to_string)
-        .collect();
-    let units = planning
-        .known
-        .iter()
-        .filter_map(|(unit, lists)| {
-            let lists = lists.as_ref()?;
-            let files = lists
-                .iter()
-                .map(|l| {
-                    planning
-                        .sets
-                        .keyed(l.files.iter().map(String::as_str))
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect()
-                })
-                .collect();
-            Some((unit.clone(), files))
-        })
-        .collect();
-    let file = PlanFile {
-        schema: PLAN_SCHEMA.into(),
-        units,
-        scope,
-    };
-    if let Ok(bytes) = serde_json::to_vec(&file) {
-        let _ = facts::write_whole(&dir.join(PLAN_FILE), &bytes);
-    }
-}
-
-/// What a unit's programs are built from, and of those its own files.
-type Made = (BTreeSet<String>, BTreeSet<String>);
-
-/// What a plan's walk says each unit is built from: `None` for one that can't be keyed.
-#[derive(Debug, Default)]
-pub(super) struct Compiled {
-    units: BTreeMap<String, Option<Made>>,
-    named: BTreeSet<String>,
-    unit_files: BTreeSet<String>,
-}
-
-impl Compiled {
-    /// \[ADR 0120\] Names `sources` as sources besides those of the units' programs.
-    pub(super) fn name(&mut self, sources: impl IntoIterator<Item = String>) {
-        self.named.extend(sources);
-    }
-}
-
-/// Every C and C++ file of the scope: what a program whose build can't be read reads.
-fn every_source(tree: &units::Tree) -> BTreeSet<String> {
-    tree.paths()
-        .filter(|p| build::is_source(p))
-        .map(str::to_string)
-        .collect()
-}
-
 impl Adapter for Recognized {
     fn word(&self) -> &'static str {
         ADAPTER
@@ -361,6 +183,17 @@ impl Adapter for Recognized {
             unit: true,
             reads: false,
         }
+    }
+
+    // \[C-146\] `not_by_test` and `not_watched` are the trait's defaults, written out: a call on
+    // this type then names this impl's own method, which the static test map follows to it alone
+    // (CONTRIBUTING.md, "Which tests CI runs again").
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
@@ -440,136 +273,6 @@ impl Adapter for Recognized {
     }
 }
 
-/// \[ADR 0090, 0120\] What the facts files of `word` in `files` say of test programs built here:
-/// each program's tests, what its build says it read, and the sets and lists a plan of this run
-/// would have keyed it by.
-pub(super) fn read_built(
-    at: &ReadAt<'_>,
-    files: &[facts::FactsFile],
-    word: &str,
-) -> Result<Option<Read>, String> {
-    let mut own: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut every: BTreeSet<String> = BTreeSet::new();
-    let mut built_sources: BTreeSet<String> = BTreeSet::new();
-    for file in files.iter().filter(|f| f.adapter == word) {
-        if let Some(map) = file.settings.get("own").and_then(|v| v.as_object()) {
-            for (unit, files) in map {
-                let files = files.as_array().into_iter().flatten();
-                own.entry(unit.clone())
-                    .or_default()
-                    .extend(files.filter_map(|f| f.as_str().map(str::to_string)));
-            }
-        }
-        if let Some(list) = file.settings.get("everySource").and_then(|v| v.as_array()) {
-            every.extend(list.iter().filter_map(|u| u.as_str().map(str::to_string)));
-        }
-        // \[ADR 0120\] The sources of the build's other programs, which a program run on its
-        // own names.
-        if let Some(list) = file.settings.get("sources").and_then(|v| v.as_array()) {
-            built_sources.extend(list.iter().filter_map(|f| f.as_str().map(str::to_string)));
-        }
-    }
-    let all_sources = every_source(at.tree);
-    let merged = facts::merged(files, word);
-    // \[ADR 0090\] An in-source build: said once in the run. When every program is of one,
-    // nothing of it can be observed, and the run says so; else each such program isn't.
-    let in_source = |m: &facts::Merged| {
-        m.not_followed
-            .iter()
-            .find(|n| n.why == "in-source build")
-            .map(|n| n.detail.clone())
-    };
-    let in_source_why = merged.values().find_map(in_source);
-    if let Some(why) = &in_source_why
-        && merged.values().all(|m| in_source(m).is_some())
-    {
-        return Err(why.clone());
-    }
-    let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
-    let mut named: BTreeSet<String> = BTreeSet::new();
-    for (unit, m) in merged {
-        let mut reads = m.reads;
-        // \[C-30\] Sources are what a build's graph gives some program: a file of a source
-        // kind no program is built from is in the rest set, and a change to it runs
-        // everything. A program whose build couldn't be read reads every source, which
-        // doesn't make every file of a source kind a source.
-        named.extend(reads.iter().filter(|f| build::is_source(f)).cloned());
-        if every.contains(&unit) {
-            reads.extend(all_sources.iter().cloned());
-        }
-        let facts = Facts {
-            complete: m.complete,
-            failed: m.failed,
-            not_followed: m.not_followed,
-            deselected: m.deselected,
-            skipped: m.skipped > 0,
-            ..Facts::default()
-        };
-        seen.insert(
-            unit,
-            Seen {
-                outside: Default::default(),
-                declared: None,
-                getenv: Default::default(),
-                facts,
-                reads,
-                duration_ms: m.duration_ms,
-                tests: m.tests,
-            },
-        );
-    }
-    let own: BTreeMap<String, Vec<String>> = own
-        .into_iter()
-        .filter(|(unit, _)| seen.contains_key(unit))
-        .map(|(unit, mut files)| {
-            files.sort();
-            files.dedup();
-            (unit, files)
-        })
-        .collect();
-    named.extend(built_sources.into_iter().filter(|f| at.tree.contains(f)));
-    let unit_files: BTreeSet<String> = own.values().flatten().cloned().collect();
-    let sets = units::classify(
-        at.tree.paths(),
-        &|p| unit_files.contains(p),
-        Sources::Named(&named, SOURCE_KINDS),
-        at.ignore,
-    );
-    let shared = super::fetch(at.asker, Hints::Sources, &sets, at.tree, at.ignore);
-    let planned = seen
-        .iter()
-        .filter(|(_, s)| s.facts.not_followed.is_empty())
-        .filter_map(|(unit, s)| {
-            let compiled: BTreeSet<String> = s
-                .reads
-                .iter()
-                .filter(|f| build::is_source(f))
-                .cloned()
-                .collect();
-            let lists = super::shared::lists(
-                unit,
-                at.map.units.get(unit),
-                &shared,
-                at.tree,
-                Some(&compiled),
-                None,
-            )?;
-            Some((unit.clone(), lists))
-        })
-        .collect();
-    Ok(Some(Read {
-        seen,
-        failures_by_unit: true,
-        sets,
-        planned,
-        own,
-        unit_files: Some(unit_files),
-        received: shared.received,
-        refused: in_source_why,
-        ..Read::default()
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,7 +287,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         assert!(matches!(
-            recognize(&words("ctest --test-dir build -j8"), cwd),
+            recognize_command(&words("ctest --test-dir build -j8"), cwd),
             Some(Ok(Some(args))) if args == words("--test-dir build -j8")
         ));
         for refused in [
@@ -594,55 +297,55 @@ mod tests {
             "cmake --build build --target=test",
         ] {
             assert!(
-                matches!(recognize(&words(refused), cwd), Some(Err(_))),
+                matches!(recognize_command(&words(refused), cwd), Some(Err(_))),
                 "{refused}"
             );
         }
         std::fs::create_dir_all(cwd.join("build")).unwrap();
         std::fs::write(cwd.join("build/CMakeCache.txt"), "").unwrap();
         assert!(matches!(
-            recognize(&words("make -C build test"), cwd),
+            recognize_command(&words("make -C build test"), cwd),
             Some(Err(_))
         ));
         assert!(matches!(
-            recognize(&words("ninja -C build test"), cwd),
+            recognize_command(&words("ninja -C build test"), cwd),
             Some(Err(_))
         ));
-        assert!(recognize(&words("ninja -C build"), cwd).is_none());
+        assert!(recognize_command(&words("ninja -C build"), cwd).is_none());
         // A shell line, a script and a Makefile that start ctest by name; not one that runs pytest.
         let sh = |line: &str| vec!["sh".to_string(), "-c".to_string(), line.to_string()];
         assert!(matches!(
-            recognize(&sh("cmake --build build && cd build && ctest -j8"), cwd),
+            recognize_command(&sh("cmake --build build && cd build && ctest -j8"), cwd),
             Some(Ok(None))
         ));
-        assert!(recognize(&sh("ctest && pytest"), cwd).is_none());
-        assert!(recognize(&sh("cmake --build build"), cwd).is_none());
+        assert!(recognize_command(&sh("ctest && pytest"), cwd).is_none());
+        assert!(recognize_command(&sh("cmake --build build"), cwd).is_none());
         // \[ADR 0090, amended\] A shell line that starts ctest by its path goes round hushrun's
         // ctest, and says so in the words COMMAND would.
         assert_eq!(
-            recognize(&sh("/opt/cmake/bin/ctest --test-dir build -j3"), cwd)
+            recognize_command(&sh("/opt/cmake/bin/ctest --test-dir build -j3"), cwd)
                 .unwrap()
                 .err()
                 .unwrap(),
             "COMMAND starts ctest by its path (/opt/cmake/bin/ctest), which hushrun's ctest on PATH can't stand in for: start it as `ctest`"
         );
-        assert!(recognize(&sh("/opt/cmake/bin/ctest && pytest"), cwd).is_none());
+        assert!(recognize_command(&sh("/opt/cmake/bin/ctest && pytest"), cwd).is_none());
         std::fs::write(
             cwd.join("check.sh"),
             "#!/bin/sh\nset -e\nctest --test-dir build\n",
         )
         .unwrap();
         assert!(matches!(
-            recognize(&words("./check.sh"), cwd),
+            recognize_command(&words("./check.sh"), cwd),
             Some(Ok(None))
         ));
         std::fs::write(cwd.join("Makefile"), "check:\n\tctest --test-dir build\n").unwrap();
         assert!(matches!(
-            recognize(&words("make check"), cwd),
+            recognize_command(&words("make check"), cwd),
             Some(Ok(None))
         ));
-        assert!(recognize(&words("go test ./..."), cwd).is_none());
-        assert!(recognize(&words("pytest"), cwd).is_none());
+        assert!(recognize_command(&words("go test ./..."), cwd).is_none());
+        assert!(recognize_command(&words("pytest"), cwd).is_none());
     }
 
     // covers: C-49, C-32

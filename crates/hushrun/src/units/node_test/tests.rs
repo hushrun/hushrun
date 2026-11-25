@@ -1,6 +1,7 @@
 //! \[ADR 0107\] Node's test runner: which COMMANDs, how it loads, and what its facts come to.
 
 use super::*;
+use crate::units::node::require;
 
 fn words(text: &str) -> Vec<String> {
     text.split(' ').map(str::to_string).collect()
