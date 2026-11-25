@@ -27,6 +27,8 @@ pub fn profile(adapter: &pytest::Pytest) -> Profile {
         hints: adapter.hints(),
         binds: adapter.binds(),
         keys: adapter.keys(),
+        not_by_test: adapter.not_by_test(),
+        not_watched: adapter.not_watched(),
     }
 }
 
