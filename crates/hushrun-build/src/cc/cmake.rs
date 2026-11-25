@@ -74,6 +74,12 @@ pub enum Note {
         /// The build folder.
         folder: PathBuf,
     },
+    /// \[B-237\] Meson set it up before the launcher: the compilers it keeps name no
+    /// indirection, and only a new setup reads `CC` and `CXX` again.
+    MesonSetUpBefore {
+        /// The build folder.
+        folder: PathBuf,
+    },
 }
 
 impl Note {
@@ -93,6 +99,11 @@ impl Note {
             ),
             Note::LauncherBefore { folder } => format!(
                 "build: {} starts a launcher of its own before hushrun's (RULE_LAUNCH_COMPILE), which sees /bin/sh as the compiler: a ccache there compiles every time, in and out of a run; name it in CMAKE_C_COMPILER_LAUNCHER and CMAKE_CXX_COMPILER_LAUNCHER instead",
+                folder.display()
+            ),
+            Note::MesonSetUpBefore { folder } => format!(
+                "build: C and C++ objects aren't reused in {}: Meson set it up before hushrun's launcher and keeps its compilers; set it up again inside hushrun run (meson setup --wipe {})",
+                folder.display(),
                 folder.display()
             ),
         }
@@ -136,6 +147,19 @@ pub fn notes(words: &[String], cwd: &Path) -> Vec<Note> {
             out.push(Note::LauncherBefore { folder });
         }
     }
+    // B-237: build folders Meson set up before the launcher.
+    let mut meson = super::meson::named_folders(words, cwd);
+    meson.extend(named_folders(words, cwd));
+    let mut seen = Vec::new();
+    for folder in meson {
+        if seen.contains(&folder) || !folder.join("meson-private").is_dir() {
+            continue;
+        }
+        seen.push(folder.clone());
+        if super::meson::set_up_before(&folder) {
+            out.push(Note::MesonSetUpBefore { folder });
+        }
+    }
     out
 }
 
@@ -145,7 +169,7 @@ pub fn configured_before(words: &[String], cwd: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(|n| match n {
             Note::ConfiguredBefore { folder, .. } => Some(folder),
-            Note::LauncherBefore { .. } => None,
+            Note::LauncherBefore { .. } | Note::MesonSetUpBefore { .. } => None,
         })
         .collect()
 }

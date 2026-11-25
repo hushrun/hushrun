@@ -60,6 +60,7 @@ pub trait Program: Sync {
 /// \[ADR 0080\] The programs adapters put on `PATH`, by name. A new one is one entry here.
 pub const PROGRAMS: &[&dyn Program] = &[
     &super::ctest::Ctest,
+    &super::mesontest::Meson,
     &super::swift::SWIFT,
     &super::swift::SWIFT_TEST,
     // \[ADR 0112\] Not on `PATH`: Cargo starts it as `RUSTDOC`.
@@ -716,6 +717,19 @@ fn run_with(
         None => {}
     }
     command.env_remove(DIR_VAR).env_remove(PATH_WAS);
+    // B-236: `meson setup` inside a run names its compilers through the launcher's indirection.
+    if name == "meson" {
+        command.envs(hushrun_build::cc::meson::setup_vars(args, &|var| {
+            if var == "PATH" {
+                match &was {
+                    Some(path) => path.clone(),
+                    None => std::env::var_os("PATH"),
+                }
+            } else {
+                std::env::var_os(var)
+            }
+        }));
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -952,32 +966,49 @@ mod tests {
     fn output_that_never_stops_is_handed_over_and_kept_only_so_far() {
         let tmp = tempfile::tempdir().unwrap();
         let pid = tmp.path().join("pid");
-        // The program exits, and leaves one printing as fast as it can.
+        let line = "a long line printed over and over ".repeat(30);
+        // More than KEEP_MOST before the program ends, whatever the machine's speed: a pipe's
+        // writer waits for its reader, so all of it has been read once `head` is done. Then the
+        // program exits, and leaves one printing as fast as it can.
         let mut command = Command::new("sh");
         command.arg("-c").arg(format!(
-            "yes '{}' & echo $! > '{}'; exit 4",
-            "a long line printed over and over ".repeat(30),
+            "yes '{line}' | head -c {}; yes '{line}' & echo $! > '{}'; exit 4",
+            KEEP_MOST + (1 << 20),
             pid.display()
         ));
-        // Whatever happens, `yes` stops after 10 s.
+        // Whatever happens, `yes` stops after 30 s. The pid file appears just before the
+        // program's end: the time it took to hand over is counted from there.
         let watched = pid.clone();
+        let (ended_tx, ended_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(10));
+            let started = std::time::Instant::now();
+            let mut told = false;
+            while started.elapsed() < std::time::Duration::from_secs(30) {
+                if !told && watched.exists() {
+                    let _ = ended_tx.send(std::time::Instant::now());
+                    told = true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             if let Ok(text) = std::fs::read_to_string(&watched) {
                 let _ = Command::new("kill").arg(text.trim()).status();
             }
         });
-        let started = std::time::Instant::now();
         let copied = run_copying_stdout(command, |_| true).unwrap();
-        let took = started.elapsed();
+        let returned = std::time::Instant::now();
         if let Ok(text) = std::fs::read_to_string(&pid) {
             let _ = Command::new("kill").arg(text.trim()).status();
         }
+        let ended = ended_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the program wrote its pid");
+        let took = returned.saturating_duration_since(ended);
         assert_eq!(copied.exit, Some(4));
         assert!(took < MOST_AFTER * 4, "{took:?}");
         assert!(copied.held);
         assert!(copied.stdout.len() <= KEEP_MOST, "{}", copied.stdout.len());
         assert!(copied.cut);
+        assert!(copied.wanted > KEEP_MOST as u64, "{}", copied.wanted);
     }
 
     // covers: C-39

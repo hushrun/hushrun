@@ -354,6 +354,21 @@ pub const ROWS: &[Row] = &[
         "ktlint",
         "./gradlew ktlintCheck",
     )),
+    // Shell: \[ADR 0115\] Bats, by its name or as the submodule its docs set up.
+    check(
+        "Shell",
+        "bats|./test/bats/bin/bats|test/bats/bin/bats",
+        &[],
+        "test",
+        "bats test",
+    ),
+    lint(check(
+        "Shell",
+        "shellcheck",
+        &[],
+        "shellcheck",
+        "shellcheck bin/tool",
+    )),
     // Ruby
     check("Ruby", "rspec|bin/rspec", &[], "test", "bundle exec rspec"),
     lint(check(

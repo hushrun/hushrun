@@ -137,28 +137,62 @@ impl Ran {
         out
     }
 
-    /// How many tests VSTest ran of each assembly, by its file name, from its summary line
+    /// How many tests VSTest ran of each assembly, by its file name, from its summaries
     /// (`Passed!  - Failed: 0, Passed: 3, Skipped: 0, Total: 3, Duration: 9 ms - A.dll (net8.0)`).
+    ///
+    /// Under load two projects' summaries can land on one line (`… Duration: 84 msPassed!  - …`),
+    /// so each summary is read from its own `Total:` to the next one, wherever the lines break: a
+    /// total counts for the assembly its own summary names, and one whose summary names none (cut)
+    /// counts for none, never for the next summary's.
     fn totals(&self) -> std::collections::BTreeMap<String, u64> {
         let mut out = std::collections::BTreeMap::new();
-        for line in self.stdout.lines() {
-            let Some((counts, dll)) = line.rsplit_once(" - ") else {
-                continue;
-            };
-            let Some(total) = counts.split("Total:").nth(1) else {
-                continue;
-            };
-            let total: u64 = total
+        for summary in self.stdout.split("Total:").skip(1) {
+            let Some(total) = summary
                 .trim_start()
-                .split(',')
+                .split(|c: char| !c.is_ascii_digit())
                 .next()
-                .and_then(|t| t.trim().parse().ok())
-                .unwrap_or(0);
-            let dll = dll.split_whitespace().next().unwrap_or("").to_string();
+                .and_then(|t| t.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(dll) = summary.split(" - ").skip(1).find_map(|rest| {
+                let name = rest.split_whitespace().next()?;
+                name.ends_with(".dll").then(|| name.to_string())
+            }) else {
+                continue;
+            };
             *out.entry(dll).or_insert(0) += total;
         }
         out
     }
+}
+
+#[test]
+fn vstest_summaries_are_counted_by_their_own_assembly_even_when_they_share_a_line() {
+    let ran = Ran {
+        code: 0,
+        stdout: [
+            "Passed!  - Failed:     0, Passed:     1, Skipped:     0, Total:     1, Duration: 12 ms - Calc.XTests.dll (net11.0)",
+            // Two summaries joined: the first, cut, names no assembly and counts for none; the
+            // second counts for its own.
+            "Passed!  - Failed:     0, Passed:     1, Skipped:     0, Total:     1, Duration: 84 msPassed!  - Failed:     0, Passed:     3, Skipped:     0, Total:     3, Duration: 90 ms - Calc.NTests.dll (net11.0)",
+            // A cut summary names no assembly: it counts for none, not the next one's.
+            "Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5, Dur",
+            "  Calc.MTests -> /tmp/x/Calc.MTests.dll",
+            "Passed!  - Failed:     0, Passed:     2, Skipped:     0, Total:     2, Duration: 7 ms - Calc.MTests.dll (net11.0)",
+        ]
+        .join("\n"),
+        stderr: String::new(),
+    };
+    let totals = ran.totals();
+    assert_eq!(
+        totals,
+        std::collections::BTreeMap::from([
+            ("Calc.MTests.dll".to_string(), 2),
+            ("Calc.NTests.dll".to_string(), 3),
+            ("Calc.XTests.dll".to_string(), 1),
+        ])
+    );
 }
 
 struct Project {

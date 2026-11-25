@@ -26,6 +26,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **C and C++ without CMake, and `meson test`** (B-230 to B-238, C-102 to C-105, ADR 0119). Inside
+  `hushrun run`, GNU Make's commands (plain Makefiles and autotools ones) find hushrun's compiler
+  programs first on `PATH` through `MAKEFILES`, a `ninja` COMMAND on a handwritten `build.ninja`
+  gets them too, and `meson setup` in a Meson repository names its compilers through CMake's
+  launcher indirection: their objects are reused and shared as `cc/1` blocks. `cmake` and `meson`
+  started from make's commands, and the Rust linker, never see the programs; autoconf's and
+  Meson's configure checks aren't stored. With `tests: reuse`, `meson test` reuses test programs
+  and tests one by one, as CTest does. New variables COMMAND gets: `MAKEFILES` (the hook first,
+  the person's after it) and, in a Meson repository, `PATH` with hushrun's `meson` first.
 - **C++ test programs started directly, test by test** (C-106 to C-108, ADR 0120). `hushrun run
   NAME -- build/tests/t_calc` with a GoogleTest or Catch2 3 program of a CMake build directory
   reuses each test that passed on the files the program is built from, leaving tests out through
@@ -163,6 +172,24 @@ project's new branch starts from what main's CI already ran.
   build. `hushrun build xcode on|off|status` does the same for the Xcode app's builds with a
   LaunchAgent. `HUSHRUN_BUILD_XCODE=0` turns it off for a run. Not yet run against a real Xcode:
   the ADR lists what the first build on a Mac checks.
+- **Bats test files and tests reused** (C-86 to C-89, [ADR 0115](docs/adr/0115-bats.md)): with
+  `tests: reuse`, `hushrun run NAME -- bats …` (by name, a path or `npx`) leaves out the `.bats`
+  files, or with `unit: test` the tests, that already passed on the files they read. A hook that
+  `BASH_ENV` loads into every bash process notes the files each test's commands ran from: helpers
+  it loaded, libraries it sourced, scripts it ran and what they sourced, so `reads: test` works. A
+  reused test shows as `# skip reused by hushrun`, and bats' output is otherwise unchanged. bats-core
+  1.10 or later, on Linux and macOS. `hushrun init` knows `bats` and `shellcheck`. Shell has no
+  compile step, so there are no build blocks for it.
+- **RSpec's and Minitest's test files and tests reused** (C-82 to C-85, [ADR 0114](docs/adr/0114-ruby.md)):
+  with `tests: reuse`, `rspec`, `bin/rails test`, `rake test` and `ruby` (alone or after
+  `bundle exec`) load hushrun's Ruby adapter through `RUBYLIB` and `RUBYOPT`, and a spec or test
+  file that already passed on the files it read doesn't run again. What it read is the code of the
+  repository that ran for it (one TracePoint per file, armed once per test), what that code
+  requires and opens, to the end, and what code outside the repository loaded or opened while it
+  or an earlier test file ran (Zeitwerk, Rails' initializers and fixtures). With `unit: test`,
+  each RSpec example (`spec/cart_spec.rb::[1:2]`) and Minitest test (`CartTest#test_total`) is
+  reused on its own, RSpec's left out by an exclusion filter before any of its hooks runs. Ruby
+  3.1 or later, CRuby; Minitest 5 and 6, RSpec 3. Ruby has no compile step to reuse.
 - **Go: coverage runs whole, files no test binary is built from rerun only what read them, and
   `runtime` is shared before Go 1.27** (C-70, C-71, B-150, ADR 0111). A `go test` with `-cover`, `-coverprofile`, `-coverpkg` or
   `-covermode` (in COMMAND, after `-args` or in `GOFLAGS`) now runs every package, as Jest and
