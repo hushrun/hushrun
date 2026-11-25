@@ -702,7 +702,7 @@ fn reason_text(reason: hushrun_core::plan::RunReason) -> &'static str {
 }
 
 /// How a check runs: its `run` through its shell.
-pub(crate) enum Program {
+pub enum Program {
     Shell { shell: Shell, script: String },
 }
 

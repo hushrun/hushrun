@@ -29,13 +29,13 @@ use super::{Opened, Relay, pack};
 
 /// What opens a baked store's packs and hints for the wrapper, the Go cache program and the
 /// launcher (B-64).
-pub(crate) struct Packs;
+pub struct Packs;
 
 /// The one [`Packs`], which `main` installs before any of them runs.
-pub(crate) static PACKS: Packs = Packs;
+pub static PACKS: Packs = Packs;
 
 /// Installs [`PACKS`] for this process.
-pub(crate) fn install() {
+pub fn install() {
     baked::install(&PACKS);
 }
 

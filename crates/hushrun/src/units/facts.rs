@@ -804,6 +804,10 @@ pub fn left_out(files: &[FactsFile]) -> Option<String> {
 
 /// What a file says of a runner setting, as a list of strings, when every file that says it
 /// agrees; `Err(())` when two disagree.
+#[allow(
+    clippy::result_unit_err,
+    reason = "the library is for hushrun's own tests: its callers only ask whether two disagree"
+)]
 pub fn setting(files: &[FactsFile], adapter: &str, key: &str) -> Result<Option<Vec<String>>, ()> {
     let mut found: Option<Vec<String>> = None;
     for file in files.iter().filter(|f| f.adapter == adapter) {
