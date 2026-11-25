@@ -136,7 +136,7 @@ fn for_go_each_lists_env_is_the_variables_its_entry_names_with_their_values_now(
     };
     let name = "HUSHRUN_TEST_LISTS_VARIABLE";
     let getenv = |value: &'static str| {
-        gotest::Getenv::of(std::path::Path::new("/home/dev/shop"), move |n| {
+        super::super::getenv::Getenv::of(std::path::Path::new("/home/dev/shop"), move |n| {
             (n == name).then(|| value.to_string())
         })
     };
