@@ -125,6 +125,14 @@ narrower than can be shown.
   per crate, kept by that crate's inputs, would index only what changed.
 - **Finer keys.** A test's key is made of whole files. Keying by the items it reaches would let a
   change to a function it doesn't reach, in a file it does, leave it reusable.
+- **Lists a repository extends.** `HYGIENIC` (procedural macro crates whose output names only
+  absolute paths and its input) and `OWN_METHODS` (crates whose `macro_rules!` bodies call methods
+  only on their own types) are hushrun's own trust assumptions, in code and in C-150. A
+  repository's macro that isn't on them counts the whole of its module, which is sound. Letting a
+  repository add crates to them is left for later.
+- **Receivers' types.** A call to a trait's default method on a concrete type resolves to the
+  trait, so it counts every `impl` that overrides the method. rust-analyzer's index says no
+  receiver's type; one that did would let such a call count the one `impl`.
 - **The command line's types.** Derives on `cli.rs`'s types reach most of the `hushrun` binary.
   A closer reading of clap's derive would narrow the tests that build a command line.
 

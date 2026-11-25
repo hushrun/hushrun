@@ -44,6 +44,8 @@ pub struct Binary<'a> {
     pub own: &'a BTreeSet<String>,
     /// The `.rs` files its tests' lists may leave out.
     pub mappable: &'a BTreeSet<String>,
+    /// Of those, what is built into it, where what runs unnamed comes from (C-149).
+    pub linked: &'a BTreeSet<String>,
     /// The ids of the tests to map.
     pub tests: Vec<String>,
 }
@@ -103,7 +105,7 @@ pub fn lists(
             .chain(b.own.iter())
             .filter(|f| f.ends_with(".rs"))
             .find_map(|f| graph.unmapped(f).map(|why| (f.clone(), why.to_string())));
-        let linked: BTreeSet<String> = b.mappable.union(b.own).cloned().collect();
+        let linked: BTreeSet<String> = b.linked.union(b.own).cloned().collect();
         for id in &b.tests {
             total += 1;
             let list = match &unmapped {
@@ -224,6 +226,7 @@ fn graph(
         proc_macros: &workspace.proc_macros,
         binaries: &workspace.binaries,
         external: &external,
+        layout: Some(&workspace.layout),
     }));
     if let Ok(mut held) = GRAPH.lock() {
         *held = Some((key, graph.clone()));
@@ -496,6 +499,7 @@ mod tests {
                 reads: &reads,
                 own: &reads,
                 mappable: &reads,
+                linked: &reads,
                 tests: vec!["tests::t".to_string()],
             },
         )]);

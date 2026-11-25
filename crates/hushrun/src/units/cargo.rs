@@ -404,9 +404,13 @@ pub struct Observed {
     pub executables: BTreeMap<String, PathBuf>,
     /// \[C-146\] Each test binary's own files and those its tests' lists may leave out, by its
     /// unit, and the workspace: what the static map is made with.
-    pub mapping: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)>,
+    pub mapping: BTreeMap<String, Mapping>,
     pub workspace: Workspace,
 }
+
+/// \[C-146\] A test binary's own files, those its tests' lists may leave out, and of those, what
+/// is built into it.
+pub type Mapping = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>);
 
 /// \[ADR 0069\] What a build says of its test binaries before any runs: the plan's.
 #[derive(Debug, Default)]
@@ -434,6 +438,8 @@ pub struct Workspace {
     pub binaries: BTreeSet<String>,
     /// Each package outside it, by name and version: its folder, where its macros are read.
     pub external: BTreeMap<(String, String), PathBuf>,
+    /// \[C-150\] Its packages' folders, libraries and dependencies.
+    pub layout: hushrun_graph::graph::Layout,
 }
 
 /// One test binary of a build.
@@ -458,6 +464,9 @@ pub struct BuiltUnit {
     /// Every other file it read (a build script's, a procedural macro's, a file a build script
     /// watches, anything but a `.rs` source) stays in every test's list.
     pub mappable: BTreeSet<String>,
+    /// \[C-149\] Of `mappable`, what is built into the binary: its own crate's and its libraries'
+    /// files, not its package's other targets the package rule adds, which it may only start.
+    pub linked: BTreeSet<String>,
 }
 
 /// \[ADR 0096\] The SHA-256 of the values of `names` that `var` gives, raw, as [`units::env()`]
@@ -876,7 +885,10 @@ pub fn observe(
         let (complete, failed, duration_ms) = ended(starts, recognized, command_passed);
         // \[C-146\] nextest starts a binary once per test: each test's start is its own.
         let tests = recognized.nextest.then(|| tests_of(starts)).flatten();
-        mapping.insert(unit.clone(), (b.own.clone(), b.mappable.clone()));
+        mapping.insert(
+            unit.clone(),
+            (b.own.clone(), b.mappable.clone(), b.linked.clone()),
+        );
         let outside = b.outside();
         let declared = Some(b.declared.clone());
         units.insert(
@@ -1136,11 +1148,13 @@ fn read_build(
         // rule adds; never a build script's or a procedural macro's.
         let mut depinfos: Vec<PathBuf> = Vec::new();
         let mut mappable_depinfos: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut linked_depinfos: BTreeSet<PathBuf> = BTreeSet::new();
         let mut own_depinfo: Option<PathBuf> = None;
         match &artifact.depinfo {
             Some(d) => {
                 depinfos.push(d.clone());
                 mappable_depinfos.insert(d.clone());
+                linked_depinfos.insert(d.clone());
                 own_depinfo = Some(d.clone());
             }
             None => {
@@ -1171,6 +1185,9 @@ fn read_build(
                     depinfos.push(d.clone());
                     if !script && !proc_macro {
                         mappable_depinfos.insert(d.clone());
+                        if lib {
+                            linked_depinfos.insert(d.clone());
+                        }
                     }
                 }
                 None => {
@@ -1227,6 +1244,7 @@ fn read_build(
         let mut given: BTreeSet<String> = BTreeSet::new();
         let mut declared: BTreeSet<String> = BTreeSet::new();
         let mut mappable: BTreeSet<String> = BTreeSet::new();
+        let mut linked_rs: BTreeSet<String> = BTreeSet::new();
         let mut kept: BTreeSet<String> = BTreeSet::new();
         let mut own: BTreeSet<String> = BTreeSet::new();
         for (d, files, sources) in depinfos
@@ -1250,6 +1268,9 @@ fn read_build(
                 let named: Vec<String> = info.files.iter().filter_map(|p| relative(p)).collect();
                 if mappable_depinfos.contains(d) {
                     mappable.extend(named.iter().filter(|f| f.ends_with(".rs")).cloned());
+                    if linked_depinfos.contains(d) {
+                        linked_rs.extend(named.iter().filter(|f| f.ends_with(".rs")).cloned());
+                    }
                 } else {
                     kept.extend(named.iter().cloned());
                 }
@@ -1354,6 +1375,7 @@ fn read_build(
                 },
                 not_followed,
                 own,
+                linked: linked_rs.intersection(&mappable).cloned().collect(),
                 mappable,
             },
         );
@@ -1380,6 +1402,31 @@ fn read_build(
         prefix,
         ..Workspace::default()
     };
+    // \[C-150\] Each member's folder, library and the members it may name.
+    for (manifest, package) in &packages {
+        let folder = manifest
+            .parent()
+            .and_then(&relative)
+            .map(|dir| format!("{dir}/"))
+            .unwrap_or_default();
+        workspace
+            .layout
+            .folders
+            .push((folder, package.name.clone()));
+        if let Some(lib) = package.targets.iter().find(|t| t.is_lib())
+            && let Some(root) = relative(&lib.src_path)
+        {
+            workspace
+                .layout
+                .libraries
+                .insert(package.name.clone(), root);
+        }
+        let sees: BTreeSet<String> = linked(manifest)
+            .iter()
+            .filter_map(|m| packages.get(m).map(|p| p.name.clone()))
+            .collect();
+        workspace.layout.sees.insert(package.name.clone(), sees);
+    }
     for package in &metadata.packages {
         if members.contains(package.id.as_str()) {
             workspace.packages.insert(package.name.clone());
@@ -2147,6 +2194,7 @@ impl Adapter for Recognized {
                             reads: &b.reads,
                             own: &b.own,
                             mappable: &b.mappable,
+                            linked: &b.linked,
                             tests,
                         },
                     )
@@ -2210,7 +2258,7 @@ impl Adapter for Recognized {
                 .iter()
                 .filter(|(unit, seen)| seen.facts.not_followed.is_empty() && at.tree.contains(unit))
                 .filter_map(|(unit, seen)| {
-                    let (own, mappable) = observed.mapping.get(unit)?;
+                    let (own, mappable, linked) = observed.mapping.get(unit)?;
                     let tests = seen
                         .tests
                         .as_ref()
@@ -2222,6 +2270,7 @@ impl Adapter for Recognized {
                             reads: &seen.reads,
                             own,
                             mappable,
+                            linked,
                             tests,
                         },
                     ))

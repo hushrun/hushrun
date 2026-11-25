@@ -95,6 +95,33 @@ pub struct Inputs<'a> {
     /// \[C-150\] The free names of a `macro_rules!` macro of a crate outside the workspace, by its
     /// package, version and name; `None` when it isn't one that can be read.
     pub external: &'a dyn Fn(&str, &str, &str) -> Option<crate::external::Macro>,
+    /// \[C-150\] The workspace's packages, for what a name can resolve to; `None`: anything.
+    pub layout: Option<&'a Layout>,
+}
+
+/// \[C-150\] The workspace's packages as name resolution sees them: a crate's code names items of
+/// its own crate, of its package's library, and of the libraries of the packages it depends on
+/// (of any kind, closed), never of a crate that depends on it.
+#[derive(Debug, Clone, Default)]
+pub struct Layout {
+    /// Each package's folder from the repository's root, with a `/` (empty for the root), and
+    /// its name.
+    pub folders: Vec<(String, String)>,
+    /// Each package's library's root file, when it has one.
+    pub libraries: BTreeMap<String, String>,
+    /// Each package's dependencies in the workspace, closed, itself not included.
+    pub sees: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Layout {
+    /// The package a file is of: the one whose folder holds it, the deepest.
+    pub fn package_of(&self, path: &str) -> Option<&str> {
+        self.folders
+            .iter()
+            .filter(|(folder, _)| path.starts_with(folder.as_str()))
+            .max_by_key(|(folder, _)| folder.len())
+            .map(|(_, name)| name.as_str())
+    }
 }
 
 /// One item: its file and its index there.
@@ -434,6 +461,14 @@ struct Linker<'g, 'i> {
     scopes: HashMap<(u32, Option<u32>), Vec<u32>>,
     /// Each module symbol's modules: a file, and its `mod` item when it isn't the file's own.
     namespaces: HashMap<u32, Vec<(u32, Option<u32>)>>,
+    /// \[C-147\] Each file's crates, by their root files: those it is a module of, by `mod`
+    /// declarations (`#[path]` included), more than it is rather than fewer.
+    crates_of: Vec<BTreeSet<u32>>,
+    /// Each file's index, by its path.
+    by_file: HashMap<String, u32>,
+    /// \[C-147\] Each file's symbols that a `use` of it names, and whether it imports by `*` from
+    /// anything but its own crate.
+    imported: Vec<(HashSet<u32>, bool)>,
 }
 
 impl<'g, 'i> Linker<'g, 'i> {
@@ -457,6 +492,9 @@ impl<'g, 'i> Linker<'g, 'i> {
             external: HashMap::new(),
             scopes: HashMap::new(),
             namespaces: HashMap::new(),
+            crates_of: Vec::new(),
+            by_file: HashMap::new(),
+            imported: Vec::new(),
         }
     }
 
@@ -479,6 +517,7 @@ impl<'g, 'i> Linker<'g, 'i> {
 
     fn link(mut self) {
         self.tables();
+        self.crates();
         for n in 0..self.g.nodes.len() as u32 {
             self.link_node(n);
         }
@@ -664,7 +703,20 @@ impl<'g, 'i> Linker<'g, 'i> {
                     }
                 }
                 let external_trait = it.impl_trait.is_some() && !workspace_trait;
-                for s in in_range(&it.impl_self).into_iter().chain(trait_syms) {
+                // What it is for: its self type, and the types its trait's arguments name
+                // (`Foo` of `From<Foo>`); never the trait, whose items reach their `impl`s
+                // themselves.
+                let traits: HashSet<u32> = trait_syms
+                    .iter()
+                    .copied()
+                    .filter(|s| {
+                        self.defs
+                            .get(s)
+                            .is_some_and(|d| d.iter().any(|d| self.kind_of(*d) == Kind::Trait))
+                    })
+                    .collect();
+                let named_in_trait = trait_syms.into_iter().filter(|s| !traits.contains(s));
+                for s in in_range(&it.impl_self).into_iter().chain(named_in_trait) {
                     naming.push((s, n, external_trait));
                 }
             }
@@ -754,6 +806,9 @@ impl<'g, 'i> Linker<'g, 'i> {
         let to = self.by_name.get(name).cloned().unwrap_or_default();
         let mut found = false;
         for t in to {
+            if !self.can_name(from, t) {
+                continue;
+            }
             let method = self.is_method(t);
             let kind = self.kind_of(t);
             let made = matches!(kind, Kind::MacroCall | Kind::MacroRules);
@@ -908,7 +963,9 @@ impl<'g, 'i> Linker<'g, 'i> {
         let mut unknown_attribute = false;
         let unresolved: Vec<(String, Class, Option<String>)> =
             in_ranges(&entry.split.idents, &own, |i| &i.range)
-                .filter(|i| !starts.contains(&i.range.start) && !i.defines && i.text != "Self")
+                .filter(|i| {
+                    !starts.contains(&i.range.start) && !i.defines && !i.label && i.text != "Self"
+                })
                 .filter(|i| !File::within(&entry.split.inert, &i.range))
                 .filter(|i| {
                     let path = File::within(&entry.split.attr_paths, &i.range);
@@ -952,7 +1009,14 @@ impl<'g, 'i> Linker<'g, 'i> {
             .cloned()
             .collect();
         for s in &strings {
-            if s.text.contains("CARGO_BIN_EXE_") {
+            // A lookup of a binary's path: a string that starts with the variable's name
+            // (`env!("CARGO_BIN_EXE_x")`, `concat!("CARGO_BIN_EXE_", …)`, `var("CARGO_BIN_EXE_…")`),
+            // not a message that mentions it.
+            let content = s
+                .text
+                .trim_start_matches(['r', '#'])
+                .trim_start_matches('"');
+            if content.starts_with("CARGO_BIN_EXE_") {
                 let unmarked = if it.marked {
                     format!(
                         ", which the `{}` marker of its function doesn't cover",
@@ -1147,6 +1211,12 @@ impl<'g, 'i> Linker<'g, 'i> {
             }
             return;
         }
+        // \[C-147\] One symbol defined in more files than one: rust-analyzer names the root items
+        // of each target of a package alike (`hushrun 0.19.1 run().` is the binary's and every
+        // integration test's). A reference that only its own crate can resolve (unqualified, or
+        // through `crate::`, `self::` or `super::`), from a file that imports no such symbol and
+        // nothing by `*` from another crate, is to its own crate's, when that crate has one.
+        let defs = self.same_crate(n, sym, range, defs);
         for d in defs {
             self.edge(n, d);
             let kind = self.kind_of(d);
@@ -1183,8 +1253,15 @@ impl<'g, 'i> Linker<'g, 'i> {
                 && let Some(tsym) = self.own_symbol.get(&t).copied()
             {
                 let name = p.name().to_string();
+                // A trait's function runs an `impl`'s function of its name, or its own default
+                // body, which is already reached: only the `impl`s that have one are, and each
+                // through it (its head comes with it). Its associated const or type is in every
+                // `impl`'s head.
+                let method = kind == Kind::Fn;
                 for imp in self.impls_of.get(&tsym).cloned().unwrap_or_default() {
-                    self.edge(n, imp);
+                    if !method {
+                        self.edge(n, imp);
+                    }
                     let file = self.g.nodes[imp as usize].file as usize;
                     let children = self.item(imp).children.clone();
                     for c in children {
@@ -1196,6 +1273,213 @@ impl<'g, 'i> Linker<'g, 'i> {
                 }
             }
         }
+    }
+
+    /// \[C-150\] Whether code of node `from` can name node `to` by name: always from a
+    /// `macro_rules!` body (it is resolved where it expands) or without a layout; else when `to`
+    /// is of a crate `from`'s file is a module of, of its package's library (from another of the
+    /// package's crates), or of the library of a package its package depends on.
+    fn can_name(&self, from: u32, to: u32) -> bool {
+        let Some(layout) = self.inputs.layout else {
+            return true;
+        };
+        if self.kind_of(from) == Kind::MacroRules {
+            return true;
+        }
+        let file_from = self.g.nodes[from as usize].file as usize;
+        let file_to = self.g.nodes[to as usize].file as usize;
+        if !self.crates_of[file_from].is_disjoint(&self.crates_of[file_to]) {
+            return true;
+        }
+        let path_from = &self.g.files[file_from].path;
+        let path_to = &self.g.files[file_to].path;
+        let (Some(p), Some(q)) = (layout.package_of(path_from), layout.package_of(path_to)) else {
+            return true;
+        };
+        let in_library = |package: &str| {
+            layout.libraries.get(package).is_some_and(|root| {
+                self.by_file
+                    .get(root.as_str())
+                    .is_some_and(|r| self.crates_of[file_to].contains(r))
+            })
+        };
+        let sees = p == q || layout.sees.get(p).is_none_or(|sees| sees.contains(q));
+        sees && in_library(q)
+    }
+
+    /// \[C-147\] Of the definitions of `sym`, those [`Linker::symbol_edges`] keeps for the
+    /// occurrence at `range` in `n`: all, but for a reference only its own crate can resolve.
+    fn same_crate(&self, n: u32, sym: u32, range: &Range<usize>, defs: Vec<u32>) -> Vec<u32> {
+        let file_of = |d: u32| self.g.nodes[d as usize].file;
+        let files: BTreeSet<u32> = defs.iter().map(|d| file_of(*d)).collect();
+        if files.len() < 2 {
+            return defs;
+        }
+        let here = file_of(n);
+        let (imported, globs) = &self.imported[here as usize];
+        if imported.contains(&sym) || *globs {
+            return defs;
+        }
+        let source = &self.inputs.sources[&self.g.files[here as usize].path];
+        let before = source[..range.start].trim_end();
+        if let Some(path) = before.strip_suffix("::") {
+            let head = path
+                .rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("::");
+            let first = head.split("::").next().unwrap_or("");
+            if !matches!(first, "crate" | "self" | "super" | "Self") {
+                return defs;
+            }
+        }
+        let mine = &self.crates_of[here as usize];
+        let kept: Vec<u32> = defs
+            .iter()
+            .copied()
+            .filter(|d| !self.crates_of[file_of(*d) as usize].is_disjoint(mine))
+            .collect();
+        if kept.is_empty() { defs } else { kept }
+    }
+
+    /// \[C-147\] Each file's crates, and what each file imports: the module tree from each root
+    /// (a file no `mod` declares), a `mod name;` declaring `name.rs` or `name/mod.rs` beside its file
+    /// or in the folder named after it (both, on the safe side), or the file its `#[path]` names.
+    fn crates(&mut self) {
+        let index: HashMap<&str, u32> = self
+            .g
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.path.as_str(), i as u32))
+            .collect();
+        let mut children: Vec<Vec<u32>> = vec![Vec::new(); self.g.files.len()];
+        let mut declared: Vec<bool> = vec![false; self.g.files.len()];
+        for (f, entry) in self.g.files.iter().enumerate() {
+            let source = &self.inputs.sources[&entry.path];
+            let (dir, stem) = match entry.path.rsplit_once('/') {
+                Some((dir, name)) => (dir.to_string(), name.trim_end_matches(".rs").to_string()),
+                None => (
+                    String::new(),
+                    entry.path.trim_end_matches(".rs").to_string(),
+                ),
+            };
+            let join = |a: &str, b: &str| {
+                if a.is_empty() {
+                    b.to_string()
+                } else {
+                    format!("{a}/{b}")
+                }
+            };
+            for it in &entry.split.items {
+                if it.kind != Kind::Mod || !source[it.range.clone()].trim_end().ends_with(';') {
+                    continue;
+                }
+                // Each module of a `mod` inside an inline module is below that module's folder.
+                let mut inline: Vec<&str> = Vec::new();
+                let mut up = it.module;
+                while let Some(m) = up {
+                    inline.push(entry.split.items[m].name.as_str());
+                    up = entry.split.items[m].module;
+                }
+                inline.reverse();
+                let nested = inline.join("/");
+                let text = &source[it.range.clone()];
+                let mut candidates: Vec<String> = Vec::new();
+                if let Some(at) = text.find("#[path")
+                    && let Some(value) = text[at..].split('"').nth(1)
+                {
+                    candidates.push(normalize(&join(&dir, value)));
+                } else {
+                    for base in [join(&dir, &nested), join(&join(&dir, &stem), &nested)] {
+                        let base = base.trim_end_matches('/').to_string();
+                        candidates.push(join(&base, &format!("{}.rs", it.name)));
+                        candidates.push(join(&base, &format!("{}/mod.rs", it.name)));
+                    }
+                }
+                for c in candidates {
+                    if let Some(child) = index.get(c.as_str())
+                        && *child as usize != f
+                    {
+                        children[f].push(*child);
+                        declared[*child as usize] = true;
+                    }
+                }
+            }
+        }
+        let mut crates_of: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); self.g.files.len()];
+        for root in (0..self.g.files.len()).filter(|f| !declared[*f]) {
+            let mut stack = vec![root as u32];
+            while let Some(f) = stack.pop() {
+                if crates_of[f as usize].insert(root as u32) {
+                    stack.extend(children[f as usize].iter().copied());
+                }
+            }
+        }
+        // A file in a cycle of declarations no root reaches is its own crate.
+        for (f, crates) in crates_of.iter_mut().enumerate() {
+            if crates.is_empty() {
+                crates.insert(f as u32);
+            }
+        }
+        self.crates_of = crates_of;
+        self.by_file = self
+            .g
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.path.clone(), i as u32))
+            .collect();
+        let mut imported: Vec<(HashSet<u32>, bool)> = Vec::new();
+        for (f, entry) in self.g.files.iter().enumerate() {
+            let source = &self.inputs.sources[&entry.path];
+            let mut names: HashSet<u32> = HashSet::new();
+            let mut globs = false;
+            for it in entry.split.items.iter().filter(|it| it.kind == Kind::Use) {
+                let text = &source[it.range.clone()];
+                let body = text.trim_start_matches("pub").trim_start();
+                let body = body
+                    .strip_prefix("use")
+                    .map(str::trim_start)
+                    .unwrap_or(body);
+                // A glob from its own crate: `crate::`, `self::`, `super::`, or a module the index
+                // defines in a file of the same crate.
+                if text.contains('*')
+                    && !["crate::", "self::", "super::"]
+                        .iter()
+                        .any(|p| body.starts_with(p))
+                {
+                    let module = entry
+                        .occurrences
+                        .iter()
+                        .filter(|(r, s, _)| {
+                            it.range.start <= r.start && r.end <= it.range.end && *s != u32::MAX
+                        })
+                        .filter(|(_, s, _)| {
+                            Symbol::parse(&self.symbols[*s as usize])
+                                .is_some_and(|p| p.last() == Last::Namespace)
+                        })
+                        .map(|(_, s, _)| *s)
+                        .next_back();
+                    let own = module
+                        .and_then(|m| self.namespaces.get(&m))
+                        .is_some_and(|defs| {
+                            !defs.is_empty()
+                                && defs.iter().all(|(file, _)| {
+                                    !self.crates_of[*file as usize].is_disjoint(&self.crates_of[f])
+                                })
+                        });
+                    globs |= !own;
+                }
+                for (r, s, _) in &entry.occurrences {
+                    if it.range.start <= r.start && r.end <= it.range.end && *s != u32::MAX {
+                        names.insert(*s);
+                    }
+                }
+            }
+            imported.push((names, globs));
+        }
+        self.imported = imported;
     }
 
     /// \[C-151\] Whether an occurrence of a symbol outside the workspace starts a program that
@@ -1298,6 +1582,22 @@ impl<'g, 'i> Linker<'g, 'i> {
         self.scopes.insert((file, module), out.clone());
         out
     }
+}
+
+/// A path with its `.` and `..` segments resolved: `crates/a/tests/common/x.rs` of
+/// `crates/a/tests/../tests/common/x.rs`.
+fn normalize(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            part => out.push(part),
+        }
+    }
+    out.join("/")
 }
 
 /// The members of `sorted` (by their ranges' starts, as a file keeps them) inside one of `ranges`.

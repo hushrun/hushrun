@@ -105,6 +105,7 @@ impl Fake<'_> {
             proc_macros: &proc_macros,
             binaries: &binaries,
             external,
+            layout: None,
         })
     }
 
@@ -440,6 +441,7 @@ fn a_procedural_macro_of_the_workspace_falls_back() {
         proc_macros: &BTreeSet::from(["wmacros".to_string()]),
         binaries: &BTreeSet::new(),
         external: &|_, _, _| None,
+        layout: None,
     });
     let all = set(&["src/lib.rs"]);
     let why = g.reach("t", &all, &all).unwrap_err();
@@ -496,7 +498,7 @@ fn a_marked_function_s_own_command_is_trusted_but_never_a_binary_it_names() {
 fn a_test_that_can_start_a_workspace_binary_falls_back() {
     let files: &[(&str, &str)] = &[(
         "tests/run.rs",
-        "#[test]\nfn spawns() { std::process::Command::new(env!(\"CARGO_BIN_EXE_hushrun\")); }\n#[test]\nfn by_variable() { let p = \"x\"; Command::new(p); }\n#[test]\nfn git() { Command::new(\"git\"); }\n#[test]\nfn named() { Command::new(\"hushrun\"); }\n#[test]\nfn itself() { std::env::current_exe(); }\n",
+        "#[test]\nfn spawns() { std::process::Command::new(env!(\"CARGO_BIN_EXE_hushrun\")); }\n#[test]\nfn by_variable() { let p = \"x\"; Command::new(p); }\n#[test]\nfn git() { Command::new(\"git\"); panic!(\"start it with env!(CARGO_BIN_EXE_…)\"); }\n#[test]\nfn named() { Command::new(\"hushrun\"); }\n#[test]\nfn itself() { std::env::current_exe(); }\n",
     )];
     let symbols: &[(&str, &str)] = &[
         ("spawns", "spawns()."),
@@ -512,6 +514,7 @@ fn a_test_that_can_start_a_workspace_binary_falls_back() {
             "rust-analyzer cargo std 1.0 env/current_exe().",
         ),
         ("env", "rust-analyzer cargo core 1.0 macros/builtin/env!"),
+        ("panic", "rust-analyzer cargo core 1.0 macros/panic!"),
         ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
     ];
     let fake = Fake {
@@ -519,6 +522,7 @@ fn a_test_that_can_start_a_workspace_binary_falls_back() {
         symbols,
         at: &[],
     };
+    // A message that mentions `CARGO_BIN_EXE_…` looks nothing up.
     for test in ["spawns", "by_variable", "named", "itself"] {
         assert!(fake.reach(test).is_err(), "{test}");
     }
@@ -549,6 +553,7 @@ fn a_file_the_index_lacks_is_unmapped_and_says_why() {
         proc_macros: &BTreeSet::new(),
         binaries: &BTreeSet::new(),
         external: &|_, _, _| None,
+        layout: None,
     });
     assert_eq!(g.unmapped("src/lib.rs"), None);
     assert!(g.unmapped("src/new.rs").unwrap().contains("no document"));
@@ -594,4 +599,171 @@ fn an_impls_bracketed_names_are_its_type_and_trait() {
         bracketed("yaml/impl#[`MapVisitor<K, V>`][`Visitor<'de>`]"),
         ["MapVisitor", "Visitor"]
     );
+}
+
+// covers: C-147
+#[test]
+fn a_root_item_two_crates_share_a_symbol_of_is_its_own_crates() {
+    // rust-analyzer names the root `run` of the binary and of each integration test alike.
+    let files: &[(&str, &str)] = &[
+        ("src/main.rs", "fn run() { far(); }\nfn main() { run(); }\n"),
+        ("src/far.rs", "pub fn far() {}\n"),
+        (
+            "tests/a.rs",
+            "#[path = \"common/help.rs\"]\nmod help;\nfn run() { help::h(); }\n#[test]\nfn t() { run(); }\n",
+        ),
+        ("tests/common/help.rs", "pub fn h() {}\n"),
+        (
+            "tests/b.rs",
+            "use w::run;\nfn run_here() {}\n#[test]\nfn u() { run(); }\n",
+        ),
+    ];
+    let symbols: &[(&str, &str)] = &[
+        ("run", "run()."),
+        ("main", "main()."),
+        ("far", "far/far()."),
+        ("help", "help/"),
+        ("h", "help/h()."),
+        ("t", "t()."),
+        ("u", "u()."),
+        ("w", "crate/"),
+        ("run_here", "run_here()."),
+        ("path", ""),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+    ];
+    let fake = Fake {
+        files,
+        symbols,
+        at: &[],
+    };
+    let all: BTreeSet<String> = files.iter().map(|(p, _)| p.to_string()).collect();
+    let g = fake.graph(&|_, _, _| None);
+    let own = set(&["tests/a.rs", "tests/common/help.rs"]);
+    let reached = g.reach("t", &own, &all).unwrap().files;
+    assert!(reached.contains("tests/common/help.rs"), "{reached:?}");
+    assert!(
+        !reached.contains("src/far.rs") && !reached.contains("src/main.rs"),
+        "{reached:?}"
+    );
+    // A file that imports the symbol keeps every definition of it.
+    let reached = g.reach("u", &set(&["tests/b.rs"]), &all).unwrap().files;
+    assert!(
+        reached.contains("src/main.rs") && reached.contains("tests/a.rs"),
+        "{reached:?}"
+    );
+    assert_eq!(
+        normalize("crates/a/tests/../tests/common/x.rs"),
+        "crates/a/tests/common/x.rs"
+    );
+}
+
+// covers: C-148
+#[test]
+fn a_trait_methods_call_reaches_its_overrides_alone_and_a_trait_reaches_no_impl_head() {
+    let files: &[(&str, &str)] = &[
+        (
+            "src/lib.rs",
+            "pub trait Ad { fn go(&self) -> u8 { 0 } fn other(&self); }\n#[test]\nfn t() { One.go(); }\n",
+        ),
+        (
+            "src/one.rs",
+            "pub struct One;\nimpl Ad for One { fn other(&self) {} }\n",
+        ),
+        (
+            "src/two.rs",
+            "pub struct Two;\nimpl Ad for Two { fn go(&self) -> u8 { two() } fn other(&self) {} }\nfn two() -> u8 { 2 }\n",
+        ),
+        (
+            "src/three.rs",
+            "pub struct Three;\nimpl Ad for Three { fn other(&self) { far() } }\n",
+        ),
+        ("src/far.rs", "pub fn far() {}\n"),
+    ];
+    let symbols: &[(&str, &str)] = &[
+        ("Ad", "Ad#"),
+        ("go", "Ad#go()."),
+        ("other", "Ad#other()."),
+        ("t", "t()."),
+        ("One", "one/One#"),
+        ("Two", "two/Two#"),
+        ("Three", "three/Three#"),
+        ("two", "two/two()."),
+        ("far", "far/far()."),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+    ];
+    let at: &[(&str, &str, usize, &str)] = &[
+        ("src/one.rs", "other", 1, "one/impl#[One][Ad]other()."),
+        ("src/two.rs", "go", 1, "two/impl#[Two][Ad]go()."),
+        ("src/two.rs", "other", 1, "two/impl#[Two][Ad]other()."),
+        ("src/three.rs", "other", 1, "three/impl#[Three][Ad]other()."),
+    ];
+    let fake = Fake { files, symbols, at };
+    let reached = fake.reach("t").unwrap();
+    // `go` resolves to the trait's own: its default body, and Two's override; not Three, which
+    // doesn't override it, nor what Three's other method calls.
+    assert!(reached.contains("src/two.rs"), "{reached:?}");
+    assert!(
+        !reached.contains("src/three.rs") && !reached.contains("src/far.rs"),
+        "{reached:?}"
+    );
+}
+
+// covers: C-150
+#[test]
+fn a_name_is_matched_only_among_what_its_crate_can_see() {
+    let files: &[(&str, &str)] = &[
+        (
+            "lower/src/lib.rs",
+            "#[test]\nfn t() {\n    #[cfg(feature = \"x\")]\n    target();\n}\n",
+        ),
+        ("upper/src/lib.rs", "pub fn target() {}\n"),
+        ("lower/src/local.rs", "pub fn target() {}\n"),
+    ];
+    let symbols: &[(&str, &str)] = &[
+        ("t", "t()."),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+        ("cfg", "rust-analyzer cargo core 1.0 cfg:"),
+    ];
+    let fake = Fake {
+        files,
+        symbols,
+        at: &[],
+    };
+    let sources: BTreeMap<String, String> = files
+        .iter()
+        .map(|(p, t)| (p.to_string(), t.to_string()))
+        .collect();
+    let index = fake.index();
+    let layout = Layout {
+        folders: vec![
+            ("lower/".into(), "lower".into()),
+            ("upper/".into(), "upper".into()),
+        ],
+        libraries: BTreeMap::from([
+            ("lower".to_string(), "lower/src/lib.rs".to_string()),
+            ("upper".to_string(), "upper/src/lib.rs".to_string()),
+        ]),
+        // `upper` depends on `lower`, never the other way.
+        sees: BTreeMap::from([
+            ("lower".to_string(), BTreeSet::new()),
+            ("upper".to_string(), BTreeSet::from(["lower".to_string()])),
+        ]),
+    };
+    let g = Graph::build(&Inputs {
+        sources: &sources,
+        index: &index,
+        prefix: "",
+        packages: &BTreeSet::from(["w".to_string()]),
+        proc_macros: &BTreeSet::new(),
+        binaries: &BTreeSet::new(),
+        external: &|_, _, _| None,
+        layout: Some(&layout),
+    });
+    let all: BTreeSet<String> = sources.keys().cloned().collect();
+    let reached = g
+        .reach("t", &set(&["lower/src/lib.rs"]), &all)
+        .unwrap()
+        .files;
+    // An unresolved `target` in `lower` can't be `upper`'s, which depends on it.
+    assert!(!reached.contains("upper/src/lib.rs"), "{reached:?}");
 }

@@ -78,6 +78,9 @@ pub struct Ident {
     /// `const`, `static`, `mod` or `let`: it names what the expansion defines, and refers to
     /// nothing.
     pub defines: bool,
+    /// In a macro's tokens, it is followed by `:`: a field, a binding or a label, which refers
+    /// to nothing and defines no item.
+    pub label: bool,
     /// Where it stands in a path, which says what it can name.
     pub class: Class,
     /// For a [`Class::Tail`], the segment before it: `String` of `String::from`.
@@ -511,6 +514,8 @@ fn tokens_after(
                 head,
                 range: node.byte_range(),
                 text: text(),
+                // `name: …` in a macro's tokens: a field, a binding or a label, never an item.
+                label: in_tokens && after == Some(":"),
                 defines: in_tokens
                     && before.is_some_and(|b| {
                         matches!(

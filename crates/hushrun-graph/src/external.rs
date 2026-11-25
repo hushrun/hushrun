@@ -15,6 +15,12 @@ pub struct Macros {
     /// Each `macro_rules!` of the crate by name: the free names of its transcribers, the macros
     /// they invoke, and whether they hold an attribute that makes code run unnamed.
     by_name: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>, bool, bool)>,
+    /// Each macro's matchers' literal identifiers: the words of its own syntax (`target:` of
+    /// tracing's `event!`).
+    literals: BTreeMap<String, BTreeSet<String>>,
+    /// Each macro's identifiers handed to another macro of the crate, with that macro: a name
+    /// only when that macro's matchers don't hold it literally.
+    handed: BTreeMap<String, Vec<(String, String)>>,
 }
 
 /// \[C-149, C-150\] What one macro can name where it expands, and whether what it expands to
@@ -82,14 +88,19 @@ impl Macros {
                     continue;
                 };
                 let name = source[name.byte_range()].to_string();
-                let entry = self.by_name.entry(name).or_default();
+                let entry = self.by_name.entry(name.clone()).or_default();
+                let literals = self.literals.entry(name.clone()).or_default();
+                let handed = self.handed.entry(name).or_default();
                 let mut cursor = node.walk();
                 for rule in node.named_children(&mut cursor) {
                     if rule.kind() != "macro_rule" {
                         continue;
                     }
+                    if let Some(left) = rule.child_by_field_name("left") {
+                        matcher_words(left, source, literals);
+                    }
                     if let Some(right) = rule.child_by_field_name("right") {
-                        free(right, source, &mut entry.0, &mut entry.1);
+                        free(right, source, None, &mut entry.0, &mut entry.1, handed);
                         let text = &source[right.byte_range()];
                         entry.2 |= crate::graph::ROOT_ATTRS
                             .iter()
@@ -118,6 +129,12 @@ impl Macros {
             }
             if let Some((names, invoked, registers, impls)) = self.by_name.get(&next) {
                 out.names.extend(names.iter().cloned());
+                for (word, to) in self.handed.get(&next).into_iter().flatten() {
+                    let bare = word.trim_start_matches('.');
+                    if !self.literals.get(to).is_some_and(|l| l.contains(bare)) {
+                        out.names.insert(word.clone());
+                    }
+                }
                 out.registers |= *registers;
                 out.impls |= *impls;
                 pending.extend(invoked.iter().cloned());
@@ -137,19 +154,51 @@ pub fn contains_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// The free names under a transcriber, and the macros it invokes.
+/// The identifiers of a matcher, but its fragments' names and kinds: the words a macro's own
+/// syntax matches literally.
+fn matcher_words(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<String>) {
+    let mut cursor = tree.walk();
+    let children: Vec<tree_sitter::Node<'_>> = tree.children(&mut cursor).collect();
+    for child in children {
+        match child.kind() {
+            "identifier" => {
+                out.insert(source[child.byte_range()].to_string());
+            }
+            "metavariable" | "fragment_specifier" | "token_binding_pattern" => {}
+            _ => matcher_words(child, source, out),
+        }
+    }
+}
+
+/// The free names under a transcriber, and the macros it invokes. Inside the input of a macro it
+/// invokes (`inside`), a name goes to `handed`, with that macro.
 fn free(
     tree: tree_sitter::Node<'_>,
     source: &str,
+    inside: Option<&str>,
     names: &mut BTreeSet<String>,
     invoked: &mut BTreeSet<String>,
+    handed: &mut Vec<(String, String)>,
 ) {
     let mut cursor = tree.walk();
     let tokens: Vec<tree_sitter::Node<'_>> = tree.children(&mut cursor).collect();
     let text = |n: &tree_sitter::Node<'_>| &source[n.byte_range()];
     for (i, token) in tokens.iter().enumerate() {
         match token.kind() {
-            "token_tree" | "token_repetition" => free(*token, source, names, invoked),
+            "token_tree" | "token_repetition" => {
+                // `name!(…)`: the tree is that macro's input.
+                let macro_name = (i >= 2 && text(&tokens[i - 1]) == "!")
+                    .then(|| text(&tokens[i - 2]))
+                    .filter(|_| tokens[i - 2].kind() == "identifier");
+                free(
+                    *token,
+                    source,
+                    macro_name.or(inside),
+                    names,
+                    invoked,
+                    handed,
+                );
+            }
             "identifier" => {
                 let word = text(token);
                 let before = i.checked_sub(1).map(|b| text(&tokens[b]));
@@ -164,11 +213,21 @@ fn free(
                 if after == Some("::") && matches!(word, "std" | "core" | "alloc" | "crate") {
                     continue;
                 }
+                // `name: …`: a field, a binding or a macro's own label, never an item.
+                if after == Some(":") {
+                    continue;
+                }
                 // A method's name, `.name`, apart from a path's head.
-                if before == Some(".") {
-                    names.insert(format!(".{word}"));
+                let name = if before == Some(".") {
+                    format!(".{word}")
                 } else {
-                    names.insert(word.to_string());
+                    word.to_string()
+                };
+                match inside {
+                    Some(to) => handed.push((name, to.to_string())),
+                    None => {
+                        names.insert(name);
+                    }
                 }
             }
             _ => {}
@@ -206,6 +265,20 @@ mod tests {
         assert_eq!(m.free_names("missing"), None);
         assert!(!m.free_names("json").unwrap().registers);
         m.read("macro_rules! submit { ($e:expr) => { #[used] #[link_section = \".init_array\"] static S: fn() = $e; } }");
+        // A word of another macro's own syntax is no name: `target:` of `event!`.
+        m.read("macro_rules! event { (target: $t:expr, $($a:tt)*) => { helper2($t) }; } macro_rules! debug { ($($a:tt)*) => { $crate::event!(target: module_path!(), named_arg) }; }");
+        let debug = m.free_names("debug").unwrap().names;
+        assert!(!debug.contains("target"), "{debug:?}");
+        assert!(
+            debug.contains("named_arg") && debug.contains("helper2"),
+            "{debug:?}"
+        );
+        m.read("macro_rules! meta { () => { Metadata { target: here(), level: 1 } } }");
+        let meta = m.free_names("meta").unwrap().names;
+        assert!(
+            meta.contains("here") && !meta.contains("target") && !meta.contains("level"),
+            "{meta:?}"
+        );
         assert!(m.free_names("submit").unwrap().registers);
     }
 }
