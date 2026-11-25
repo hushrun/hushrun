@@ -1180,6 +1180,27 @@ hushrun: build: typescript: 1 compile: 1 reused, 0 built, saving about 14s
 
 This is new and its rules are a draft ([ADR 0106](../adr/0106-typescript-build-blocks.md)).
 
+### PHP
+
+PHP compiles nothing ahead of a run, so there is nothing of it to reuse here. Its tests are reused
+instead: with `tests: reuse` (and `unit: test` for each test on its own), a check that runs
+PHPUnit 10, 11 or 12 or Pest 3 or 4 (`vendor/bin/phpunit`, `vendor/bin/pest`, `php
+vendor/bin/phpunit`, or a `composer test` whose script runs one of them) leaves out of PHPUnit's
+suite the test files and tests that already passed on the files they read, with nothing to set
+up: hushrun loads its adapter through `PHP_INI_SCAN_DIR` and runs your own bootstrap after it.
+
+- **What a test file read** is what PHP had loaded or opened by the end of its last test, since a
+  class loaded once leaves no trace in the next test that uses it. The first test files of a run
+  read least; each run that reuses some loads less before the rest, so they read less next time.
+- **Keep PHPUnit's result cache in `.gitignore`** (`.phpunit.result.cache`, `.phpunit.cache/`), or
+  set `cacheResult="false"`: PHPUnit rewrites it on every run, and a run that changed a file of the
+  repository records nothing.
+- **Not yet:** Pest's `--parallel`, paratest, `php artisan test`, a PHP started with `-n`, and a
+  test PHPUnit runs in a process of its own, which always runs. With coverage on, everything runs.
+
+The rules are [C-90 to C-93](../spec/07-configuration.md) and
+[ADR 0116](../adr/0116-phpunit-and-pest.md).
+
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
 

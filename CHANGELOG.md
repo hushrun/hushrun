@@ -138,6 +138,18 @@ project's new branch starts from what main's CI already ran.
   after the build's hook instead of over it; the folders TypeScript lists for tsconfig's
   `include` while ts-jest resolves it are no longer read by the first test file of each Jest
   process, which ran every test file again with `isolatedModules`.
+- **PHPUnit and Pest test files and tests reused** (C-90 to C-93, ADR 0116). With `tests:
+  reuse`, a check that runs PHPUnit 10, 11 or 12 or Pest 3 or 4 (by name or path, through `php`,
+  or as a `composer` script that runs one of them) is observed with no file of the repository
+  changed: hushrun adds its directory to `PHP_INI_SCAN_DIR`, whose ini file prepends a file that,
+  in PHPUnit's or Pest's own process only, adds a bootstrap of hushrun's ahead of the one PHPUnit
+  would have loaded. A test file read what the process had included or opened by the end of its
+  last test, but other test files it doesn't name; with `unit: test`, each test (its class, method
+  and data set; for Pest, its name) is reused on its own. Leaving out removes tests from the suite
+  PHPUnit is about to run, after its filters and before any hook, so a run all of whose tests are
+  left out passes on PHPUnit 12 too. Not offered, said once: `php -n`, Pest's `--parallel`,
+  listing and watching flags, and other majors. PHP has no compile step, so it has no build
+  blocks.
 - **Rust: doctests as units, and `cargo check` and `cargo clippy` as build blocks** ([ADR
   0112](docs/adr/0112-rust-doctests-checks-and-clippy.md), C-74 to C-77, B-160, B-161). `cargo test
   --doc` with `tests: reuse` runs only the doctests of the libraries whose files changed: hushrun
