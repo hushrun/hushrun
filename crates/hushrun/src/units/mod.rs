@@ -2312,6 +2312,17 @@ pub struct Observed {
 }
 
 impl Observed {
+    /// Where COMMAND ran, which [`Adapter::again`] takes for the audit's second run.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// \[ADR 0071\] The test files the runner listed, which [`Adapter::again`] takes for the
+    /// audit's second run.
+    pub fn unit_files(&self) -> &BTreeSet<String> {
+        &self.unit_files
+    }
+
     /// A run whose units couldn't be read: it says why, and records nothing of them.
     fn unread(check: &hushrun_core::CheckName, why: &str) -> Option<Observed> {
         Some(Observed {
