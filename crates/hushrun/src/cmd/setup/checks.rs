@@ -329,6 +329,15 @@ pub const ROWS: &[Row] = &[
         "build",
         "./gradlew build",
     ))),
+    // \[ADR 0117\] Kotlin Multiplatform's and Android's own test tasks, which the Gradle adapter
+    // follows as it does `test`.
+    task(check(
+        "Kotlin",
+        "gradle|./gradlew|gradlew",
+        &["allTests|jvmTest|jsTest|testDebugUnitTest|testReleaseUnitTest"],
+        "test",
+        "./gradlew allTests",
+    )),
     // Scala
     alone(task(check("Scala", "sbt", &["test"], "test", "sbt test"))),
     lint(check(
@@ -344,6 +353,21 @@ pub const ROWS: &[Row] = &[
         &["ktlintCheck"],
         "ktlint",
         "./gradlew ktlintCheck",
+    )),
+    // Shell: \[ADR 0115\] Bats, by its name or as the submodule its docs set up.
+    check(
+        "Shell",
+        "bats|./test/bats/bin/bats|test/bats/bin/bats",
+        &[],
+        "test",
+        "bats test",
+    ),
+    lint(check(
+        "Shell",
+        "shellcheck",
+        &[],
+        "shellcheck",
+        "shellcheck bin/tool",
     )),
     // Ruby
     check("Ruby", "rspec|bin/rspec", &[], "test", "bundle exec rspec"),
@@ -530,8 +554,17 @@ pub const ROWS: &[Row] = &[
     // package.json init doesn't edit: one in a subdirectory of the repository.
     check("JavaScript", "vitest", &["run"], "test", "vitest run"),
     check("JavaScript", "jest", &[], "test", "jest --ci"),
+    check("JavaScript", "mocha", &[], "test", "mocha"),
     lint(check("JavaScript", "eslint", &[], "lint", "eslint .")),
     lint(check("JavaScript", "tsc", &[], "typecheck", "tsc --noEmit")),
+    // \[ADR 0109\] Svelte's type checker, a check that reuses whole.
+    lint(check(
+        "JavaScript",
+        "svelte-check",
+        &[],
+        "svelte-check",
+        "svelte-check --fail-on-warnings",
+    )),
     check(
         "JavaScript",
         "playwright",
@@ -1203,7 +1236,7 @@ mod tests {
         line.split_whitespace().collect()
     }
 
-    // covers: C-15
+    // covers: C-15, C-94
     #[test]
     fn more_runners_are_checks_and_what_only_looks_like_one_isnt() {
         let check = |line: &str| match recognize(&words(line), true) {
@@ -1217,6 +1250,9 @@ mod tests {
             ("./gradlew build --no-daemon", "build"),
             ("gradle --scan clean build", "build"),
             ("./gradlew clean test", "test"),
+            ("./gradlew allTests", "test"),
+            ("./gradlew --continue jvmTest jsTest", "test"),
+            ("./gradlew testDebugUnitTest", "test"),
             ("mvn -B clean install", "install"),
             ("./mvnw install -DskipTests=false", "install"),
             ("mvn clean verify", "verify"),
@@ -1470,6 +1506,7 @@ mod tests {
             "mypy src",
             "npx eslint .",
             "tsc --noEmit",
+            "npx svelte-check --threshold error",
             "bundle exec rubocop",
             "mix credo --strict",
             "terraform validate",

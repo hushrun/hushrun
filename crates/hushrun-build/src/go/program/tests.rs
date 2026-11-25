@@ -365,8 +365,13 @@ fn a_panic_while_starting_or_reading_never_ends_the_program_before_close() {
 // covers: B-40
 #[test]
 fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
+    // Long enough that a panic's handler, printing a backtrace on a loaded machine, answers well
+    // before the watchdog would (CI has seen 938 ms); every wait below is in budgets.
+    const BUDGET_MS: u64 = 3000;
+    let budget = Duration::from_millis(BUDGET_MS);
     let mut m = Machine::new();
-    m.env.insert(BUDGET_VAR.into(), "1000".into());
+    m.env
+        .insert(BUDGET_VAR.into(), BUDGET_MS.to_string().into());
     // Counted by command: the gets are requests 1, 2 and 4.
     m.env.insert(
         FAULT_VAR.into(),
@@ -396,7 +401,7 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
         let out = out.clone();
         let seen = seen.clone();
         std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + budget * 3;
             let mut panicked_at = None;
             while Instant::now() < deadline {
                 let lines = out.lines();
@@ -420,17 +425,19 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
         m.env.clone(),
         Box::new(|_| Ok("go build".into())),
     );
-    // A panic is answered at once, not by the watchdog at the budget.
+    // A panic is answered by its handler, not by the watchdog at the budget (never before a
+    // tick past it): a loaded machine may take a while to print the panic.
     let panicked_at = reader.join().unwrap();
-    assert!(panicked_at < Duration::from_millis(500), "{panicked_at:?}");
-    // The slow handler answers after `close`'s wait: given its time, it writes nothing.
-    std::thread::sleep(Duration::from_millis(1500));
+    assert!(panicked_at < budget - TICK * 2, "{panicked_at:?}");
+    // The slow handler answers two budgets in, after `close`'s wait of one: given its time, it
+    // writes nothing.
+    std::thread::sleep(budget * 3 / 2);
     let lines = out.lines();
     let answers = by_id(&lines);
     assert_eq!(answers.len(), 6, "{lines:?}");
     // Hung: the watchdog's miss, within the budget and a few ticks.
     assert_eq!(answers[&1]["Miss"], true);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < budget * 5);
     // Panicked: a miss, and for a put the body in a file of the program's own.
     assert_eq!(answers[&2]["Miss"], true);
     assert!(answers[&3]["DiskPath"].is_string());

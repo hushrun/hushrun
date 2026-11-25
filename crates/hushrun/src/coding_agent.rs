@@ -1,6 +1,7 @@
 //! Who runs hushrun: a coding agent, or a person (C-23). The pre-push hook refuses an agent's
 //! push, and \[ADR 0065\] the newer-release notice (C-21) tells an agent without a terminal. One
-//! definition, so the two never disagree about who is an agent.
+//! definition, so the two never disagree about who is an agent, and \[ADR 0140\] its agents come
+//! from the table `detect` reads, so a sandbox and its agent are named the same way.
 
 /// The name of the coding agent this runs under, as the environment `var` reads tells it.
 /// hushrun's own settings first, which an org gives its agents; then what the agents set
@@ -22,29 +23,18 @@ pub fn agent(var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     if let Some(name) = var("AI_AGENT").filter(|name| !name.trim().is_empty()) {
         return Some(name.trim().to_string());
     }
-    const NAMED: &[(&[&str], &str)] = &[
-        (&["CLAUDECODE", "CLAUDE_CODE"], "Claude Code"),
-        (&["CODEX_SANDBOX", "CODEX_CI", "CODEX_THREAD_ID"], "Codex"),
-        (&["OPENCODE_CLIENT"], "OpenCode"),
-        (&["CURSOR_AGENT"], "Cursor"),
-        (&["GEMINI_CLI"], "Gemini CLI"),
-        (&["AUGMENT_AGENT"], "Augment"),
-        (&["ANTIGRAVITY_AGENT"], "Antigravity"),
-        (
-            &["COPILOT_MODEL", "COPILOT_ALLOW_ALL", "COPILOT_GITHUB_TOKEN"],
-            "GitHub Copilot",
-        ),
-    ];
-    for (names, agent) in NAMED {
-        if names.iter().any(|name| var(name).is_some()) {
-            return Some((*agent).to_string());
-        }
-    }
-    if var("OPENCODE").as_deref() == Some("1") {
-        return Some("OpenCode".into());
-    }
-    if var("CURSOR_EXTENSION_HOST_ROLE").as_deref() == Some("agent-exec") {
-        return Some("Cursor".into());
+    // \[ADR 0140\] The one table of agents and their platforms, which `detect` reads too.
+    let env = hushrun_ci::Env::from_pairs(
+        hushrun_ci::platforms::PLATFORMS
+            .iter()
+            .flat_map(|platform| platform.markers.iter().map(|marker| marker.name()))
+            .filter_map(|name| var(name).map(|value| (name, value)))
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|(name, value)| (*name, value.as_str())),
+    );
+    if let Some(platform) = hushrun_ci::platforms::of(&env) {
+        return Some(platform.agent.to_string());
     }
     None
 }
@@ -53,7 +43,7 @@ pub fn agent(var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
 mod tests {
     use super::*;
 
-    // covers: C-23
+    // covers: C-23, C-140
     #[test]
     fn an_agent_is_who_the_environment_says() {
         let who = |vars: &[(&str, &str)]| {
@@ -82,6 +72,23 @@ mod tests {
         assert_eq!(who(&[("OPENCODE", "1")]).as_deref(), Some("OpenCode"));
         assert_eq!(who(&[("OPENCODE", "0")]), None);
         assert_eq!(who(&[("CURSOR_AGENT", "1")]).as_deref(), Some("Cursor"));
+        // ADR 0140: a hosted platform's marker names its agent.
+        assert_eq!(
+            who(&[("CLAUDE_CODE_REMOTE", "true")]).as_deref(),
+            Some("Claude Code")
+        );
+        assert_eq!(
+            who(&[("CURSOR_AGENT_SOCKET", "/tmp/s")]).as_deref(),
+            Some("Cursor")
+        );
+        assert_eq!(
+            who(&[("COPILOT_AGENT_SESSION_ID", "x")]).as_deref(),
+            Some("GitHub Copilot")
+        );
+        assert_eq!(
+            who(&[("CURSOR_EXTENSION_HOST_ROLE", "agent-exec")]).as_deref(),
+            Some("Cursor")
+        );
         assert_eq!(who(&[("AI_AGENT", "my-bot")]).as_deref(), Some("my-bot"));
         // Everyone's terminal in Cursor has this.
         assert_eq!(who(&[("CURSOR_TRACE_ID", "abc")]), None);

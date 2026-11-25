@@ -32,7 +32,10 @@ use super::db::{Edge, HintKnown};
 use super::facts::FactsFile;
 use super::shared::{Asker, List, Shared};
 use super::store::Map;
-use super::{Seen, cargo, ctest, exunit, gotest, gradle, jest, maven, pytest, swift, vitest};
+use super::{
+    Seen, bats, cargo, ctest, dotnet, exunit, gotest, gradle, jest, maven, mesontest, mocha,
+    node_test, phpunit, pytest, ruby, swift, testprogram, unittest, vitest, xcodebuild,
+};
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
 /// the adapter can't load safely, which the run says once.
@@ -41,7 +44,9 @@ pub type Recognize = fn(&[String], &Path) -> Option<Result<Box<dyn Adapter>, Str
 /// The adapters a COMMAND may get, tried in order. Any COMMAND none of them takes gets pytest's,
 /// which does nothing where pytest never starts ([`choose`]).
 ///
-/// Those that know COMMAND by its program's name come first. CTest's and Swift's come last, since
+/// Those that know COMMAND by its program's name come first. \[ADR 0110\] unittest's comes after
+/// them: a Python COMMAND (`python -m unittest`, `manage.py test`) that pytest's adapter took
+/// before it was there. CTest's and Swift's come last, since
 /// they also take wrapper COMMANDs (C-32): a shell line, script or Makefile whose own text starts
 /// `ctest`, or (where a `Package.swift` is) `swift test` or `swift-test`, and names no other
 /// runner. CTest's goes before Swift's, so that `ctest` in a Swift package is CTest's.
@@ -50,16 +55,33 @@ pub const RECOGNIZED: &[Recognize] = &[
     gotest::recognized,
     vitest::recognized,
     jest::recognized,
+    node_test::recognized,
+    mocha::recognized,
     maven::recognized,
     gradle::recognized,
+    // \[ADR 0115\] Bats, by its name or a path: before the adapters that take wrappers.
+    bats::recognized,
+    dotnet::recognized,
+    phpunit::recognized,
     exunit::recognized,
+    // \[ADR 0114\] RSpec and Minitest, by `rspec`, `rails test`, `rake` or `ruby`.
+    ruby::recognized,
+    testprogram::recognized,
+    unittest::recognized,
     ctest::recognized,
+    mesontest::recognized,
     swift::recognized,
+    xcodebuild::recognized,
 ];
 
 /// How many of [`RECOGNIZED`], at its end, load through `PATH` and take wrapper COMMANDs too:
-/// CTest's and Swift's, which came after pytest took every COMMAND nobody else did.
-pub const THROUGH_PATH: usize = 2;
+/// CTest's, Meson's, Swift's and \[ADR 0121\] `xcodebuild test`'s, which came after pytest took
+/// every COMMAND nobody else did.
+pub const THROUGH_PATH: usize = 4;
+
+/// \[ADR 0110\] How many of [`RECOGNIZED`], at its end, take a COMMAND pytest's adapter took
+/// before they were there: unittest's, and the [`THROUGH_PATH`] ones.
+pub const SINCE_PYTEST: usize = THROUGH_PATH + 1;
 
 /// \[C-32\] The one adapter a run of `command` in `cwd` gets: the first of [`RECOGNIZED`] that
 /// takes it, else pytest's; `Err` says why the one it would get can't load safely.
@@ -72,7 +94,7 @@ pub fn choose(command: &[String], cwd: &Path) -> Result<Box<dyn Adapter>, String
 }
 
 /// \[C-32\] [`choose`] for a check whose store names the adapter that last reported its test files
-/// here (`stored`, [`super::db::adapter_of`]): a COMMAND CTest's or Swift's adapter would claim
+/// here (`stored`, [`super::db::adapter_of`]): a COMMAND unittest's, CTest's or Swift's adapter would claim
 /// stays pytest's when pytest reported it, as it was before those adapters took it, so that a
 /// `ctest` whose tests are pytest's keeps being observed by pytest. The run, `hushrun ready` and
 /// `hushrun why` all ask it.
@@ -83,7 +105,7 @@ pub fn choose_kept(
 ) -> Result<Box<dyn Adapter>, String> {
     let command = super::command::without_env(command);
     let by_name = if stored == Some(pytest::WORD) {
-        RECOGNIZED.len() - THROUGH_PATH
+        RECOGNIZED.len() - SINCE_PYTEST
     } else {
         RECOGNIZED.len()
     };
@@ -339,6 +361,15 @@ pub trait Adapter: std::fmt::Debug {
     /// store an older hushrun wrote or a hint, keys nothing, and the unit runs.
     fn keys(&self) -> KeysOutside {
         KeysOutside::None
+    }
+
+    /// \[ADR 0120\] What one start of COMMAND gets besides [`Adapter::variables`], from what
+    /// `hushrun.json` in `run_dir` lists, made just before it starts: a variable to set, or with
+    /// `None` to remove. For a runner whose COMMAND is the test program itself, which takes what
+    /// to leave out only from its environment.
+    fn start_variables(&self, run_dir: &Path) -> Vec<(String, Option<OsString>)> {
+        let _ = run_dir;
+        Vec::new()
     }
 
     /// \[C-22\] The plan from the scope's files, the map and hints alone, starting no tool, which

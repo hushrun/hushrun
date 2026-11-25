@@ -352,6 +352,19 @@ fn cmake_probe(cwd: &Path, output: &str) -> bool {
         .any(|m| cwd.contains(m) || output.contains(m.trim_start_matches('/')))
 }
 
+/// \[B-238\] Whether a compile is one of a configure step's own checks outside CMake: autoconf's
+/// (`conftest.c`, `conftest.cpp`, … compiled to `conftest.o`, `conftest2.o`, …) and Meson's (in a temporary
+/// folder of the build folder's `meson-private`). Storing them would only fill the store.
+fn configure_probe(cwd: &Path, source: &str, output: &str) -> bool {
+    let source = Path::new(source);
+    let conftest = source.file_stem().is_some_and(|stem| stem == "conftest")
+        && Path::new(output)
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("conftest"));
+    let in_meson_private = |p: &Path| p.components().any(|c| c.as_os_str() == "meson-private");
+    conftest || in_meson_private(cwd) || in_meson_private(&cwd.join(output))
+}
+
 fn decide(
     ports: &mut dyn Ports,
     current: &Current,
@@ -368,6 +381,12 @@ fn decide(
     if cmake_probe(&cwd, &compile.output) {
         return Decided::Pass {
             why: "cmake-probe",
+            probe: true,
+        };
+    }
+    if configure_probe(&cwd, &compile.source, &compile.output) {
+        return Decided::Pass {
+            why: "configure-probe",
             probe: true,
         };
     }
@@ -1275,7 +1294,8 @@ fn compile(ports: &mut dyn Ports, current: &Current, mut plan: Plan, start: Syst
     let mut env: Vec<(OsString, OsString)> = Vec::new();
     // `-H` prints the include tree to stderr, which the graph's variables would turn into the
     // graph's JSON there: such a compile has no graph, as GCC's hasn't (B-55).
-    if plan.identity.clang && !plan.compile.prints_headers {
+    // \[B-243\] Only a clang that takes them: one that doesn't fails the compile.
+    if plan.identity.clang && plan.identity.graph && !plan.compile.prints_headers {
         env.push((graph::FORMAT.0.into(), graph::FORMAT.1.into()));
         env.push((graph::FILTERING.0.into(), graph::FILTERING.1.into()));
         env.push((graph::FILE.into(), graph_file.clone().into_os_string()));

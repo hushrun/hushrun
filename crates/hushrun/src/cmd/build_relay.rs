@@ -316,8 +316,9 @@ struct Check {
 }
 
 /// The check's Go manifest (B-45): asked once `open` answered, kept until the first Go fetch
-/// takes it for the prefetch. Until it has answered, a Go fetch is a miss, and a Go fetch for an
-/// archive the manifest doesn't name never asks the server.
+/// takes it for the prefetch. A Go fetch that comes before it has answered waits for it, within
+/// the fetch's own bound (ADR 0111), and is a miss past it; a Go fetch for an archive the manifest
+/// doesn't name never asks the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GoManifest {
     /// No Go command in the check, or `open` hasn't answered yet.
@@ -1209,6 +1210,26 @@ impl Relay {
         key: Digest,
         local_ms: Option<u64>,
     ) -> Answer {
+        let wait = local_ms
+            .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
+            .min(GO_PREFETCH_WAIT);
+        let until = Instant::now() + wait;
+        // \[ADR 0111\] The cache program starts with COMMAND, as the check's `open`s go out: a
+        // fetch that comes while one is under way (the policy, or this kind's manifest) waits for
+        // it within the same bound as for the lookup below, else Go's first packages compiled
+        // on a slow link whatever the manifest named.
+        loop {
+            {
+                let mut state = self.state();
+                let now = Instant::now();
+                let opening = matches!(state.phase_now(now), Phase::Opening);
+                let asking = *state.named_manifest(kind) == GoManifest::Asking;
+                if !(opening || asking) || now >= until {
+                    break;
+                }
+            }
+            tokio::time::sleep(self.config.tuning.tick).await;
+        }
         let manifest = {
             let mut state = self.state();
             let now = Instant::now();
@@ -1231,10 +1252,6 @@ impl Relay {
             *self.state().named_prefetching(kind) = false;
         }
         let address = Relay::address_in(kind, &key);
-        let wait = local_ms
-            .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
-            .min(GO_PREFETCH_WAIT);
-        let until = Instant::now() + wait;
         loop {
             {
                 let state = self.state();

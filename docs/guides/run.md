@@ -349,6 +349,34 @@ command's exit code, or 0 when it skips.
   same check in CI, and the other way round. Environment variables and the OS aren't part of it
   either: when a check depends on them, give each variant its own name, such as `unit-node22`.
 
+### Shell tests with Bats
+
+With `tests: reuse` (or `{mode: reuse, unit: test, reads: test}` for one test at a time), a Bats
+check skips the `.bats` files, or the tests, that already passed on the files they read. hushrun
+sees what each test read through bash itself: the helpers it `load`ed, the libraries it
+`source`d, the scripts it ran and what those sourced. A test it reuses shows in bats' own output
+as a skip, so the count and the exit code stay bats':
+
+```text
+$ hushrun run unit -- bats test
+hushrun: unit: 3 of 4 tests run, in 2 of 2 test files; 1 already passed on the files it read
+1..4
+ok 1 says hello
+ok 2 plain
+ok 3 adds # skip reused by hushrun
+ok 4 adds zero
+```
+
+- **bats-core 1.10 or later**, started as `bats`, by a path (`./test/bats/bin/bats`), or through
+  `npx`, `pnpm`, `yarn` or `bun`. A shell script or Makefile that runs bats isn't observed: run
+  bats itself after `--`.
+- **A file bash doesn't run runs every test when it changes**: a `#!/bin/sh` script, a Python
+  helper, a fixture. bash-run files are `.bash` and `.sh` files whose `#!` line names bash (or
+  that have none and aren't executable) and scripts like `bin/tool` with a bash `#!` line.
+- **What hushrun can't see**: a file read as data (`cat`, `grep`, `shellcheck`), a program that
+  isn't bash, and a process started without the environment (`env -i`, `sudo`). Put a test file
+  that depends on those in `tests.always`, so it always runs.
+
 ## Where results go
 
 hushrun takes the first of these:
@@ -697,12 +725,26 @@ In the environment's settings:
   HUSHRUN_AGENT=hushrun_agent_v1_…
   ```
 
-- network access that reaches `api.hushrun.com`, as an allowed domain or with full access,
-  and the npm registry;
+- network access that reaches `api.hushrun.com`, `registry.hushrun.com` and
+  `*.r2.cloudflarestorage.com`, as allowed domains or with full access, and the npm registry;
 - a setup script that installs the dependencies, which installs hushrun with them: `npm ci`.
 
 Each session's `npm test` then goes through `hushrun run`, and skips what another session, a
 teammate or CI already passed on the same files.
+
+### Hosted agent platforms
+
+hushrun knows the sandboxes vendors host for their agents by a variable only that platform sets,
+such as `CLAUDE_CODE_REMOTE` on Claude Code on the web or `CURSOR_AGENT_SOCKET` on Cursor's cloud
+agents. There a run is local, even beside `CI=true` or, for GitHub's Copilot cloud agent, inside a
+GitHub Actions job. With no credential set, results stay in the sandbox and skip checks for the rest
+of the session; with one, they are shared. An agent's own variable, such as `CLAUDECODE`, makes a
+sandbox only beside a bare `CI=true`: an agent's step in a named CI's job stays CI.
+
+In the sandbox, `hushrun doctor` names the platform, where the credential comes from, whether each
+host hushrun needs answers, and the exact entry that platform's allowlist needs. It never prints a
+value. `sh scripts/agent-cloud-probe.sh`, in this repository, shows what a new platform's sandbox
+looks like, with variable names only.
 
 ### A container
 
@@ -778,6 +820,34 @@ hushrun says why in one line, and runs the check anyway:
 | `not recorded: …; upgrade: https://…` | The org has recorded every check its plan includes this period: an admin upgrades at that page, or the next period starts over. `hushrun repository usage` shows where it stands |
 | ``not recorded: set `HUSHRUN_MACHINE_KEY` to the key `hushrun token create --agent` printed`` | The sandbox has no key, or one that isn't its token's: set `HUSHRUN_MACHINE_KEY` to the key shown with the token, or make a new token if nobody kept it |
 | `HUSHRUN_TOKEN isn't sent to …` | The backend isn't on hushrun's host: use `HUSHRUN_AGENT`, or set `HUSHRUN_BACKEND` or `HUSHRUN_HOST` (above) |
+
+## Tests with Node's test runner and Mocha
+
+With `tests: {mode: reuse}` on a check, `node --test` and Mocha reuse test files, and with
+`unit: test` single tests, that already passed on the files they read, as Vitest and Jest do. No
+file changes: hushrun adds its adapter to `NODE_OPTIONS` (keep what a script's `NODE_OPTIONS=` had,
+`NODE_OPTIONS="$NODE_OPTIONS …"`, or the adapter is dropped and the run says so).
+
+```yaml
+checks:
+  unit:
+    tests: {mode: reuse, unit: test}
+```
+
+```text
+$ hushrun run unit -- node --test
+hushrun: unit: 3 of 41 tests run, in 2 of 12 test files; 38 already passed on the files they read
+```
+
+- **Node's test runner** needs Node 22.15 or later. Each test file's process is watched from its
+  start to its exit, so what a test file read is exact; a left-out test shows as skipped with
+  `hushrun: passed before on the files it read`. `--watch`, `--test-isolation=none` and coverage
+  run everything; `--test-shard` leaves single tests out but no whole test file.
+- **Mocha** 10 or 11, on Node 22.15 or later. Every spec file still loads, so its root hooks and
+  what its top level does are as without hushrun; the tests that passed are taken out before the
+  run starts, and a suite left with none runs no hook. A spec file that defines a root hook is
+  read by every spec file and always runs. `--parallel` and `--watch` run as written.
+- What a test reads is its test file's list (`reads: test` runs as `reads: file`).
 
 ## Compiled code
 
@@ -943,6 +1013,74 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   when its maker leaves the org or loses the role. A backend of your own serves its registry on its
   own host.
 
+### C and C++
+
+The objects of a CMake build come from the store when their inputs match (ADR 0097). Some
+compiles always run as asked, and the summary's `compiled as asked` line counts each by its reason:
+
+- **C++20 modules.** CMake 3.28 and later scan every C++20 source. With clang, a source that
+  imports no module is stored and reused as any other; a module and the sources that import one
+  compile every time (`modules`). With GCC every scanned compile does, since GCC writes a second
+  file beside each object.
+- **Precompiled headers** (`target_precompile_headers`): the header and the sources that use it
+  compile every time (`pch`).
+- **clang 15 to 18** compile through the launcher as GCC does: without the include graph newer
+  clangs write, so a quoted include from another folder is keyed by the source's folder.
+
+Tests a CTest run starts are reused one by one (ADR 0090). So are the tests of a GoogleTest or
+Catch2 3 program you start yourself, by its path, with `tests: {mode: reuse, unit: test}`:
+
+```text
+$ hushrun run unit -- build/tests/t_calc
+hushrun: unit: 1 of 40 tests run, in 1 of 1 test program; 39 already passed on the files they read, and 1 more that already passed runs anyway, as a check
+```
+
+hushrun leaves tests out through the framework's own variables (`GTEST_FILTER`, Catch2's
+`TESTBRIDGE_TEST_ONLY`) and reads what each test came to from its XML, so the command stays as you
+wrote it; GoogleTest or Catch2 says it is filtering. A `--gtest_filter` of your own, or sharding,
+keeps every test running and records each. doctest and Catch2 2 read nothing from the
+environment: run them through `ctest` with `doctest_discover_tests` or `catch_discover_tests`.
+
+### C and C++ without CMake
+
+Make, autotools, Meson and a handwritten `build.ninja` get the same launcher as CMake, with nothing
+to set ([ADR 0119](../adr/0119-c-without-cmake-and-meson-test.md)):
+
+```text
+$ hushrun run build -- make -j8                          # in a second worktree
+hushrun: build: c/c++: 41 objects: 40 reused, 1 built
+```
+
+- **Make and autotools.** Inside `hushrun run`, GNU Make's commands find hushrun's `cc`, `gcc`,
+  `clang` (and their C++ names) first on `PATH`, through `MAKEFILES`; each starts the next compiler
+  of its name through the launcher. A Makefile that names its compiler by a path, or sets `PATH`
+  itself, compiles as before. `./configure` writes the compiler's name, not a path, so a plain
+  `make` afterwards is the compiler's own, and has nothing to do. BSD make reads no `MAKEFILES` and
+  gets nothing.
+- **Meson.** In a repository with a `meson.build`, a `meson setup` inside `hushrun run` names its
+  compilers through the same one-line indirection CMake keeps in its cache: outside a run it is the
+  compiler. A build folder set up before keeps its compilers, and the run says so: set it up again
+  inside `hushrun run` with `meson setup --wipe <folder>`. Its `compile_commands.json` then starts
+  with `/bin/sh`, which some editors' language servers can't follow.
+- **Ninja.** `hushrun run … -- ninja` on a `build.ninja` you wrote gets the compilers it names on
+  `PATH`; `build.ninja` isn't touched, so `ninja -n` has no work after.
+- **Configure checks** (autoconf's `conftest.c`, Meson's in `meson-private`) compile as asked and
+  are never stored.
+- **`meson test`.** With `tests: reuse`, `hushrun run test -- meson test -C build` reuses each test
+  program whose files didn't change, as with CTest: hushrun's `meson` on `PATH` names the tests that
+  still need to run, after checking that their programs are built from what the plan keyed.
+
+### Python
+
+Pure Python compiles nothing to reuse, and a C extension a package builds as it installs
+(setuptools, meson-python) doesn't go through hushrun's C and C++ launcher: setuptools takes its
+compiler only from `CC`, which hushrun never sets because CMake, Meson and the Rust `cc` crate read
+it too; meson-python starts its own Meson, not the `meson setup` on COMMAND's `PATH` that
+hushrun gives the launcher (ADR 0119); and pip's isolated builds compile against headers in a new
+temporary folder each time. pip's wheel cache keeps what it built already
+([ADR 0110](../adr/0110-unittest.md)). Python's tests are reused one by one under `tests: reuse`,
+with pytest, unittest (`python -m unittest`) and Django's `manage.py test`.
+
 ### Rust: clippy, checks and doctests
 
 `cargo check` and `cargo clippy` go through the same store as `cargo build`: every target's
@@ -1050,8 +1188,136 @@ environment (`System.get_env/1` in a module body) isn't known, so another checko
 `_build` could run with the wrong files or values ([ADR 0122](../adr/0122-exunit.md)). `mix test`'s
 test files are reused (C-114 to C-117).
 
+### PHP
+
+PHP compiles nothing ahead of a run, so there is nothing of it to reuse here. Its tests are reused
+instead: with `tests: reuse` (and `unit: test` for each test on its own), a check that runs
+PHPUnit 10, 11 or 12 or Pest 3 or 4 (`vendor/bin/phpunit`, `vendor/bin/pest`, `php
+vendor/bin/phpunit`, or a `composer test` whose script runs one of them) leaves out of PHPUnit's
+suite the test files and tests that already passed on the files they read, with nothing to set
+up: hushrun loads its adapter through `PHP_INI_SCAN_DIR` and runs your own bootstrap after it.
+
+- **What a test file read** is what PHP had loaded or opened by the end of its last test, since a
+  class loaded once leaves no trace in the next test that uses it. The first test files of a run
+  read least; each run that reuses some loads less before the rest, so they read less next time.
+- **Keep PHPUnit's result cache in `.gitignore`** (`.phpunit.result.cache`, `.phpunit.cache/`), or
+  set `cacheResult="false"`: PHPUnit rewrites it on every run, and a run that changed a file of the
+  repository records nothing.
+- **Not yet:** Pest's `--parallel`, paratest, `php artisan test`, a PHP started with `-n`, and a
+  test PHPUnit runs in a process of its own, which always runs. With coverage on, everything runs.
+
+The rules are [C-90 to C-93](../spec/07-configuration.md) and
+[ADR 0116](../adr/0116-phpunit-and-pest.md).
+
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
+
+### Svelte
+
+Svelte's tests reuse as any Vitest project's, after the one config line `hushrun init` proposes:
+components and runes modules (`.svelte`, `.svelte.js`, `.svelte.ts`) are read through
+vite-plugin-svelte's compile, so changing a component runs only the test files, or with
+`unit: test` the tests, that rendered it. What a preprocessor reads for a component (a
+`<style lang="scss">`'s imports) counts too, and the Svelte config, with what it imports, is read by
+every test, as the Vite config is. In a SvelteKit app, `$app/environment` and `$env/*` no longer
+make a test file run every time; its env entry (`src/env.*`) and `.env` files are read by every
+test. Component tests in jsdom or happy-dom load hushrun's setup file, whatever the framework.
+
+Svelte's compile isn't shared as compiled code: it is a small part of `vite build`, and Vite has
+no compile cache for hushrun to serve, so a `vite build` or `svelte-check` check skips or runs
+whole ([ADR 0109](../adr/0109-svelte.md)).
+
+### Vue
+
+Vue's compiles get no build blocks: `vue-tsc --noEmit` is a check that a whole run already skips
+on code that passed, and `vite build` compiles each component inside one bundler process, with no
+per-file compile or cache protocol for hushrun to stand in for. What hushrun does for a Vue project
+is its tests: with `tests` on, a component (`.vue`) is a source like a `.ts` file, under Vitest
+(`@vitejs/plugin-vue`) and Jest (`@vue/vue3-jest`), so a change to one component runs only the
+test files that mounted it.
+
+```text
+$ hushrun run unit -- vitest run        # after editing src/Badge.vue
+hushrun: unit: 1 of 40 test files run; 39 already passed on the files they read
+```
+
+- **What a component is made of** counts as read with it: its `src=` blocks, and, under Vitest,
+  the files the types of `defineProps<Props>()` and the other macros came from, whose code never
+  runs. A type change that breaks a component runs its tests.
+- **`jsdom` and `happy-dom`** environments work: hushrun lets Vite serve its setup file.
+- **Rest.** A CSS, HTML or image file a component names, and `tsconfig.json`, run every test file
+  when they change. Under Jest, a run whose cache is cold with ts-jest or `lang="ts"` components
+  reads everything below the directories `tsconfig.json` includes, so its test files reuse only
+  after a run with Jest's cache warm.
+- **Not followed.** Nuxt's `@nuxt/test-utils` environment makes modules from no file: its test
+  files always run. `@vitejs/plugin-vue-jsx` with `resolveType` reads types hushrun doesn't see.
+
+The rules are C-58 to C-61 ([ADR 0108](../adr/0108-vue-components.md)).
+
+### Kotlin
+
+Kotlin's tests and builds go through Gradle, with the same line in the settings file. Beside
+`test`, `jvmTest` and Android's `testDebugUnitTest`, hushrun follows Kotlin Multiplatform's own
+test tasks, `jsNodeTest`, `jsBrowserTest`, `wasmJsNodeTest` and native ones such as
+`linuxX64Test`: a test class is the file that declares it, so a `commonTest` class is one test
+file for every platform it runs on, and a class or test that already passed on the files it read
+is left out on all of them, through Gradle's own test filter. Kotest's specs are test files too,
+left out whole; their tests, which have no method to name, always run when their spec does.
+
+```text
+$ hushrun run unit -- ./gradlew allTests
+hushrun: unit: 3 of 12 tests run, in 2 of 5 test classes; 9 already passed on the files they read
+```
+
+For compiled code, Kotlin's compile tasks, KSP's and kapt's annotation processing are cacheable and
+relocatable, and are shared like any other Gradle task. kapt's stub generation writes its
+sources' absolute paths into its output, so it stays on the machine, and the summary names it:
+
+```text
+hushrun: build: gradle: 1 task run here stays on this machine (1: its outputs hold the checkout's folder): :app:kaptGenerateStubsDebugKotlin
+```
+
+KSP has no such step. A Kotlin/JS or native task leaves out at most 250 tests one by one, and no
+class of the default package.
+
+### .NET
+
+`dotnet build`'s compiles aren't reused: since .NET 8 the SDK writes the commit into every
+assembly, so no compile could be reused across commits ([ADR 0118](../adr/0118-dotnet-test.md),
+decision 11). hushrun reuses .NET's tests, not its assemblies. With
+`tests: reuse`, `hushrun run unit -- dotnet test` leaves out each test project that already passed
+on the files it and the projects it references compile, unbuilt, and with `unit: test` the tests
+that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on
+Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
+when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
+
+### Ruby's tests
+
+With `tests: reuse` on a check that runs RSpec or Minitest, a spec or test file that already passed
+on the files it read doesn't run again:
+
+```yaml
+checks:
+  test:
+    tests: reuse
+```
+
+```text
+$ hushrun run test -- bundle exec rspec
+hushrun: test: 2 of 40 test files run; 38 already passed on the files they read
+Run options: exclude {:hushrun_reused=>"already passed on the files it read"}
+```
+
+`rspec`, `bin/rails test`, `rake test`, `rake spec` and `ruby -Itest …`, alone or after
+`bundle exec`, load hushrun's adapter through `RUBYLIB` and `RUBYOPT`; no file of the repository
+changes, and a script that sets `RUBYOPT` should add to what it had (`RUBYOPT="$RUBYOPT -W0"`).
+A test file read the repository's code that ran for it, what that code requires, `require_relative`s
+and opens, and what spec_helper or test_helper loaded. In a Rails app, what Zeitwerk, an
+initializer or a fixture loaded while one test file ran is read by every later one, since the app
+keeps it; with `config.eager_load` on in the test environment (Rails' default when `CI` is set)
+every file of `app/` is, and only changes to test files skip anything. `tests: {mode: reuse, unit:
+test}` reuses each RSpec example and Minitest test on its own. Ruby 3.1 or later; Spring and
+`rspec --only-failures` aren't observed, and say so.
 
 ## When hushrun runs anyway
 

@@ -666,6 +666,10 @@ impl Program {
                 self.close(&slot);
                 return Next::Closed;
             }
+            // A test's faults are counted by command in the order Go sent the requests, here,
+            // where they are read one by one: counted in its handler thread, the order would be
+            // the threads' start, which a loaded machine reorders.
+            let nth = self.nth(&asked);
             lock(&self.open).insert(slot.id, slot.clone());
             self.busy.fetch_add(1, Ordering::AcqRel);
             let program = self.clone();
@@ -673,8 +677,9 @@ impl Program {
             let spawned = std::thread::Builder::new()
                 .name("hushrun-gocache".into())
                 .spawn(move || {
-                    let handled =
-                        catch_unwind(AssertUnwindSafe(|| program.handle(&handler_slot, asked)));
+                    let handled = catch_unwind(AssertUnwindSafe(|| {
+                        program.handle(&handler_slot, asked, nth)
+                    }));
                     if handled.is_err() {
                         program.fall_back(&handler_slot);
                     }
@@ -730,10 +735,10 @@ impl Program {
         }
     }
 
-    fn handle(&self, slot: &Slot, asked: Asked) {
+    fn handle(&self, slot: &Slot, asked: Asked, nth: u64) {
         match asked {
             Asked::Get { action } => {
-                self.fault_get();
+                self.fault_get(nth);
                 let (value, served) = self.get(&action);
                 // What serving from the store records happens only when Go got that answer.
                 if self.answer(slot, value)
@@ -747,7 +752,7 @@ impl Program {
                 output,
                 body,
             } => {
-                self.fault_put();
+                self.fault_put(nth);
                 self.put(slot, &action, &output, &body);
             }
             Asked::Bad(why) => {
@@ -759,9 +764,24 @@ impl Program {
         }
     }
 
+    /// The request's number among its command's, for a test's faults; 0 in a release build.
     #[cfg(debug_assertions)]
-    fn fault_get(&self) {
-        let n = self.faults.gets.fetch_add(1, Ordering::AcqRel) + 1;
+    fn nth(&self, asked: &Asked) -> u64 {
+        let count = match asked {
+            Asked::Get { .. } => &self.faults.gets,
+            Asked::Put { .. } => &self.faults.puts,
+            Asked::Bad(_) | Asked::Close => return 0,
+        };
+        count.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn nth(&self, _: &Asked) -> u64 {
+        0
+    }
+
+    #[cfg(debug_assertions)]
+    fn fault_get(&self, n: u64) {
         if self.faults.panic_get == Some(n) {
             panic!("the test's panic: a get");
         }
@@ -775,20 +795,19 @@ impl Program {
     }
 
     #[cfg(not(debug_assertions))]
-    fn fault_get(&self) {
+    fn fault_get(&self, _: u64) {
         let _ = &self.faults;
     }
 
     #[cfg(debug_assertions)]
-    fn fault_put(&self) {
-        let n = self.faults.puts.fetch_add(1, Ordering::AcqRel) + 1;
+    fn fault_put(&self, n: u64) {
         if self.faults.panic_put == Some(n) {
             panic!("the test's panic: a put");
         }
     }
 
     #[cfg(not(debug_assertions))]
-    fn fault_put(&self) {}
+    fn fault_put(&self, _: u64) {}
 
     // --- get ---------------------------------------------------------------------------
 

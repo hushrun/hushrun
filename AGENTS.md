@@ -9,6 +9,7 @@ prints, fix what fails, and push once it says the code is ready.
 The pre-push hook refuses a coding agent's push until then, and `hushrun ready` installs it in a
 clone that has none. Don't use `--no-verify` unless a person asks you to. If a check can't run on
 this machine, tell the person what it needs. When you report back, say which checks hushrun skipped
-and which `hushrun ready` said CI still runs. More:
+and which `hushrun ready` said CI still runs. Before you finish, run `hushrun flush`: it sends any
+result that waited on this machine while the backend was out of reach. More:
 https://hushrun.com/docs/for-agents.md
 <!-- hushrun:end -->

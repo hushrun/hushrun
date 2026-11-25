@@ -61,6 +61,11 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    "CLAUDE_CODE_REMOTE",
+    "CURSOR_AGENT_SOCKET",
+    "COPILOT_AGENT_SESSION_ID",
+    "CODEX_PROXY_CERT",
+    "HUSHRUN_SANDBOX",
     // B-1, B-2: the developer's build mode, store and wrapper stay out: a test run that cargo
     // itself compiles through the wrapper doesn't pass its session on to a fixture's cargo.
     "HUSHRUN_BUILD",
@@ -967,6 +972,9 @@ fn vitest_hazards_miss_no_failure() {
 /// The plugin and its setup file, as hushrun writes them.
 const PLUGIN: &str = include_str!("../src/units/hushrun_vitest.mjs");
 const SETUP: &str = include_str!("../src/units/hushrun_vitest_setup.mjs");
+const VUE: &str = include_str!("../src/units/hushrun_vitest_vue.mjs");
+/// \[ADR 0109\] The module the plugin imports, beside it.
+const SVELTE: &str = include_str!("../src/units/hushrun_vitest_svelte.mjs");
 
 /// What Vitest with hushrun's plugin did, with tests told one by one.
 struct Told {
@@ -1091,6 +1099,8 @@ fn tests_vitest(
     std::fs::create_dir_all(&adapter).unwrap();
     std::fs::write(adapter.join("hushrun-vitest.mjs"), PLUGIN).unwrap();
     std::fs::write(adapter.join("hushrun-vitest-setup.mjs"), SETUP).unwrap();
+    std::fs::write(adapter.join("hushrun-vitest-vue.mjs"), VUE).unwrap();
+    std::fs::write(adapter.join("hushrun-vitest-svelte.mjs"), SVELTE).unwrap();
     let mut cmd = Command::new(r.repo.join("node_modules/.bin/vitest"));
     Repo::clean(&mut cmd);
     let out = cmd
