@@ -3,6 +3,12 @@
 //! imported for `defineProps<Props>()`) is read with it; hushrun's setup file loads in a browser's
 //! environment (`jsdom`); and reuse never misses a failure.
 //!
+//! In-process (CONTRIBUTING.md, "Which tests CI runs again"): each test runs a check through the
+//! one adapter's own type, `vitest::Recognized` or `jest::Recognized`, and the code every adapter
+//! shares, and never starts the `hushrun` binary (`common/in_process.rs`). Each adapter has its own
+//! functions, `run_vitest` and `run_jest`, so that a test of one reaches nothing of the other.
+//! Vitest and Jest run as COMMAND, for real. A run's last line is the CLI's: `e2e_vue.rs`.
+//!
 //! The fixtures need Node and two `node_modules` installed from npm outside the repository:
 //! `HUSHRUN_TEST_VUE` with Vitest 4.1.12, Vue, @vitejs/plugin-vue, @vue/test-utils and jsdom (CI:
 //! `npm install --prefix <dir> --legacy-peer-deps vitest@4.1.12 vue@3.5.46 @vitejs/plugin-vue@6.0.11
@@ -12,296 +18,300 @@
 //! typescript@5.9.3`). Each says so and passes where its own is missing, unless
 //! `HUSHRUN_TEST_TOOLS=required`.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[path = "common/vue.rs"]
+mod fixtures;
+#[path = "common/in_process.rs"]
+mod in_process;
+#[path = "common/repo.rs"]
+mod repo;
+#[path = "common/store.rs"]
+mod store;
 
-use hushrun_testkit::git;
-use serde_json::Value;
+use std::collections::BTreeSet;
 
-const CLEARED: &[&str] = &[
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "BUILDKITE",
-    "CIRCLECI",
-    "ACTIONS_ID_TOKEN_REQUEST_URL",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "HUSHRUN_AGENT",
-    "HUSHRUN_BACKEND",
-    "HUSHRUN_TOKEN",
-    "HUSHRUN_CONFIG",
-    "HUSHRUN_FORMAT",
-    "HUSHRUN_PROVIDER",
-    "HUSHRUN_INSIDE_RUN",
-    "HUSHRUN_UNITS",
-    "HUSHRUN_VITEST",
-    "HUSHRUN_JEST",
-    "HUSHRUN_JEST_RUN",
-    "HUSHRUN_INVOKED_BY",
-    "HUSHRUN_REPORTS_READ",
-    "NODE_OPTIONS",
-    "VITEST",
-    "VITEST_POOL_ID",
-    "VITEST_WORKER_ID",
-    "JEST_WORKER_ID",
-    "npm_lifecycle_event",
-    "AI_AGENT",
-    "CLAUDECODE",
-    "CLAUDE_CODE",
-    "CODEX_SANDBOX",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "OPENCODE",
-    "OPENCODE_CLIENT",
-    "CURSOR_AGENT",
-    "CURSOR_EXTENSION_HOST_ROLE",
-    "GEMINI_CLI",
-    "AUGMENT_AGENT",
-    "ANTIGRAVITY_AGENT",
-    "COPILOT_MODEL",
-    "COPILOT_ALLOW_ALL",
-    "COPILOT_GITHUB_TOKEN",
-    "HUSHRUN_BUILD",
-    "HUSHRUN_BUILD_KEEP_DAYS",
-    "HUSHRUN_BUILD_DIR",
-    "HUSHRUN_BUILD_SESSION",
-    "HUSHRUN_CC",
-    "CMAKE_C_COMPILER_LAUNCHER",
-    "CMAKE_CXX_COMPILER_LAUNCHER",
-    "RUSTC_WRAPPER",
-];
+use hushrun::units::adapter::Adapter as _;
+use hushrun::units::{Profile, jest, vitest};
 
-const NO_HOST: &str = "http://127.0.0.1:9";
+use fixtures::*;
+use in_process::{Ran, Repo};
 
-/// The `node_modules` a variable names, when it holds `package` at `version`.
-fn modules(variable: &str, package: &str, version: &str) -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var_os(variable)?);
-    let text = std::fs::read(dir.join(package).join("package.json")).ok()?;
-    let json: Value = serde_json::from_slice(&text).ok()?;
-    (json["version"] == version).then_some(dir)
-}
-
-fn vitest_modules() -> Option<PathBuf> {
-    modules("HUSHRUN_TEST_VUE", "vitest", "4.1.12")
-        .filter(|d| d.join("@vitejs/plugin-vue").is_dir() && d.join("jsdom").is_dir())
-}
-
-fn jest_modules() -> Option<PathBuf> {
-    modules("HUSHRUN_TEST_VUE_JEST", "jest", "29.7.0").filter(|d| d.join("@vue/vue3-jest").is_dir())
-}
-
-fn tools(what: &str, here: Option<PathBuf>) -> Option<PathBuf> {
-    let node = Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if node && here.is_some() {
-        return here;
-    }
-    if std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required") {
-        panic!("{what} is missing, and HUSHRUN_TEST_TOOLS=required");
-    }
-    eprintln!("note: skipping: {what} is missing (HUSHRUN_TEST_TOOLS=required makes this fail)");
-    None
-}
-
-struct Repo {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    repo: PathBuf,
-    cache: PathBuf,
-}
-
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-impl Ran {
-    fn observe_line(&self) -> String {
-        let line = self
-            .stderr
-            .lines()
-            .find(|l| l.contains("with `tests: reuse`"))
-            .unwrap_or_else(|| panic!("no observe line in:\n{}", self.stderr));
-        hushrun_testkit::lines::without_saving(line)
+/// What Vitest's adapter answers that never changes in a run.
+fn profile_vitest(adapter: &vitest::Recognized) -> Profile {
+    Profile {
+        word: adapter.word(),
+        runner: adapter.runner(),
+        test_file: adapter.test_file(),
+        tests: adapter.tests(),
+        hints: adapter.hints(),
+        binds: adapter.binds(),
+        keys: adapter.keys(),
+        not_by_test: adapter.not_by_test(),
+        not_watched: adapter.not_watched(),
     }
 }
 
-impl Repo {
-    fn new(files: &[(&str, &str)], modules: &Path) -> Repo {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("real path");
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("mkdir");
-        git::init(&repo, "sha1");
-        let r = Repo {
-            _dir: dir,
-            cache: root.join("cache"),
-            root,
-            repo,
+/// What Jest's adapter answers that never changes in a run.
+fn profile_jest(adapter: &jest::Recognized) -> Profile {
+    Profile {
+        word: adapter.word(),
+        runner: adapter.runner(),
+        test_file: adapter.test_file(),
+        tests: adapter.tests(),
+        hints: adapter.hints(),
+        binds: adapter.binds(),
+        keys: adapter.keys(),
+        not_by_test: adapter.not_by_test(),
+        not_watched: adapter.not_watched(),
+    }
+}
+
+/// COMMAND of `hushrun ARGS`, which are `run unit -- COMMAND`.
+fn command_of<'a>(args: &'a [&'a str]) -> &'a [&'a str] {
+    args.strip_prefix(&["run", "unit", "--"][..])
+        .unwrap_or_else(|| panic!("{args:?} isn't `run unit -- COMMAND`"))
+}
+
+/// `hushrun ARGS`, which are `run unit -- vitest run …`, in-process, through Vitest's adapter
+/// alone.
+fn run_vitest(r: &Repo, args: &[&str]) -> Ran {
+    let args = command_of(args);
+    let command: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // As `units::adapter::choose_kept` comes to Vitest's adapter (`vitest::recognized`), with no
+    // trait object: what COMMAND is, and whether its config loads the adapter.
+    let adapter = match vitest::recognize(hushrun::units::command::without_env(&command)) {
+        Some(Ok(adapter)) => adapter,
+        Some(Err(why)) => return in_process::Run::new(r, "unit", args, &[]).unobserved(&why),
+        None => panic!("{args:?} doesn't start Vitest"),
+    };
+    if let Some(why) = vitest::unloadable(&adapter, &r.repo) {
+        return in_process::Run::new(r, "unit", args, &[]).unobserved(&why);
+    }
+    observe_vitest(r, args, &[], &adapter)
+}
+
+/// `hushrun ARGS`, which are `run unit -- node node_modules/jest/bin/jest.js …`, in-process,
+/// through Jest's adapter alone.
+fn run_jest(r: &Repo, args: &[&str]) -> Ran {
+    let args = command_of(args);
+    let command: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // As `units::adapter::choose_kept` comes to Jest's adapter (`jest::recognized`), with no trait
+    // object: what COMMAND is, and which Jest the repository has.
+    let adapter = match jest::recognize_in(hushrun::units::command::without_env(&command), &r.repo)
+    {
+        Some(Ok(adapter)) => adapter,
+        Some(Err(why)) => return in_process::Run::new(r, "unit", args, &[]).unobserved(&why),
+        None => panic!("{args:?} doesn't start Jest"),
+    };
+    observe_jest(r, args, &[], &adapter)
+}
+
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order, on `vitest::Recognized` itself (`units_gradle.rs`'s, with Vitest's type).
+fn observe_vitest(
+    r: &Repo,
+    args: &[&str],
+    env: &[(&str, &str)],
+    adapter: &vitest::Recognized,
+) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile_vitest(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // Vitest's adapter keeps the trait's `plan`, which is its `plan_from_files`.
+            Ok(context) => {
+                let planning = adapter.plan_from_files(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
         };
-        for (path, text) in files {
-            r.write(path, text);
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(modules, r.repo.join("node_modules")).expect("symlink");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(modules, r.repo.join("node_modules")).expect("link");
-        git::commit_all(&r.repo, "init");
-        r
+        drop(input);
+        run.planned(&observer, planned);
     }
-
-    fn write(&self, path: &str, text: &str) {
-        let path = self.repo.join(path);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, text).expect("write");
-    }
-
-    fn run(&self, args: &[&str]) -> Ran {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
-        cmd.current_dir(&self.repo)
-            .env("HUSHRUN_CACHE_DIR", &self.cache)
-            .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
-            .env("HUSHRUN_HOST", NO_HOST)
-            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
-            .env("HOME", self.root.join("home"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            );
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("NEXTEST")
-                || (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("CLAUDE")
-            {
-                cmd.env_remove(name.as_ref());
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
             }
         }
-        let output = cmd.args(args).output().expect("hushrun");
-        Ran {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
-    }
-
-    /// A run that must pass, and what it said would have been reused.
-    fn passes(&self, args: &[&str]) -> String {
-        let ran = self.run(args);
-        assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
-        ran.observe_line()
-    }
-}
-
-fn yaml(tests: &str) -> String {
-    format!("version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: {tests}\n")
-}
-
-const VITEST_CONFIG: &str = "import { defineConfig } from 'vitest/config'\nimport vue from '@vitejs/plugin-vue'\n\nexport default defineConfig({\n  plugins: [vue(), process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined],\n  test: { environment: 'jsdom' },\n})\n";
-
-const VITEST_RUN: &[&str] = &["run", "unit", "--", "node_modules/.bin/vitest", "run"];
-
-const COUNTER: &str = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nimport { label } from './format'\nconst n = ref(0)\n</script>\n\n<template>\n  <button @click=\"n++\">{{ label(n) }}</button>\n</template>\n";
-
-const FLAG: &str = "<script setup lang=\"ts\">\nimport type { FlagProps } from './types'\nconst props = defineProps<FlagProps>()\n</script>\n\n<template><b>{{ props.on === true ? 'yes' : 'no' }}</b></template>\n";
-
-const BADGE: &str = "<script setup>\nconst props = defineProps({ text: String })\n</script>\n\n<template>\n  <span :class=\"$style.badge\">{{ props.text }}</span>\n</template>\n\n<style module>\n.badge { color: red; }\n</style>\n";
-
-/// A shop of components: a counter whose `<script setup>` imports a function, a flag whose props
-/// come from an imported type, a price whose script and template are `src=` files, a badge with
-/// a CSS module, a component of static text; and a test file for each.
-fn shop(tests: &str, config: (&str, &str), test_import: &str) -> Vec<(String, String)> {
-    let t = |_name: &str, body: &str| {
-        format!("{test_import}import {{ mount }} from '@vue/test-utils'\n{body}")
+        break (code, observed);
     };
-    let files: Vec<(&str, String)> = vec![
-        ("hushrun.yaml", yaml(tests)),
-        (".gitignore", "node_modules\n".into()),
-        (config.0, config.1.into()),
-        ("src/format.ts", "export const label = (n: number) => `count: ${n}`\n".into()),
-        ("src/Counter.vue", COUNTER.into()),
-        ("src/types.ts", "export interface FlagProps { on?: boolean }\n".into()),
-        ("src/Flag.vue", FLAG.into()),
-        (
-            "src/price-logic.ts",
-            "import { defineComponent } from 'vue'\nexport default defineComponent({ props: { cents: { type: Number, required: true } }, computed: { euros() { return (this.cents / 100).toFixed(2) } } })\n".into(),
-        ),
-        ("src/price.html", "<span>{{ euros }} EUR</span>\n".into()),
-        (
-            "src/Price.vue",
-            "<script src=\"./price-logic.ts\" lang=\"ts\"></script>\n<template src=\"./price.html\"></template>\n".into(),
-        ),
-        ("src/Badge.vue", BADGE.into()),
-        ("src/Plain.vue", "<template>\n  <p>static text</p>\n</template>\n".into()),
-        (
-            "test/counter.test.ts",
-            t("counter", "import Counter from '../src/Counter.vue'\n\ntest('counts', async () => {\n  const w = mount(Counter)\n  await w.find('button').trigger('click')\n  expect(w.text()).toBe('count: 1')\n})\ntest('plain', () => {})\n"),
-        ),
-        (
-            "test/flag.test.ts",
-            t("flag", "import Flag from '../src/Flag.vue'\n\ntest('a present attribute is true', () => {\n  expect(mount(Flag, { attrs: { on: '' } }).text()).toBe('yes')\n})\ntest('plain', () => {})\n"),
-        ),
-        (
-            "test/price.test.ts",
-            t("price", "import Price from '../src/Price.vue'\n\ntest('euros', () => {\n  expect(mount(Price, { props: { cents: 250 } }).text()).toBe('2.50 EUR')\n})\ntest('plain', () => {})\n"),
-        ),
-        (
-            "test/badge.test.ts",
-            t("badge", "import Badge from '../src/Badge.vue'\n\ntest('badge', () => {\n  const w = mount(Badge, { props: { text: 'hi' } })\n  expect(w.text()).toBe('hi')\n  expect(w.find('span').classes().length).toBe(1)\n})\n"),
-        ),
-        (
-            "test/plain.test.ts",
-            t("plain", "import Plain from '../src/Plain.vue'\n\ntest('plain', () => { expect(mount(Plain).text()).toBe('static text') })\n"),
-        ),
-    ];
-    files.into_iter().map(|(p, t)| (p.to_string(), t)).collect()
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
+            }
+            None => in_process::Run::not_again(&wanted),
+        };
+        run.disagreements(o, ended);
+    }
+    run.record(code, observed)
 }
 
-fn borrowed(files: &[(String, String)]) -> Vec<(&str, &str)> {
-    files
-        .iter()
-        .map(|(p, t)| (p.as_str(), t.as_str()))
-        .collect()
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order, on `jest::Recognized` itself (`units_gradle.rs`'s, with Jest's type).
+fn observe_jest(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &jest::Recognized) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile_jest(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // Jest's adapter keeps the trait's `plan`, which is its `plan_from_files`.
+            Ok(context) => {
+                let planning = adapter.plan_from_files(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
+        };
+        drop(input);
+        run.planned(&observer, planned);
+    }
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
+            }
+        }
+        break (code, observed);
+    };
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
+            }
+            None => in_process::Run::not_again(&wanted),
+        };
+        run.disagreements(o, ended);
+    }
+    run.record(code, observed)
 }
 
-fn vitest_shop(tests: &str, modules: &Path) -> Repo {
-    let mut files = shop(
-        tests,
-        ("vitest.config.ts", VITEST_CONFIG),
-        "import { test, expect } from 'vitest'\n",
-    );
-    files.push((
-        "package.json".into(),
-        "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n".into(),
-    ));
-    Repo::new(&borrowed(&files), modules)
+/// What a run's lines say, as the tests ask it: each is a line `hushrun run` writes after
+/// `hushrun: `.
+trait Said {
+    /// `observe`'s line, without what it would have saved.
+    fn observe_line(&self) -> String;
+    /// Whether the lines, one after another, hold `text`.
+    fn says(&self, text: &str) -> bool;
 }
 
-/// After a first run, each change, alone, runs what reads it and leaves the rest reused.
-fn changes(r: &Repo, run: &[&str], cases: &[(&str, &str, &str, &str)]) {
+impl Said for Ran {
+    fn observe_line(&self) -> String {
+        let line = self
+            .lines
+            .iter()
+            .find(|l| l.contains("with `tests: reuse`"))
+            .unwrap_or_else(|| panic!("no observe line in:\n{}", self.said()));
+        hushrun_testkit::lines::without_saving(line)
+    }
+
+    fn says(&self, text: &str) -> bool {
+        self.lines.join("\n").contains(text)
+    }
+}
+
+/// A run, by `run` (`run_vitest` or `run_jest`), that must pass, and what it said would have been
+/// reused.
+fn passes(r: &Repo, run: fn(&Repo, &[&str]) -> Ran, args: &[&str]) -> String {
+    let ran = run(r, args);
+    assert_eq!(ran.code, 0, "{}", ran.said());
+    ran.observe_line()
+}
+
+/// After a first run, each change, alone, runs what reads it and leaves the rest reused: each a
+/// run by `run` (`run_vitest` or `run_jest`).
+fn changes(
+    r: &Repo,
+    run: fn(&Repo, &[&str]) -> Ran,
+    args: &[&str],
+    cases: &[(&str, &str, &str, &str)],
+) {
     for (path, from, to, expected) in cases {
         let before = std::fs::read_to_string(r.repo.join(path)).expect("read");
         assert!(before.contains(from), "{path} holds {from:?}");
         r.write(path, &before.replacen(from, to, 1));
-        let ran = r.run(run);
+        let ran = run(r, args);
         assert_eq!(
             ran.observe_line(),
             *expected,
-            "after {path}: {from:?} -> {to:?}\n{}\n{}",
-            ran.stdout,
-            ran.stderr
+            "after {path}: {from:?} -> {to:?}\n{}",
+            ran.said()
         );
         r.write(path, &before);
     }
 }
+
+const VITEST_RUN: &[&str] = &["run", "unit", "--", "node_modules/.bin/vitest", "run"];
 
 // covers: C-58, C-59
 #[test]
@@ -315,11 +325,12 @@ fn vitest_runs_a_component_s_tests_in_jsdom_and_a_change_runs_only_what_read_it(
     let r = vitest_shop("observe", &modules);
     // hushrun's setup file loads in jsdom, and nothing a component's compile made is unknown.
     assert_eq!(
-        r.passes(VITEST_RUN),
-        "hushrun: unit: with `tests: reuse`, all 5 test files would have run: none had passed here yet on the files it read"
+        passes(&r, run_vitest, VITEST_RUN),
+        "unit: with `tests: reuse`, all 5 test files would have run: none had passed here yet on the files it read"
     );
     changes(
         &r,
+        run_vitest,
         VITEST_RUN,
         &[
             // A component, its `<script setup>`'s import, a `src=` script: their test file alone.
@@ -327,33 +338,33 @@ fn vitest_runs_a_component_s_tests_in_jsdom_and_a_change_runs_only_what_read_it(
                 "src/Plain.vue",
                 "static text",
                 "static words",
-                "hushrun: unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
+                "unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
             ),
             (
                 "src/format.ts",
                 "count: ",
                 "n: ",
-                "hushrun: unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
+                "unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
             ),
             (
                 "src/price-logic.ts",
                 "toFixed(2)",
                 "toFixed(1)",
-                "hushrun: unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
+                "unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
             ),
             // [C-59] A type a component's props came from: no code of it runs, its test file runs.
             (
                 "src/types.ts",
                 "on?: boolean",
                 "on?: string",
-                "hushrun: unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
+                "unit: with `tests: reuse`, 1 of 5 test files would have run; 4 already passed on the files they read",
             ),
             // A `src=` template is HTML, of the rest set: every test file runs.
             (
                 "src/price.html",
                 "EUR",
                 "USD",
-                "hushrun: unit: with `tests: reuse`, all 5 test files would have run: src/price.html changed, and any test may read it",
+                "unit: with `tests: reuse`, all 5 test files would have run: src/price.html changed, and any test may read it",
             ),
         ],
     );
@@ -369,29 +380,28 @@ fn vitest_reads_test_follows_the_type_a_component_s_props_were_compiled_from() {
         return;
     };
     let r = vitest_shop("{mode: observe, unit: test, reads: test}", &modules);
-    r.passes(VITEST_RUN);
+    passes(&r, run_vitest, VITEST_RUN);
     // The type makes the attribute a string: the test that mounted it fails, and it would have
     // run, with the other test of its file that imports the component.
     r.write(
         "src/types.ts",
         "export interface FlagProps { on?: string }\n",
     );
-    let ran = r.run(VITEST_RUN);
-    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let ran = run_vitest(&r, VITEST_RUN);
+    assert_eq!(ran.code, 1, "{}", ran.said());
     assert!(
         ran.stdout.contains("a present attribute is true"),
         "{}",
         ran.stdout
     );
     assert!(
-        !ran.stderr
-            .contains("though it passed before on the same files it read"),
+        !ran.says("though it passed before on the same files it read"),
         "{}",
-        ran.stderr
+        ran.said()
     );
     assert_eq!(
         ran.observe_line(),
-        "hushrun: unit: with `tests: reuse`, 2 of 8 tests would have run, in 1 of 5 test files; 6 already passed on the files they read"
+        "unit: with `tests: reuse`, 2 of 8 tests would have run, in 1 of 5 test files; 6 already passed on the files they read"
     );
 }
 
@@ -405,29 +415,26 @@ fn vitest_with_vue_reuses_what_already_passed() {
         return;
     };
     let r = vitest_shop("reuse", &modules);
-    r.run(VITEST_RUN);
+    run_vitest(&r, VITEST_RUN);
     r.write(
         "src/Plain.vue",
         "<template>\n  <p>static words</p>\n</template>\n",
     );
-    let ran = r.run(VITEST_RUN);
-    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let ran = run_vitest(&r, VITEST_RUN);
+    assert_eq!(ran.code, 1, "{}", ran.said());
     // The changed component's test file runs, and fails; one that passed runs as a check (C-34).
     let plan = ran
-        .stderr
-        .lines()
+        .lines
+        .iter()
         .find(|l| l.contains("test files run"))
-        .unwrap_or_else(|| panic!("no plan line in:\n{}", ran.stderr));
+        .unwrap_or_else(|| panic!("no plan line in:\n{}", ran.said()));
     assert_eq!(
         plan,
-        "hushrun: unit: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        "unit: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(ran.stdout.contains("test/plain.test.ts"), "{}", ran.stdout);
-    assert!(
-        hushrun_testkit::lines::says_reused(&ran.stderr, 3, "test files"),
-        "{}",
-        ran.stderr
-    );
+    // What the run's last line says, `3 test files reused` (e2e_vue.rs), is the result's count.
+    assert_eq!(ran.units["reused"], 3, "{}", ran.said());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -498,15 +505,11 @@ fn jest_with_vue3_jest_runs_only_what_read_a_changed_component() {
     .into_iter()
     .map(|(p, t)| (p.to_string(), t))
     .collect();
-    let r = Repo::new(&borrowed(&files), &modules);
+    let r = repo(&borrowed(&files), &modules);
     // Jest's cache holds every component before hushrun first sees them: vue3-jest then reads no
     // `src=` file, and hushrun reads it from the component.
-    let mut warm = Command::new("node");
-    warm.current_dir(&r.repo)
-        .args(["node_modules/jest/bin/jest.js", "--ci"]);
-    for var in CLEARED {
-        warm.env_remove(var);
-    }
+    let mut warm = r.command("node");
+    warm.args(["node_modules/jest/bin/jest.js", "--ci"]);
     let warmed = warm.output().expect("jest");
     assert!(
         warmed.status.success(),
@@ -514,24 +517,25 @@ fn jest_with_vue3_jest_runs_only_what_read_a_changed_component() {
         String::from_utf8_lossy(&warmed.stderr)
     );
     assert_eq!(
-        r.passes(JEST_RUN),
-        "hushrun: unit: with `tests: reuse`, all 4 test files would have run: none had passed here yet on the files it read"
+        passes(&r, run_jest, JEST_RUN),
+        "unit: with `tests: reuse`, all 4 test files would have run: none had passed here yet on the files it read"
     );
     changes(
         &r,
+        run_jest,
         JEST_RUN,
         &[
             (
                 "src/Plain.vue",
                 "static text",
                 "static words",
-                "hushrun: unit: with `tests: reuse`, 1 of 4 test files would have run; 3 already passed on the files they read",
+                "unit: with `tests: reuse`, 1 of 4 test files would have run; 3 already passed on the files they read",
             ),
             (
                 "src/Badge.vue",
                 "color: red",
                 "color: blue",
-                "hushrun: unit: with `tests: reuse`, 1 of 4 test files would have run; 3 already passed on the files they read",
+                "unit: with `tests: reuse`, 1 of 4 test files would have run; 3 already passed on the files they read",
             ),
             // [C-61] A `src=` script, which vue3-jest reads only when Jest's cache doesn't hold the
             // component (and whose change that cache doesn't see): read with the component.
@@ -539,7 +543,7 @@ fn jest_with_vue3_jest_runs_only_what_read_a_changed_component() {
                 "src/price-logic.js",
                 "toFixed(2)",
                 "toFixed(1)",
-                "hushrun: unit: with `tests: reuse`, 1 of 4 test files would have run; 3 already passed on the files they read",
+                "unit: with `tests: reuse`, 1 of 4 test files would have run; 3 already passed on the files they read",
             ),
         ],
     );
