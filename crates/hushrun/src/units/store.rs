@@ -892,6 +892,9 @@ pub struct TestRow {
     /// \[ADR 0081\] With `reads: test`, what it read then (C-40): its own list; `None` when it
     /// read its test file's.
     pub list: Option<TestListRow>,
+    /// \[C-151\] The functions marked `hushrun::starts_no_workspace_binary` whose programs the
+    /// static map took it to start no workspace binary, for `hushrun why`; `None` for none.
+    pub trusted: Option<String>,
 }
 
 /// \[ADR 0081\] A test's own list as the store keeps it, a set tests share: the files its key

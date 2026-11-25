@@ -631,8 +631,40 @@ fn explain_test(
         says(out, Decision::Runs, "not-kept", why.into());
         return;
     }
+    // \[C-151\] A spawn the map trusted, by its function's marker.
+    if let Some(marked) = row.and_then(|r| r.trusted.as_deref()) {
+        out.detail.push(format!(
+            "it starts programs through {marked}, marked `{}`: the static map takes those to start no binary of the workspace, as that function's own code must make sure of",
+            hushrun_graph::items::MARKER
+        ));
+    }
     let seen = at.shared.test_seen(at.unit, at.id);
-    let lists = shared::test_lists(at.reads, at.file_lists, row, &seen, input.tree);
+    // \[C-146\] A test whose adapter maps it: the list its row keeps, the map's of its last run
+    // here, with what its test file's keys hold of what isn't a file; none, its test file's.
+    let mapped = adapter.why_tests_by_their_rows();
+    let lists = match (
+        mapped,
+        row.and_then(|r| r.list.as_ref()),
+        at.file_lists.first(),
+    ) {
+        (true, Some(list), Some(file)) => {
+            out.detail.push(
+                "as far as this machine knows: it reads what the static map of its sources gave it the last time it ran here, which a run makes again".into(),
+            );
+            let reads: BTreeSet<String> = list.reads.keys().cloned().collect();
+            vec![shared::TestList {
+                list: shared::List {
+                    files: reads.clone(),
+                    reads,
+                    dirs: BTreeSet::new(),
+                    outside: file.outside,
+                    from: shared::From::Here(store::Origin::SeenHere),
+                },
+                own: true,
+            }]
+        }
+        _ => shared::test_lists(at.reads, at.file_lists, row, &seen, input.tree),
+    };
     if (row.is_none() && seen.is_empty()) || lists.is_empty() {
         says(
             out,

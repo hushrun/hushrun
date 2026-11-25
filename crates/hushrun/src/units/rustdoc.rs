@@ -254,6 +254,7 @@ fn invocation(
         dir: None,
         testlog: None,
         testlog_truncated: false,
+        left_out: Vec::new(),
     }
 }
 
