@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 
 use hushrun_core::units::{self, Sets, Sources};
 
-use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
+use super::adapter::{
+    Adapter, Hints, KeysOutside, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+};
 use super::ctest::{self, build, run, select};
 use super::facts::{self, FactsFile, TestFacts, Unfollowed, UnitFacts};
 
@@ -157,6 +159,12 @@ fn program_of(first: &str, cwd: &Path) -> Option<PathBuf> {
 /// build directory, started by its path (C-106): `Some(Err)` for one hushrun can't observe
 /// (doctest's, Catch2 2's, or COMMAND's arguments), `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    let found = recognize(command, cwd)?;
+    Some(found.map(|adapter| Box::new(adapter) as Box<dyn Adapter>))
+}
+
+/// [`recognized`], as the adapter's own type: what a test of it calls, with no trait object.
+pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
     let first = command.first()?;
     let program = program_of(first, cwd)?;
     let bytes = std::fs::read(&program).ok()?;
@@ -165,14 +173,12 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
         Err(why) => return Some(Err(why)),
     };
     let args = command[1..].to_vec();
-    Some(framework.args(&args).map(|observe| {
-        Box::new(Recognized {
-            program,
-            framework,
-            args,
-            observe,
-            started: OnceLock::new(),
-        }) as Box<dyn Adapter>
+    Some(framework.args(&args).map(|observe| Recognized {
+        program,
+        framework,
+        args,
+        observe,
+        started: OnceLock::new(),
     }))
 }
 
@@ -456,6 +462,30 @@ impl Adapter for Recognized {
         }
     }
 
+    // `hints`, `binds`, `keys`, `not_by_test` and `not_watched` are the trait's defaults, written
+    // out: a call on this type then names this impl's own method, which the static test map
+    // follows to it alone, where the trait's would count every adapter that overrides it
+    // (CONTRIBUTING.md, "Which tests CI runs again").
+    fn hints(&self) -> Hints {
+        Hints::Sources
+    }
+
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
+    }
+
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
         let observe = self.framework.env(at.env)?;
         let _ = self.started.set(Started {
@@ -468,7 +498,7 @@ impl Adapter for Recognized {
     }
 
     fn plan_from_files(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
-        Ok(Some(ctest::planning(at, None)))
+        Ok(Some(ctest::built::planning(at, None)))
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
@@ -490,7 +520,7 @@ impl Adapter for Recognized {
                 )
             })
             .collect();
-        let mut compiled = ctest::compiled_from(&programs, &walked.built, at.tree);
+        let mut compiled = ctest::built::compiled_from(&programs, &walked.built, at.tree);
         compiled.name(
             walked
                 .sources
@@ -498,9 +528,9 @@ impl Adapter for Recognized {
                 .filter(|f| at.tree.contains(f))
                 .cloned(),
         );
-        let planning = ctest::planning(at, Some(&compiled));
+        let planning = ctest::built::planning(at, Some(&compiled));
         if let Some(started) = self.started.get() {
-            ctest::write_plan(&started.dir, &planning, at.tree);
+            ctest::built::write_plan(&started.dir, &planning, at.tree);
         }
         Ok(Some(planning))
     }
@@ -594,7 +624,7 @@ impl Adapter for Recognized {
             .get("leftOut")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut read = ctest::read_built(at, std::slice::from_ref(&file), ADAPTER)?;
+        let mut read = ctest::built::read_built(at, std::slice::from_ref(&file), ADAPTER)?;
         if let Some(read) = &mut read {
             read.left_out = left_out;
             read.stale_build = file.stale_build.clone();
@@ -610,7 +640,7 @@ impl Adapter for Recognized {
         units::classify(
             at.tree.paths(),
             &|p| at.map.unit_files.contains(p),
-            Sources::Named(&at.map.sources, ctest::SOURCE_KINDS),
+            Sources::Named(&at.map.sources, build::SOURCE_KINDS),
             at.ignore,
         )
     }

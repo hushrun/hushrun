@@ -9,9 +9,9 @@ fn words(text: &str) -> Vec<String> {
 fn xcodebuild_test_is_the_adapters_and_what_goes_round_its_program_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path();
-    let direct = recognize(&words("xcodebuild -scheme App test"), cwd);
-    let by_path = recognize(&words("/usr/bin/xcodebuild test"), cwd);
-    let xcrun = recognize(&words("xcrun xcodebuild test"), cwd);
+    let direct = recognize_command(&words("xcodebuild -scheme App test"), cwd);
+    let by_path = recognize_command(&words("/usr/bin/xcodebuild test"), cwd);
+    let xcrun = recognize_command(&words("xcrun xcodebuild test"), cwd);
     if cfg!(target_os = "macos") {
         assert_eq!(direct, Some(Ok(Some(words("-scheme App test")))));
     } else {
@@ -20,20 +20,20 @@ fn xcodebuild_test_is_the_adapters_and_what_goes_round_its_program_is_refused() 
     assert!(matches!(by_path, Some(Err(_))));
     assert!(matches!(xcrun, Some(Err(_))));
     assert!(matches!(
-        recognize(&words("xcodebuild test-without-building"), cwd),
+        recognize_command(&words("xcodebuild test-without-building"), cwd),
         Some(Err(_))
     ));
     // Not a run of the tests: not the adapter's.
-    assert_eq!(recognize(&words("xcodebuild build"), cwd), None);
-    assert_eq!(recognize(&words("xcodebuild -list"), cwd), None);
-    assert_eq!(recognize(&words("swift test"), cwd), None);
+    assert_eq!(recognize_command(&words("xcodebuild build"), cwd), None);
+    assert_eq!(recognize_command(&words("xcodebuild -list"), cwd), None);
+    assert_eq!(recognize_command(&words("swift test"), cwd), None);
     // A wrapper whose text starts xcodebuild's tests and no other runner.
     let wrapper = vec![
         "sh".to_string(),
         "-c".into(),
         "xcodebuild -scheme A test | xcpretty".into(),
     ];
-    let found = recognize(&wrapper, cwd);
+    let found = recognize_command(&wrapper, cwd);
     if cfg!(target_os = "macos") {
         assert_eq!(found, Some(Ok(None)));
     } else {
@@ -44,7 +44,7 @@ fn xcodebuild_test_is_the_adapters_and_what_goes_round_its_program_is_refused() 
         "-c".into(),
         "swift test && xcodebuild test".into(),
     ];
-    assert_eq!(recognize(&both, cwd), None);
+    assert_eq!(recognize_command(&both, cwd), None);
 }
 
 // covers: C-110

@@ -91,17 +91,24 @@ pub fn recognized(
     cwd: &Path,
 ) -> Option<Result<Box<dyn super::adapter::Adapter>, String>> {
     let found = recognize(command, cwd)?;
-    Some(found.map(|direct| {
-        Box::new(Recognized {
-            direct,
-            dir: OnceLock::new(),
-        }) as Box<dyn Adapter>
+    Some(found.map(|adapter| Box::new(adapter) as Box<dyn Adapter>))
+}
+
+/// [`recognized`], as the adapter's own type: what a test of it calls, with no trait object.
+pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
+    let found = recognize_command(command, cwd)?;
+    Some(found.map(|direct| Recognized {
+        direct,
+        dir: OnceLock::new(),
     }))
 }
 
 /// What `command` in `cwd` is for the adapter: `Some(Ok(Some(args)))` for `xcodebuild` itself,
 /// `Some(Ok(None))` for a wrapper, `Some(Err(why))` for one it can't observe.
-pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>, String>> {
+pub fn recognize_command(
+    command: &[String],
+    cwd: &Path,
+) -> Option<Result<Option<Vec<String>>, String>> {
     let first = command.first()?;
     let name = program_name(first);
     let tests_in = |words: &[String]| parse(words).tests();
@@ -421,6 +428,17 @@ impl Adapter for Recognized {
             unit: true,
             reads: false,
         }
+    }
+
+    // \[C-146\] `not_by_test` and `not_watched` are the trait's defaults, written out: a call on
+    // this type then names this impl's own method, which the static test map follows to it alone
+    // (CONTRIBUTING.md, "Which tests CI runs again").
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
