@@ -1096,6 +1096,14 @@ impl Adapter for Recognized {
         KeysOutside::None
     }
 
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
+    }
+
     fn start_variables(&self, _: &Path) -> Vec<(String, Option<OsString>)> {
         Vec::new()
     }

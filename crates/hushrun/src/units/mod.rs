@@ -27,6 +27,7 @@
 pub mod adapter;
 pub mod bats;
 pub mod cargo;
+pub mod cargo_map;
 pub mod command;
 pub mod ctest;
 pub mod db;
@@ -117,6 +118,10 @@ pub struct Profile {
     pub binds: bool,
     /// [`Adapter::keys`].
     pub keys: adapter::KeysOutside,
+    /// \[C-146\] [`Adapter::not_by_test`].
+    pub not_by_test: Option<&'static str>,
+    /// \[C-146\] [`Adapter::not_watched`].
+    pub not_watched: Option<&'static str>,
 }
 
 impl Profile {
@@ -130,6 +135,8 @@ impl Profile {
             hints: adapter.hints(),
             binds: adapter.binds(),
             keys: adapter.keys(),
+            not_by_test: adapter.not_by_test(),
+            not_watched: adapter.not_watched(),
         }
     }
 }
@@ -189,8 +196,15 @@ fn what_it_reuses(tests: &Tests, profile: &Profile) -> (Unit, Reads, Vec<String>
         Unit::Test if knows.unit => Unit::Test,
         Unit::Test => {
             notes.push(format!(
-                "its tests are reused by {}: {}'s tests can't be reused one by one yet",
-                profile.test_file, profile.runner
+                "its tests are reused by {}: {}",
+                profile.test_file,
+                profile
+                    .not_by_test
+                    .map(String::from)
+                    .unwrap_or_else(|| format!(
+                        "{}'s tests can't be reused one by one yet",
+                        profile.runner
+                    ))
             ));
             Unit::File
         }
@@ -200,9 +214,14 @@ fn what_it_reuses(tests: &Tests, profile: &Profile) -> (Unit, Reads, Vec<String>
         Reads::Test if unit == Unit::Test && knows.reads => Reads::Test,
         Reads::Test if unit == Unit::Test => {
             notes.push(format!(
-                "each test is taken to have read what its {} read: {} can't be watched test by test yet",
-                profile.test_file,
-                profile.runner
+                "each test is taken to have read {}",
+                profile
+                    .not_watched
+                    .map(String::from)
+                    .unwrap_or_else(|| format!(
+                        "what its {} read: {} can't be watched test by test yet",
+                        profile.test_file, profile.runner
+                    ))
             ));
             Reads::File
         }
@@ -328,6 +347,8 @@ struct TestsAt<'a> {
     keyer: &'a Keyer<'a>,
     /// \[C-40\] What a test is taken to have read in this run.
     reads: Reads,
+    /// \[C-146\] Each test's own list, by its adapter's map.
+    test_lists: &'a adapter::TestLists,
     tree: &'a Tree,
     keyed: &'a Keyed,
     map: &'a store::Map,
@@ -355,6 +376,7 @@ fn tests_known(
     map: &store::Map,
     hints: &Shared,
     tree: &Tree,
+    mapped: Option<&BTreeMap<String, Result<BTreeSet<String>, String>>>,
 ) -> BTreeMap<String, Vec<shared::TestList>> {
     let rows = map.units.get(unit).map(|mapped| &mapped.tests);
     let mut ids: BTreeSet<&str> = hints.test_ids(unit);
@@ -370,11 +392,45 @@ fn tests_known(
             if row.is_some_and(|row| row.state == State::NotObserved) {
                 return (id.to_string(), Vec::new());
             }
+            // \[C-146\] One its adapter maps: that list alone, with what its test file's keys
+            // hold of what isn't a file; one it can't, its test file's.
+            if let Some(mapped) = mapped {
+                return (id.to_string(), mapped_lists(mapped.get(id), file_lists));
+            }
             let seen = hints.test_seen(unit, id);
             let lists = shared::test_lists(reads, file_lists, row, &seen, tree);
             (id.to_string(), lists)
         })
         .collect()
+}
+
+/// \[C-146\] The lists of a test its adapter maps (`mapped`): the files the map says it reads, with
+/// the `outside` its test file's lists hold, as its own list; when the map says why not, or has
+/// nothing of it, its test file's lists. A test's key is never made of fewer files than its map
+/// gives, and never holds less of what isn't a file than its test file's.
+fn mapped_lists(
+    mapped: Option<&Result<BTreeSet<String>, String>>,
+    file_lists: &[List],
+) -> Vec<shared::TestList> {
+    match (mapped, file_lists.first()) {
+        (Some(Ok(reads)), Some(file)) => vec![shared::TestList {
+            list: List {
+                files: reads.clone(),
+                reads: reads.clone(),
+                dirs: BTreeSet::new(),
+                outside: file.outside,
+                from: shared::From::Build,
+            },
+            own: true,
+        }],
+        _ => file_lists
+            .iter()
+            .map(|list| shared::TestList {
+                list: list.clone(),
+                own: false,
+            })
+            .collect(),
+    }
 }
 
 /// \[C-39, ADR 0080\] The second tier of a plan (RFC 0004 §3.3): for each test file the first tier
@@ -386,7 +442,15 @@ fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
     let mut asked_of: BTreeMap<&String, BTreeMap<String, Vec<shared::TestList>>> = BTreeMap::new();
     for (unit, lists) in at.keyed {
         let file_lists: Vec<List> = lists.iter().map(|(_, list)| list.clone()).collect();
-        let known = tests_known(at.reads, unit, &file_lists, at.map, at.shared, at.tree);
+        let known = tests_known(
+            at.reads,
+            unit,
+            &file_lists,
+            at.map,
+            at.shared,
+            at.tree,
+            at.test_lists.get(unit.as_str()),
+        );
         if !known.is_empty() {
             asked_of.insert(unit, known);
         }
@@ -955,6 +1019,7 @@ impl Observer {
             ignore: &self.tests.ignore,
             compile_env: &self.compile_env,
             assigned: &self.assigned,
+            by_test: self.unit == Unit::Test,
         }
     }
 
@@ -980,6 +1045,8 @@ impl Observer {
             received,
             extras,
             bound,
+            test_lists,
+            notes: adapter_notes,
         } = planning;
         let keyer = Keyer::new(input.tree, &sets, &input.base, self.profile.keys);
         let total = known.len();
@@ -1055,7 +1122,11 @@ impl Observer {
         }
         let check = &input.base.check;
         // \[C-39\] The second tier: the tests of each test file whose own key didn't pass.
-        let mut notes = Vec::new();
+        // \[C-152\] First what the adapter couldn't do, once.
+        let mut notes: Vec<String> = adapter_notes
+            .iter()
+            .map(|note| format!("{check}: {note}"))
+            .collect();
         let tested = match self.unit {
             Unit::Test => {
                 let fetched = asker
@@ -1065,6 +1136,7 @@ impl Observer {
                 match plan_tests(&TestsAt {
                     keyer: &keyer,
                     reads: self.reads,
+                    test_lists: &test_lists,
                     tree: input.tree,
                     keyed: &keyed,
                     map: &map,
@@ -1102,6 +1174,22 @@ impl Observer {
             }
             Unit::File => PlannedTests::default(),
         };
+        // \[C-146\] A binary some of whose tests are left out one by one is left as the bytes
+        // whose build the tests' keys hold, as one reused whole is.
+        let mut test_binaries = Vec::new();
+        if self.profile.binds {
+            for unit in tested.listed().keys() {
+                if let Some(path) = bound.get(unit)
+                    && let Ok(bytes) = std::fs::read(path)
+                {
+                    test_binaries.push(facts::Binary {
+                        unit: unit.clone(),
+                        path: path.clone(),
+                        sha256: Digest::of(&bytes).hex(),
+                    });
+                }
+            }
+        }
         if let Err(err) = write_run_file(
             &self.run_dir,
             &self.root,
@@ -1109,6 +1197,7 @@ impl Observer {
                 reuse: reuse.iter().cloned().collect(),
                 extras,
                 binaries,
+                test_binaries,
                 unit: self.unit,
                 reads: self.reads,
                 reuse_tests: tested.listed(),
@@ -1451,6 +1540,7 @@ impl Observer {
             asker,
             ignore: &self.tests.ignore,
             assigned: &self.assigned,
+            by_test: self.unit == Unit::Test,
         }
     }
 
@@ -1534,6 +1624,7 @@ impl Observer {
             reuse: others,
             extras,
             binaries,
+            test_binaries: Vec::new(),
             unit: self.unit,
             reads: self.reads,
             reuse_tests,
@@ -1702,6 +1793,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
             ignore: &p.tests.ignore,
             compile_env: &[],
             assigned: &command::assignments(p.command),
+            by_test: false,
         })
         .ok()??;
     let total = found.known.len();
@@ -1745,6 +1837,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
             let tested = plan_tests(&TestsAt {
                 keyer: &keyer,
                 reads,
+                test_lists: &adapter::TestLists::new(),
                 tree: p.tree,
                 keyed: &keyed,
                 map: &map,
@@ -1913,6 +2006,8 @@ struct Listed {
     extras: RunExtras,
     /// \[ADR 0069\] The reused test binaries.
     binaries: Vec<facts::Binary>,
+    /// \[C-146\] The test binaries some of whose tests `reuse_tests` lists.
+    test_binaries: Vec<facts::Binary>,
     /// \[ADR 0080\] What the run reuses one by one, and what a test is taken to have read.
     unit: Unit,
     reads: Reads,
@@ -1931,6 +2026,7 @@ fn write_run_file(dir: &Path, root: &Path, listed: &Listed) -> std::io::Result<(
         reuse: listed.reuse.clone(),
         python_files: listed.extras.python_files.clone(),
         binaries: listed.binaries.clone(),
+        test_binaries: listed.test_binaries.clone(),
         test_files: listed.extras.test_files.clone(),
         unit: Some(listed.unit.word().to_string()),
         reads: Some(listed.reads.word().to_string()),
@@ -2690,6 +2786,9 @@ fn decide(
         left_out: _,
         stale_build: _,
         not_kept: _,
+        test_lists,
+        notes: adapter_notes,
+        trusted,
     } = read;
     let mut seen = seen;
     // \[C-39, C-10\] A test file reused whole whose adapter told none of its tests (it left the
@@ -2763,6 +2862,12 @@ fn decide(
         ));
     }
     let check = &end.base.check;
+    // \[C-152\] What the adapter couldn't do, once: a plan said it before COMMAND.
+    if !matches!(how, How::Plan(_)) {
+        for note in &adapter_notes {
+            out.lines.push(format!("{check}: {note}"));
+        }
+    }
     // \[C-39\] Tests one by one: with `unit: test`, for the test files whose adapter told their
     // tests, up to the limit; past it, this run reuses by test file, and `observe` says so.
     let reported: usize = seen
@@ -2828,8 +2933,14 @@ fn decide(
                     let file_lists: Vec<List> =
                         lists.iter().map(|(_, list)| list.clone()).collect();
                     let before = map.units.get(unit);
+                    let mapped = test_lists.get(unit.as_str());
                     told.keys()
                         .map(|id| {
+                            // \[C-146\] One its adapter maps: as a plan keys it.
+                            if let Some(mapped) = mapped {
+                                let lists = mapped_lists(mapped.get(id), &file_lists);
+                                return (unit.clone(), id.clone(), lists);
+                            }
                             let row = before.and_then(|m| m.tests.get(id));
                             let seen = mode.shared.test_seen(unit, id);
                             let lists =
@@ -3088,7 +3199,10 @@ fn decide(
             )
         };
         // What a test's key holds: its own list, with every file now below a directory it
-        // listed, or its test file's.
+        // listed, or its test file's. \[C-146\] One its adapter maps: the files the map gives.
+        let mapped = test_lists.get(unit.as_str());
+        let mapped_files =
+            |id: &str| -> Option<BTreeSet<String>> { mapped?.get(id)?.as_ref().ok().cloned() };
         let test_files = |list: &units::TestList| {
             if list.own {
                 let mut files = list.files.clone();
@@ -3101,16 +3215,17 @@ fn decide(
         // \[C-39\] Two tiers: a test file that passed whole records its own pass, and nothing more
         // with `reads: file`, \[C-40\] and each test's with `reads: test`; one that didn't run
         // whole, or didn't pass whole, records each test that ran under the test's own key.
-        if state != State::Passed || mode.reads == Reads::Test {
+        // \[C-146\] A test file whose adapter maps its tests records each test's own pass too: a
+        // later change outside what it reads leaves it reusable.
+        if state != State::Passed || mode.reads == Reads::Test || mapped.is_some() {
             for (id, (test, _)) in decisions.iter().flatten() {
                 // \[C-39\] One its adapter never leaves out records no pass of its own: no plan
                 // finds one to list it by, and it runs, as it would. A fail still counts.
                 let Some(passed) = test.recorded() else {
                     continue;
                 };
-                let Some(key) =
-                    keyer.test_key(unit, id, &test_files(&test_list(id)), &seen.outside)
-                else {
+                let files = mapped_files(id).unwrap_or_else(|| test_files(&test_list(id)));
+                let Some(key) = keyer.test_key(unit, id, &files, &seen.outside) else {
                     continue;
                 };
                 let duration_ms = seen
@@ -3166,16 +3281,26 @@ fn decide(
                                 not_followed: BTreeSet::new(),
                                 not_kept: None,
                                 list,
+                                trusted: None,
                             },
                         ));
                     }
                     let told = seen.tests.as_ref()?.get(id)?;
                     // \[C-40\] With `reads: test`, its own list, which the next plan keys it by.
-                    let list = test_list(id);
-                    let list = list.own.then(|| store::TestListRow {
-                        reads: entries(sets, tree, &list.files),
-                        dirs: list.dirs.clone(),
-                    });
+                    // \[C-146\] One its adapter maps: the map's, which `hushrun why` reads.
+                    let list = match mapped_files(id) {
+                        Some(files) => Some(store::TestListRow {
+                            reads: entries(sets, tree, &files),
+                            dirs: BTreeSet::new(),
+                        }),
+                        None => {
+                            let list = test_list(id);
+                            list.own.then(|| store::TestListRow {
+                                reads: entries(sets, tree, &list.files),
+                                dirs: list.dirs.clone(),
+                            })
+                        }
+                    };
                     Some((
                         id.clone(),
                         store::TestRow {
@@ -3190,6 +3315,7 @@ fn decide(
                                 &mode.words,
                             ),
                             list,
+                            trusted: trusted.get(unit.as_str()).and_then(|t| t.get(id)).cloned(),
                         },
                     ))
                 })
