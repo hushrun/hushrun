@@ -31,8 +31,7 @@ use hushrun_core::digest::Digest;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources};
 
 use super::adapter::{
-    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
-    WhyAt,
+    Adapter, Hints, KeysOutside, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
 use super::facts::{FactsFile, Invocation};
 use super::runner;
@@ -1880,16 +1879,6 @@ impl Adapter for Recognized {
             "doctest crate"
         } else {
             "test binary"
-        }
-    }
-
-    // `tests` is the trait's default, written out: a call on this type then names this impl's
-    // own method, which the static test map follows to it alone, where the trait's would count
-    // every adapter that overrides it (CONTRIBUTING.md, "Which tests CI runs again").
-    fn tests(&self) -> KnowsTests {
-        KnowsTests {
-            unit: false,
-            reads: false,
         }
     }
 
