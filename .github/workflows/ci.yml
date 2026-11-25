@@ -366,6 +366,9 @@ jobs:
       # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
+      # Swift (ADR 0121): the runner's own Xcode for the tests of the xcodebuild test adapter.
+      - name: Name Xcode for the xcodebuild test-target tests
+        run: echo "HUSHRUN_TEST_XCODEBUILD=$(command -v xcodebuild)" >> "$GITHUB_ENV"
       # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
       # offline against a local repository: filled here once by running those tests online.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
