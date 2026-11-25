@@ -27,10 +27,10 @@ use hushrun_core::glob::Pattern;
 use hushrun_core::hints::{self, Key, Os};
 use hushrun_core::units::{self, KeyBase, Set, Sets, Sources, Tree};
 
-use super::MOST_UNITS;
 use super::adapter::Hints;
 use super::db::{HintHow, HintKnown};
 use super::store::{Found, HintPlace, Lookup, Mapped, Origin, UnitResults};
+use super::{MOST_UNITS, getenv};
 use crate::results::RunResult;
 
 /// The most lists a test file's key is computed from.
@@ -278,7 +278,7 @@ pub fn lists(
     shared: &Shared,
     tree: &Tree,
     compiled: Option<&BTreeSet<String>>,
-    getenv: Option<&super::getenv::Getenv>,
+    getenv: Option<&getenv::Getenv>,
 ) -> Option<Vec<List>> {
     let none = BTreeSet::new();
     let make = |reads: &BTreeSet<String>,

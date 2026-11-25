@@ -288,7 +288,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
         let dirs = listed.remove(&unit).unwrap_or_default();
         let mut reads = m.reads;
         reads.insert(unit.clone());
-        reads.extend(super::gotest::under(tree, &dirs));
+        reads.extend(super::shared::under(tree, &dirs));
         reads.retain(|p| tree.contains(p));
         let not_followed: BTreeSet<NotFollowed> = m.not_followed;
         out.dirs.insert(unit.clone(), dirs);

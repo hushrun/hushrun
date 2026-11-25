@@ -240,7 +240,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Observed, String> {
         reads.insert(unit.clone());
         reads.extend(seen.reads);
         let dirs = listed.get(&unit).cloned().unwrap_or_default();
-        reads.extend(super::gotest::under(tree, &dirs));
+        reads.extend(super::shared::under(tree, &dirs));
         reads.retain(|p| tree.contains(p));
         let not_followed: BTreeSet<NotFollowed> = seen.not_followed;
         out.dirs.insert(unit.clone(), dirs);

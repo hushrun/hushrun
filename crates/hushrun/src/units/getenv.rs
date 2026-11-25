@@ -1,6 +1,8 @@
-//! \[ADR 0096\] The environment a unit's key holds what its tests read of (C-31's `env`): Go's
-//! today ([`super::adapter::KeysOutside::Getenv`]). The code every adapter shares keys a list by
-//! it (`shared::lists`), so it is a file of its own, not Go's adapter's.
+//! \[ADR 0096\] The environment a unit's key holds what it read of (C-31's `env`): Go's
+//! packages' `getenv`, which a plan, the record after COMMAND and `hushrun why` key by, and
+//! which [`super::shared::lists`] takes for every adapter. Apart from `gotest.rs`, so that the
+//! code every adapter shares reaches no adapter's file (CONTRIBUTING.md, "Which tests CI runs
+//! again").
 
 use std::collections::BTreeSet;
 use std::path::Path;

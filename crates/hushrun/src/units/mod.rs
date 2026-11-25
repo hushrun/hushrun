@@ -56,6 +56,7 @@ pub mod testprogram;
 pub mod unittest;
 pub mod vitest;
 pub mod why;
+pub mod words;
 pub mod xcodebuild;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,7 +70,6 @@ use hushrun_core::units::{
     self, Decision, Facts, KeyBase, Mode, Reads, RunFacts, Set, State, Tests, Tree, Unit,
 };
 
-use crate::cmd::usage;
 use crate::results::RunResult;
 use adapter::{Adapter, Hints, Known, PlanAt, Read, ReadAt, RunExtras, StartAt};
 use shared::{Asker, Choice, List, Shared};
@@ -253,7 +253,7 @@ struct TestPassed {
 struct PlannedTests {
     passed: BTreeMap<String, TestPassed>,
     audited: BTreeSet<String>,
-    /// \[C-46\] Tests a JUnit 4 task wouldn't leave out though they could be ([`gradle::left_in`]):
+    /// \[C-46\] Tests a JUnit 4 task wouldn't leave out though they could be ([`store::left_in`]):
     /// not listed, so counted as running.
     left_in: BTreeSet<String>,
     /// \[C-34\] The tests, by name, of each test file the first tier could reuse whole that holds
@@ -702,11 +702,11 @@ fn tests_line(
             audited.iter().map(|unit| tests_of(unit)).sum::<usize>() + tested.audited.len();
         let mut line = format!(
             "{check}: {} of {} run, in {} of {}; {} already passed on the files {} read",
-            usage::thousands((total - reused) as u64),
+            words::thousands((total - reused) as u64),
             count_tests(total as u64),
-            usage::thousands(files_run),
+            words::thousands(files_run),
             test_files_grouped(files_total, noun),
-            usage::thousands(reused as u64),
+            words::thousands(reused as u64),
             if reused == 1 { "it" } else { "they" },
         );
         more(&mut line, checked);
@@ -714,9 +714,9 @@ fn tests_line(
     }
     let mut line = format!(
         "{check}: {} of {} run; {} already passed on the files {} read",
-        usage::thousands(files_run),
+        words::thousands(files_run),
         test_files_grouped(files_total, noun),
-        usage::thousands((reuse.len() + one_by_one) as u64),
+        words::thousands((reuse.len() + one_by_one) as u64),
         if reuse.len() + one_by_one == 1 {
             "it"
         } else {
@@ -726,9 +726,9 @@ fn tests_line(
     if one_by_one > 0 {
         line = format!(
             "{check}: {} of {} run; {} already passed on the files {} read, and so did {} of the others",
-            usage::thousands(files_run),
+            words::thousands(files_run),
             test_files_grouped(files_total, noun),
-            usage::thousands(reuse.len() as u64),
+            words::thousands(reuse.len() as u64),
             if reuse.len() == 1 { "it" } else { "they" },
             count_tests(one_by_one as u64),
         );
@@ -1092,8 +1092,8 @@ impl Observer {
                         audited = file_audited.clone();
                         notes.push(format!(
                             "{check}: its tests are reused by test file in this run: it has {} tests, more than the {} this version reuses one by one",
-                            usage::thousands(n as u64),
-                            usage::thousands(MOST_TESTS as u64)
+                            words::thousands(n as u64),
+                            words::thousands(MOST_TESTS as u64)
                         ));
                         PlannedTests::default()
                     }
@@ -1798,7 +1798,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
 pub fn previewed_line(previewed: &Previewed, label: &str, here: bool) -> String {
     let who = if here { "a run here would" } else { "CI would" };
     let passed = if here { "passed here" } else { "passed" };
-    let n = |n: usize| usage::thousands(n as u64);
+    let n = |n: usize| words::thousands(n as u64);
     match previewed {
         Previewed::Suspended(why) => format!("{label}: every test file runs: {why}"),
         Previewed::Plan {
@@ -2454,7 +2454,7 @@ fn whole_reusable(map: &store::Map, test_file: &str) -> bool {
 fn test_files_grouped(n: u64, noun: &str) -> String {
     match n {
         1 => format!("1 {noun}"),
-        n => format!("{} {}", usage::thousands(n), plural(noun)),
+        n => format!("{} {}", words::thousands(n), plural(noun)),
     }
 }
 
@@ -2473,11 +2473,11 @@ fn saving(saved_ms: u64, whole_ms: Option<u64>) -> Option<u64> {
 fn checked_apart(files: usize, tests: usize, noun: &str) -> String {
     let files_said = match files {
         1 => format!("1 more {noun}"),
-        n => format!("{} more {}", usage::thousands(n as u64), plural(noun)),
+        n => format!("{} more {}", words::thousands(n as u64), plural(noun)),
     };
     let tests_said = match tests {
         1 => "1 more test".to_string(),
-        n => format!("{} more tests", usage::thousands(n as u64)),
+        n => format!("{} more tests", words::thousands(n as u64)),
     };
     let what = match (files, tests) {
         (0, 0) => return String::new(),
@@ -2497,7 +2497,7 @@ fn checked_too(n: usize) -> String {
         1 => ", and 1 more that already passed runs anyway, as a check".into(),
         n => format!(
             ", and {} more that already passed run anyway, as a check",
-            usage::thousands(n as u64)
+            words::thousands(n as u64)
         ),
     }
 }
@@ -2511,7 +2511,7 @@ fn checked_only(n: usize) -> String {
     } else {
         format!(
             "{} that already passed on the files they read run anyway, as a check",
-            usage::thousands(n as u64)
+            words::thousands(n as u64)
         )
     }
 }
@@ -2520,7 +2520,7 @@ fn checked_only(n: usize) -> String {
 fn count_tests(n: u64) -> String {
     match n {
         1 => "1 test".into(),
-        n => format!("{} tests", usage::thousands(n)),
+        n => format!("{} tests", words::thousands(n)),
     }
 }
 
@@ -2788,8 +2788,8 @@ fn decide(
     if unit_mode == Unit::Test && !by_test && matches!(how, How::Observe) {
         out.lines.push(format!(
             "{check}: its tests are reused by test file in this run: it has {} tests, more than the {} this version reuses one by one",
-            usage::thousands(reported as u64),
-            usage::thousands(MOST_TESTS as u64)
+            words::thousands(reported as u64),
+            words::thousands(MOST_TESTS as u64)
         ));
     }
     // What the plan would have done, in `observe`: from what was recorded before this run, a unit
@@ -3283,7 +3283,7 @@ fn decide(
     if counts.total > 0 && matches!(how, How::Observe) {
         let would_run = counts.total - reused;
         let saving = match saving(saved_ms, map.whole_ms) {
-            Some(ms) if ms >= 1000 => format!(", saving about {}", crate::cmd::wrap::took(ms)),
+            Some(ms) if ms >= 1000 => format!(", saving about {}", words::took(ms)),
             _ => String::new(),
         };
         // \[C-39\] Tests that would have been reused: those of the test files reused whole, and
@@ -3317,11 +3317,11 @@ fn decide(
                     .count() as u64;
             format!(
                 "{check}: with `tests: reuse`, {} of {} would have run, in {} of {}; {} already passed on the files {}{saving}",
-                usage::thousands(test_counts.total - tests_reused),
+                words::thousands(test_counts.total - tests_reused),
                 count_tests(test_counts.total),
-                usage::thousands(files_run),
+                words::thousands(files_run),
                 test_files_grouped(counts.total, mode.noun),
-                usage::thousands(tests_reused),
+                words::thousands(tests_reused),
                 if tests_reused == 1 {
                     "it read"
                 } else {

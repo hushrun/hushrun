@@ -33,9 +33,9 @@ use super::adapter::{
     Adapter, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
 use super::facts::{FactsFile, Invocation};
-pub use super::getenv::{ALWAYS_READ, Getenv};
+use super::getenv::Getenv;
 use super::runner;
-pub use super::shared::under;
+use super::shared::under;
 
 /// The adapter's name in a facts file.
 pub const ADAPTER: &str = "go";
@@ -50,7 +50,6 @@ pub const GOFLAGS_WAS: &str = "HUSHRUN_GOFLAGS";
 const LIST_BUDGET: Duration = Duration::from_secs(120);
 /// The most lines of a test log hushrun reads: past it, the package is `not observed`.
 pub const MOST_LOG_LINES: usize = 200_000;
-
 /// COMMAND, when it is `go test …` in a form hushrun reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recognized {
