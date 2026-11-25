@@ -3,6 +3,12 @@
 //! opened when its last test ended, but other test files it doesn't name; each test is told on
 //! its own and left out of the suite PHPUnit runs; and reuse never misses a failure.
 //!
+//! In-process (CONTRIBUTING.md, "Which tests CI runs again"): each test runs a check as `hushrun
+//! run unit -- vendor/bin/phpunit` would, through the PHPUnit adapter's own type,
+//! `phpunit::Recognized`, and the code every adapter shares, and never starts the `hushrun`
+//! binary (`common/in_process.rs`). PHP itself runs as COMMAND, for real. What only the CLI shows
+//! of it (the run's last line, the check's skip, `hushrun why`) is in `e2e_phpunit.rs`.
+//!
 //! The fixtures need PHP 8.3 and Composer's `vendor` of each runner, installed outside the
 //! repository: PHPUnit 10, 11 and 12 in the directories `HUSHRUN_TEST_PHPUNIT10`,
 //! `HUSHRUN_TEST_PHPUNIT11` and `HUSHRUN_TEST_PHPUNIT12` name, and Pest 3 and 4 in those
@@ -11,415 +17,147 @@
 //! and passes where all are missing, unless `HUSHRUN_TEST_TOOLS=required` (and `HUSHRUN_TEST_PHP`
 //! isn't `skip`), which needs them all.
 
+#[path = "common/in_process.rs"]
+mod in_process;
+#[path = "common/phpunit.rs"]
+mod php;
+#[path = "common/repo.rs"]
+mod repo;
 #[path = "common/store.rs"]
 mod store;
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
 use std::process::Command;
 
-use hushrun_testkit::git;
-use serde_json::{Value, json};
+use hushrun::units::adapter::Adapter as _;
+use hushrun::units::{Profile, phpunit};
+use serde_json::json;
 
-const CLEARED: &[&str] = &[
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "BUILDKITE",
-    "CIRCLECI",
-    "ACTIONS_ID_TOKEN_REQUEST_URL",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "HUSHRUN_AGENT",
-    "HUSHRUN_BACKEND",
-    "HUSHRUN_TOKEN",
-    "HUSHRUN_CONFIG",
-    "HUSHRUN_FORMAT",
-    "HUSHRUN_PROVIDER",
-    "HUSHRUN_INSIDE_RUN",
-    "HUSHRUN_UNITS",
-    "HUSHRUN_PHP_PREPEND",
-    "HUSHRUN_PHPUNIT_BOOTSTRAP",
-    "PHP_INI_SCAN_DIR",
-    "HUSHRUN_INVOKED_BY",
-    "HUSHRUN_REPORTS_READ",
-    "XDEBUG_MODE",
-    "AI_AGENT",
-    "CLAUDECODE",
-    "CLAUDE_CODE",
-    "CODEX_SANDBOX",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "OPENCODE",
-    "OPENCODE_CLIENT",
-    "CURSOR_AGENT",
-    "CURSOR_EXTENSION_HOST_ROLE",
-    "GEMINI_CLI",
-    "AUGMENT_AGENT",
-    "ANTIGRAVITY_AGENT",
-    "COPILOT_MODEL",
-    "COPILOT_ALLOW_ALL",
-    "COPILOT_GITHUB_TOKEN",
-    "HUSHRUN_BUILD",
-    "HUSHRUN_BUILD_KEEP_DAYS",
-    "HUSHRUN_BUILD_DIR",
-    "HUSHRUN_BUILD_SESSION",
-    "HUSHRUN_CC",
-    "RUSTC_WRAPPER",
-];
+use in_process::{Ran, Repo};
+use php::*;
 
-const NO_HOST: &str = "http://127.0.0.1:9";
+/// `vendor/bin/phpunit`, the COMMAND most tests run.
+const PHPUNIT: &[&str] = &["vendor/bin/phpunit"];
 
-/// One runner these tests run on: PHPUnit's or Pest's major and its Composer `vendor`.
-#[derive(Clone)]
-struct Runner {
-    pest: bool,
-    major: u32,
-    vendor: PathBuf,
-}
-
-impl Runner {
-    fn name(&self) -> String {
-        format!(
-            "{} {}",
-            if self.pest { "Pest" } else { "PHPUnit" },
-            self.major
-        )
+/// What the PHPUnit adapter answers that never changes in a run, for the code every adapter
+/// shares.
+fn profile(adapter: &phpunit::Recognized) -> Profile {
+    Profile {
+        word: adapter.word(),
+        runner: adapter.runner(),
+        test_file: adapter.test_file(),
+        tests: adapter.tests(),
+        hints: adapter.hints(),
+        binds: adapter.binds(),
+        keys: adapter.keys(),
+        not_by_test: adapter.not_by_test(),
+        not_watched: adapter.not_watched(),
     }
 }
 
-/// The `vendor` a variable names, when it holds `package` of `major`.
-fn runner_in(variable: &str, package: &str, pest: bool, major: u32) -> Option<Runner> {
-    let vendor = PathBuf::from(std::env::var_os(variable)?);
-    let installed = std::fs::read(vendor.join("composer/installed.json")).ok()?;
-    let installed: Value = serde_json::from_slice(&installed).ok()?;
-    let version = installed["packages"]
-        .as_array()?
-        .iter()
-        .find(|p| p["name"] == package)?["version"]
-        .as_str()?
-        .trim_start_matches('v')
-        .to_string();
-    version.starts_with(&format!("{major}.")).then_some(Runner {
-        pest,
-        major,
-        vendor,
-    })
-}
-
-fn has_php() -> bool {
-    Command::new("php")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-fn required(what: &str, found: usize, wanted: usize) {
-    let required = std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required")
-        && std::env::var("HUSHRUN_TEST_PHP").as_deref() != Ok("skip");
-    if required && found < wanted {
-        panic!("PHP with {what} is missing, and HUSHRUN_TEST_TOOLS=required");
+/// `hushrun run unit -- ARGS`, with `env` besides, in-process, through the PHPUnit adapter alone.
+fn run(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
+    let command: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // As `units::adapter::choose_kept` comes to the PHPUnit adapter (`phpunit::recognized`), with
+    // no trait object: what COMMAND is, and whether the PHPUnit or Pest installed is one it knows.
+    let adapter = match phpunit::recognize(hushrun::units::command::without_env(&command), &r.repo)
+    {
+        Some(Ok(adapter)) => adapter,
+        Some(Err(why)) => return in_process::Run::new(r, "unit", args, env).unobserved(&why),
+        None => panic!("{args:?} starts neither PHPUnit nor Pest"),
+    };
+    if let Some(why) = phpunit::unloadable(&adapter, &r.repo) {
+        return in_process::Run::new(r, "unit", args, env).unobserved(&why);
     }
-    if found == 0 {
-        eprintln!(
-            "note: skipping: PHP with {what} is missing (HUSHRUN_TEST_TOOLS=required makes this fail)"
-        );
-    }
+    observe(r, args, env, &adapter)
 }
 
-/// Every PHPUnit this machine has for these tests.
-fn phpunits() -> Vec<Runner> {
-    let found: Vec<Runner> = [10, 11, 12]
-        .iter()
-        .filter_map(|major| {
-            runner_in(
-                &format!("HUSHRUN_TEST_PHPUNIT{major}"),
-                "phpunit/phpunit",
-                false,
-                *major,
-            )
-        })
-        .filter(|_| has_php())
-        .collect();
-    required(
-        "PHPUnit 10, 11 and 12 (HUSHRUN_TEST_PHPUNIT10, 11, 12)",
-        found.len(),
-        3,
-    );
-    found
-}
-
-/// Every Pest this machine has for these tests.
-fn pests() -> Vec<Runner> {
-    let found: Vec<Runner> = [3, 4]
-        .iter()
-        .filter_map(|major| {
-            runner_in(
-                &format!("HUSHRUN_TEST_PEST{major}"),
-                "pestphp/pest",
-                true,
-                *major,
-            )
-        })
-        .filter(|_| has_php())
-        .collect();
-    required("Pest 3 and 4 (HUSHRUN_TEST_PEST3, 4)", found.len(), 2);
-    found
-}
-
-/// `from`'s files below `to`, each linked where it can be and copied where it can't: Pest finds
-/// the project by the real path of its own program, so its `vendor` can't be a link.
-fn link_tree(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).expect("mkdir");
-    for entry in std::fs::read_dir(from).expect("read_dir").flatten() {
-        let path = entry.path();
-        let target = to.join(entry.file_name());
-        let kind = entry.file_type().expect("file type");
-        if kind.is_dir() {
-            link_tree(&path, &target);
-        } else if kind.is_symlink() {
-            let link = std::fs::read_link(&path).expect("read_link");
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&link, &target).expect("symlink");
-            #[cfg(windows)]
-            std::fs::copy(path.parent().unwrap().join(link), &target).expect("copy");
-        } else if std::fs::hard_link(&path, &target).is_err() {
-            std::fs::copy(&path, &target).expect("copy");
-        }
-    }
-}
-
-struct Repo {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    repo: PathBuf,
-    cache: PathBuf,
-}
-
-impl Repo {
-    fn new(runner: &Runner, files: &[(String, String)]) -> Repo {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("real path");
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("mkdir");
-        git::init(&repo, "sha1");
-        let r = Repo {
-            _dir: dir,
-            cache: root.join("cache"),
-            root,
-            repo,
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order. Every call is on `phpunit::Recognized` itself, which the static map resolves to its
+/// own `impl Adapter`; through a trait object or a generic it would reach every adapter
+/// (CONTRIBUTING.md, "Which tests CI runs again"). Another adapter's test file copies this
+/// function and changes the type.
+fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &phpunit::Recognized) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // PHPUnit's adapter keeps the trait's `plan`, which is its `plan_from_files`.
+            Ok(context) => {
+                let planning = adapter.plan_from_files(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
         };
-        for (path, text) in files {
-            r.write(path, text);
-        }
-        // The runner as installed outside the repository, which git ignores.
-        if runner.pest {
-            link_tree(&runner.vendor, &r.repo.join("vendor"));
-        } else {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&runner.vendor, r.repo.join("vendor")).expect("symlink");
-            #[cfg(windows)]
-            std::os::windows::fs::symlink_dir(&runner.vendor, r.repo.join("vendor")).expect("link");
-        }
-        git::commit_all(&r.repo, "init");
-        r
+        drop(input);
+        run.planned(&observer, planned);
     }
-
-    fn write(&self, path: &str, text: &str) {
-        let path = self.repo.join(path);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, text).expect("write");
-    }
-
-    fn clean(cmd: &mut Command) {
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        hushrun_testkit::env::Hermetic::hermetic(cmd);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("NEXTEST")
-                || (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("CLAUDE")
-                || name.starts_with("COMPOSER")
-            {
-                cmd.env_remove(name.as_ref());
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
             }
         }
+        break (code, observed);
+    };
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
+            }
+            None => in_process::Run::not_again(&wanted),
+        };
+        run.disagreements(o, ended);
     }
-
-    fn run(&self, args: &[&str]) -> Ran {
-        self.run_env(args, &[])
-    }
-
-    fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
-        cmd.current_dir(&self.repo)
-            .env("HUSHRUN_CACHE_DIR", &self.cache)
-            .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
-            .env("HUSHRUN_HOST", NO_HOST)
-            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
-            .env("HOME", self.root.join("home"))
-            .env("COMPOSER_HOME", self.root.join("composer"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            );
-        Repo::clean(&mut cmd);
-        cmd.env("COMPOSER_HOME", self.root.join("composer"));
-        cmd.env("COMPOSER_ALLOW_SUPERUSER", "1");
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-        let output = cmd.args(args).output().expect("hushrun");
-        Ran {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
-    }
-
-    fn map(&self) -> Value {
-        store::map(&self.cache)
-    }
-
-    fn reads(&self, unit: &str) -> Vec<String> {
-        let map = self.map();
-        map["units"][unit]["reads"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{unit} isn't in the map: {map:#}"))
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect()
-    }
-
-    fn tests_of(&self, unit: &str) -> Value {
-        self.map()["units"][unit]["tests"].clone()
-    }
+    run.record(code, observed)
 }
-
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-impl Ran {
-    fn line(&self, start: &str) -> &str {
-        self.stderr
-            .lines()
-            .find(|l| l.starts_with(start))
-            .unwrap_or_else(|| panic!("no line starting {start:?} in:\n{}", self.out()))
-    }
-
-    fn out(&self) -> String {
-        format!("{}\n{}", self.stdout, self.stderr)
-    }
-}
-
-fn file(path: &str, text: &str) -> (String, String) {
-    (path.to_string(), text.to_string())
-}
-
-fn yaml(tests: &str) -> String {
-    format!("version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: {tests}\n")
-}
-
-/// The bootstrap the configuration names: Composer's autoloader, and the shop's classes from
-/// `src/` by their names.
-const BOOTSTRAP: &str = "<?php\nrequire __DIR__ . '/../vendor/autoload.php';\nspl_autoload_register(static function (string $class): void {\n    if (strncmp($class, 'Shop\\\\', 5) === 0) {\n        $file = __DIR__ . '/../src/' . str_replace('\\\\', '/', substr($class, 5)) . '.php';\n        if (is_file($file)) {\n            require $file;\n        }\n    }\n});\n";
-
-const PHPUNIT_XML: &str = "<?xml version=\"1.0\"?>\n<phpunit bootstrap=\"tests/bootstrap.php\" cacheResult=\"false\">\n  <testsuites>\n    <testsuite name=\"all\"><directory>tests</directory></testsuite>\n  </testsuites>\n</phpunit>\n";
-
-fn class(name: &str, body: &str) -> String {
-    format!("<?php\nnamespace Shop;\nfinal class {name}\n{{\n{body}\n}}\n")
-}
-
-fn test_class(namespace: &str, name: &str, body: &str) -> String {
-    format!(
-        "<?php\nnamespace {namespace};\nuse PHPUnit\\Framework\\TestCase;\nfinal class {name} extends TestCase\n{{\n{body}\n}}\n"
-    )
-}
-
-/// A shop: a cart that uses pricing, each with a test file; a greeting with five test files that
-/// read only it; and a test file that opens a PHP file as data.
-fn shop(tests: &str) -> Vec<(String, String)> {
-    let mut files = vec![
-        file("hushrun.yaml", &yaml(tests)),
-        file(".gitignore", "vendor\n.phpunit.cache\n"),
-        file("phpunit.xml", PHPUNIT_XML),
-        file("tests/bootstrap.php", BOOTSTRAP),
-        file(
-            "src/Pricing.php",
-            &class(
-                "Pricing",
-                "    public static function price(int $x): int { return $x * 2; }",
-            ),
-        ),
-        file(
-            "src/Cart.php",
-            &class(
-                "Cart",
-                "    public static function total(array $xs): int { return array_sum(array_map([Pricing::class, 'price'], $xs)); }",
-            ),
-        ),
-        file(
-            "src/Greet.php",
-            &class(
-                "Greet",
-                "    public static function hello(): string { return 'hi'; }",
-            ),
-        ),
-        file("src/template.php", "<?php // Hello, <?= $name ?>\n"),
-        file(
-            "tests/Unit/CartTest.php",
-            &test_class(
-                "Shop\\Tests\\Unit",
-                "CartTest",
-                "    public function testTotal(): void { $this->assertSame(6, \\Shop\\Cart::total([1, 2])); }\n    public static function sums(): array { return ['one' => [[1], 2], [[2], 4]]; }\n    #[\\PHPUnit\\Framework\\Attributes\\DataProvider('sums')]\n    public function testSums(array $xs, int $want): void { $this->assertSame($want, \\Shop\\Cart::total($xs)); }",
-            ),
-        ),
-        file(
-            "tests/Unit/PricingTest.php",
-            &test_class(
-                "Shop\\Tests\\Unit",
-                "PricingTest",
-                "    public function testPrice(): void { $this->assertSame(6, \\Shop\\Pricing::price(3)); }",
-            ),
-        ),
-        file(
-            "tests/Unit/TemplateTest.php",
-            &test_class(
-                "Shop\\Tests\\Unit",
-                "TemplateTest",
-                "    public function testText(): void { $this->assertStringContainsString('Hello', file_get_contents(__DIR__ . '/../../src/template.php')); }",
-            ),
-        ),
-    ];
-    for n in 1..=5 {
-        files.push(file(
-            &format!("tests/Greet/Greet{n}Test.php"),
-            &test_class(
-                "Shop\\Tests\\Greet",
-                &format!("Greet{n}Test"),
-                "    public function testHello(): void { $this->assertSame('hi', \\Shop\\Greet::hello()); }",
-            ),
-        ));
-    }
-    files
-}
-
-const PHPUNIT_RUN: &[&str] = &["run", "unit", "--", "vendor/bin/phpunit"];
 
 // covers: C-30, C-31, C-90, C-92
 #[test]
 fn phpunit_test_files_are_observed_from_what_php_included_and_opened() {
     for runner in phpunits() {
-        let r = Repo::new(&runner, &shop("observe"));
-        let first = r.run(PHPUNIT_RUN);
-        assert_eq!(first.code, 0, "{}: {}", runner.name(), first.out());
+        let r = repo(&runner, &shop("observe"));
+        let first = run(&r, PHPUNIT, &[]);
+        assert_eq!(first.code, 0, "{}: {}", runner.name(), first.said());
         assert_eq!(
-            first.line("hushrun: unit: with"),
-            "hushrun: unit: with `tests: reuse`, all 8 test files would have run: none had passed here yet on the files it read",
+            first.line("unit: with"),
+            "unit: with `tests: reuse`, all 8 test files would have run: none had passed here yet on the files it read",
             "{}",
             runner.name()
         );
@@ -427,7 +165,7 @@ fn phpunit_test_files_are_observed_from_what_php_included_and_opened() {
         // test file reads, and what the greeting's test files, which PHPUnit ran first, loaded;
         // never another test file, which PHPUnit included before any test ran.
         assert_eq!(
-            r.reads("tests/Unit/CartTest.php"),
+            reads(&r, "tests/Unit/CartTest.php"),
             [
                 "src/Cart.php",
                 "src/Greet.php",
@@ -440,11 +178,10 @@ fn phpunit_test_files_are_observed_from_what_php_included_and_opened() {
         );
         // A PHP file opened as data, not included, is read too.
         assert!(
-            r.reads("tests/Unit/TemplateTest.php")
-                .contains(&"src/template.php".to_string()),
+            reads(&r, "tests/Unit/TemplateTest.php").contains(&"src/template.php".to_string()),
             "{}: {:?}",
             runner.name(),
-            r.reads("tests/Unit/TemplateTest.php")
+            reads(&r, "tests/Unit/TemplateTest.php")
         );
         let map = r.map();
         assert_eq!(map["unitFiles"].as_array().unwrap().len(), 8, "{map:#}");
@@ -458,15 +195,15 @@ fn phpunit_test_files_are_observed_from_what_php_included_and_opened() {
                 "    public static function total(array $xs): int { return (int) array_sum(array_map([Pricing::class, 'price'], $xs)); }",
             ),
         );
-        let changed = r.run(PHPUNIT_RUN);
-        assert_eq!(changed.code, 0, "{}", changed.out());
+        let changed = run(&r, PHPUNIT, &[]);
+        assert_eq!(changed.code, 0, "{}", changed.said());
         assert!(
-            hushrun_testkit::lines::without_saving(changed.line("hushrun: unit: with")).starts_with(
-                "hushrun: unit: with `tests: reuse`, 3 of 8 test files would have run; 5 already passed on the files they read"
+            hushrun_testkit::lines::without_saving(changed.line("unit: with")).starts_with(
+                "unit: with `tests: reuse`, 3 of 8 test files would have run; 5 already passed on the files they read"
             ),
             "{}: {}",
             runner.name(),
-            changed.stderr
+            changed.said()
         );
     }
 }
@@ -475,15 +212,15 @@ fn phpunit_test_files_are_observed_from_what_php_included_and_opened() {
 #[test]
 fn phpunit_reuses_test_files_and_tests_that_already_passed() {
     for runner in phpunits() {
-        let r = Repo::new(&runner, &shop("{mode: reuse, unit: test}"));
-        let first = r.run(PHPUNIT_RUN);
-        assert_eq!(first.code, 0, "{}", first.out());
+        let r = repo(&runner, &shop("{mode: reuse, unit: test}"));
+        let first = run(&r, PHPUNIT, &[]);
+        assert_eq!(first.code, 0, "{}", first.said());
         assert_eq!(
-            first.line("hushrun: unit: every"),
-            "hushrun: unit: every test file runs: no run here has listed PHPUnit's test files yet"
+            first.line("unit: every"),
+            "unit: every test file runs: no run here has listed PHPUnit's test files yet"
         );
         assert_eq!(
-            r.tests_of("tests/Unit/CartTest.php"),
+            tests_of(&r, "tests/Unit/CartTest.php"),
             json!({
                 "Shop\\Tests\\Unit\\CartTest::testTotal": "passed",
                 "Shop\\Tests\\Unit\\CartTest::testSums with data set \"one\"": "passed",
@@ -502,11 +239,11 @@ fn phpunit_reuses_test_files_and_tests_that_already_passed() {
                 "    public function testPrice(): void { $this->assertSame(8, \\Shop\\Pricing::price(4)); }",
             ),
         );
-        let second = r.run(PHPUNIT_RUN);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run(&r, PHPUNIT, &[]);
+        assert_eq!(second.code, 0, "{}", second.said());
         assert_eq!(
-            second.line("hushrun: unit: 2"),
-            "hushrun: unit: 2 of 10 tests run, in 2 of 8 test files; 8 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+            second.line("unit: 2"),
+            "unit: 2 of 10 tests run, in 2 of 8 test files; 8 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
             "{}",
             runner.name()
         );
@@ -515,86 +252,26 @@ fn phpunit_reuses_test_files_and_tests_that_already_passed() {
             second.stdout.contains("OK (2 tests, 2 assertions)"),
             "{}: {}",
             runner.name(),
-            second.out()
+            second.said()
         );
-        assert!(
-            hushrun_testkit::lines::says_reused(&second.stderr, 8, "tests"),
-            "{}",
-            second.stderr
-        );
+        // That the run's last line says how many tests it reused is the CLI's: e2e_phpunit.rs.
         // Everything already passed but the audited test: PHPUnit 12, which fails a run of no
         // test, passes, as the run of those tests did.
-        let again = r.run(&[
-            "run",
-            "unit",
-            "--",
-            "vendor/bin/phpunit",
-            "--testsuite",
-            "all",
-        ]);
-        assert_eq!(again.code, 0, "{}", again.out());
-        // Why a test file runs, from this machine alone.
-        r.write(
-            "src/Pricing.php",
-            &class(
-                "Pricing",
-                "    public static function price(int $x): int { return 2 * $x; }",
-            ),
-        );
-        let why = r.run(&["why", "unit", "tests/Unit/CartTest.php"]);
-        assert_eq!(why.code, 0, "{}", why.stderr);
-        assert!(
-            why.stdout.starts_with(
-                "tests/Unit/CartTest.php runs: it read src/Pricing.php, which changed"
-            ),
-            "{}",
-            why.stdout
-        );
-        assert!(
-            why.stdout
-                .contains("PHPUnit's list of test files is the one of its last run here"),
-            "{}",
-            why.stdout
-        );
+        let again = run(&r, &["vendor/bin/phpunit", "--testsuite", "all"], &[]);
+        assert_eq!(again.code, 0, "{}", again.said());
+        // \[C-37\] Why a test file runs, from this machine alone, is `hushrun why`'s: e2e_phpunit.rs.
     }
-}
-
-/// A test file whose tests fail while FAIL is set, and one whose class teardown fails while
-/// BREAK is.
-fn flips() -> Vec<(String, String)> {
-    vec![
-        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
-        file(".gitignore", "vendor\n"),
-        file("phpunit.xml", PHPUNIT_XML),
-        file("tests/bootstrap.php", BOOTSTRAP),
-        file(
-            "tests/FlipTest.php",
-            &test_class(
-                "Shop\\Tests",
-                "FlipTest",
-                "    public function testOne(): void { $this->assertTrue(true); }\n    public function testFlips(): void { $this->assertFalse((bool) getenv('FAIL')); }\n    public function testSkipped(): void { $this->markTestSkipped('never'); }",
-            ),
-        ),
-        file(
-            "tests/HookTest.php",
-            &test_class(
-                "Shop\\Tests",
-                "HookTest",
-                "    public static function tearDownAfterClass(): void { if (getenv('BREAK')) { throw new \\RuntimeException('teardown'); } }\n    public function testA(): void { $this->assertTrue(true); }\n    public function testB(): void { $this->assertTrue(true); }",
-            ),
-        ),
-    ]
 }
 
 // covers: C-39, C-92
 #[test]
 fn a_failure_is_never_reused_and_a_failing_class_hook_fails_its_tests() {
     for runner in phpunits() {
-        let r = Repo::new(&runner, &flips());
-        let first = r.run_env(PHPUNIT_RUN, &[("FAIL", "1"), ("BREAK", "1")]);
-        assert_ne!(first.code, 0, "{}", first.out());
+        let r = repo(&runner, &flips());
+        let first = run(&r, PHPUNIT, &[("FAIL", "1"), ("BREAK", "1")]);
+        assert_ne!(first.code, 0, "{}", first.said());
         assert_eq!(
-            r.tests_of("tests/FlipTest.php"),
+            tests_of(&r, "tests/FlipTest.php"),
             json!({
                 "Shop\\Tests\\FlipTest::testOne": "passed",
                 "Shop\\Tests\\FlipTest::testFlips": "failed",
@@ -605,72 +282,24 @@ fn a_failure_is_never_reused_and_a_failing_class_hook_fails_its_tests() {
         );
         // The class's teardown failed: every test of it failed with it.
         assert_eq!(
-            r.tests_of("tests/HookTest.php"),
+            tests_of(&r, "tests/HookTest.php"),
             json!({"Shop\\Tests\\HookTest::testA": "failed", "Shop\\Tests\\HookTest::testB": "failed"}),
             "{}",
             runner.name()
         );
         // Fixed: what failed runs, and what didn't record a pass; the one test that passed may
         // be reused or audited.
-        let second = r.run(PHPUNIT_RUN);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run(&r, PHPUNIT, &[]);
+        assert_eq!(second.code, 0, "{}", second.said());
         assert_eq!(
-            second.line("hushrun: unit: "),
-            "hushrun: unit: all 5 tests run; 1 that already passed on the files it read runs anyway, as a check",
+            second.line("unit: "),
+            "unit: all 5 tests run; 1 that already passed on the files it read runs anyway, as a check",
             "{}",
             runner.name()
         );
-        let again = r.run(PHPUNIT_RUN);
-        assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
+        // That the next run skips the check, which passed on this code, is the CLI's:
+        // e2e_phpunit.rs.
     }
-}
-
-/// A Pest shop, run through `composer test`.
-fn pest_shop() -> Vec<(String, String)> {
-    vec![
-        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
-        file(".gitignore", "vendor\n"),
-        file(
-            "composer.json",
-            "{\"name\": \"acme/shop\", \"scripts\": {\"test\": \"pest\"}}\n",
-        ),
-        file(
-            "phpunit.xml",
-            "<?xml version=\"1.0\"?>\n<phpunit bootstrap=\"tests/bootstrap.php\" cacheResult=\"false\">\n  <testsuites>\n    <testsuite name=\"all\"><directory suffix=\"Test.php\">tests</directory></testsuite>\n  </testsuites>\n</phpunit>\n",
-        ),
-        file("tests/bootstrap.php", BOOTSTRAP),
-        file("tests/Pest.php", "<?php\n"),
-        file(
-            "src/Pricing.php",
-            &class(
-                "Pricing",
-                "    public static function price(int $x): int { return $x * 2; }",
-            ),
-        ),
-        file(
-            "src/Greet.php",
-            &class(
-                "Greet",
-                "    public static function hello(): string { return 'hi'; }",
-            ),
-        ),
-        file(
-            "tests/Unit/PricingTest.php",
-            "<?php\nuse Shop\\Pricing;\nit('prices', function () { expect(Pricing::price(3))->toBe(6); });\ntest('sums', function (int $x, int $want) { expect(Pricing::price($x))->toBe($want); })->with(['one' => [1, 2], [2, 4]]);\n",
-        ),
-        file(
-            "tests/Unit/GreetTest.php",
-            "<?php\nit('greets', fn () => expect(Shop\\Greet::hello())->toBe('hi'));\n",
-        ),
-        file(
-            "tests/Unit/Greet2Test.php",
-            "<?php\nit('greets', fn () => expect(Shop\\Greet::hello())->toBe('hi'));\n",
-        ),
-        file(
-            "tests/Unit/Greet3Test.php",
-            "<?php\nit('greets', fn () => expect(Shop\\Greet::hello())->toBe('hi'));\n",
-        ),
-    ]
 }
 
 // covers: C-39, C-90, C-91, C-93
@@ -685,17 +314,17 @@ fn pest_is_observed_and_reused_through_composer_test() {
         return;
     }
     for runner in pests() {
-        let r = Repo::new(&runner, &pest_shop());
-        let run = &["run", "unit", "--", "composer", "test"];
-        let first = r.run(run);
-        assert_eq!(first.code, 0, "{}: {}", runner.name(), first.out());
+        let r = repo(&runner, &pest_shop());
+        let composer = &["composer", "test"];
+        let first = run(&r, composer, &[]);
+        assert_eq!(first.code, 0, "{}: {}", runner.name(), first.said());
         assert_eq!(
-            first.line("hushrun: unit: every"),
-            "hushrun: unit: every test file runs: no run here has listed Pest's test files yet"
+            first.line("unit: every"),
+            "unit: every test file runs: no run here has listed Pest's test files yet"
         );
         // Pest ran GreetTest first, so what PricingTest read is GreetTest's and its own.
         assert_eq!(
-            r.reads("tests/Unit/PricingTest.php"),
+            reads(&r, "tests/Unit/PricingTest.php"),
             [
                 "src/Greet.php",
                 "src/Pricing.php",
@@ -708,7 +337,7 @@ fn pest_is_observed_and_reused_through_composer_test() {
         );
         // A test's id is Pest's name of it, without its class, which Pest makes from the path.
         assert_eq!(
-            r.tests_of("tests/Unit/PricingTest.php"),
+            tests_of(&r, "tests/Unit/PricingTest.php"),
             json!({
                 "it_prices": "passed",
                 "sums with data set \"dataset \"one\"\"": "passed",
@@ -718,7 +347,7 @@ fn pest_is_observed_and_reused_through_composer_test() {
             runner.name()
         );
         assert_eq!(
-            r.reads("tests/Unit/GreetTest.php"),
+            reads(&r, "tests/Unit/GreetTest.php"),
             [
                 "src/Greet.php",
                 "tests/Pest.php",
@@ -737,11 +366,11 @@ fn pest_is_observed_and_reused_through_composer_test() {
                 "    public static function price(int $x): int { return 2 * $x; }",
             ),
         );
-        let second = r.run(run);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run(&r, composer, &[]);
+        assert_eq!(second.code, 0, "{}", second.said());
         assert_eq!(
-            second.line("hushrun: unit: 4"),
-            "hushrun: unit: 4 of 6 tests run, in 2 of 4 test files; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+            second.line("unit: 4"),
+            "unit: 4 of 6 tests run, in 2 of 4 test files; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
             "{}",
             runner.name()
         );
@@ -749,7 +378,7 @@ fn pest_is_observed_and_reused_through_composer_test() {
             second.stdout.contains("4 passed") || second.stderr.contains("4 passed"),
             "{}: {}",
             runner.name(),
-            second.out()
+            second.said()
         );
     }
 }
@@ -758,14 +387,14 @@ fn pest_is_observed_and_reused_through_composer_test() {
 #[test]
 fn a_php_that_reads_no_ini_file_is_said_and_runs_everything() {
     for runner in phpunits().into_iter().take(1) {
-        let r = Repo::new(&runner, &shop("{mode: reuse, unit: test}"));
-        let ran = r.run(&["run", "unit", "--", "php", "-n", "vendor/bin/phpunit"]);
+        let r = repo(&runner, &shop("{mode: reuse, unit: test}"));
+        let ran = run(&r, &["php", "-n", "vendor/bin/phpunit"], &[]);
         assert!(
-            ran.stderr.contains(
-                "hushrun: unit: test files aren't observed: php -n reads no ini file, and hushrun's adapter loads through one"
+            ran.said().contains(
+                "unit: test files aren't observed: php -n reads no ini file, and hushrun's adapter loads through one"
             ),
             "{}",
-            ran.out()
+            ran.said()
         );
     }
 }

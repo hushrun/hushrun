@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources};
 
 use super::adapter::{
-    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
 use super::command::program_name;
 use super::facts::FactsFile;
@@ -359,21 +360,29 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
         Ok(recognized) => recognized,
         Err(why) => return Some(Err(why)),
     };
+    if let Some(why) = unloadable(&recognized, cwd) {
+        return Some(Err(why));
+    }
+    Some(Ok(Box::new(recognized)))
+}
+
+/// Why the adapter can't load for `recognized` in `cwd`: the PHPUnit or Pest installed there is a
+/// major it doesn't know. `None` when it can, or nothing says which is installed.
+pub fn unloadable(recognized: &Recognized, cwd: &Path) -> Option<String> {
     let (package, majors, name) = if recognized.pest {
         ("pestphp/pest", PEST_MAJORS, "Pest")
     } else {
         ("phpunit/phpunit", PHPUNIT_MAJORS, "PHPUnit")
     };
-    if let Some(version) = installed(package, cwd, recognized.vendor.as_deref())
-        && !major(&version).is_some_and(|m| majors.contains(&m))
-    {
-        let known: Vec<String> = majors.iter().map(u64::to_string).collect();
-        return Some(Err(format!(
-            "this {name}, {version}, isn't one hushrun's adapter knows ({})",
-            known.join(", ")
-        )));
+    let version = installed(package, cwd, recognized.vendor.as_deref())?;
+    if major(&version).is_some_and(|m| majors.contains(&m)) {
+        return None;
     }
-    Some(Ok(Box::new(recognized)))
+    let known: Vec<String> = majors.iter().map(u64::to_string).collect();
+    Some(format!(
+        "this {name}, {version}, isn't one hushrun's adapter knows ({})",
+        known.join(", ")
+    ))
 }
 
 /// What the adapter observed of a run, before hushrun decides any state.
@@ -533,6 +542,31 @@ impl Adapter for Recognized {
 
     fn hints(&self) -> Hints {
         Hints::Kinds(SOURCE_KINDS)
+    }
+
+    // `binds`, `keys`, `start_variables`, `not_by_test` and `not_watched` are the trait's defaults,
+    // written out: a call on this type then names this impl's own method, which the static test map
+    // follows to it alone, where the trait's would count every adapter that overrides it
+    // (CONTRIBUTING.md, "Which tests CI runs again").
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, run_dir: &Path) -> Vec<(String, Option<OsString>)> {
+        let _ = run_dir;
+        Vec::new()
+    }
+
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

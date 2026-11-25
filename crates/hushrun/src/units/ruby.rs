@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources, Tree};
 
 use super::adapter::{
-    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
 use super::command::program_name;
 use super::facts::FactsFile;
@@ -353,6 +354,35 @@ impl Adapter for Recognized {
 
     fn hints(&self) -> Hints {
         Hints::Kinds(SOURCE_KINDS)
+    }
+
+    // `test_file`, `binds`, `keys`, `start_variables`, `not_by_test` and `not_watched` are the
+    // trait's defaults, written out: a call on this type then names this impl's own method, which
+    // the static test map follows to it alone, where the trait's would count every adapter that
+    // overrides it (CONTRIBUTING.md, "Which tests CI runs again").
+    fn test_file(&self) -> &'static str {
+        "test file"
+    }
+
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, run_dir: &Path) -> Vec<(String, Option<OsString>)> {
+        let _ = run_dir;
+        Vec::new()
+    }
+
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use hushrun_core::units::{self, Facts, Set, Sets, Sources, Tree};
 
 use super::Seen;
-use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
+use super::adapter::{
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
+};
 use super::shared::Shared;
 use super::store::Map;
 
@@ -56,6 +59,12 @@ pub struct ExUnit;
 /// \[C-114\] `mix test`, or `mix test` after `env NAME=value` and `MIX_ENV=test`, from any
 /// folder; `mix do …`, an alias of another name and `iex -S mix test` aren't.
 pub fn recognized(command: &[String], _cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    Some(recognize(command)?.map(|found| Box::new(found) as Box<dyn Adapter>))
+}
+
+/// What `command` is for the adapter: `None` when it doesn't run `mix test`; `Some(Err(why))`
+/// when it does, in a way hushrun doesn't observe, which the run says.
+pub fn recognize(command: &[String]) -> Option<Result<ExUnit, String>> {
     let command = super::command::without_env(command);
     let (program, rest) = command.split_first()?;
     let name = super::command::program_name(program);
@@ -72,7 +81,7 @@ pub fn recognized(command: &[String], _cwd: &Path) -> Option<Result<Box<dyn Adap
             return Some(Err((*why).to_string()));
         }
     }
-    Some(Ok(Box::new(ExUnit)))
+    Some(Ok(ExUnit))
 }
 
 /// Compiles the module into `<cache dir>/adapters/exunit-<hash>/hushrun_exunit/ebin`, unless it
@@ -218,6 +227,46 @@ impl Adapter for ExUnit {
 
     fn runner(&self) -> &'static str {
         "ExUnit"
+    }
+
+    // `test_file`, `tests`, `hints`, `binds`, `keys`, `start_variables`, `not_by_test` and
+    // `not_watched` are the trait's defaults, written out: a call on this type then names this
+    // impl's own method, which the static test map follows to it alone, where the trait's would
+    // count every adapter that overrides it (CONTRIBUTING.md, "Which tests CI runs again").
+    fn test_file(&self) -> &'static str {
+        "test file"
+    }
+
+    fn tests(&self) -> KnowsTests {
+        KnowsTests {
+            unit: false,
+            reads: false,
+        }
+    }
+
+    fn hints(&self) -> Hints {
+        Hints::Sources
+    }
+
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, run_dir: &Path) -> Vec<(String, Option<OsString>)> {
+        let _ = run_dir;
+        Vec::new()
+    }
+
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
