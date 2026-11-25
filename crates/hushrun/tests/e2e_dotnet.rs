@@ -18,7 +18,7 @@
 #[path = "common/cli.rs"]
 mod cli;
 #[path = "common/dotnet.rs"]
-mod fixtures;
+mod dotnet_fixtures;
 #[path = "common/repo.rs"]
 mod repo;
 #[path = "common/store.rs"]
@@ -27,7 +27,7 @@ mod store;
 use hushrun_testkit::git;
 
 use cli::{Cli as _, Output};
-use fixtures::{M, N, X, dotnet, project, ran, solution, totals, unit};
+use dotnet_fixtures::{M, N, X, dotnet, project, ran, solution, totals, unit};
 use repo::Repo;
 
 /// Its output, COMMAND's and hushrun's.
@@ -190,11 +190,11 @@ fn commands_own_filter_and_trx_logger_are_kept() {
     assert_eq!(ran.code, 0, "{}", out(&ran));
     // The filter held: only the xUnit project's tests ran.
     assert!(
-        fixtures::ran(&ran.stdout)
+        dotnet_fixtures::ran(&ran.stdout)
             .iter()
             .all(|t| t.starts_with("Calc.XTests.")),
         "{:?}",
-        fixtures::ran(&ran.stdout)
+        dotnet_fixtures::ran(&ran.stdout)
     );
     // COMMAND's TRX file is where VSTest puts it, and hushrun read it: the run was recorded.
     let results = r.repo.join("tests/Calc.XTests/TestResults");

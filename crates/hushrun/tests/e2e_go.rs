@@ -14,7 +14,7 @@
 #[path = "common/cli.rs"]
 mod cli;
 #[path = "common/go.rs"]
-mod fixtures;
+mod go_fixtures;
 #[path = "common/repo.rs"]
 mod repo;
 #[path = "common/store.rs"]
@@ -26,7 +26,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use cli::{Cli as _, Output};
-use fixtures::*;
+use go_fixtures::*;
 use repo::Repo;
 
 impl Repo {

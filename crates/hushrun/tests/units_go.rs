@@ -15,7 +15,7 @@
 //! where it is missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI sets.
 
 #[path = "common/go.rs"]
-mod fixtures;
+mod go_fixtures;
 #[path = "common/in_process.rs"]
 mod in_process;
 #[path = "common/repo.rs"]
@@ -25,7 +25,7 @@ mod store;
 
 use hushrun::units::gotest;
 
-use fixtures::*;
+use go_fixtures::*;
 use in_process::{Ran, Repo};
 
 /// `hushrun run unit -- ARGS`, with `env` besides, in-process, for a COMMAND Go's adapter takes

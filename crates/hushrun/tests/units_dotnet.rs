@@ -14,7 +14,7 @@
 #![cfg(unix)]
 
 #[path = "common/dotnet.rs"]
-mod fixtures;
+mod dotnet_fixtures;
 #[path = "common/in_process.rs"]
 mod in_process;
 #[path = "common/repo.rs"]
@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use hushrun::units::dotnet;
 
-use fixtures::{project, run_dotnet, totals};
+use dotnet_fixtures::{project, run_dotnet, totals};
 use in_process::{Ran, Repo};
 
 /// `hushrun run unit -- ARGS`, in-process, through the `dotnet test` adapter alone, for a COMMAND
@@ -70,7 +70,7 @@ fn vstest_summaries_are_counted_by_their_own_assembly_even_when_they_share_a_lin
 // covers: C-101, C-98
 #[test]
 fn what_runs_without_hushruns_vstest_target_says_why() {
-    let Some((dotnet, framework)) = fixtures::dotnet() else {
+    let Some((dotnet, framework)) = dotnet_fixtures::dotnet() else {
         return;
     };
     let r = project(&dotnet, &framework);
