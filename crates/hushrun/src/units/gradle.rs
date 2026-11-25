@@ -35,7 +35,6 @@ use super::facts::{FactsFile, MergedTest, Unfollowed};
 use super::jvm::{self, JvmEvents};
 use super::shared::Shared;
 use super::store::Map;
-pub use super::store::left_in;
 
 /// The adapter's name in its facts files.
 pub const ADAPTER: &str = "gradle";

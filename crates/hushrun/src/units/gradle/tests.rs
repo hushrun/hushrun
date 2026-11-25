@@ -1066,7 +1066,7 @@ fn a_junit4_task_leaves_out_its_first_tests_by_id_and_none_its_patterns_cant_nam
         // No JUnit 4 task: every one is left out.
         ("d::shop.D.t1", "d", "shop.D.t1"),
     ];
-    let left_in = left_in(
+    let left_in = crate::units::store::left_in(
         &[group(2, &["a"]), group(250, &["b", "c"])],
         listed.iter().copied(),
     );
