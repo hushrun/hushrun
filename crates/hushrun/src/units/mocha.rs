@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources, Tree};
 
 use super::adapter::{
-    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
 use super::command::program_name;
 use super::facts::FactsFile;
@@ -267,9 +268,10 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Observed, String> {
     Ok(out)
 }
 
-/// \[ADR 0107\] The Mocha adapter for a COMMAND that starts one run of Mocha 10 or 11; `None`
-/// for any other COMMAND.
-pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+/// What `command` in `cwd` is for the Mocha adapter, as [`recognized`] finds it, without the
+/// trait object: a test calls the adapter on its own type (CONTRIBUTING.md, "Which tests CI runs
+/// again").
+pub fn recognize_in(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
     let mut recognized = match recognize(command)? {
         Ok(recognized) => recognized,
         Err(why) => return Some(Err(why)),
@@ -286,7 +288,13 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
             )));
         }
     }
-    Some(Ok(Box::new(recognized)))
+    Some(Ok(recognized))
+}
+
+/// \[ADR 0107\] The Mocha adapter for a COMMAND that starts one run of Mocha 10 or 11; `None`
+/// for any other COMMAND.
+pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    Some(recognize_in(command, cwd)?.map(|r| Box::new(r) as Box<dyn Adapter>))
 }
 
 impl Adapter for Recognized {
@@ -312,6 +320,22 @@ impl Adapter for Recognized {
 
     fn hints(&self) -> Hints {
         Hints::Kinds(SOURCE_KINDS)
+    }
+
+    // `binds`, `keys` and `start_variables` are the trait's defaults, written out: a call on this
+    // type then names this impl's own method, which the static test map follows to it alone,
+    // where the trait's would count every adapter that overrides it (CONTRIBUTING.md, "Which
+    // tests CI runs again").
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, _: &Path) -> Vec<(String, Option<OsString>)> {
+        Vec::new()
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

@@ -122,6 +122,11 @@ impl Repo {
         std::fs::write(path, text).expect("write");
     }
 
+    /// Removes the file at `path`, from the repository's root.
+    pub fn remove(&self, path: &str) {
+        std::fs::remove_file(self.repo.join(path)).expect("remove");
+    }
+
     /// COMMAND's program, `program`, in the repository's root, with the environment `hushrun
     /// run` would give it but hushrun's own variables ([`Repo::configure`]). It starts through
     /// `hushrun_testkit::tool::command`, which the static map trusts to start none of the
