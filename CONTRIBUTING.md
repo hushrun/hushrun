@@ -55,13 +55,15 @@ binaries, and nearly all of its test time.
 
 With `tests.unit: test` ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)), which
 `hushrun.yaml` doesn't turn on yet, a Rust test is reused on its own when nothing it can reach
-changed, by a static map made with rust-analyzer. The integration tests still start the binary, so
-they still read all of `crates/hushrun/src/`. Only the unit tests narrow:
+changed, by a static map made with rust-analyzer. An integration test that starts the binary still
+reads all of `crates/hushrun/src/`. The in-process adapter tests, the `tests/units_<adapter>.rs`
+files written as [An adapter test the map can narrow](#an-adapter-test-the-map-can-narrow) says,
+link the library instead and narrow as the unit tests do:
 
 | A pull request that changes | runs, with `unit: test` |
 | --- | --- |
-| one adapter, such as `crates/hushrun/src/units/gradle.rs` | the binary's unit tests that reach it (about 290 of 751), the 80 integration binaries, and the audit |
-| one module of a library crate, such as `crates/hushrun-core/src/glob.rs` | that crate's tests that reach it (54 of 171), the binary's unit tests that reach it (about 350 of 751), the integration binaries of the crates that link it, and the audit |
+| one adapter, such as `crates/hushrun/src/units/gradle.rs` | the binary's unit tests that reach it (about 290 of 751), the in-process tests that reach it (that adapter's own), the integration binaries that start hushrun, and the audit |
+| one module of a library crate, such as `crates/hushrun-core/src/glob.rs` | that crate's tests that reach it (54 of 171), the binary's unit tests that reach it (about 350 of 751), the in-process tests that reach it, the other integration binaries of the crates that link it, and the audit |
 | anything, on a machine without rust-analyzer | the same as the table above, and the log says `rustup component add rust-analyzer` |
 
 So a pull request that changes `crates/hushrun/src/` runs every test binary on every push, on both
@@ -165,9 +167,10 @@ fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &gradle::Reco
 - Keep it a function. No macro, no helper generic over `Adapter`, no `&dyn Adapter`: a helper of
   your own takes the adapter's own type.
 - Write out in the adapter's `impl Adapter` each method the test calls that it would otherwise
-  take from the trait's default (`binds`, `keys`, `start_variables` for Gradle's), with the
-  default's body. A call to a default names the trait's method, and the map counts every
-  adapter that overrides it; written out, it names the adapter's own.
+  take from the trait's default (`binds`, `keys`, `not_by_test`, `not_watched` and
+  `start_variables` for Gradle's), with the default's body. A call to a default names the trait's
+  method, and the map counts every adapter that overrides it; written out, it names the
+  adapter's own.
 - A `Ran` holds COMMAND's `code`, `stdout` and `stderr`, the `lines` hushrun's steps said
   (`hushrun run` writes each after `hushrun: `), and `units`, the counts the check's result
   keeps. `Repo::map`, `unit_results` and `disagreements` read this machine's store.
