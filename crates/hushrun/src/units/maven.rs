@@ -359,7 +359,7 @@ fn of_kind(path: &str) -> bool {
 /// \[C-47\] The one rule for the sources: the files of a JVM kind below a directory some unit
 /// read, `dirs`. Every other file, POMs and resources among them, is in the rest set.
 pub fn sources(tree: &Tree, dirs: &BTreeSet<String>) -> BTreeSet<String> {
-    super::gotest::under(tree, dirs)
+    super::shared::under(tree, dirs)
         .into_iter()
         .filter(|p| of_kind(p))
         .collect()
@@ -847,7 +847,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             });
         }
         let (unit, own) = unit_of(module, &class, tree);
-        seen_unit.reads = super::gotest::under(tree, &module.dirs);
+        seen_unit.reads = super::shared::under(tree, &module.dirs);
         match &own {
             Some(own) => out.unit_files.extend(own.iter().cloned()),
             None => {

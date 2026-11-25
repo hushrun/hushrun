@@ -30,7 +30,7 @@ use hushrun_core::units::{self, KeyBase, Set, Sets, Sources, Tree};
 use super::adapter::Hints;
 use super::db::{HintHow, HintKnown};
 use super::store::{Found, HintPlace, Lookup, Mapped, Origin, UnitResults};
-use super::{MOST_UNITS, gotest};
+use super::{MOST_UNITS, getenv};
 use crate::results::RunResult;
 
 /// The most lists a test file's key is computed from.
@@ -278,7 +278,7 @@ pub fn lists(
     shared: &Shared,
     tree: &Tree,
     compiled: Option<&BTreeSet<String>>,
-    getenv: Option<&gotest::Getenv>,
+    getenv: Option<&getenv::Getenv>,
 ) -> Option<Vec<List>> {
     let none = BTreeSet::new();
     let make = |reads: &BTreeSet<String>,
@@ -288,7 +288,7 @@ pub fn lists(
                 from: From| {
         let mut files = compiled.cloned().unwrap_or_default();
         files.extend(reads.iter().cloned());
-        files.extend(gotest::under(tree, dirs));
+        files.extend(under(tree, dirs));
         List {
             files,
             reads: reads.clone(),
@@ -380,7 +380,7 @@ pub fn test_lists(
     }
     let own = |reads: BTreeSet<String>, dirs: &BTreeSet<String>, from: From| {
         let mut files = reads.clone();
-        files.extend(gotest::under(tree, dirs));
+        files.extend(under(tree, dirs));
         TestList {
             list: List {
                 files,
@@ -482,3 +482,21 @@ pub fn lookup(
 
 #[cfg(test)]
 mod tests;
+
+/// Every file of `tree` in one of `dirs` or below it: what listing a directory read.
+pub fn under(tree: &Tree, dirs: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for dir in dirs {
+        if dir.is_empty() || dir == "." {
+            out.extend(tree.paths().map(str::to_string));
+            continue;
+        }
+        let prefix = format!("{dir}/");
+        out.extend(
+            tree.paths()
+                .filter(|p| p.starts_with(&prefix))
+                .map(str::to_string),
+        );
+    }
+    out
+}

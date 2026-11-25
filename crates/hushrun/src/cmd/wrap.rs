@@ -42,6 +42,7 @@ use crate::results::{
     Selection, Verdict,
 };
 use crate::units;
+use crate::units::words::took;
 use hushrun_core::units::Mode;
 
 pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
@@ -2264,17 +2265,6 @@ fn signaled(status: &ExitStatus) -> bool {
 #[cfg(not(unix))]
 fn signaled(_: &ExitStatus) -> bool {
     false
-}
-
-/// A run's length, rounded for people: `0.4s`, `41s`, `3m 12s`, `1h 4m`.
-pub(crate) fn took(ms: u64) -> String {
-    let s = ms / 1000;
-    match ms {
-        0..1_000 => format!("{:.1}s", ms as f64 / 1000.0),
-        1_000..60_000 => format!("{s}s"),
-        60_000..3_600_000 => format!("{}m {}s", s / 60, s % 60),
-        _ => format!("{}h {}m", s / 3_600, s / 60 % 60),
-    }
 }
 
 /// How long ago, rounded for people: `just now`, `12s ago`, `4 min ago`, `3 h ago`.
