@@ -24,29 +24,80 @@ Tests run against fakes and need no network. Integration tests against real regi
 and Docker sit behind the `it` feature (`cargo test --features it`). A test that covers a spec rule
 names it after a `covers:` marker, and `cargo xtask trace` checks every rule is covered.
 
-## Which tests CI runs again
+## Pull requests
 
-CI runs `cargo nextest` through `hushrun run test` with `tests: mode: reuse` (`hushrun.yaml`):
-a test that already passed on the files it read isn't run again. What a Rust test read is what
-it can reach from its own code, by a static map of each test's calls that needs no coverage run:
+- Keep each pull request to one change, with tests.
+- Use [Conventional Commits](https://www.conventionalcommits.org) for commit messages, such as
+  `fix(init): read matrix values from an expression`.
+- Sign off every commit (`git commit -s`), which certifies the
+  [Developer Certificate of Origin](https://developercertificate.org): that you wrote the change,
+  or have the right to submit it under the project's license.
 
-- the functions a test calls, and the ones those call, in every crate of the workspace;
-- for a call through a trait object (`dyn Adapter`) or a generic bound (`A: Adapter`), and in a
-  trait's default method, which calls through `Self`: every implementation of the trait;
-- for a test that starts the `hushrun` binary (`env!("CARGO_BIN_EXE_hushrun")`, directly or
-  through hushrun-testkit or `tests/common/cli.rs`): the whole binary, every file of
-  `crates/hushrun/src`.
+### Which tests CI runs again
 
-So a test that starts the binary runs again on any change to hushrun, and so does a test that
-goes through `units::adapter::choose`, `choose_kept` or `RECOGNIZED`, through `units::Session`
-or `units::why`, which take a `Box<dyn Adapter>`, or through anything in `cmd::`: each reaches
-every adapter. Until the static map lands, a test binary runs again when anything it was built
-from changed, which for `crates/hushrun/tests/` is all of `crates/hushrun/src`.
+CI's `test` (Linux) and `test-macos` (macOS) steps run `cargo nextest` through `hushrun run` with
+`tests: mode: reuse` ([hushrun.yaml](hushrun.yaml)): a test binary that already passed on the files
+it read doesn't run again on that OS. For Rust, the unit is a whole test binary, never one test.
+A test binary reads its own sources, every workspace library it may link, and, for an integration
+test, every other target of its package
+([ADR 0068](docs/adr/0068-test-files-observed.md), C-31). Each file in `crates/hushrun/tests/` is an
+integration test of the `hushrun` package, so each reads all of `crates/hushrun/src/`: nearly all
+start the `hushrun` binary, and the in-process ones link its library, which is the same files. Those 80 binaries and the binary's own unit tests are 81 of CI's 108 test
+binaries, and nearly all of its test time.
 
-### An adapter test the map can narrow
+| A pull request that changes | runs, in `test` and `test-macos` |
+| --- | --- |
+| only files `tests.ignore` lists, such as `docs/adr/`, `docs/spec/`, the root's `*.md`, `ci.yml` | an audit's 2%: about 3 binaries, a few minutes |
+| one file in `crates/hushrun/tests/` | that binary, and the audit |
+| a library crate, such as `crates/hushrun-build/src/` | its own tests and those of every crate that links it, so `hushrun`'s 81 too |
+| anything in `crates/hushrun/src/` | all 108: 25 to 40 minutes on Linux, about 45 on macOS |
+| `Cargo.lock`, `rust-toolchain.toml` or a build script | all 108 |
+
+So a pull request that changes `crates/hushrun/src/` runs every test binary on every push, on both
+systems. That is reuse working: each of those tests runs the binary that changed. The macOS job is
+the longest, so that is where it shows. To keep a pull request from running more than it must:
+
+- **Push once the branch is ready**, after `hushrun ready` here. A push cancels the pull request's
+  running jobs (`cancel-in-progress` in `ci.yml`), and a cancelled `hushrun run` records nothing:
+  a CHANGELOG fix pushed ten minutes after the code throws away the macOS job's run, and the next
+  one runs every binary the code changed again.
+- **Merge `main` in only when GitHub says it conflicts**, or just before merging. CI already tests
+  the pull request merged with `main`, and each push of a merge in which `main` changed
+  `crates/hushrun/src/` runs every test binary again.
+- **Give docs, ADR and spec changes that stand alone a pull request of their own**: alone, they
+  reuse all but the audit's.
+- **Put a test that needs only a library in that library's crate**, not in `crates/hushrun/tests/`:
+  there it reads that crate and what it links, never the whole binary.
+- **Read the line hushrun prints before the tests start**, such as `hushrun: test-macos: 3 of 107
+  test binaries run; 104 already passed on the files they read` or `all 108 test binaries run: …`:
+  it says what CI decided, and why.
+
+The Maven and Gradle adapters' tests need a filled Maven repository and Gradle user home. CI keeps
+both in Actions' cache, keyed by the files that decide what they download (`ci.yml` lists them). A
+pull request that changes one of those files fills them online once, which runs those two test
+binaries outside hushrun first.
+
+#### What the static map will count
+
+A static map of each Rust test, which needs no coverage run, will narrow the unit from a test
+binary to one test: a test that already passed is reused when nothing it can reach changed. It
+reads names, not types. Every identifier a reached item mentions reaches every item of that name
+in the crates the binary links, and a reached type reaches every `impl` block that names it. A
+fully qualified path (`gradle::Recognized::read`) may come to reach only its own item. So:
+
+- a test that starts the `hushrun` binary (`env!("CARGO_BIN_EXE_hushrun")`, directly or through
+  hushrun-testkit or `tests/common/cli.rs`) reaches the whole binary, every file of
+  `crates/hushrun/src/`;
+- a method call that every adapter's trait methods share a name with (`x.read(…)`, `x.plan(…)`,
+  `x.variables(…)`) reaches every adapter;
+- so does going through `units::adapter::choose`, `choose_kept` or `RECOGNIZED`, through
+  `units::Session` or `units::why`, which take a `Box<dyn Adapter>`, or through anything in
+  `cmd::`.
+
+#### An adapter test the map can narrow
 
 `crates/hushrun` is a library its binary is a thin `main` over, so a test can call its code
-in-process. An adapter's tests live in `tests/units_<adapter>.rs` and run a check as `hushrun run
+in-process instead of starting the binary. An adapter's tests live in `tests/units_<adapter>.rs` and run a check as `hushrun run
 CHECK -- COMMAND` would, through that one adapter. `units_gradle.rs` is the pattern:
 
 ```rust
@@ -86,8 +137,8 @@ fn run(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
   `impl Adapter` defines: `plan`, or `plan_from_files` where it keeps the trait's default `plan`.
   The same goes for anything else you call on it: call what its `impl` defines, never a default
   that calls another method.
-- Write no helper generic over `Adapter`, and take no `&dyn Adapter`: each reaches every adapter.
-  A helper of your own takes the adapter's own type.
+- Write no helper generic over `Adapter`, and take no `&dyn Adapter`. A helper of your own takes
+  the adapter's own type.
 - A `Ran` holds COMMAND's `code`, `stdout` and `stderr`, the `lines` hushrun's steps said
   (`hushrun run` writes each after `hushrun: `), and `units`, the counts the check's result
   keeps. `Repo::map`, `unit_results` and `disagreements` read this machine's store.
@@ -100,7 +151,7 @@ fn run(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
   Keep it that way: a test that needs a variable gives it to COMMAND (`Repo::give`, or the
   `env` of a run).
 
-### When a test is end to end
+#### When a test is end to end
 
 A test starts the binary only for what the CLI alone does, which no in-process test sees: its
 lines as it writes them (`hushrun: `, and their order with COMMAND's output), a run's last line
@@ -118,59 +169,6 @@ and CI's detection. Those tests are the end-to-end set:
 
 Everything else an adapter test checks moves in-process, with the same assertions: the plan's
 line, what was left out, what each unit read, what the store kept, and how each ended.
-
-## Pull requests
-
-- Keep each pull request to one change, with tests.
-- Use [Conventional Commits](https://www.conventionalcommits.org) for commit messages, such as
-  `fix(init): read matrix values from an expression`.
-- Sign off every commit (`git commit -s`), which certifies the
-  [Developer Certificate of Origin](https://developercertificate.org): that you wrote the change,
-  or have the right to submit it under the project's license.
-
-### Which tests CI runs again
-
-CI's `test` (Linux) and `test-macos` (macOS) steps run `cargo nextest` through `hushrun run` with
-`tests: mode: reuse` ([hushrun.yaml](hushrun.yaml)): a test binary that already passed on the files
-it read doesn't run again on that OS. For Rust, the unit is a whole test binary, never one test.
-A test binary reads its own sources, every workspace library it may link, and, for an integration
-test, every other target of its package
-([ADR 0068](docs/adr/0068-test-files-observed.md), C-31). Each file in `crates/hushrun/tests/` is an
-integration test of the `hushrun` package, which starts the `hushrun` binary, so each reads all of
-`crates/hushrun/src/`. Those 80 binaries and the binary's own unit tests are 81 of CI's 108 test
-binaries, and nearly all of its test time.
-
-| A pull request that changes | runs, in `test` and `test-macos` |
-| --- | --- |
-| only files `tests.ignore` lists, such as `docs/adr/`, `docs/spec/`, the root's `*.md`, `ci.yml` | an audit's 2%: about 3 binaries, a few minutes |
-| one file in `crates/hushrun/tests/` | that binary, and the audit |
-| a library crate, such as `crates/hushrun-build/src/` | its own tests and those of every crate that links it, so `hushrun`'s 81 too |
-| anything in `crates/hushrun/src/` | all 108: 25 to 40 minutes on Linux, about 45 on macOS |
-| `Cargo.lock`, `rust-toolchain.toml` or a build script | all 108 |
-
-So a pull request that changes `crates/hushrun/src/` runs every test binary on every push, on both
-systems. That is reuse working: each of those tests runs the binary that changed. The macOS job is
-the longest, so that is where it shows. To keep a pull request from running more than it must:
-
-- **Push once the branch is ready**, after `hushrun ready` here. A push cancels the pull request's
-  running jobs (`cancel-in-progress` in `ci.yml`), and a cancelled `hushrun run` records nothing:
-  a CHANGELOG fix pushed ten minutes after the code throws away the macOS job's run, and the next
-  one runs every binary the code changed again.
-- **Merge `main` in only when GitHub says it conflicts**, or just before merging. CI already tests
-  the pull request merged with `main`, and each push of a merge in which `main` changed
-  `crates/hushrun/src/` runs every test binary again.
-- **Give docs, ADR and spec changes that stand alone a pull request of their own**: alone, they
-  reuse all but the audit's.
-- **Put a test that needs only a library in that library's crate**, not in `crates/hushrun/tests/`:
-  there it reads that crate and what it links, never the whole binary.
-- **Read the line hushrun prints before the tests start**, such as `hushrun: test-macos: 3 of 107
-  test binaries run; 104 already passed on the files they read` or `all 108 test binaries run: …`:
-  it says what CI decided, and why.
-
-The Maven and Gradle adapters' tests need a filled Maven repository and Gradle user home. CI keeps
-both in Actions' cache, keyed by the files that decide what they download (`ci.yml` lists them). A
-pull request that changes one of those files fills them online once, which runs those two test
-binaries outside hushrun first.
 
 Pull requests are reviewed and merged here, with your commits and their sign-off as they are.
 This repository is public, so CI scans every push and pull request for anything that looks like
