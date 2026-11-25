@@ -1183,6 +1183,21 @@ This is new and its rules are a draft ([ADR 0106](../adr/0106-typescript-build-b
 `hushrun guide` says the rest, such as how to read each line, and the rules are
 [spec §10](../spec/10-build-blocks.md).
 
+### Svelte
+
+Svelte's tests reuse as any Vitest project's, after the one config line `hushrun init` proposes:
+components and runes modules (`.svelte`, `.svelte.js`, `.svelte.ts`) are read through
+vite-plugin-svelte's compile, so changing a component runs only the test files, or with
+`unit: test` the tests, that rendered it. What a preprocessor reads for a component (a
+`<style lang="scss">`'s imports) counts too, and the Svelte config, with what it imports, is read by
+every test, as the Vite config is. In a SvelteKit app, `$app/environment` and `$env/*` no longer
+make a test file run every time; its env entry (`src/env.*`) and `.env` files are read by every
+test. Component tests in jsdom or happy-dom load hushrun's setup file, whatever the framework.
+
+Svelte's compile isn't shared as compiled code: it is a small part of `vite build`, and Vite has
+no compile cache for hushrun to serve, so a `vite build` or `svelte-check` check skips or runs
+whole ([ADR 0109](../adr/0109-svelte.md)).
+
 ### Vue
 
 Vue's compiles get no build blocks: `vue-tsc --noEmit` is a check that a whole run already skips

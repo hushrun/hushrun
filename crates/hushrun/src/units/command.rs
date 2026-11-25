@@ -108,13 +108,16 @@ pub enum Runner {
     SwiftTest,
     /// \[ADR 0119\] `meson test`.
     MesonTest,
+    /// \[ADR 0121\] `xcodebuild` with a `test` action.
+    Xcodebuild,
 }
 
-const RUNNERS: [Runner; 4] = [
+const RUNNERS: [Runner; 5] = [
     Runner::Pytest,
     Runner::Ctest,
     Runner::SwiftTest,
     Runner::MesonTest,
+    Runner::Xcodebuild,
 ];
 
 impl Runner {
@@ -130,6 +133,7 @@ impl Runner {
                 words.contains(&"swift-test") || words.windows(2).any(|w| w == ["swift", "test"])
             }
             Runner::MesonTest => words.windows(2).any(|w| w == ["meson", "test"]),
+            Runner::Xcodebuild => words.contains(&"xcodebuild") && words.contains(&"test"),
         }
     }
 }
@@ -217,6 +221,7 @@ pub fn wrapper_starts_by_path(command: &[String], cwd: &Path, runner: Runner) ->
             (Runner::SwiftTest, Some("swift")) => words.get(at + 1) == Some(&"test"),
             (Runner::SwiftTest, Some("swift-test")) => true,
             (Runner::MesonTest, Some("meson")) => words.get(at + 1) == Some(&"test"),
+            (Runner::Xcodebuild, Some("xcodebuild")) => words.contains(&"test"),
             _ => false,
         })
         .map(|at| words[at].to_string())

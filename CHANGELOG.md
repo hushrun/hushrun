@@ -44,6 +44,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Svelte's tests reuse** (C-62 to C-65, ADR 0109). With Vitest, `.svelte` components are
+  sources, vite-plugin-svelte's, SvelteKit's and Testing Library's `svelteTesting()` plugins are
+  known, what a Svelte preprocessor reads (its `dependencies`) is read by whoever runs the
+  component, the Svelte config and what it imports are config files, and SvelteKit's env entry and
+  `.env` files are too, so SvelteKit 2's `$env/*` and `__sveltekit/*` modules no longer make a test
+  file `not observed`. Before, every test file of a Svelte project was `not observed`. Fixed on
+  the way, for every framework: a Vitest test in jsdom or happy-dom failed to load hushrun's setup
+  file (`Cannot find module '/@fs/…'`), which Vite now serves (`server.fs.allow`, as ADR 0108
+  has it).
 - **C and C++ without CMake, and `meson test`** (B-230 to B-238, C-102 to C-105, ADR 0119). Inside
   `hushrun run`, GNU Make's commands (plain Makefiles and autotools ones) find hushrun's compiler
   programs first on `PATH` through `MAKEFILES`, a `ninja` COMMAND on a handwritten `build.ninja`
@@ -53,6 +62,14 @@ project's new branch starts from what main's CI already ran.
   Meson's configure checks aren't stored. With `tests: reuse`, `meson test` reuses test programs
   and tests one by one, as CTest does. New variables COMMAND gets: `MAKEFILES` (the hook first,
   the person's after it) and, in a Meson repository, `PATH` with hushrun's `meson` first.
+- **`xcodebuild test`'s test targets and tests** (C-110 to C-113, ADR 0121): with `tests: mode:
+  reuse` on macOS, an Xcode project's unit-test and UI-test bundles are units, read from
+  `project.pbxproj` (build phases, synchronized folders, local packages, the targets they depend on
+  and the app that hosts them), and with `unit: test` each XCTest and Swift Testing test is reused
+  on its own. hushrun's `xcodebuild` on `PATH` adds `-skip-testing:` and a result bundle, and reads
+  outcomes with `xcresulttool` (Xcode 16 and later). `xcrun xcodebuild`, `test-without-building`,
+  `-xctestrun` and repeated runs are refused, said once. SwiftPM's compiles outside Xcode aren't
+  reused yet: the ADR says how they will be.
 - **C++ test programs started directly, test by test** (C-106 to C-108, ADR 0120). `hushrun run
   NAME -- build/tests/t_calc` with a GoogleTest or Catch2 3 program of a CMake build directory
   reuses each test that passed on the files the program is built from, leaving tests out through
