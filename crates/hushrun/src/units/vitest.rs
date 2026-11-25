@@ -298,8 +298,7 @@ fn unobservable(text: &str) -> Option<&'static str> {
 /// they aren't there yet: `<cache dir>/adapters/vitest-<first 16 hex of their SHA-256>`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
     let digest =
-        hushrun_core::Digest::of(format!("{}\0{}\0{}\0{}", PLUGIN, SETUP, VUE, SVELTE).as_bytes())
-            .hex();
+        hushrun_core::Digest::of(format!("{PLUGIN}\0{SETUP}\0{VUE}\0{SVELTE}").as_bytes()).hex();
     let dir = cache
         .join("adapters")
         .join(format!("vitest-{}", &digest[..16]));
@@ -436,10 +435,8 @@ fn relative(root: &Path, path: &Path) -> Option<String> {
 /// What a module id a worker ran says: a file, by its path without a query; nothing, for Vite's
 /// own helpers (`\0vite/…`) \[ADR 0108\] and @vitejs/plugin-vue's (`\0plugin-vue:export-helper`,
 /// the same text from the plugin's own code for every component); or a module some plugin made
-/// from no one file, `Err`. Not `module_path`, which `tracing`'s macros name, and the static test
-/// map, reading a macro by its names, would take for this (CONTRIBUTING.md, "Which tests CI runs
-/// again").
-fn module_file(id: &str) -> Result<Option<PathBuf>, String> {
+/// from no one file, `Err`.
+fn module_path(id: &str) -> Result<Option<PathBuf>, String> {
     if id.starts_with("\0vite/") || id == VUE_HELPER {
         return Ok(None);
     }
@@ -535,7 +532,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             };
             let entry = seen_by.entry(name).or_default();
             for id in &unit.reads {
-                match module_file(id) {
+                match module_path(id) {
                     Ok(Some(path)) => entry.files.extend(relative(&root, &path)),
                     Ok(None) => {}
                     Err(virtual_id) => {
@@ -963,24 +960,24 @@ mod tests {
     #[test]
     fn a_module_some_plugin_made_is_not_a_file() {
         assert_eq!(
-            module_file("/repo/src/a.ts?raw").unwrap(),
+            module_path("/repo/src/a.ts?raw").unwrap(),
             Some(PathBuf::from("/repo/src/a.ts"))
         );
         assert_eq!(
-            module_file("\0vite/dynamic-import-helper.js").unwrap(),
+            module_path("\0vite/dynamic-import-helper.js").unwrap(),
             None
         );
-        assert!(module_file("\0virtual:routes").is_err());
-        assert!(module_file("virtual:routes").is_err());
+        assert!(module_path("\0virtual:routes").is_err());
+        assert!(module_path("virtual:routes").is_err());
         // [ADR 0108] plugin-vue's one helper is its own code, and a component's blocks are its
         // file's or the file their `src=` names.
-        assert_eq!(module_file("\0plugin-vue:export-helper").unwrap(), None);
-        assert!(module_file("\0plugin-vue:other").is_err());
+        assert_eq!(module_path("\0plugin-vue:export-helper").unwrap(), None);
+        assert!(module_path("\0plugin-vue:other").is_err());
         assert_eq!(
-            module_file("/repo/src/A.vue?vue&type=style&index=0&lang.module.css").unwrap(),
+            module_path("/repo/src/A.vue?vue&type=style&index=0&lang.module.css").unwrap(),
             Some(PathBuf::from("/repo/src/A.vue"))
         );
-        assert!(module_file("src/relative.ts").is_err());
+        assert!(module_path("src/relative.ts").is_err());
     }
 
     fn told(id: &str, finished: bool, failed: bool, ran: Option<Vec<usize>>) -> TestFacts {

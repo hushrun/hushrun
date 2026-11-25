@@ -47,9 +47,6 @@ pub fn env_key(name: &str) -> String {
         .collect()
 }
 
-// `::std::result::Result`, not `Result`: the static test map reads a macro's body by its names,
-// and a bare `Result` is every `Result` of the workspace (CONTRIBUTING.md, "Which tests CI runs
-// again").
 macro_rules! name_type {
     ($(#[$doc:meta])* $ty:ident, $kind:literal) => {
         $(#[$doc])*
@@ -62,7 +59,7 @@ macro_rules! name_type {
             pub const KIND: &'static str = $kind;
 
             /// Validates `name`.
-            pub fn new(name: impl Into<String>) -> ::std::result::Result<Self, NameError> {
+            pub fn new(name: impl Into<String>) -> Result<Self, NameError> {
                 let name = name.into();
                 if is_valid_name(&name) {
                     Ok(Self(name))
@@ -89,7 +86,7 @@ macro_rules! name_type {
 
         impl FromStr for $ty {
             type Err = NameError;
-            fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
                 Self::new(s)
             }
         }
@@ -119,7 +116,7 @@ macro_rules! name_type {
         }
 
         impl<'de> Deserialize<'de> for $ty {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> ::std::result::Result<Self, D::Error> {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 let name = String::deserialize(deserializer)?;
                 Self::new(name).map_err(serde::de::Error::custom)
             }
