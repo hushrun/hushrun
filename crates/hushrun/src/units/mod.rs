@@ -33,6 +33,7 @@ pub mod db;
 pub mod dotnet;
 pub mod exunit;
 pub mod facts;
+pub mod getenv;
 pub mod gotest;
 pub mod gradle;
 pub mod jest;
@@ -449,7 +450,7 @@ fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
         .map(|(name, (unit, id, _))| (name.clone(), (unit.clone(), id.clone())))
         .collect::<BTreeMap<String, (String, String)>>();
     // \[C-46\] What a JUnit 4 task leaves out at most, of what would be listed: the rest runs.
-    let left_in = gradle::left_in(
+    let left_in = store::left_in(
         &at.map.leave_out_at_most,
         passed
             .iter()
@@ -3090,7 +3091,7 @@ fn decide(
         let test_files = |list: &units::TestList| {
             if list.own {
                 let mut files = list.files.clone();
-                files.extend(gotest::under(tree, &list.dirs));
+                files.extend(shared::under(tree, &list.dirs));
                 files
             } else {
                 reads.clone()
