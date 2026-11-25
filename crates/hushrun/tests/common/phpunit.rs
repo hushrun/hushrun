@@ -119,10 +119,7 @@ pub fn link_tree(from: &Path, to: &Path) {
             link_tree(&path, &target);
         } else if kind.is_symlink() {
             let link = std::fs::read_link(&path).expect("read_link");
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&link, &target).expect("symlink");
-            #[cfg(windows)]
-            std::fs::copy(path.parent().unwrap().join(link), &target).expect("copy");
+            relink(&path, &link, &target);
         } else if std::fs::hard_link(&path, &target).is_err() {
             std::fs::copy(&path, &target).expect("copy");
         }
@@ -153,12 +150,33 @@ pub fn repo(runner: &Runner, files: &[(String, String)]) -> Repo {
     if runner.pest {
         link_tree(&runner.vendor, &r.repo.join("vendor"));
     } else {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&runner.vendor, r.repo.join("vendor")).expect("symlink");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&runner.vendor, r.repo.join("vendor")).expect("link");
+        link_dir(&runner.vendor, &r.repo.join("vendor"));
     }
     r
+}
+
+/// `path`, a link to `link`, again at `target`: a link where the system can make one, a copy
+/// where it can't. One function a system, as [`link_dir`].
+#[cfg(unix)]
+fn relink(_path: &Path, link: &Path, target: &Path) {
+    std::os::unix::fs::symlink(link, target).expect("symlink");
+}
+
+#[cfg(windows)]
+fn relink(path: &Path, link: &Path, target: &Path) {
+    std::fs::copy(path.parent().unwrap().join(link), target).expect("copy");
+}
+
+/// A link at `to` to the directory `from`. One function a system, so that the static map, which
+/// reads only this system's code, never takes the other's names for items of hushrun's.
+#[cfg(unix)]
+fn link_dir(from: &Path, to: &Path) {
+    std::os::unix::fs::symlink(from, to).expect("symlink");
+}
+
+#[cfg(windows)]
+fn link_dir(from: &Path, to: &Path) {
+    std::os::windows::fs::symlink_dir(from, to).expect("link");
 }
 
 /// What `unit` read, as this machine's store keeps it.
