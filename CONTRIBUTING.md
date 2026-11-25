@@ -157,6 +157,11 @@ fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &gradle::Reco
   take from the trait's default (`binds`, `keys`, `start_variables` for Gradle's), with the
   default's body. A call to a default names the trait's method, and the map counts every
   adapter that overrides it; written out, it names the adapter's own.
+- In the adapter's code and the code every adapter shares, give a format string an item as an
+  argument (`format!("{}.xml", ADAPTER)`), never inside its braces (`"{ADAPTER}.xml"`): the
+  index doesn't resolve a name there, so the map counts every item of that name, every
+  adapter's `ADAPTER`. Likewise, a helper the shared code calls lives in a shared file
+  (`units/store.rs`, `units/getenv.rs`), not in an adapter's.
 - A `Ran` holds COMMAND's `code`, `stdout` and `stderr`, the `lines` hushrun's steps said
   (`hushrun run` writes each after `hushrun: `), and `units`, the counts the check's result
   keeps. `Repo::map`, `unit_results` and `disagreements` read this machine's store.
