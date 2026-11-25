@@ -1,15 +1,19 @@
-//! \[ADR 0090\] Test programs with CTest (C-30 to C-34, C-39, C-49): a unit is a test program, a
-//! test one CTest test, what a program read is what its build directory says it is built from,
-//! and hushrun's `ctest` on `PATH` leaves out only what it was told, after checking it again.
+//! \[ADR 0090\] Test programs with CTest (C-30 to C-34, C-39, C-49), end to end: a unit is a
+//! test program, a test one CTest test, what a program read is what its build directory says it is
+//! built from, and hushrun's `ctest` on `PATH` leaves out only what it was told, after checking it
+//! again.
 //!
-//! The fixtures are generated CMake projects of plain C, and need CMake: `HUSHRUN_TEST_CMAKE` names
-//! the directories holding `cmake` and `ctest` (and `ninja`, where there), separated as `PATH` is;
-//! each CMake there runs the tests, and a directory holding only `ninja` gives the others one.
-//! Without it, the `cmake` on `PATH`. They say so and pass where CMake is missing, unless
-//! `HUSHRUN_TEST_TOOLS=required`, which CI sets. No fixture needs the network.
+//! This file is part of the end-to-end set (`tests/e2e_*.rs`, CONTRIBUTING.md, "Which tests CI
+//! runs again"): hushrun's `ctest` on COMMAND's `PATH` is the `hushrun` binary itself
+//! (`units::program`), so every run the adapter observes starts it, and so does every test of
+//! hushrun's `ctest` alone (`Project::shim`): they reach the whole binary. What needs no helper is
+//! in-process, in `units_ctest.rs`. The fixtures are `common/ctest.rs`'s: generated CMake projects
+//! of plain C, which need CMake.
 
 #![cfg(unix)]
 
+#[path = "common/ctest.rs"]
+mod fixtures;
 #[path = "common/store.rs"]
 mod store;
 
@@ -17,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use hushrun_testkit::git;
+
+use fixtures::*;
 use serde_json::{Value, json};
 
 /// Environment variables a test must never inherit.
@@ -79,99 +85,6 @@ const CLEARED: &[&str] = &[
 
 const NO_HOST: &str = "http://127.0.0.1:9";
 
-/// One CMake to run the fixtures with.
-#[derive(Debug, Clone)]
-struct Cmake {
-    bin: PathBuf,
-    ninja: Option<PathBuf>,
-    version: (u32, u32),
-}
-
-/// The CMakes `HUSHRUN_TEST_CMAKE` names, or the one on `PATH`.
-fn cmakes() -> Vec<Cmake> {
-    let dirs: Vec<PathBuf> = match std::env::var_os("HUSHRUN_TEST_CMAKE") {
-        Some(list) => std::env::split_paths(&list).collect(),
-        None => which("cmake")
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .into_iter()
-            .collect(),
-    };
-    let any_ninja = dirs
-        .iter()
-        .map(|d| d.join("ninja"))
-        .find(|n| n.is_file())
-        .or_else(|| which("ninja"));
-    dirs.iter()
-        .filter(|d| d.join("cmake").is_file() && d.join("ctest").is_file())
-        .filter_map(|d| {
-            let out = Command::new(d.join("cmake"))
-                .arg("--version")
-                .output()
-                .ok()?;
-            let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            let v = text.split("version ").nth(1)?;
-            let mut parts = v.split('.').map(|p| {
-                p.chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-                    .parse::<u32>()
-                    .unwrap_or(0)
-            });
-            let version = (parts.next()?, parts.next()?);
-            let own = d.join("ninja");
-            Some(Cmake {
-                bin: d.clone(),
-                ninja: Some(own)
-                    .filter(|n| n.is_file())
-                    .or_else(|| any_ninja.clone()),
-                version,
-            })
-        })
-        .collect()
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
-}
-
-fn tools(what: &str, here: bool) -> bool {
-    if here {
-        return true;
-    }
-    if std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required") {
-        panic!("{what} is missing, and HUSHRUN_TEST_TOOLS=required");
-    }
-    eprintln!("note: skipping: {what} is missing (HUSHRUN_TEST_TOOLS=required makes this fail)");
-    false
-}
-
-/// The CMakes to run with, or none, said.
-fn with_cmake() -> Vec<Cmake> {
-    let found = cmakes();
-    if tools(
-        "CMake 3.21 or later (HUSHRUN_TEST_CMAKE)",
-        !found.is_empty(),
-    ) {
-        found
-    } else {
-        Vec::new()
-    }
-}
-
-/// The generators a CMake can use here: Ninja where there is one, and Makefiles where `make` is.
-fn generators(cmake: &Cmake) -> Vec<&'static str> {
-    let mut out = Vec::new();
-    if cmake.ninja.is_some() {
-        out.push("Ninja");
-    }
-    if which("make").is_some() {
-        out.push("Unix Makefiles");
-    }
-    out
-}
-
 struct Project {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -203,18 +116,7 @@ impl Project {
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).expect("mkdir");
         git::init(&repo, "sha1");
-        let mut dirs = vec![cmake.bin.clone()];
-        dirs.extend(
-            cmake
-                .ninja
-                .as_ref()
-                .and_then(|n| n.parent().map(Path::to_path_buf)),
-        );
-        dirs.extend(which("make").and_then(|m| m.parent().map(Path::to_path_buf)));
-        dirs.extend(which("cc").and_then(|m| m.parent().map(Path::to_path_buf)));
-        dirs.push("/usr/bin".into());
-        dirs.push("/bin".into());
-        let path = std::env::join_paths(dirs).unwrap();
+        let path = fixtures::path(cmake);
         let p = Project {
             _dir: dir,
             cache: root.join("cache"),
@@ -229,15 +131,11 @@ impl Project {
             p.write(path, text);
         }
         git::commit_all(&p.repo, "init");
-        let mut configure = p.tool("cmake");
-        configure.args(["-S", ".", "-B", build_dir, "-G", generator]);
-        if generator == "Ninja" {
-            configure.arg(format!(
-                "-DCMAKE_MAKE_PROGRAM={}",
-                cmake.ninja.as_ref().unwrap().display()
-            ));
-        }
-        let out = configure.output().expect("cmake");
+        let out = p
+            .tool("cmake")
+            .args(fixtures::configure(cmake, generator, build_dir))
+            .output()
+            .expect("cmake");
         assert!(
             out.status.success(),
             "{}",
@@ -477,78 +375,6 @@ impl Shim {
     fn selection(&self) -> &str {
         self.facts["settings"]["selection"].as_str().unwrap_or("")
     }
-}
-
-fn file(path: &str, text: &str) -> (String, String) {
-    (path.to_string(), text.to_string())
-}
-
-fn yaml(tests: &str) -> String {
-    format!("version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: {tests}\n")
-}
-
-/// A shop in C: a price library two test programs link, a cart header one of them includes, and
-/// three programs that read headers of their own, or none. Every test but `greet` fails when
-/// `FAIL_HIDDEN` is set, which no file says, as a missed dependency would.
-fn shop(tests: &str) -> Vec<(String, String)> {
-    let hidden = "  if (getenv(\"FAIL_HIDDEN\")) return 1;\n";
-    vec![
-        file("hushrun.yaml", &yaml(tests)),
-        file(".gitignore", "build/\n"),
-        file(
-            "CMakeLists.txt",
-            "cmake_minimum_required(VERSION 3.19)\nproject(shop C)\nenable_testing()\n\
-             add_library(price STATIC src/price.c)\ntarget_include_directories(price PUBLIC src)\n\
-             foreach(t t_price t_cart t_greet t_util t_misc)\n  add_executable(${t} tests/${t}.c)\n  target_include_directories(${t} PRIVATE src)\nendforeach()\n\
-             target_link_libraries(t_price PRIVATE price)\ntarget_link_libraries(t_cart PRIVATE price)\n\
-             add_test(NAME price COMMAND t_price)\n\
-             add_test(NAME cart_total COMMAND t_cart total)\nadd_test(NAME cart_empty COMMAND t_cart empty)\nadd_test(NAME cart_tax COMMAND t_cart tax)\n\
-             add_test(NAME greet COMMAND t_greet)\nadd_test(NAME util COMMAND t_util)\nadd_test(NAME misc COMMAND t_misc)\n",
-        ),
-        file("src/price.h", "int price(int x);\n"),
-        file(
-            "src/price.c",
-            "#include \"price.h\"\nint price(int x) { return x * 2; }\n",
-        ),
-        file(
-            "src/cart.h",
-            "static int cart_total(int a, int b) { return a + b; }\n",
-        ),
-        file(
-            "src/greet.h",
-            "static const char *greet(void) { return \"hi\"; }\n",
-        ),
-        file("src/util.h", "static int twice(int x) { return 2 * x; }\n"),
-        file(
-            "tests/t_price.c",
-            &format!(
-                "#include <stdlib.h>\n#include \"price.h\"\nint main(void) {{\n{hidden}  return price(3) == 6 ? 0 : 1;\n}}\n"
-            ),
-        ),
-        file(
-            "tests/t_cart.c",
-            &format!(
-                "#include <stdlib.h>\n#include <string.h>\n#include \"price.h\"\n#include \"cart.h\"\n\
-                 int main(int argc, char **argv) {{\n  const char *c = argc > 1 ? argv[1] : \"\";\n{hidden}\
-                 \x20 if (getenv(\"FAIL_CART\") && strcmp(getenv(\"FAIL_CART\"), c) == 0) return 1;\n\
-                 \x20 if (strcmp(c, \"total\") == 0) return cart_total(price(1), price(2)) == 6 ? 0 : 1;\n  return 0;\n}}\n"
-            ),
-        ),
-        file(
-            "tests/t_greet.c",
-            "#include \"greet.h\"\nint main(void) { return greet()[0] == 'h' ? 0 : 1; }\n",
-        ),
-        file(
-            "tests/t_util.c",
-            &format!(
-                "#include <stdlib.h>\n#include \"util.h\"\nint main(void) {{\n{hidden}  return twice(2) == 4 ? 0 : 1;\n}}\n"
-            ),
-        ),
-        file(
-            "tests/t_misc.c",
-            &format!("#include <stdlib.h>\nint main(void) {{\n{hidden}  return 0;\n}}\n"),
-        ),
-    ]
 }
 
 const CTEST: &[&str] = &["run", "unit", "--", "ctest", "--test-dir", "build"];
@@ -2812,26 +2638,13 @@ fn discovered_googletest_tests_are_named_by_their_filter_on_every_cmake() {
 
 // covers: C-49, C-32
 #[test]
-fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
+fn a_shell_line_is_observed_and_a_stale_program_records_nothing() {
     let Some(cmake) = with_cmake().into_iter().next() else {
         return;
     };
     let generator = generators(&cmake)[0];
+    // `cmake --build … --target test` is refused in-process: units_ctest.rs.
     let p = Project::new(&cmake, generator, &shop("observe"));
-    let bypassed = p.run(
-        &[
-            "run", "unit", "--", "cmake", "--build", "build", "--target", "test",
-        ],
-        &[],
-    );
-    assert_eq!(bypassed.code, 0, "{}", bypassed.stderr);
-    assert!(
-        bypassed.stderr.contains(
-            "hushrun: unit: test files aren't observed: make test, ninja test and cmake --build … --target test start ctest by its full path"
-        ),
-        "{}",
-        bypassed.stderr
-    );
     let line = p.run(
         &["run", "unit", "--", "sh", "-c", "cd build && ctest -j2"],
         &[],

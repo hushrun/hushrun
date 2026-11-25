@@ -1,13 +1,16 @@
-//! \[ADR 0121\] Test targets and tests with `xcodebuild test` (C-110 to C-113): a unit is a test
-//! target of an Xcode project, what it read is what the project says it and the targets it
-//! depends on are built from, a test is its id in the result bundle, and reuse never misses a
-//! failure.
+//! \[ADR 0121\] Test targets and tests with `xcodebuild test` (C-110 to C-113), end to end: a
+//! unit is a test target of an Xcode project, what it read is what the project says it and the
+//! targets it depends on are built from, a test is its id in the result bundle, and reuse never
+//! misses a failure.
 //!
-//! The project is tiny (`testdata/xcodebuild/Lib`), and needs macOS with Xcode 16 or later:
-//! `HUSHRUN_TEST_XCODEBUILD` names the `xcodebuild` to use (by default the one on `PATH`). The
-//! tests say so and pass where it is missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI
-//! sets on macOS.
+//! This file is part of the end-to-end set (`tests/e2e_*.rs`, CONTRIBUTING.md, "Which tests CI
+//! runs again"): hushrun's `xcodebuild` on COMMAND's `PATH` is the `hushrun` binary itself
+//! (`units::program`), so every run the adapter observes starts it, and reaches the whole binary.
+//! What needs no helper is in-process, in `units_xcodebuild.rs`. The fixtures are
+//! `common/xcodebuild.rs`'s, and need macOS with Xcode 16 or later.
 
+#[path = "common/xcodebuild.rs"]
+mod fixtures;
 #[path = "common/store.rs"]
 mod store;
 
@@ -15,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use hushrun_testkit::git;
+
+use fixtures::*;
 use serde_json::{Value, json};
 
 /// Environment variables a test must never inherit.
@@ -71,37 +76,6 @@ const CLEARED: &[&str] = &[
 
 const NO_HOST: &str = "http://127.0.0.1:9";
 
-/// The `xcodebuild` these tests run, on macOS with Xcode 16 or later: `HUSHRUN_TEST_XCODEBUILD`
-/// names it, by default the one on `PATH`. Elsewhere there is none, and none is missing.
-fn xcodebuild() -> Option<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    let named = std::env::var_os("HUSHRUN_TEST_XCODEBUILD").map(PathBuf::from);
-    let xcodebuild = named.unwrap_or_else(|| PathBuf::from("xcodebuild"));
-    let output = Command::new(&xcodebuild).arg("-version").output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let major: u32 = text
-        .strip_prefix("Xcode ")?
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .ok()?;
-    (output.status.success() && major >= 16).then_some(xcodebuild)
-}
-
-fn tools(what: &str, here: bool) -> bool {
-    if here {
-        return true;
-    }
-    if std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required") {
-        panic!("{what} is missing, and HUSHRUN_TEST_TOOLS=required");
-    }
-    eprintln!("note: skipping: {what} is missing (HUSHRUN_TEST_TOOLS=required makes this fail)");
-    false
-}
-
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -119,19 +93,10 @@ impl Repo {
         std::fs::create_dir_all(&repo).expect("mkdir");
         std::fs::create_dir_all(root.join("home")).expect("home");
         git::init(&repo, "sha1");
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if xcodebuild.is_absolute()
-            && let Some(parent) = xcodebuild.parent()
-        {
-            dirs.push(parent.to_path_buf());
-        }
-        dirs.extend(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ));
         let r = Repo {
             _dir: dir,
             cache: root.join("cache"),
-            path: std::env::join_paths(dirs).expect("PATH"),
+            path: fixtures::path(xcodebuild),
             root,
             repo,
         };
@@ -242,55 +207,10 @@ impl Ran {
     }
 }
 
-fn copy(from: &Path, out: &mut Vec<(String, String)>, prefix: &str) {
-    for entry in std::fs::read_dir(from).expect("fixture").flatten() {
-        let path = entry.path();
-        let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
-        if path.is_dir() {
-            copy(&path, out, &format!("{name}/"));
-        } else {
-            out.push((name, std::fs::read_to_string(&path).expect("text")));
-        }
-    }
-}
-
-/// The fixture under `ios/`: Lib, LibTests on it (XCTest and Swift Testing), OtherTests alone;
-/// the scheme `All` tests both. `TEST_RUNNER_FAIL` fails `LibTests.testFlips`.
-fn project(tests: &str) -> Vec<(String, String)> {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/xcodebuild/Lib");
-    let mut files = Vec::new();
-    copy(&fixture, &mut files, "ios/");
-    files.push((
-        "hushrun.yaml".into(),
-        format!(
-            "version: 1\nrepository: example.com/acme/lib\nchecks:\n  unit:\n    tests: {tests}\n"
-        ),
-    ));
-    files.push(("notes/a.md".into(), "a\n".into()));
-    files
-}
-
 fn xcodebuild_test(r: &Repo) -> Vec<String> {
-    let dd = r.root.join("dd");
-    [
-        "run",
-        "unit",
-        "--",
-        "xcodebuild",
-        "-project",
-        "ios/Lib.xcodeproj",
-        "-scheme",
-        "All",
-        "-destination",
-        "platform=macOS",
-        "-derivedDataPath",
-        dd.to_str().expect("utf-8"),
-        "CODE_SIGNING_ALLOWED=NO",
-        "test",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
+    let mut args: Vec<String> = ["run", "unit", "--"].map(String::from).to_vec();
+    args.extend(test_command(&r.root.join("dd")));
+    args
 }
 
 fn run_test(r: &Repo, env: &[(&str, &str)]) -> Ran {
@@ -395,21 +315,4 @@ fn with_tests_as_the_unit_only_the_test_that_failed_runs_again() {
         r.map()["units"]["ios/Lib.xcodeproj/LibTests"]["tests"]["LibTests/testFlips()"],
         "passed"
     );
-}
-
-// covers: C-110
-#[test]
-fn xcrun_xcodebuild_is_refused_and_everything_runs() {
-    let Some(xcodebuild) = xcodebuild() else {
-        // xcodebuild is macOS's alone: elsewhere there is nothing to miss.
-        tools("Xcode 16", !cfg!(target_os = "macos"));
-        return;
-    };
-    let r = Repo::new(&xcodebuild, &project("{mode: reuse}"));
-    let mut args = xcodebuild_test(&r);
-    args.insert(3, "xcrun".into());
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let ran = r.run(&args, &[]);
-    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
-    assert!(ran.stderr.contains("xcrun xcodebuild"), "{}", ran.stderr);
 }

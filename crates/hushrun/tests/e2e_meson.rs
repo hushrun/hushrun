@@ -1,14 +1,17 @@
-//! \[ADR 0119\] Test programs with `meson test` (C-102 to C-105): a unit is a test program, a test
-//! one Meson test, what a program read is what its build folder says it is built from, and
-//! hushrun's `meson` on `PATH` leaves out only what it was told, after checking it again.
+//! \[ADR 0119\] Test programs with `meson test` (C-102 to C-105), end to end: a unit is a test
+//! program, a test one Meson test, what a program read is what its build folder says it is built
+//! from, and hushrun's `meson` on `PATH` leaves out only what it was told, after checking it again.
 //!
-//! The fixtures are generated Meson projects of plain C, and need Meson and Ninja:
-//! `HUSHRUN_TEST_MESON` names the `meson` to use (and `HUSHRUN_TEST_CMAKE` the folder of `ninja`,
-//! as for the CTest tests). Without them, the ones on `PATH`. They say so and pass where they are
-//! missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI sets. No fixture needs the network.
+//! This file is part of the end-to-end set (`tests/e2e_*.rs`, CONTRIBUTING.md, "Which tests CI
+//! runs again"): hushrun's `meson` on COMMAND's `PATH` is the `hushrun` binary itself
+//! (`units::program`), so every run the adapter observes starts it, and reaches the whole binary.
+//! What needs no helper is in-process, in `units_meson.rs`. The fixtures are `common/meson.rs`'s:
+//! generated Meson projects of plain C, which need Meson and Ninja.
 
 #![cfg(unix)]
 
+#[path = "common/meson.rs"]
+mod fixtures;
 #[path = "common/store.rs"]
 mod store;
 
@@ -16,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use hushrun_testkit::git;
+
+use fixtures::{shop, tools};
 use serde_json::{Value, json};
 
 /// Environment variables a test must never inherit.
@@ -72,43 +77,6 @@ const CLEARED: &[&str] = &[
 
 const NO_HOST: &str = "http://127.0.0.1:9";
 
-fn which(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
-}
-
-/// The folders holding `meson` and `ninja`, or `None`, said, where either is missing.
-fn tools() -> Option<Vec<PathBuf>> {
-    let meson = std::env::var_os("HUSHRUN_TEST_MESON")
-        .map(PathBuf::from)
-        .or_else(|| which("meson"));
-    let ninja = std::env::var_os("HUSHRUN_TEST_CMAKE")
-        .and_then(|dirs| {
-            std::env::split_paths(&dirs)
-                .map(|d| d.join("ninja"))
-                .find(|p| p.is_file())
-        })
-        .or_else(|| which("ninja"));
-    match (meson, ninja) {
-        (Some(meson), Some(ninja)) => Some(vec![
-            meson.parent().unwrap().to_path_buf(),
-            ninja.parent().unwrap().to_path_buf(),
-        ]),
-        _ => {
-            if std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required") {
-                panic!(
-                    "Meson or Ninja is missing (HUSHRUN_TEST_MESON), and HUSHRUN_TEST_TOOLS=required"
-                );
-            }
-            eprintln!(
-                "note: skipping: Meson or Ninja is missing (HUSHRUN_TEST_TOOLS=required makes this fail)"
-            );
-            None
-        }
-    }
-}
-
 struct Project {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -125,16 +93,12 @@ impl Project {
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).expect("mkdir");
         git::init(&repo, "sha1");
-        let mut dirs = bin.to_vec();
-        dirs.extend(which("cc").and_then(|m| m.parent().map(Path::to_path_buf)));
-        dirs.push("/usr/bin".into());
-        dirs.push("/bin".into());
         let p = Project {
             _dir: dir,
             cache: root.join("cache"),
             root,
             repo,
-            path: std::env::join_paths(dirs).unwrap(),
+            path: fixtures::path(bin),
         };
         for (path, text) in files {
             p.write(path, text);
@@ -251,57 +215,6 @@ impl Ran {
     }
 }
 
-fn shop(extra: &str) -> Vec<(&'static str, String)> {
-    vec![
-        (
-            "hushrun.yaml",
-            "version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: reuse\n"
-                .into(),
-        ),
-        (".gitignore", "build/\n".into()),
-        (
-            "meson.build",
-            format!(
-                "project('shop', 'c')\ninc = include_directories('src')\n\
-                 price = static_library('price', 'src/price.c', include_directories: inc)\n\
-                 t_price = executable('t_price', 'tests/t_price.c', link_with: price, include_directories: inc)\n\
-                 t_cart = executable('t_cart', 'tests/t_cart.c', link_with: price, include_directories: inc)\n\
-                 t_greet = executable('t_greet', 'tests/t_greet.c', include_directories: inc)\n\
-                 test('price', t_price)\ntest('cart_total', t_cart, args: ['total'])\n\
-                 test('cart_empty', t_cart, args: ['empty'])\ntest('greet', t_greet)\n{extra}"
-            ),
-        ),
-        ("src/price.h", "int price(int x);\n".into()),
-        (
-            "src/price.c",
-            "#include \"price.h\"\nint price(int x) { return x * 2; }\n".into(),
-        ),
-        (
-            "src/cart.h",
-            "static int cart_total(int a, int b) { return a + b; }\n".into(),
-        ),
-        (
-            "src/greet.h",
-            "static const char *greet(void) { return \"hi\"; }\n".into(),
-        ),
-        (
-            "tests/t_price.c",
-            "#include <stdlib.h>\n#include \"price.h\"\nint main(void) { if (getenv(\"FAIL_PRICE\")) return 1; return price(3) == 6 ? 0 : 1; }\n"
-                .into(),
-        ),
-        (
-            "tests/t_cart.c",
-            "#include <string.h>\n#include \"price.h\"\n#include \"cart.h\"\n\
-             int main(int argc, char **argv) { if (argc > 1 && strcmp(argv[1], \"total\") == 0) return cart_total(price(1), price(2)) == 6 ? 0 : 1; return 0; }\n"
-                .into(),
-        ),
-        (
-            "tests/t_greet.c",
-            "#include \"greet.h\"\nint main(void) { return greet()[0] == 'h' ? 0 : 1; }\n".into(),
-        ),
-    ]
-}
-
 const MESON_TEST: &[&str] = &["run", "unit", "--", "meson", "test", "-C", "build"];
 
 // covers: C-102, C-103, C-104, C-105
@@ -402,25 +315,6 @@ fn a_test_that_starts_a_program_not_built_here_is_not_observed_and_always_runs()
         "{}",
         second.text()
     );
-}
-
-// covers: C-102
-#[test]
-fn meson_test_started_by_its_path_says_why_nothing_is_reused() {
-    let Some(bin) = tools() else { return };
-    let p = Project::new(&bin, &shop(""));
-    let meson = bin[0].join("meson");
-    let ran = p.run(&[
-        "run",
-        "unit",
-        "--",
-        meson.to_str().unwrap(),
-        "test",
-        "-C",
-        "build",
-    ]);
-    assert_eq!(ran.code, 0, "{}", ran.text());
-    assert!(ran.stderr.contains("by its path"), "{}", ran.text());
 }
 
 // covers: C-104
