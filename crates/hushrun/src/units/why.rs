@@ -305,12 +305,9 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     // assignments over this environment, as a run's would.
     let assigned = super::command::assignments(&input.base.command);
     let getenv = (adapter.keys() == super::adapter::KeysOutside::Getenv)
-        .then(|| super::gotest::Getenv::of_command(input.root, &assigned));
-    let keys = getenv
-        .as_ref()
-        .map(|getenv| move |names: &BTreeSet<String>| getenv.outside(names));
-    let keys = keys.as_ref().map(|keys| keys as &shared::KeysEnv<'_>);
-    let lists = shared::lists(&unit, own, &shared, input.tree, None, keys).unwrap_or_default();
+        .then(|| super::getenv::Getenv::of_command(input.root, &assigned));
+    let lists =
+        shared::lists(&unit, own, &shared, input.tree, None, getenv.as_ref()).unwrap_or_default();
     if lists.is_empty() {
         says(
             &mut out,
