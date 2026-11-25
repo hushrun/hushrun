@@ -137,7 +137,7 @@ pub struct Graph {
 pub type Fallback = String;
 
 /// What a test reaches: the sources, and \[C-151\] each marked function it reaches whose
-/// `Command::new` the map trusted, for people (`<file>:<line> `<name>``).
+/// `Command::new` the map trusted, for people: its file, line and name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reached {
     pub files: BTreeSet<String>,
