@@ -170,6 +170,7 @@ fn sent_tests(
             not_followed: BTreeSet::new(),
             not_kept: None,
             list: list.clone(),
+            trusted: None,
         };
         mapped.tests.insert("test_ok".into(), row(State::Passed));
         mapped.tests.insert(
@@ -285,11 +286,27 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
         assert!(notes.is_empty(), "{notes:?}");
     }
     // Tests, of an adapter that knows none: by test file, said once, in the runner's words.
-    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &Profile::of(&cargo));
+    // covers: C-146
+    // \[C-146\] `cargo test` starts a binary once: by test binary, said once, and why.
+    let cargo_test = cargo::recognize(&words("cargo test --workspace")).unwrap();
+    let (unit, _, notes) =
+        what_it_reuses(&tests(Unit::Test, Reads::File), &Profile::of(&cargo_test));
     assert_eq!(unit, Unit::File);
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].starts_with("its tests are reused by test binary: `cargo test` runs each test binary's tests in one start"),
+        "{notes:?}"
+    );
+    // `cargo nextest run` starts each test on its own: one by one, each taken to have read
+    // what the static map gives, never watched.
+    let (unit, reads, notes) =
+        what_it_reuses(&tests(Unit::Test, Reads::Test), &Profile::of(&cargo));
+    assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert_eq!(
         notes,
-        ["its tests are reused by test binary: cargo's tests can't be reused one by one yet"]
+        [
+            "each test is taken to have read what the static map of its sources says it reaches, with what its test binary read besides: cargo nextest's tests aren't watched one by one"
+        ]
     );
     // \[ADR 0086\] Go knows tests, unless COMMAND chooses its own.
     let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &Profile::of(&go));
@@ -550,6 +567,7 @@ fn a_test_not_followed_keeps_its_file_from_being_reused_whole_for_either_unit() 
             }]),
             not_kept: None,
             list: None,
+            trusted: None,
         },
     );
     map.units.insert("tests/test_a.py".into(), mapped);
@@ -819,6 +837,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         not_followed: BTreeSet::new(),
         not_kept: None,
         list: None,
+        trusted: None,
     };
     // \[C-33\] A run that reused nothing took a second here: what reuse can save at most.
     let mut map = store::Map {
@@ -1076,6 +1095,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
         not_followed: BTreeSet::new(),
         not_kept: None,
         list: None,
+        trusted: None,
     };
     let mut map = store::Map::default();
     for (unit, n) in [("tests/test_a.py", 25_000), ("tests/test_b.py", 25_001)] {
@@ -1095,6 +1115,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
     let passed = BTreeMap::new();
     let plan = |map: &store::Map| {
         plan_tests(&TestsAt {
+            test_lists: &adapter::TestLists::new(),
             keyer: &keyer,
             reads: Reads::File,
             tree: &tree,
@@ -1149,6 +1170,7 @@ fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
         not_followed: BTreeSet::new(),
         not_kept: None,
         list: None,
+        trusted: None,
     };
     // \[C-33\] A run that reused nothing took a second here: what reuse can save at most.
     let mut map = store::Map {
@@ -1355,4 +1377,36 @@ fn an_adapter_s_node_options_go_after_the_build_s_hook() {
         super::beside(None, None, &os("--require /c/jest.cjs")),
         os("--require /c/jest.cjs")
     );
+}
+
+// covers: C-146
+#[test]
+fn a_mapped_test_is_keyed_by_its_map_with_its_test_files_outside() {
+    let outside = units::Outside {
+        env: Some(Digest::of(b"env")),
+        scripts: Some(Digest::of(b"scripts")),
+    };
+    let file = built_list(
+        &["src/lib.rs", "src/a.rs", "src/b.rs", "Cargo.toml"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        outside,
+    );
+    let reads: BTreeSet<String> = ["src/lib.rs", "src/a.rs", "Cargo.toml"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let lists = mapped_lists(Some(&Ok(reads.clone())), std::slice::from_ref(&file));
+    assert_eq!(lists.len(), 1);
+    assert!(lists[0].own);
+    assert_eq!(lists[0].list.files, reads);
+    assert_eq!(lists[0].list.outside, outside);
+    // One the map can't narrow, or has nothing of: its test file's.
+    for mapped in [Some(&Err("why".to_string())), None] {
+        let lists = mapped_lists(mapped, std::slice::from_ref(&file));
+        assert_eq!(lists.len(), 1);
+        assert!(!lists[0].own);
+        assert_eq!(lists[0].list, file);
+    }
 }
