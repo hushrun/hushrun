@@ -4,6 +4,11 @@
 //! where either is missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI sets. Nothing here
 //! downloads: the build applies Gradle's own `java` plugin alone. (`--offline` would turn
 //! Gradle's remote build cache off, hushrun's with it.)
+//!
+//! Every test here stays end to end (CONTRIBUTING.md, "When a test is end to end"): what it checks
+//! is Gradle served by the build session and the relay, which run in the `hushrun` process that
+//! `hushrun run` starts, and what the run's lines say of it. What of Gradle's build block needs no
+//! run, its cache's protocol and entries, is tested in-process in `hushrun-build` (`gradle/`).
 
 #![cfg(unix)]
 
