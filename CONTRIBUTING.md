@@ -80,25 +80,30 @@ binaries outside hushrun first.
 #### What the static map will count
 
 A static map of each Rust test, which needs no coverage run, will narrow the unit from a test
-binary to one test: a test that already passed is reused when nothing it can reach changed. It
-reads names, not types. Every identifier a reached item mentions reaches every item of that name
-in the crates the binary links, and a reached type reaches every `impl` block that names it. A
-fully qualified path (`gradle::Recognized::read`) may come to reach only its own item. So:
+binary to one test: a test that already passed is reused when no file it can reach changed. It
+follows each call rust-analyzer resolves, item by item, and keys a test by the files those
+items are in. So:
 
-- a test that starts the `hushrun` binary (`env!("CARGO_BIN_EXE_hushrun")`, directly or through
-  hushrun-testkit or `tests/common/cli.rs`) reaches the whole binary, every file of
-  `crates/hushrun/src/`;
-- a method call that every adapter's trait methods share a name with (`x.read(…)`, `x.plan(…)`,
-  `x.variables(…)`) reaches every adapter;
-- so does going through `units::adapter::choose`, `choose_kept` or `RECOGNIZED`, through
-  `units::Session` or `units::why`, which take a `Box<dyn Adapter>`, or through anything in
-  `cmd::`.
+- a call on a concrete type (`adapter.read(…)` where `adapter` is a `gradle::Recognized`)
+  reaches that type's own method, and nothing else;
+- a call through a trait object or a generic bound (`Box<dyn Adapter>`, `&dyn Adapter`,
+  `T: Adapter`) reaches the trait's method, so every `impl` of it: every adapter. So does going
+  through `units::adapter::choose`, `choose_kept` or `RECOGNIZED`, `units::Session` or
+  `units::why`, or anything in `cmd::`;
+- a name rust-analyzer can't resolve, in a `macro_rules!` body or code a `cfg` leaves out,
+  reaches every item of that name: a macro that calls `adapter.read(…)` reaches every adapter's
+  `read`;
+- a test that starts a program it can't name, such as the `hushrun` binary
+  (`env!("CARGO_BIN_EXE_hushrun")`, `current_exe()`, hushrun-testkit's `World`,
+  `tests/common/cli.rs`) or a `Command::new` of a variable, reads the whole binary, every file
+  of `crates/hushrun/src/`.
 
 #### An adapter test the map can narrow
 
 `crates/hushrun` is a library its binary is a thin `main` over, so a test can call its code
-in-process instead of starting the binary. An adapter's tests live in `tests/units_<adapter>.rs` and run a check as `hushrun run
-CHECK -- COMMAND` would, through that one adapter. `units_gradle.rs` is the pattern:
+in-process instead of starting the binary. An adapter's tests live in `tests/units_<adapter>.rs`
+and run a check as `hushrun run CHECK -- COMMAND` would, through that one adapter.
+`units_gradle.rs` is the pattern:
 
 ```rust
 #[path = "common/in_process.rs"]
@@ -124,26 +129,35 @@ fn run(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
     if let Some(why) = gradle::unloadable(&adapter, &r.repo) {
         return in_process::Run::new(r, "unit", args, env).unobserved(&why);
     }
-    hushrun_run!(r, "unit", args, env, &adapter, plan_from_files, profile(&adapter))
+    observe(r, args, env, &adapter)
+}
+
+/// One run, with each call `hushrun run` makes of the adapter, on `gradle::Recognized`.
+fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &gradle::Recognized) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile(adapter)) else { return run.plain() };
+    let variables = adapter.variables(&observer.start_at(&run.env()));
+    run.started(&mut observer, variables);
+    // … the plan, COMMAND, the facts read, the audit's second run: see units_gradle.rs
+    run.record(code, observed)
 }
 ```
 
 - Name the adapter by its own type (`gradle::Recognized`, `maven::Recognized`, `pytest::Pytest`)
   and find it as its `recognized` function does, without the box: its own `recognize` and
   checks. Never call `recognized`, `choose`, `choose_kept` or `RECOGNIZED`.
-- `hushrun_run!` (`tests/common/in_process.rs`) makes each call `hushrun run` makes of the
-  adapter, on the value you pass, around the steps of `units::Observer`: the code every adapter
-  shares, which takes no adapter. Pass the method that makes the plan, the one the adapter's
-  `impl Adapter` defines: `plan`, or `plan_from_files` where it keeps the trait's default `plan`.
-  The same goes for anything else you call on it: call what its `impl` defines, never a default
-  that calls another method.
-- Write no helper generic over `Adapter`, and take no `&dyn Adapter`. A helper of your own takes
-  the adapter's own type.
+- Copy `observe` from `units_gradle.rs` and change the type: it makes each call `hushrun run`
+  makes of the adapter, in order, around the steps of `units::Observer` and
+  `tests/common/in_process.rs`'s `Run`, the code every adapter shares, which takes no adapter.
+  Make the plan with the method the adapter's `impl Adapter` defines: `plan`, or
+  `plan_from_files` where it keeps the trait's default `plan`.
+- Keep it a function. No macro, no helper generic over `Adapter`, no `&dyn Adapter`: a helper of
+  your own takes the adapter's own type.
 - A `Ran` holds COMMAND's `code`, `stdout` and `stderr`, the `lines` hushrun's steps said
   (`hushrun run` writes each after `hushrun: `), and `units`, the counts the check's result
   keeps. `Repo::map`, `unit_results` and `disagreements` read this machine's store.
 - COMMAND runs for real: the runner and its tools, as before. Fixtures and tool lookups that an
-  adapter's end-to-end tests share go in `tests/common/<adapter>.rs`.
+  adapter's in-process and end-to-end tests share go in `tests/common/<adapter>.rs`.
 - Nothing in the harness changes what the test process shares: it sets no environment
   variable, keeps the current directory, and installs no signal handler. COMMAND gets its
   environment on its own `Command`, and the observer gets the cache directory as an argument. So
@@ -156,13 +170,18 @@ fn run(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
 A test starts the binary only for what the CLI alone does, which no in-process test sees: its
 lines as it writes them (`hushrun: `, and their order with COMMAND's output), a run's last line
 and exit code, the check's own result and skip, the audit's second start of COMMAND, `hushrun
-why` and `hushrun ready`, the target runner and the programs an adapter puts on `PATH`, the hook,
-and CI's detection. Those tests are the end-to-end set:
+why` and `hushrun ready`, the hook, and CI's detection. Those tests are the end-to-end set:
 
 - `tests/e2e_<adapter>.rs`: each adapter's small smoke set, one run through the CLI that reuses
   and says so, and whatever of the list above the adapter has (`e2e_gradle.rs`). They include
   `tests/common/cli.rs`, the one file of `tests/common/` that names the binary; an in-process
   test file never includes it.
+- an adapter whose COMMAND runs the hushrun binary itself as a helper: Cargo's target runner, the
+  programs `units::program` puts on `PATH` (CTest, Swift, Meson, xcodebuild), Bats' hook, the
+  VSTest step, and the build blocks' wrapper, launcher and helpers. A flow that runs the helper
+  reaches the whole binary, as it should, and stays end to end: never fake the helper. What of
+  that adapter needs no helper, such as reading a runner's output or facts, or making its plan
+  and keys, is tested in-process all the same, in `units_<adapter>.rs`.
 - the CLI's own flows, whose files keep their names for now: `hushrun init`, `ready`, `hook`,
   `login`, `run` and its CI lines, the build blocks, and the rest of `tests/` that isn't an
   adapter's.
