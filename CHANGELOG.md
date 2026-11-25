@@ -107,7 +107,11 @@ project's new branch starts from what main's CI already ran.
   to 18, whose compiles all failed through the launcher, get no include-graph variables (B-243).
 - **`hushrun build pull`** (B-240, [ADR 0143](docs/adr/0143-a-baked-store-pulled-into-a-fixed-sandbox.md)):
   the repository's newest baked store from the backend's registry, checked (and its signature, when
-  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`.
+  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`. Each layer
+  goes to disk as it arrives, never into memory whole, and a pull into a folder that holds the image
+  its tag names already downloads nothing ([ADR 0146](docs/adr/0146-a-pull-streams-its-layers-and-skips-a-store-it-has.md)).
+  `--resolve` prints `<image>@<digest>` only, `--format json` gives `hushrun.build-pull/v1`, and
+  the line names the whole digest.
 - **Recipes per agent cloud** in `recipes/agent-clouds/`, and a Dev Container Feature in
   `features/src/hushrun`, to publish as `ghcr.io/hushrun/features/hushrun`.
 - **A results outbox** (C-143, [ADR 0142](docs/adr/0142-results-that-wait-and-what-a-sandbox-fetches.md)):

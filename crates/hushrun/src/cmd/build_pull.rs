@@ -59,30 +59,62 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
         },
     )
     .map_err(|e| failed(e.to_string()))?;
-    let Some((digest, layers)) = artifacts
-        .pull_layers(&image, &tag, MOST_LAYER)
+    let Some(manifest) = artifacts
+        .tagged(&image, &tag)
         .map_err(|e| failed(format!("{image}:{tag}: {e}")))?
     else {
         return Err(failed(format!(
             "{image} has no {tag}: no baked store of this repository for this platform yet"
         )));
     };
-    // Unpacked beside the destination, so the swap is a rename on one file system.
+    let digest = manifest.digest();
+    let pulled = Pulled {
+        image: image.to_string(),
+        tag: tag.clone(),
+        digest: digest.to_string(),
+        to: dest.clone(),
+    };
+    if args.resolve {
+        return said(global, &pulled, "resolved", None);
+    }
     let parent = dest
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    fs::create_dir_all(parent)
-        .map_err(|e| failed(format!("creating {}: {e}", parent.display())))?;
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
     let name = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "hushrun".into());
+    let record = parent.join(format!(".{name}.pulled"));
+    // B-240: the store there is this image's, as the last pull put it: nothing is downloaded.
+    // One whose signature no longer verifies (hushrun.yaml changed) is pulled again.
+    if already(&record, &pulled, &dest).is_some()
+        && let Ok(trust) = signature(global, &dest)
+    {
+        return said(global, &pulled, "unchanged", Some(&trust));
+    }
+    // Unpacked beside the destination, so the swap is a rename on one file system; the layers
+    // go to files there as they arrive, and each goes once it is unpacked.
+    fs::create_dir_all(&parent)
+        .map_err(|e| failed(format!("creating {}: {e}", parent.display())))?;
     let staging = parent.join(format!(".{name}.pull-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&staging);
+    let downloads = parent.join(format!(".{name}.layers-{}", std::process::id()));
+    let clean = || {
+        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(&downloads);
+    };
+    clean();
     let result = (|| -> Result<String, String> {
+        let layers = artifacts
+            .pull_layers(&image, &manifest, MOST_LAYER, &downloads)
+            .map_err(|e| format!("{image}:{tag}: {e}"))?;
         for layer in &layers {
-            untar(layer, &staging).map_err(|e| format!("unpacking {image}:{tag}: {e}"))?;
+            let file =
+                fs::File::open(layer).map_err(|e| format!("reading {}: {e}", layer.display()))?;
+            untar(io::BufReader::new(file), &staging)
+                .map_err(|e| format!("unpacking {image}:{tag}: {e}"))?;
+            let _ = fs::remove_file(layer);
         }
         let store = staging.join(STORE_ROOT);
         let baked = Baked::read(&store).map_err(|why| format!("{tag}: {}", why.0))?;
@@ -90,30 +122,98 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
             .map_err(|why| format!("{tag}: {why}"))?;
         signature(global, &store)
     })();
-    let said = match result {
-        Ok(said) => said,
+    let trust = match result {
+        Ok(trust) => trust,
         Err(why) => {
-            let _ = fs::remove_dir_all(&staging);
+            clean();
             return Err(failed(why));
         }
     };
+    let _ = fs::remove_file(&record);
     swap(&staging.join(STORE_ROOT), &dest).map_err(|e| {
-        let _ = fs::remove_dir_all(&staging);
+        clean();
         failed(format!("putting it at {}: {e}", dest.display()))
     })?;
-    let _ = fs::remove_dir_all(&staging);
-    if global.quiet == 0 {
-        eprintln!(
-            "hushrun: pulled {image}:{tag} ({}) into {}: {said}",
-            short(&digest.to_string()),
-            dest.display()
-        );
+    clean();
+    // What a later pull compares with; without it, that pull downloads again.
+    if let Some(baked) = baked_digest(&dest) {
+        let _ = fs::write(&record, pulled.record(&baked).to_string());
     }
-    Ok(Exit::Ok)
+    said(global, &pulled, "pulled", Some(&trust))
 }
 
-fn short(digest: &str) -> String {
-    digest.chars().take(19).collect()
+/// What a pull read: the image, its tag, the digest the tag names, and where the store goes.
+struct Pulled {
+    image: String,
+    tag: String,
+    digest: String,
+    to: PathBuf,
+}
+
+impl Pulled {
+    /// What the pull keeps beside the store, `.<name>.pulled`.
+    fn record(&self, baked: &str) -> serde_json::Value {
+        serde_json::json!({
+            "image": self.image,
+            "tag": self.tag,
+            "digest": self.digest,
+            "baked": baked,
+        })
+    }
+}
+
+/// The digest of `store`'s `baked.json`.
+fn baked_digest(store: &Path) -> Option<String> {
+    let bytes = fs::read(store.join("baked.json")).ok()?;
+    Some(hushrun_core::digest::Digest::of(&bytes).to_string())
+}
+
+/// Whether `dest` holds the store of the image `pulled` names already: the record the last pull
+/// left says the same image and digest, `baked.json` is the one it put there, and the folder
+/// still checks (B-63, names and bytes).
+fn already(record: &Path, pulled: &Pulled, dest: &Path) -> Option<()> {
+    let record: serde_json::Value = serde_json::from_slice(&fs::read(record).ok()?).ok()?;
+    let baked = baked_digest(dest)?;
+    if record != pulled.record(&baked) {
+        return None;
+    }
+    let read = Baked::read(dest).ok()?;
+    baked::check_contents(dest, Some(&read), Depth::Bytes).ok()
+}
+
+/// Says what happened (`pulled`, `unchanged`, or `resolved` with no download), as text on stderr
+/// or `hushrun.build-pull/v1` on stdout.
+fn said(global: &GlobalOpts, pulled: &Pulled, what: &str, trust: Option<&str>) -> CmdResult {
+    use crate::output::Format;
+    if global.format == Format::Json {
+        crate::output::print_json(&serde_json::json!({
+            "schema": "hushrun.build-pull/v1",
+            "outcome": what,
+            "image": pulled.image,
+            "tag": pulled.tag,
+            "digest": pulled.digest,
+            "reference": format!("{}@{}", pulled.image, pulled.digest),
+            "to": pulled.to.display().to_string(),
+            "trust": trust,
+        }))?;
+        return Ok(Exit::Ok);
+    }
+    let (image, tag, digest, to) = (
+        &pulled.image,
+        &pulled.tag,
+        &pulled.digest,
+        pulled.to.display(),
+    );
+    match trust {
+        // `--resolve` prints the reference, which is what it is asked for.
+        None => crate::output::print(&format!("{image}@{digest}\n"))?,
+        Some(_) if global.quiet > 0 => {}
+        Some(trust) if what == "unchanged" => eprintln!(
+            "hushrun: {to} holds {image}:{tag} ({digest}) already, so nothing was downloaded: {trust}"
+        ),
+        Some(trust) => eprintln!("hushrun: pulled {image}:{tag} ({digest}) into {to}: {trust}"),
+    }
+    Ok(Exit::Ok)
 }
 
 /// The image to pull and the credential to pull it with: `--image`, else the repository's on its
@@ -240,17 +340,20 @@ fn swap(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Unpacks the tar `bytes` into `into`: regular files and folders under `hushrun/` only, with no
-/// `..`, no absolute path and nothing else (links, devices); ustar's prefix, GNU's long names and
-/// PAX's `path` read.
-fn untar(bytes: &[u8], into: &Path) -> io::Result<()> {
+/// Unpacks the tar read from `from` into `into`, a file at a time: regular files and folders
+/// under `hushrun/` only, with no `..`, no absolute path and nothing else (links, devices);
+/// ustar's prefix, GNU's long names and PAX's `path` read.
+fn untar(mut from: impl io::Read, into: &Path) -> io::Result<()> {
     let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_string());
-    let mut at = 0usize;
+    // A long name or a PAX header is read whole, and none is larger than this.
+    const MOST_HEADER: u64 = 1 << 20;
     let mut long_name: Option<String> = None;
-    while at + 512 <= bytes.len() {
-        let header = &bytes[at..at + 512];
-        if header.iter().all(|b| *b == 0) {
-            break;
+    let mut header = [0u8; 512];
+    loop {
+        match read_block(&mut from, &mut header)? {
+            false => break,
+            true if header.iter().all(|b| *b == 0) => break,
+            true => {}
         }
         let field = |from: usize, len: usize| {
             let raw = &header[from..from + len];
@@ -258,15 +361,9 @@ fn untar(bytes: &[u8], into: &Path) -> io::Result<()> {
             String::from_utf8_lossy(&raw[..end]).into_owned()
         };
         let size = u64::from_str_radix(field(124, 12).trim(), 8).map_err(|_| bad("a size"))?;
-        let size = usize::try_from(size).map_err(|_| bad("a size"))?;
+        let padding = size.div_ceil(512) * 512 - size;
         let kind = header[156];
-        let data_at = at + 512;
-        let data_end = data_at.checked_add(size).ok_or_else(|| bad("a size"))?;
-        if data_end > bytes.len() {
-            return Err(bad("a file runs past the layer"));
-        }
-        let data = &bytes[data_at..data_end];
-        at = data_at + size.div_ceil(512) * 512;
+        let mut data = io::Read::take(&mut from, size);
         let name = match long_name.take() {
             Some(name) => name,
             None => {
@@ -279,44 +376,84 @@ fn untar(bytes: &[u8], into: &Path) -> io::Result<()> {
                 }
             }
         };
-        match kind {
+        let small = |data: &mut dyn io::Read| -> io::Result<Vec<u8>> {
+            if size > MOST_HEADER {
+                return Err(bad("a header larger than 1 MiB"));
+            }
+            let mut bytes = Vec::new();
+            data.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        };
+        let relative = match kind {
             // GNU's long name, for the next entry.
             b'L' => {
+                let bytes = small(&mut data)?;
                 long_name = Some(
-                    String::from_utf8_lossy(data)
+                    String::from_utf8_lossy(&bytes)
                         .trim_end_matches('\0')
                         .to_string(),
                 );
-                continue;
+                None
             }
             // PAX: its `path`, for the next entry; the rest isn't read.
             b'x' => {
-                long_name = pax_path(data);
-                continue;
+                long_name = pax_path(&small(&mut data)?);
+                None
             }
-            b'g' => continue,
-            _ => {}
-        }
-        let relative = safe(&name).ok_or_else(|| bad("a path outside the store"))?;
-        if relative.components().next().map(|c| c.as_os_str()) != Some(STORE_ROOT.as_ref()) {
-            // Anything else the image holds isn't the store's.
-            continue;
-        }
-        let path = into.join(&relative);
-        match kind {
-            b'0' | 0 => {
+            b'g' => None,
+            _ => {
+                let relative = safe(&name).ok_or_else(|| bad("a path outside the store"))?;
+                // Anything else the image holds isn't the store's.
+                (relative.components().next().map(|c| c.as_os_str()) == Some(STORE_ROOT.as_ref()))
+                    .then_some(relative)
+            }
+        };
+        match (kind, relative) {
+            (b'0' | 0, Some(relative)) => {
+                let path = into.join(&relative);
                 if let Some(parent) = path.parent() {
                     make_dirs(parent)?;
                 }
-                fs::write(&path, data)?;
+                let mut file = fs::File::create(&path)?;
+                io::copy(&mut data, &mut file)?;
                 // Whatever the umask: a baked store others could write isn't one (B-63).
                 set_mode(&path, 0o644)?;
             }
-            b'5' => make_dirs(&path)?,
-            _ => return Err(bad("an entry that is neither a file nor a folder")),
+            (b'5', Some(relative)) => make_dirs(&into.join(relative))?,
+            (_, Some(_)) => return Err(bad("an entry that is neither a file nor a folder")),
+            (_, None) => {}
+        }
+        // What wasn't read (an entry that isn't the store's), then the padding.
+        io::copy(&mut data, &mut io::sink())?;
+        if data.limit() > 0 {
+            return Err(bad("a file runs past the layer"));
+        }
+        let skipped = io::copy(&mut io::Read::take(&mut from, padding), &mut io::sink())?;
+        if skipped < padding {
+            return Err(bad("a file runs past the layer"));
         }
     }
     Ok(())
+}
+
+/// Reads one 512-byte block; `false` at the end of the layer, an error part of the way in.
+fn read_block(from: &mut impl io::Read, block: &mut [u8; 512]) -> io::Result<bool> {
+    let mut read = 0;
+    while read < block.len() {
+        match from.read(&mut block[read..]) {
+            Ok(0) if read == 0 => return Ok(false),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a header runs past the layer",
+                ));
+            }
+            Ok(n) => read += n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(true)
 }
 
 /// `path` and its missing parents, each `0755` whatever the umask.
@@ -398,7 +535,7 @@ mod tests {
         tar.extend(entry("ignored", b'0', b"hint"));
         tar.extend(entry("etc/passwd", b'0', b"not the store's"));
         tar.extend([0u8; 1024]);
-        untar(&tar, dir.path()).unwrap();
+        untar(&tar[..], dir.path()).unwrap();
         assert_eq!(
             fs::read(dir.path().join("hushrun/baked.json")).unwrap(),
             b"{}"
@@ -411,8 +548,14 @@ mod tests {
             entry("/hushrun/x", b'0', b"x"),
             entry("hushrun/link", b'2', b""),
         ] {
-            assert!(untar(&bad, dir.path()).is_err());
+            assert!(untar(&bad[..], dir.path()).is_err());
         }
+        // A layer that ends part of the way into an entry, or a header, stops it.
+        let file = entry("hushrun/cut", b'0', &[7; 600]);
+        assert!(untar(&file[..700], dir.path()).is_err());
+        assert!(untar(&file[..100], dir.path()).is_err());
+        assert!(untar(&file[..], dir.path()).is_ok());
+        assert_eq!(fs::read(dir.path().join("hushrun/cut")).unwrap(), [7; 600]);
         assert_eq!(
             pax_path(b"30 path=hushrun/a/very/long/name\n"),
             Some("hushrun/a/very/long/name".into())

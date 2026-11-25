@@ -23,9 +23,6 @@ use sha2::{Digest as _, Sha256};
 
 use crate::registry::{ArtifactError, BlobStream, Manifest, OCI_INDEX, OCI_MANIFEST, Repository};
 
-/// \[B-240\] A pulled image: its manifest's digest and each layer's bytes.
-pub type PulledLayers = (Digest, Vec<Vec<u8>>);
-
 /// The image config's media type.
 pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 /// The config label that says what each layer holds, as JSON ([`Label`]).
@@ -877,41 +874,48 @@ impl crate::Artifacts {
         })
     }
 
-    /// \[B-240\] The image `tag` names in `repository`: its manifest's digest and each of its
-    /// layers, read whole, checked against their digests, and refused past `most` bytes each;
-    /// `None` when the tag names nothing.
+    /// \[B-240\] The layers `manifest` (an image of `repository`) names, each written into `dir`
+    /// as it arrives, under its digest's hex, checked against its digest, and refused past
+    /// `most` bytes; in the manifest's order. No layer is ever held in memory whole.
     pub fn pull_layers(
         &self,
         repository: &Repository,
-        tag: &str,
+        manifest: &Manifest,
         most: u64,
-    ) -> Result<Option<PulledLayers>, ArtifactError> {
-        self.runtime.block_on(async {
-            let manifest = match self.registry.manifest(repository, tag).await {
-                Ok(manifest) => manifest,
-                Err(ArtifactError::NotFound(_)) => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            let json: Value = serde_json::from_slice(&manifest.bytes)
-                .map_err(|e| ArtifactError::Invalid(format!("{tag}'s manifest: {e}")))?;
-            let layers = json["layers"]
-                .as_array()
-                .ok_or_else(|| ArtifactError::Invalid(format!("{tag} names no layers")))?;
-            let mut out = Vec::new();
-            for layer in layers {
-                let digest = layer["digest"]
+        dir: &Path,
+    ) -> Result<Vec<PathBuf>, ArtifactError> {
+        let what = repository.at_digest(&manifest.digest());
+        let json: Value = serde_json::from_slice(&manifest.bytes)
+            .map_err(|e| ArtifactError::Invalid(format!("{what}'s manifest: {e}")))?;
+        let layers = json["layers"]
+            .as_array()
+            .ok_or_else(|| ArtifactError::Invalid(format!("{what} names no layers")))?;
+        let digests = layers
+            .iter()
+            .map(|layer| {
+                layer["digest"]
                     .as_str()
                     .and_then(|d| Digest::parse(d).ok())
-                    .ok_or_else(|| ArtifactError::Invalid(format!("{tag}: a layer's digest")))?;
-                let bytes = self.registry.pull_blob(repository, &digest, most).await?;
-                if Digest::of(&bytes) != digest {
-                    return Err(ArtifactError::Invalid(format!(
-                        "{tag}: a layer isn't {digest}"
-                    )));
-                }
-                out.push(bytes);
+                    .ok_or_else(|| ArtifactError::Invalid(format!("{what}: a layer's digest")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let io = |path: &Path, e: io::Error| {
+            ArtifactError::Invalid(format!("writing {}: {e}", path.display()))
+        };
+        fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+        self.runtime.block_on(async {
+            let mut out = Vec::new();
+            for digest in digests {
+                let path = dir.join(digest.hex());
+                let mut file =
+                    io::BufWriter::new(fs::File::create(&path).map_err(|e| io(&path, e))?);
+                self.registry
+                    .pull_blob_to(repository, &digest, most, &mut file)
+                    .await?;
+                file.flush().map_err(|e| io(&path, e))?;
+                out.push(path);
             }
-            Ok(Some((manifest.digest(), out)))
+            Ok(out)
         })
     }
 

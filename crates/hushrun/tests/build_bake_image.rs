@@ -6,6 +6,7 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use hushrun_attest::testing::github_claims;
 use hushrun_testkit::sigstore::FakeSigstore;
@@ -1302,4 +1303,222 @@ fn a_bake_outside_ci_signs_with_an_id_token_at_hand_only_when_asked() {
     let (said, stderr) = bake(&w.root.join("asked"), Some("sigstore"));
     assert!(said["image"]["signed"].is_string(), "{said}\n{stderr}");
     assert_eq!(fake.count("/api/v2/signingCert"), 1, "{stderr}");
+}
+
+/// A registry that serves the image layout at `layout`, read only, over plain HTTP on the
+/// loopback, as Distribution serves what was pushed to it: each blob it sends is counted.
+fn serve_layout(layout: &Path) -> (hushrun_testkit::http::Server, Arc<Mutex<Vec<String>>>) {
+    use hushrun_testkit::http::{Reply, Response, Server};
+    let layout = layout.to_path_buf();
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let counted = sent.clone();
+    let server = Server::start(move |request| {
+        let blob = |digest: &str| {
+            std::fs::read(
+                layout
+                    .join("blobs/sha256")
+                    .join(digest.trim_start_matches("sha256:")),
+            )
+            .ok()
+        };
+        let path = request.path.as_str();
+        if path == "/v2/" {
+            return Reply::Send(Response::json(200, &serde_json::json!({})));
+        }
+        let head = request.method == "HEAD";
+        if let Some((_, reference)) = path.split_once("/manifests/") {
+            let index: Value =
+                serde_json::from_slice(&std::fs::read(layout.join("index.json")).unwrap()).unwrap();
+            let found = index["manifests"].as_array().unwrap().iter().find(|m| {
+                m["digest"] == reference
+                    || m["annotations"]["org.opencontainers.image.ref.name"] == reference
+            });
+            let Some(found) = found else {
+                return Reply::Send(Response::new(404));
+            };
+            let digest = found["digest"].as_str().unwrap();
+            let bytes = blob(digest).unwrap();
+            let kind = found["mediaType"].as_str().unwrap().to_string();
+            let response = Response::bytes(200, if head { Vec::new() } else { bytes.clone() });
+            let mut response = response.header("docker-content-digest", digest);
+            response.headers.retain(|(n, _)| n != "content-type");
+            return Reply::Send(response.header("content-type", kind));
+        }
+        if let Some((_, digest)) = path.split_once("/blobs/") {
+            return Reply::Send(match blob(digest) {
+                Some(bytes) => {
+                    if !head {
+                        counted.lock().unwrap().push(digest.to_string());
+                    }
+                    Response::bytes(200, if head { Vec::new() } else { bytes })
+                        .header("docker-content-digest", digest)
+                }
+                None => Response::new(404),
+            });
+        }
+        Reply::Send(Response::new(404))
+    });
+    (server, sent)
+}
+
+/// `hushrun build pull` of `image:tag` into `to`, as JSON.
+fn pull(machine: &Machine<'_>, image: &str, tag: &str, to: &Path) -> Value {
+    let pulled = ran(machine
+        .hushrun()
+        .args([
+            "build",
+            "pull",
+            "--insecure",
+            "--format",
+            "json",
+            "--image",
+            image,
+            "--tag",
+            tag,
+            "--to",
+        ])
+        .arg(to));
+    assert_eq!(pulled.code, 0, "{}", pulled.stderr);
+    serde_json::from_str(&pulled.stdout).expect(&pulled.stdout)
+}
+
+// covers: B-240
+#[test]
+fn a_baked_image_is_pulled_from_a_registry_into_a_fresh_sandbox_and_a_second_pull_downloads_nothing()
+ {
+    let w = World::new("acme-api.yaml");
+    let (laptop, key, target) = signed_world(&w);
+    let layout = w.root.join("layout");
+    let said = laptop.bake(&layout, &key);
+    let fixed = said["image"]["tags"][0].as_str().unwrap().to_string();
+    let digest = said["image"]["digest"].as_str().unwrap().to_string();
+    let (server, sent) = serve_layout(&layout);
+    let image = format!("{}/acme/app", server.addr());
+    let downloads = || std::mem::take(&mut *sent.lock().unwrap()).len();
+    round_trip(
+        &w,
+        &laptop,
+        &target,
+        &image,
+        &fixed,
+        &digest,
+        Some(&downloads),
+    );
+}
+
+// covers: B-240
+/// The same round trip through the registries CI starts (`HUSHRUN_IT_REGISTRIES`, two hosts over
+/// plain HTTP, `--features it`): a bake pushes, a pull reads back.
+#[cfg(feature = "it")]
+#[test]
+fn a_bake_pushed_to_each_real_registry_is_pulled_back() {
+    let Ok(hosts) = std::env::var("HUSHRUN_IT_REGISTRIES") else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "HUSHRUN_IT_REGISTRIES must be set in CI"
+        );
+        return;
+    };
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    for host in hosts.split_whitespace() {
+        let w = World::new("acme-api.yaml");
+        let (laptop, key, target) = signed_world(&w);
+        let image = format!("{host}/acme/pull-{unique}");
+        let bake = ran(laptop
+            .hushrun()
+            .current_dir(w.repo.join("ws"))
+            .args([
+                "build",
+                "bake",
+                "--check",
+                "build",
+                "--branch-tag",
+                "--force",
+            ])
+            .args([
+                "--oci",
+                &image,
+                "--insecure-registry",
+                host,
+                "--signing-key",
+            ])
+            .arg(&key)
+            .args(["--format", "json"]));
+        assert_eq!(bake.code, 0, "{host}: {}", bake.stderr);
+        let said: Value = serde_json::from_str(&bake.stdout).expect(&bake.stdout);
+        let fixed = said["image"]["tags"][0].as_str().unwrap();
+        let digest = said["image"]["digest"].as_str().unwrap();
+        round_trip(&w, &laptop, &target, &image, fixed, digest, None);
+    }
+}
+
+/// B-240's round trip: `image:tag`, a bake's signed image whose manifest is `digest`, pulled into
+/// a sandbox's folder, serves a fresh machine on its signature; a second pull downloads no layer
+/// (`downloads`, where the test can count them, says how many were sent since it was last asked);
+/// `--resolve` says what the tag names.
+fn round_trip(
+    w: &World,
+    laptop: &Machine<'_>,
+    target: &Path,
+    image: &str,
+    tag: &str,
+    digest: &str,
+    downloads: Option<&dyn Fn() -> usize>,
+) {
+    let lower = w.root.join("sandbox").join("hushrun");
+    let first = pull(laptop, image, tag, &lower);
+    assert_eq!(first["schema"], "hushrun.build-pull/v1");
+    assert_eq!(first["outcome"], "pulled", "{first}");
+    assert_eq!(first["digest"], digest, "the whole digest: {first}");
+    assert_eq!(first["reference"], format!("{image}@{digest}"));
+    assert!(
+        first["trust"]
+            .as_str()
+            .unwrap()
+            .starts_with("signed by key sha256:"),
+        "{first}"
+    );
+    assert!(lower.join("baked.json").is_file());
+    if let Some(downloads) = downloads {
+        assert!(downloads() > 0);
+    }
+    // Nothing of the layers is left beside the store.
+    let beside: Vec<String> = std::fs::read_dir(lower.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(beside.len(), 2, "{beside:?}");
+    let again = pull(laptop, image, tag, &lower);
+    assert_eq!(again["outcome"], "unchanged", "{again}");
+    if let Some(downloads) = downloads {
+        assert_eq!(downloads(), 0, "a second pull downloads no layer");
+    }
+    let resolved = ran(laptop.hushrun().args([
+        "build",
+        "pull",
+        "--resolve",
+        "--insecure",
+        "--image",
+        image,
+        "--tag",
+        tag,
+    ]));
+    assert_eq!(resolved.code, 0, "{}", resolved.stderr);
+    assert_eq!(resolved.stdout.trim(), format!("{image}@{digest}"));
+
+    // A fresh machine reads the pulled store on its signature alone.
+    let fresh = Machine::new(w, &format!("fresh-{}", image.len()));
+    let _ = std::fs::remove_dir_all(target);
+    let reused = fresh.cargo_build(target, Some(&lower));
+    assert_eq!(reused.code, 0, "{}", reused.stderr);
+    assert!(
+        reused
+            .stderr
+            .contains("4 of 4 crates reused (4 from the baked store)"),
+        "{}",
+        reused.stderr
+    );
 }

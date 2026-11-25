@@ -569,6 +569,9 @@ pub struct BuildPullArgs {
     /// Where to put it [default: HUSHRUN_BUILD_LOWER, else /hushrun].
     #[arg(long, value_name = "FOLDER")]
     pub to: Option<std::path::PathBuf>,
+    /// Only say which image the tag names now (`<image>@<digest>`): download and change nothing.
+    #[arg(long, conflicts_with = "to")]
+    pub resolve: bool,
     /// The registry is reached over plain HTTP (tests only).
     #[arg(long, hide = true)]
     pub insecure: bool,
