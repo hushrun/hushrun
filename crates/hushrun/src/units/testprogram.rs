@@ -36,7 +36,9 @@ use super::adapter::{
 use super::ctest::{self, build, run, select};
 use super::facts::{self, FactsFile, TestFacts, Unfollowed, UnitFacts};
 
-/// The adapter's word, in its facts files, this machine's store and a hint.
+/// The adapter's word, in its facts files, this machine's store and a hint. A format string takes
+/// it as an argument, never inside its braces, where the static test map can't resolve it and
+/// would count every adapter's `ADAPTER` (CONTRIBUTING.md, "Which tests CI runs again").
 pub const ADAPTER: &str = "test-program";
 /// The facts file the start writes, for the read after COMMAND to complete.
 const PENDING: &str = "pending";
@@ -321,7 +323,7 @@ impl Recognized {
                 ("TEST_TOTAL_SHARDS".into(), Some("1".into())),
                 (
                     "TEST_SHARD_STATUS_FILE".into(),
-                    Some(dir.join(format!("{ADAPTER}.shard")).into()),
+                    Some(dir.join(format!("{}.shard", ADAPTER)).into()),
                 ),
             ],
         }
@@ -404,7 +406,7 @@ impl Recognized {
                 ("TEST_TOTAL_SHARDS", "1"),
             ]);
         }
-        let shard = run_dir.join(format!("{ADAPTER}.shard"));
+        let shard = run_dir.join(format!("{}.shard", ADAPTER));
         let shard = shard.to_string_lossy().into_owned();
         if self.framework == Framework::Catch2 {
             env.push(("TEST_SHARD_STATUS_FILE", shard.as_str()));
@@ -541,7 +543,7 @@ impl Adapter for Recognized {
         let Ok(root) = std::fs::canonicalize(&run.root) else {
             return Vec::new();
         };
-        let xml = run_dir.join(format!("{ADAPTER}.xml"));
+        let xml = run_dir.join(format!("{}.xml", ADAPTER));
         let _ = std::fs::remove_file(&xml);
         let mut vars = self.variables_for(run_dir, &xml);
         let walked = self.walk(&root, &started.assigned);
@@ -592,7 +594,7 @@ impl Adapter for Recognized {
             ..FactsFile::default()
         };
         if let Ok(bytes) = serde_json::to_vec(&file) {
-            let _ = facts::write_whole(&run_dir.join(format!("{ADAPTER}-start.json")), &bytes);
+            let _ = facts::write_whole(&run_dir.join(format!("{}-start.json", ADAPTER)), &bytes);
         }
         vars
     }
@@ -832,7 +834,7 @@ fn complete(p: &Pending, framework: Framework, command_passed: bool) -> FactsFil
         failures_by_unit: true,
         settings,
         units: vec![unit],
-        start: Some(format!("{ADAPTER}-{}", p.started_ms)),
+        start: Some(format!("{}-{}", ADAPTER, p.started_ms)),
         stale_build,
         errors,
         ..FactsFile::default()

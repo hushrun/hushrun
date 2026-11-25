@@ -772,11 +772,11 @@ fn write_facts(
         settings,
         units,
         // Each `meson test` is a start of its own, and writes one file (C-32).
-        start: Some(format!("{ADAPTER}-{}-{nanos}", std::process::id())),
+        start: Some(format!("{}-{}-{}", ADAPTER, std::process::id(), nanos)),
         stale_build,
         ..FactsFile::default()
     };
-    let path = dir.join(format!("{ADAPTER}-{}-{nanos}.json", std::process::id()));
+    let path = dir.join(format!("{}-{}-{}.json", ADAPTER, std::process::id(), nanos));
     if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
     }
