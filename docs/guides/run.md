@@ -1241,6 +1241,14 @@ hushrun: build: typescript: 1 compile: 1 reused, 0 built, saving about 14s
 
 This is new and its rules are a draft ([ADR 0106](../adr/0106-typescript-build-blocks.md)).
 
+### Elixir
+
+`mix compile` isn't reused or shared: a module's code holds its checkout's absolute path
+(`__DIR__`, `__ENV__.file`, what templates read through them), and what a compile read of the
+environment (`System.get_env/1` in a module body) isn't known, so another checkout's or machine's
+`_build` could run with the wrong files or values ([ADR 0122](../adr/0122-exunit.md)). `mix test`'s
+test files are reused (C-114 to C-117).
+
 ### PHP
 
 PHP compiles nothing ahead of a run, so there is nothing of it to reuse here. Its tests are reused
