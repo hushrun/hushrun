@@ -3,265 +3,141 @@
 //! its tests a test, what it read what its build directory says it is built from, and hushrun
 //! leaves tests out through the framework's own variables, after listing again with them.
 //!
-//! The fixtures are CMake projects that find GoogleTest and Catch2 3 installed (Debian's and
-//! Ubuntu's `libgtest-dev` and `catch2`), and need CMake and Ninja on `PATH`. They run where
-//! `HUSHRUN_TEST_CXX_TESTS` is set, which CI sets on Linux after installing them, and must pass
-//! there; elsewhere they say so and pass. No fixture needs the network.
+//! In-process (CONTRIBUTING.md, "Which tests CI runs again"): each test runs a check as `hushrun
+//! run unit -- build/t_calc` would, through the adapter's own type, `testprogram::Recognized`,
+//! and the code every adapter shares, and never starts the `hushrun` binary
+//! (`common/in_process.rs`). The test program runs as COMMAND, for real: no helper of hushrun's
+//! stands between, since the frameworks take what to leave out from COMMAND's environment. What
+//! only the CLI shows (its last line, and its line for a pass it doesn't record) is in
+//! `e2e_testprogram.rs`. The fixtures are `common/testprogram.rs`'s.
 
 #![cfg(unix)]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[path = "common/in_process.rs"]
+mod in_process;
+#[path = "common/repo.rs"]
+mod repo;
+#[path = "common/store.rs"]
+mod store;
+#[path = "common/testprogram.rs"]
+mod testprogram;
 
-use hushrun_testkit::git;
+use std::collections::BTreeSet;
 
-const NO_HOST: &str = "http://127.0.0.1:9";
+use hushrun::units::adapter::Adapter as _;
+use hushrun::units::{Profile, testprogram as adapter};
 
-/// Variables a run must never inherit.
-const CLEARED: &[&str] = &[
-    "CI",
-    "GITHUB_ACTIONS",
-    "HUSHRUN_AGENT",
-    "HUSHRUN_BACKEND",
-    "HUSHRUN_TOKEN",
-    "HUSHRUN_CONFIG",
-    "HUSHRUN_INSIDE_RUN",
-    "HUSHRUN_UNITS",
-    "HUSHRUN_PROGRAMS",
-    "HUSHRUN_PROGRAMS_PATH",
-    "HUSHRUN_BUILD",
-    "HUSHRUN_CC",
-    "GTEST_FILTER",
-    "GTEST_OUTPUT",
-    "GTEST_TOTAL_SHARDS",
-    "GTEST_SHARD_INDEX",
-    "BAZEL_TEST",
-    "XML_OUTPUT_FILE",
-    "TESTBRIDGE_TEST_ONLY",
-    "TEST_SHARD_INDEX",
-    "TEST_TOTAL_SHARDS",
-    "TEST_SHARD_STATUS_FILE",
-    "CMAKE_GENERATOR",
-    "CMAKE_BUILD_TYPE",
-    "CMAKE_CXX_COMPILER_LAUNCHER",
-];
+use in_process::{Ran, Repo};
+use testprogram::*;
 
-fn wanted() -> bool {
-    if std::env::var_os("HUSHRUN_TEST_CXX_TESTS").is_some() {
-        return true;
+/// What the test-program adapter answers that never changes in a run, for the code every adapter
+/// shares.
+fn profile(adapter: &adapter::Recognized) -> Profile {
+    Profile {
+        word: adapter.word(),
+        runner: adapter.runner(),
+        test_file: adapter.test_file(),
+        tests: adapter.tests(),
+        hints: adapter.hints(),
+        binds: adapter.binds(),
+        keys: adapter.keys(),
     }
-    eprintln!("note: skipping: HUSHRUN_TEST_CXX_TESTS isn't set (GoogleTest, Catch2 3, CMake)");
-    false
 }
 
-struct Project {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    repo: PathBuf,
-    cache: PathBuf,
-    built: std::cell::Cell<Option<std::time::SystemTime>>,
+/// `hushrun run unit -- ARGS`, in-process, through the test-program adapter alone.
+fn run(r: &Repo, args: &[&str]) -> Ran {
+    let command: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // As `units::adapter::choose_kept` comes to the adapter (`testprogram::recognized`), with no
+    // trait object: what COMMAND's program is, and whether its framework can be observed.
+    match adapter::recognize(hushrun::units::command::without_env(&command), &r.repo) {
+        Some(Ok(adapter)) => observe(r, args, &[], &adapter),
+        Some(Err(why)) => in_process::Run::new(r, "unit", args, &[]).unobserved(&why),
+        None => panic!("{args:?} doesn't start a test program"),
+    }
 }
 
-impl Project {
-    fn new(files: &[(&str, &str)]) -> Project {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("real path");
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("mkdir");
-        git::init(&repo, "sha1");
-        let p = Project {
-            _dir: dir,
-            cache: root.join("cache"),
-            root,
-            repo,
-            built: std::cell::Cell::new(None),
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order, on `testprogram::Recognized` itself (`units_gradle.rs`'s, with the type changed).
+fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &adapter::Recognized) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // The adapter's own `plan`, which walks the program's build before COMMAND.
+            Ok(context) => {
+                let planning = adapter.plan(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
         };
-        for (path, text) in files {
-            p.write(path, text);
-        }
-        git::commit_all(&p.repo, "init");
-        let out = p
-            .tool("cmake")
-            .args(["-S", ".", "-B", "build", "-G", "Ninja"])
-            .output()
-            .expect("cmake");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        p.build();
-        p
+        drop(input);
+        run.planned(&observer, planned);
     }
-
-    fn tool(&self, name: &str) -> Command {
-        let mut cmd = Command::new(name);
-        cmd.current_dir(&self.repo);
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
-        cmd
-    }
-
-    fn build(&self) {
-        let out = self
-            .tool("cmake")
-            .args(["--build", "build"])
-            .output()
-            .expect("cmake --build");
-        assert!(
-            out.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        self.built.set(Some(std::time::SystemTime::now()));
-    }
-
-    /// Writes a file, in a later second than the last build, as the CTest adapter's tests do.
-    fn write(&self, path: &str, text: &str) {
-        if let Some(built) = self.built.get() {
-            let second = |t: std::time::SystemTime| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs())
-            };
-            while second(std::time::SystemTime::now()) <= second(built) {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
             }
         }
-        let path = self.repo.join(path);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, text).expect("write");
-    }
-
-    fn run(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
-        cmd.current_dir(&self.repo)
-            .env("HUSHRUN_CACHE_DIR", &self.cache)
-            .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
-            .env("HUSHRUN_HOST", NO_HOST)
-            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
-            .env("HOME", self.root.join("home"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null");
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("NEXTEST")
-                || (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("CLAUDE")
-            {
-                cmd.env_remove(name.as_ref());
+        break (code, observed);
+    };
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
             }
-        }
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-        let output = cmd.args(args).output().expect("hushrun");
-        Ran {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
+            None => in_process::Run::not_again(&wanted),
+        };
+        run.disagreements(o, ended);
     }
+    run.record(code, observed)
 }
 
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
+/// Whether one of the run's lines says `text`.
+fn says(ran: &Ran, text: &str) -> bool {
+    ran.lines.iter().any(|l| l.contains(text))
 }
 
-impl Ran {
-    /// The tests GoogleTest says it ran.
-    fn gtest_ran(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .stdout
-            .lines()
-            .filter_map(|l| l.strip_prefix("[ RUN      ] "))
-            .map(str::to_string)
-            .collect();
-        out.sort();
-        out
-    }
-
-    /// The fixture's tests Catch2 says it ran, from `--durations yes`, which names each
-    /// section too.
-    fn catch2_ran(&self) -> Vec<String> {
-        let tests = ["adds, small", "multiplies [x]", "adds zero"];
-        let mut out: Vec<String> = self
-            .stdout
-            .lines()
-            .filter_map(|l| l.split_once(" s: ").map(|(_, name)| name.to_string()))
-            .filter(|name| tests.contains(&name.as_str()))
-            .collect();
-        out.sort();
-        out.dedup();
-        out
-    }
-
-    fn says(&self, text: &str) -> bool {
-        self.stderr.contains(text)
-    }
+/// How many tests the run reused one by one, as its result counts them.
+fn tests_reused(ran: &Ran) -> u64 {
+    ran.units["tests"]["reused"].as_u64().unwrap_or(0)
 }
-
-fn yaml() -> String {
-    "version: 1\nrepository: example.com/acme/calc\nchecks:\n  unit:\n    tests: {mode: reuse, unit: test}\n"
-        .to_string()
-}
-
-const LISTS: &str = "cmake_minimum_required(VERSION 3.20)\nproject(calc CXX)\n\
-    find_package(GTest REQUIRED)\nfind_package(Catch2 3 REQUIRED)\n\
-    add_library(calc STATIC src/calc.cpp)\ntarget_include_directories(calc PUBLIC src)\n\
-    add_executable(t_calc tests/t_calc.cpp)\ntarget_link_libraries(t_calc PRIVATE calc GTest::gtest_main)\n\
-    add_executable(t_other tests/t_other.cpp)\ntarget_link_libraries(t_other PRIVATE GTest::gtest_main)\n\
-    add_executable(c_calc tests/c_calc.cpp)\ntarget_link_libraries(c_calc PRIVATE calc Catch2::Catch2WithMain)\n";
-
-const CALC_H: &str = "#pragma once\nint add(int, int);\nint mul(int, int);\n";
-const CALC: &str = "#include \"calc.h\"\nint add(int a, int b) { return a + b; }\nint mul(int a, int b) { return a * b; }\n";
-
-fn files() -> Vec<(&'static str, String)> {
-    vec![
-        ("hushrun.yaml", yaml()),
-        (".gitignore", "build/\n".into()),
-        ("CMakeLists.txt", LISTS.into()),
-        ("src/calc.h", CALC_H.into()),
-        ("src/calc.cpp", CALC.into()),
-        (
-            "tests/t_calc.cpp",
-            "#include <gtest/gtest.h>\n#include \"calc.h\"\n\
-             TEST(Add, Small) { EXPECT_EQ(add(1, 2), 3); }\nTEST(Add, Zero) { EXPECT_EQ(add(0, 0), 0); }\n\
-             TEST(Mul, Small) { EXPECT_EQ(mul(2, 3), 6); }\nTEST(Mul, One) { EXPECT_EQ(mul(1, 7), 7); }\n\
-             TEST(Skip, Me) { GTEST_SKIP(); }\n"
-                .into(),
-        ),
-        (
-            "tests/t_other.cpp",
-            "#include <gtest/gtest.h>\nTEST(Other, Works) { SUCCEED(); }\n".into(),
-        ),
-        (
-            "tests/c_calc.cpp",
-            "#include <catch2/catch_test_macros.hpp>\n#include \"calc.h\"\n\
-             TEST_CASE(\"adds, small\") { REQUIRE(add(1, 2) == 3); }\n\
-             TEST_CASE(\"multiplies [x]\") { SECTION(\"small\") { REQUIRE(mul(2, 3) == 6); } SECTION(\"one\") { REQUIRE(mul(1, 7) == 7); } }\n\
-             TEST_CASE(\"adds zero\") { REQUIRE(add(0, 0) == 0); }\n"
-                .into(),
-        ),
-    ]
-}
-
-fn project() -> Project {
-    let files = files();
-    let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
-    Project::new(&refs)
-}
-
-/// What a change to `calc.cpp` that breaks `mul` does: every test that calls it fails.
-const CALC_BROKEN: &str = "#include \"calc.h\"\nint add(int a, int b) { return a + b; }\nint mul(int a, int b) { return a * b + 1; }\n";
 
 // covers: C-106, C-108
 #[test]
@@ -270,9 +146,9 @@ fn googletests_tests_that_passed_on_their_programs_files_are_left_out_and_a_chan
         return;
     }
     let p = project();
-    let first = p.run(&["run", "unit", "--", "build/t_calc"], &[]);
-    assert_eq!(first.code, 0, "{}{}", first.stdout, first.stderr);
-    assert_eq!(first.gtest_ran().len(), 5, "{}", first.stdout);
+    let first = run(&p.r, &["build/t_calc"]);
+    assert_eq!(first.code, 0, "{}", first.said());
+    assert_eq!(gtest_ran(&first.stdout).len(), 5, "{}", first.stdout);
     // A file of another program only: t_calc's tests passed on what it is built from.
     p.write(
         "tests/t_other.cpp",
@@ -280,22 +156,23 @@ fn googletests_tests_that_passed_on_their_programs_files_are_left_out_and_a_chan
     );
     p.build();
     // Its first naming of t_other's sources runs everything once; after that, they're reused.
-    let _ = p.run(&["run", "unit", "--", "build/t_calc"], &[]);
+    let _ = run(&p.r, &["build/t_calc"]);
     p.write(
         "tests/t_other.cpp",
         "#include <gtest/gtest.h>\nTEST(Other, Works) { }\n// two\n",
     );
     p.build();
-    let second = p.run(&["run", "unit", "--", "build/t_calc"], &[]);
-    assert_eq!(second.code, 0, "{}{}", second.stdout, second.stderr);
+    let second = run(&p.r, &["build/t_calc"]);
+    assert_eq!(second.code, 0, "{}", second.said());
     assert!(
-        second.says("already passed on the files they read"),
+        says(&second, "already passed on the files they read"),
         "{}",
-        second.stderr
+        second.said()
     );
-    assert!(second.says("tests reused"), "{}", second.stderr);
+    // What the run's last line counts as `tests reused` (e2e_testprogram.rs says it).
+    assert!(tests_reused(&second) > 0, "{:#}", second.units);
     assert!(
-        second.gtest_ran().len() <= 1,
+        gtest_ran(&second.stdout).len() <= 1,
         "the audit runs one: {}",
         second.stdout
     );
@@ -307,9 +184,9 @@ fn googletests_tests_that_passed_on_their_programs_files_are_left_out_and_a_chan
     // A change to what t_calc is built from runs every test of it, and the broken ones fail.
     p.write("src/calc.cpp", CALC_BROKEN);
     p.build();
-    let broken = p.run(&["run", "unit", "--", "build/t_calc"], &[]);
-    assert_ne!(broken.code, 0, "{}{}", broken.stdout, broken.stderr);
-    assert_eq!(broken.gtest_ran().len(), 5, "{}", broken.stdout);
+    let broken = run(&p.r, &["build/t_calc"]);
+    assert_ne!(broken.code, 0, "{}", broken.said());
+    assert_eq!(gtest_ran(&broken.stdout).len(), 5, "{}", broken.stdout);
     assert!(
         broken.stdout.contains("[  FAILED  ] Mul.Small"),
         "{}",
@@ -325,10 +202,13 @@ fn a_program_older_than_what_it_is_built_from_records_no_pass() {
     }
     let p = project();
     p.write("src/calc.cpp", CALC_BROKEN);
-    let ran = p.run(&["run", "unit", "--", "build/t_calc"], &[]);
-    assert_eq!(ran.code, 0, "{}{}", ran.stdout, ran.stderr);
-    assert!(ran.says("ran old code"), "{}", ran.stderr);
-    assert!(ran.says("isn't recorded"), "{}", ran.stderr);
+    let ran = run(&p.r, &["build/t_calc"]);
+    assert_eq!(ran.code, 0, "{}", ran.said());
+    // What the CLI says after `unit passed, but it isn't recorded: ` (e2e_testprogram.rs).
+    let why = ran.stale_build.as_deref().unwrap_or_default();
+    assert!(why.contains("ran old code"), "{why:?}\n{}", ran.said());
+    assert_eq!(ran.units, serde_json::Value::Null, "{}", ran.said());
+    assert!(p.r.unit_results().is_empty(), "{:?}", p.r.unit_results());
 }
 
 // covers: C-106
@@ -338,23 +218,21 @@ fn a_filter_of_commands_own_is_observed_and_leaves_nothing_out() {
         return;
     }
     let p = project();
-    let first = p.run(
-        &["run", "unit", "--", "build/t_calc", "--gtest_filter=Add.*"],
-        &[],
-    );
-    assert_eq!(first.code, 0, "{}", first.stderr);
+    let first = run(&p.r, &["build/t_calc", "--gtest_filter=Add.*"]);
+    assert_eq!(first.code, 0, "{}", first.said());
     p.write(
         "tests/t_other.cpp",
         "#include <gtest/gtest.h>\nTEST(Other, Works) { }\n",
     );
     p.build();
-    let again = p.run(
-        &["run", "unit", "--", "build/t_calc", "--gtest_filter=Add.*"],
-        &[],
+    let again = run(&p.r, &["build/t_calc", "--gtest_filter=Add.*"]);
+    assert!(
+        says(&again, "wins over the GTEST_FILTER"),
+        "{}",
+        again.said()
     );
-    assert!(again.says("wins over the GTEST_FILTER"), "{}", again.stderr);
     assert_eq!(
-        again.gtest_ran(),
+        gtest_ran(&again.stdout),
         ["Add.Small", "Add.Zero"],
         "{}",
         again.stdout
@@ -368,46 +246,36 @@ fn catch2s_tests_are_left_out_by_their_names_through_bazels_variables() {
         return;
     }
     let p = project();
-    let first = p.run(
-        &["run", "unit", "--", "build/c_calc", "--durations", "yes"],
-        &[],
-    );
-    assert_eq!(first.code, 0, "{}{}", first.stdout, first.stderr);
-    assert_eq!(first.catch2_ran().len(), 3, "{}", first.stdout);
+    let catch2 = ["build/c_calc", "--durations", "yes"];
+    let first = run(&p.r, &catch2);
+    assert_eq!(first.code, 0, "{}", first.said());
+    assert_eq!(catch2_ran(&first.stdout).len(), 3, "{}", first.stdout);
     for text in ["// one\n", "// two\n"] {
         p.write(
             "tests/t_other.cpp",
             &format!("#include <gtest/gtest.h>\nTEST(Other, Works) {{ }}\n{text}"),
         );
         p.build();
-        let _ = p.run(
-            &["run", "unit", "--", "build/c_calc", "--durations", "yes"],
-            &[],
-        );
+        let _ = run(&p.r, &catch2);
     }
     p.write(
         "tests/t_other.cpp",
         "#include <gtest/gtest.h>\nTEST(Other, Works) { }\n// three\n",
     );
     p.build();
-    let reused = p.run(
-        &["run", "unit", "--", "build/c_calc", "--durations", "yes"],
-        &[],
-    );
-    assert_eq!(reused.code, 0, "{}{}", reused.stdout, reused.stderr);
-    assert!(reused.says("tests reused"), "{}", reused.stderr);
+    let reused = run(&p.r, &catch2);
+    assert_eq!(reused.code, 0, "{}", reused.said());
+    // What the run's last line counts as `tests reused` (e2e_testprogram.rs says it).
+    assert!(tests_reused(&reused) > 0, "{:#}", reused.units);
     // Never every test: Catch2 fails when it runs none, so the audit's, or one, runs.
-    assert!(!reused.catch2_ran().is_empty(), "{}", reused.stdout);
-    assert!(reused.catch2_ran().len() < 3, "{}", reused.stdout);
+    assert!(!catch2_ran(&reused.stdout).is_empty(), "{}", reused.stdout);
+    assert!(catch2_ran(&reused.stdout).len() < 3, "{}", reused.stdout);
     assert!(reused.stdout.contains("Filters:"), "{}", reused.stdout);
     p.write("src/calc.cpp", CALC_BROKEN);
     p.build();
-    let broken = p.run(
-        &["run", "unit", "--", "build/c_calc", "--durations", "yes"],
-        &[],
-    );
+    let broken = run(&p.r, &catch2);
     assert_ne!(broken.code, 0, "{}", broken.stdout);
-    assert_eq!(broken.catch2_ran().len(), 3, "{}", broken.stdout);
+    assert_eq!(catch2_ran(&broken.stdout).len(), 3, "{}", broken.stdout);
 }
 
 // covers: C-106
@@ -416,29 +284,10 @@ fn a_doctest_program_is_said_not_to_be_observed() {
     if !wanted() {
         return;
     }
-    let Some(doctest) = [
-        "/usr/include/doctest/doctest.h",
-        "/usr/local/include/doctest/doctest.h",
-    ]
-    .iter()
-    .find(|p| Path::new(p).is_file()) else {
-        eprintln!("note: skipping: doctest isn't installed");
+    let Some(p) = doctest_project() else {
         return;
     };
-    let _ = doctest;
-    let p = Project::new(&[
-        ("hushrun.yaml", &yaml()),
-        (".gitignore", "build/\n"),
-        (
-            "CMakeLists.txt",
-            "cmake_minimum_required(VERSION 3.20)\nproject(d CXX)\nadd_executable(t_d t_d.cpp)\n",
-        ),
-        (
-            "t_d.cpp",
-            "#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN\n#include <doctest/doctest.h>\nTEST_CASE(\"one\") { CHECK(1 == 1); }\n",
-        ),
-    ]);
-    let ran = p.run(&["run", "unit", "--", "build/t_d"], &[]);
-    assert_eq!(ran.code, 0, "{}", ran.stderr);
-    assert!(ran.says("doctest takes what to run"), "{}", ran.stderr);
+    let ran = run(&p.r, &["build/t_d"]);
+    assert_eq!(ran.code, 0, "{}", ran.said());
+    assert!(says(&ran, "doctest takes what to run"), "{}", ran.said());
 }

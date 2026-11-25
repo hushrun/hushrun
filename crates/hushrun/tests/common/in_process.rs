@@ -70,6 +70,9 @@ pub struct Ran {
     /// The units' counts the check's result keeps (`units` in it): `null` when the units
     /// weren't read.
     pub units: Value,
+    /// \[C-32\] Why a pass wasn't recorded, as `hushrun run` says it after `passed, but it isn't
+    /// recorded: `: its build is stale.
+    pub stale_build: Option<String>,
 }
 
 impl Ran {
@@ -128,6 +131,7 @@ pub struct Run<'r> {
     pub lines: Vec<String>,
     stdout: String,
     stderr: String,
+    stale_build: Option<String>,
 }
 
 impl<'r> Run<'r> {
@@ -177,6 +181,7 @@ impl<'r> Run<'r> {
             lines: Vec::new(),
             stdout: String::new(),
             stderr: String::new(),
+            stale_build: None,
         }
     }
 
@@ -405,6 +410,7 @@ impl<'r> Run<'r> {
             return self.ran(code, None);
         }
         if passed && observed.stale_build.is_some() {
+            self.stale_build.clone_from(&observed.stale_build);
             observed.keep(&self.run_key, &self.tree, now, duration_ms);
             return self.ran(code, None);
         }
@@ -463,6 +469,7 @@ impl<'r> Run<'r> {
             stderr: self.stderr,
             lines: self.lines,
             units: counts.map_or(Value::Null, |c| serde_json::to_value(c).unwrap()),
+            stale_build: self.stale_build,
         }
     }
 }
