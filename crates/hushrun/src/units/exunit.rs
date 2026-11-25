@@ -229,10 +229,10 @@ impl Adapter for ExUnit {
         "ExUnit"
     }
 
-    // `test_file`, `tests`, `hints`, `binds`, `keys` and `start_variables` are the trait's
-    // defaults, written out: a call on this type then names this impl's own method, which the
-    // static test map follows to it alone, where the trait's would count every adapter that
-    // overrides it (CONTRIBUTING.md, "Which tests CI runs again").
+    // `test_file`, `tests`, `hints`, `binds`, `keys`, `start_variables`, `not_by_test` and
+    // `not_watched` are the trait's defaults, written out: a call on this type then names this
+    // impl's own method, which the static test map follows to it alone, where the trait's would
+    // count every adapter that overrides it (CONTRIBUTING.md, "Which tests CI runs again").
     fn test_file(&self) -> &'static str {
         "test file"
     }
@@ -259,6 +259,14 @@ impl Adapter for ExUnit {
     fn start_variables(&self, run_dir: &Path) -> Vec<(String, Option<OsString>)> {
         let _ = run_dir;
         Vec::new()
+    }
+
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
