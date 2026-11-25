@@ -54,6 +54,7 @@ pub mod testprogram;
 pub mod unittest;
 pub mod vitest;
 pub mod why;
+pub mod xcodebuild;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};

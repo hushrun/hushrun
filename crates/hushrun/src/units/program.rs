@@ -63,6 +63,7 @@ pub const PROGRAMS: &[&dyn Program] = &[
     &super::mesontest::Meson,
     &super::swift::SWIFT,
     &super::swift::SWIFT_TEST,
+    &super::xcodebuild::XcodebuildProgram,
     // \[ADR 0112\] Not on `PATH`: Cargo starts it as `RUSTDOC`.
     &super::rustdoc::RUSTDOC,
 ];
