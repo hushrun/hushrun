@@ -4,7 +4,6 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use std::process::Command;
 
 use super::repo::Repo;
 
@@ -83,7 +82,7 @@ pub fn has_gradle() -> bool {
     static HERE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *HERE.get_or_init(|| {
         gradle_user_home().is_some()
-            && Command::new(gradle())
+            && hushrun_testkit::tool::command(gradle())
                 .arg("--version")
                 .env_remove("GRADLE_OPTS")
                 .output()

@@ -95,8 +95,8 @@ items are in. So:
   `read`;
 - a test that starts a program it can't name, such as the `hushrun` binary
   (`env!("CARGO_BIN_EXE_hushrun")`, `current_exe()`, hushrun-testkit's `World`,
-  `tests/common/cli.rs`) or a `Command::new` of a variable, reads the whole binary, every file
-  of `crates/hushrun/src/`.
+  `tests/common/cli.rs`) or a `Command::new` of a variable outside a function the map trusts,
+  reads the whole binary, every file of `crates/hushrun/src/`.
 
 #### An adapter test the map can narrow
 
@@ -158,6 +158,12 @@ fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &gradle::Reco
   keeps. `Repo::map`, `unit_results` and `disagreements` read this machine's store.
 - COMMAND runs for real: the runner and its tools, as before. Fixtures and tool lookups that an
   adapter's in-process and end-to-end tests share go in `tests/common/<adapter>.rs`.
+- Start every program through `Repo::command`, or `hushrun_testkit::tool::command` outside a
+  `Repo`, never `Command::new` of a variable: the map counts that as perhaps the hushrun binary,
+  and the test as reading all of it. `tool::command` carries the map's marker
+  (`#[doc(alias = "hushrun::starts_no_workspace_binary")]`) and keeps its promise at run time:
+  it panics when its program is one of the workspace's binaries. A literal name
+  (`Command::new("git")`) is fine as it is.
 - Nothing in the harness changes what the test process shares: it sets no environment
   variable, keeps the current directory, and installs no signal handler. COMMAND gets its
   environment on its own `Command`, and the observer gets the cache directory as an argument. So

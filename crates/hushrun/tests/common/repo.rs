@@ -123,10 +123,20 @@ impl Repo {
     }
 
     /// COMMAND's program, `program`, in the repository's root, with the environment `hushrun
-    /// run` would give it but hushrun's own variables: what the developer's shell exports that
-    /// changes a runner never reaches it.
+    /// run` would give it but hushrun's own variables ([`Repo::configure`]). It starts through
+    /// `hushrun_testkit::tool::command`, which the static map trusts to start none of the
+    /// workspace's binaries, and which panics if `program` is one: an in-process test reaches
+    /// only what it calls, not the whole binary (CONTRIBUTING.md, "Which tests CI runs again").
     pub fn command(&self, program: &str) -> Command {
-        let mut cmd = Command::new(program);
+        let mut cmd = hushrun_testkit::tool::command(program);
+        self.configure(&mut cmd);
+        cmd
+    }
+
+    /// Gives `cmd` the repository's root as its directory, and the environment `hushrun run`
+    /// would give COMMAND but hushrun's own variables: what the developer's shell exports that
+    /// changes a runner never reaches it.
+    pub fn configure(&self, cmd: &mut Command) {
         cmd.current_dir(&self.repo)
             .env("HUSHRUN_CACHE_DIR", &self.cache)
             .env("HOME", self.root.join("home"))
@@ -138,7 +148,7 @@ impl Repo {
         for var in &self.cleared {
             cmd.env_remove(var);
         }
-        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
+        hushrun_testkit::env::Hermetic::hermetic(cmd);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("NEXTEST")
@@ -151,7 +161,6 @@ impl Repo {
         for (name, value) in &self.given {
             cmd.env(name, value);
         }
-        cmd
     }
 
     /// The map this machine's store keeps of the one check, as JSON (`common/store.rs`).

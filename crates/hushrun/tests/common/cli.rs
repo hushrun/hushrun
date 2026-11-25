@@ -24,7 +24,8 @@ pub trait Cli {
 
 impl Cli for Repo {
     fn hushrun(&self) -> Command {
-        let mut cmd = self.command(env!("CARGO_BIN_EXE_hushrun"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
+        self.configure(&mut cmd);
         cmd.env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
             .env("HUSHRUN_HOST", "http://127.0.0.1:9")
             .env("HUSHRUN_NO_UPDATE_CHECK", "1");
