@@ -401,7 +401,7 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
 /// The directory that holds the adapter and its reporter for this binary, written whole when they
 /// aren't there yet: `<cache dir>/adapters/jest-<first 16 hex of their SHA-256>`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
-    let digest = hushrun_core::Digest::of(format!("{PRELOAD}\0{REPORTER}").as_bytes()).hex();
+    let digest = hushrun_core::Digest::of(format!("{}\0{}", PRELOAD, REPORTER).as_bytes()).hex();
     let dir = cache
         .join("adapters")
         .join(format!("jest-{}", &digest[..16]));

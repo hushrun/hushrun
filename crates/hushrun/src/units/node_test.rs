@@ -29,7 +29,7 @@ pub const ADAPTER: &str = "node-test";
 /// The name in the facts file of the runner's main process.
 pub const MAIN: &str = "node-test-main";
 /// What the adapter observes being read: its sources (C-30). Every other kind is rest.
-pub const SOURCE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
+pub const SOURCE_KINDS: &[&str] = super::node::SOURCE_KINDS;
 /// The file every Node process of COMMAND loads.
 const PRELOAD: &str = include_str!("hushrun_node_test.cjs");
 /// What `hushrun why` and the run say of a test file whose process failed outside its tests.
@@ -154,31 +154,8 @@ pub fn variables(
 ) -> Result<Vec<(String, OsString)>, String> {
     Ok(vec![(
         "NODE_OPTIONS".to_string(),
-        require(&dir.join("hushrun-node-test.cjs"), node_options)?,
+        super::node::require(&dir.join("hushrun-node-test.cjs"), node_options)?,
     )])
-}
-
-/// `NODE_OPTIONS` with ` --require <file>` after what it had (C-54, C-56): in double quotes,
-/// backslashes doubled, when the path has whitespace, as Node splits it; a path with a quote can't
-/// be held.
-pub fn require(file: &Path, node_options: Option<OsString>) -> Result<OsString, String> {
-    let text = file.to_string_lossy().into_owned();
-    if text.contains('"') {
-        return Err(format!(
-            "its file's path, {text}, has a quote, which NODE_OPTIONS can't hold"
-        ));
-    }
-    let word = if text.chars().any(char::is_whitespace) {
-        format!("\"{}\"", text.replace('\\', "\\\\"))
-    } else {
-        text
-    };
-    let mut options = node_options.filter(|o| !o.is_empty()).unwrap_or_default();
-    if !options.is_empty() {
-        options.push(" ");
-    }
-    options.push(format!("--require {word}"));
-    Ok(options)
 }
 
 /// What the adapter observed of a run, before hushrun decides any state.

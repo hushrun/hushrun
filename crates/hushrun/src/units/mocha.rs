@@ -26,7 +26,7 @@ use super::facts::FactsFile;
 /// The adapter's word: its facts files, this machine's store and a hint name it so.
 pub const ADAPTER: &str = "mocha";
 /// What the adapter observes being read: its sources (C-30). Every other kind is rest.
-pub const SOURCE_KINDS: &[&str] = super::node_test::SOURCE_KINDS;
+pub const SOURCE_KINDS: &[&str] = super::node::SOURCE_KINDS;
 /// The file every Node process of COMMAND loads.
 const PRELOAD: &str = include_str!("hushrun_mocha.cjs");
 /// The Mocha majors the adapter knows.
@@ -343,7 +343,7 @@ impl Adapter for Recognized {
             install(at.cache).map_err(|err| format!("can't write its Mocha adapter: {err}"))?;
         Ok(vec![(
             "NODE_OPTIONS".to_string(),
-            super::node_test::require(&dir.join("hushrun-mocha.cjs"), (at.env)("NODE_OPTIONS"))?,
+            super::node::require(&dir.join("hushrun-mocha.cjs"), (at.env)("NODE_OPTIONS"))?,
         )])
     }
 

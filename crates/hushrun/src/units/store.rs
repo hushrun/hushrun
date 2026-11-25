@@ -781,11 +781,42 @@ pub struct Map {
 }
 
 /// \[C-46\] A Gradle JUnit 4 task leaves out at most `most` of the tests of `units`, its test
-/// files, by name: past them its tests run ([`super::gradle::left_in`]).
+/// files, by name: past them its tests run ([`left_in`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LeaveOutAtMost {
     pub most: usize,
     pub units: BTreeSet<String>,
+}
+
+/// \[C-46\] Of the tests a plan lists one by one (`listed`, each by name with its unit and id),
+/// those a JUnit 4 task of `groups` would not leave out, which run: as the script's filter takes
+/// them, per task, in the order of their ids as strings, the first `most`, and of those none whose
+/// class is in the default package or a package whose name starts with a capital letter (Gradle
+/// reads such a pattern as a simple class name). The class is the id up to its last `.`: a JUnit 4
+/// method's name has none. The script mirrors this; the plan lists only what it leaves out.
+pub fn left_in<'a>(
+    groups: &[LeaveOutAtMost],
+    listed: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
+) -> BTreeSet<String> {
+    let listed: Vec<(&str, &str, &str)> = listed.collect();
+    let mut out = BTreeSet::new();
+    for group in groups {
+        let mut of_group: Vec<(&str, &str)> = listed
+            .iter()
+            .filter(|(_, unit, _)| group.units.contains(*unit))
+            .map(|(name, _, id)| (*id, *name))
+            .collect();
+        of_group.sort_unstable();
+        for (at, (id, name)) in of_group.into_iter().enumerate() {
+            let class = id.rsplit_once('.').map_or("", |(class, _)| class);
+            let named_alone =
+                !class.contains('.') || class.chars().next().is_some_and(char::is_uppercase);
+            if at >= group.most || named_alone {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
 }
 
 impl Map {
