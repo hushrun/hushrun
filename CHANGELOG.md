@@ -26,6 +26,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Svelte's tests reuse** (C-62 to C-65, ADR 0109). With Vitest, `.svelte` components are
+  sources, vite-plugin-svelte's, SvelteKit's and Testing Library's `svelteTesting()` plugins are
+  known, what a Svelte preprocessor reads (its `dependencies`) is read by whoever runs the
+  component, the Svelte config and what it imports are config files, and SvelteKit's env entry and
+  `.env` files are too, so SvelteKit 2's `$env/*` and `__sveltekit/*` modules no longer make a test
+  file `not observed`. Before, every test file of a Svelte project was `not observed`. Fixed on
+  the way, for every framework: a Vitest test in jsdom or happy-dom failed to load hushrun's setup
+  file (`Cannot find module '/@fs/…'`), which Vite now serves (`server.fs.allow`, as ADR 0108
+  has it).
 - **C and C++ without CMake, and `meson test`** (B-230 to B-238, C-102 to C-105, ADR 0119). Inside
   `hushrun run`, GNU Make's commands (plain Makefiles and autotools ones) find hushrun's compiler
   programs first on `PATH` through `MAKEFILES`, a `ninja` COMMAND on a handwritten `build.ninja`

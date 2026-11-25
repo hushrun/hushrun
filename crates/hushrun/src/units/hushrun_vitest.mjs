@@ -25,6 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as svelte from './hushrun-vitest-svelte.mjs';
 
 // [ADR 0108] Loaded beside this file; without it, a `vite:vue` is a plugin hushrun doesn't know.
 const vue = await import('./hushrun-vitest-vue.mjs').catch(() => ({
@@ -214,9 +215,12 @@ export default function hushrun() {
         for (const file of [resolved.configFile, ...(resolved.configFileDependencies || [])]) {
           if (file) state.configFiles.add(path.resolve(file));
         }
+        // [ADR 0109] The Svelte config and what SvelteKit generates its env modules from.
+        for (const file of svelte.resolved(resolved)) state.configFiles.add(path.resolve(file));
         const unknown = resolved.plugins
           .map((p) => p.name)
-          .filter((n) => !KNOWN_NAMES.has(n) && !KNOWN_PREFIXES.some((p) => n.startsWith(p)));
+          .filter((n) => !KNOWN_NAMES.has(n) && !KNOWN_PREFIXES.some((p) => n.startsWith(p)))
+          .filter((n) => !svelte.known(n));
         state.projects.set(resolved.root, { plugins: unknown });
       });
       // [ADR 0108] An environment of the browser's (`jsdom`, `happy-dom`) loads the setup file
@@ -244,6 +248,15 @@ export default function hushrun() {
         state.errors.push(`reexports: ${err && err.message ? err.message : String(err)}`.slice(0, 500));
       }
       return guard('transform', () => {
+        // [ADR 0109] What a Svelte preprocessor read for this module: whoever runs the module
+        // reads it, as it reads what a barrel re-exports.
+        const deps = svelte.dependencies(id);
+        reexports = [...new Set([...reexports, ...deps])];
+        // A SvelteKit module made from its config files, which every test file reads already.
+        const ids = svelte.fromConfig(id) ? deps : [id, ...deps];
+        const seen = ids.length
+          ? `;(globalThis.__hushrun_vitest_seen ||= []).push(${ids.map((i) => JSON.stringify(i)).join(', ')});`
+          : '';
         let told = reexports.length
           ? `;(globalThis.__hushrun_vitest_reexports ||= {})[${JSON.stringify(id)}] = ${JSON.stringify(reexports)};`
           : '';
@@ -253,7 +266,7 @@ export default function hushrun() {
           told += `;(globalThis.__hushrun_vitest_compiled ||= {})[${JSON.stringify(id)}] = ${JSON.stringify(compiled)};`;
         }
         return {
-          code: `${code}\n;(globalThis.__hushrun_vitest_seen ||= []).push(${JSON.stringify(id)});${told}`,
+          code: `${code}\n${seen}${told}`,
           map: null,
         };
       });
