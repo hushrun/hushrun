@@ -6,18 +6,20 @@
 //! cargo test -p hushrun --test units_gradle -- --list --format terse | sed 's/: test$//' > /tmp/ids
 //! cargo run --release -p hushrun-graph --example reach -- \
 //!     --root <checkout> --index /tmp/index.scip --tests /tmp/ids \
-//!     --own crates/hushrun/tests/units_gradle.rs,crates/hushrun/tests/common/ \
-//!     --linked 'crates/,!crates/hushrun/src/main.rs,!crates/hushrun/tests/' \
+//!     --own crates/hushrun/tests/units_gradle.rs \
 //!     --show crates/hushrun/src/units/ --why crates/hushrun/src/units/cargo.rs
 //! ```
 //!
 //! - `--root`: the checkout, the tree rust-analyzer indexed (a changed file makes the map stale).
 //! - `--index`: rust-analyzer's SCIP index of it.
 //! - `--tests`: one test id per line, as the binary lists them (`module::name`).
-//! - `--own`: the test binary's own crate, as path prefixes: its root file and its modules.
-//! - `--linked`: what the binary is built from, as path prefixes; `!` leaves one out (a binary's
-//!   `main.rs` for an integration test that links the library). The adapter reads this from the
-//!   build's dep-info; here a `#[cfg(test)]` module of a library shows up though it isn't linked.
+//! - `--own`: the test binary's crate root (`crates/hushrun/tests/units_gradle.rs`). The crate is
+//!   that file and the modules its `mod` declarations reach, `#[path]` included. An entry that is
+//!   no crate root is a path prefix: every file under it is the crate's.
+//! - `--linked`: what the binary is built from. By default, its own crate and every workspace
+//!   library's crate, as the build's dep-info gives an integration test; never another test's or
+//!   binary's files. Given, it is path prefixes, and `!` leaves one out. A library's
+//!   `#[cfg(test)]` module shows up here, though a build of another crate doesn't link it.
 //! - `--show`: prints, for each test, the files it reaches under these prefixes.
 //! - `--why`: prints, for each test, the path of items that brings in each of these files.
 //! - `--changed`: counts the tests that reach each of these files.
@@ -95,10 +97,7 @@ fn run() -> Result<(), String> {
         .map(String::from)
         .collect();
     let own_prefixes = list(&flags, "own");
-    let linked_prefixes = match list(&flags, "linked") {
-        l if l.is_empty() => vec!["crates/".to_string()],
-        l => l,
-    };
+    let linked_prefixes = list(&flags, "linked");
     let workspace = Workspace::of(&root)?;
     let sources = sources(&root)?;
     let cache: RefCell<BTreeMap<PathBuf, Macros>> = RefCell::new(BTreeMap::new());
@@ -124,16 +123,34 @@ fn run() -> Result<(), String> {
         layout: Some(&workspace.layout),
     });
     eprintln!("map built in {:?}: {:?}", started.elapsed(), graph.size());
-    let own: BTreeSet<String> = sources
-        .keys()
-        .filter(|k| under(k, &own_prefixes))
-        .cloned()
-        .collect();
-    let linked: BTreeSet<String> = sources
-        .keys()
-        .filter(|k| under(k, &linked_prefixes) || own.contains(*k))
-        .cloned()
-        .collect();
+    // A crate root names its crate; anything else is a prefix of the crate's files.
+    let mut own: BTreeSet<String> = BTreeSet::new();
+    for entry in &own_prefixes {
+        let files = graph.crate_files(entry);
+        if files.is_empty() {
+            own.extend(
+                sources
+                    .keys()
+                    .filter(|k| k.starts_with(entry.as_str()))
+                    .cloned(),
+            );
+        } else {
+            own.extend(files);
+        }
+    }
+    let linked: BTreeSet<String> = if linked_prefixes.is_empty() {
+        let mut linked = own.clone();
+        for library in workspace.layout.libraries.values() {
+            linked.extend(graph.crate_files(library));
+        }
+        linked
+    } else {
+        sources
+            .keys()
+            .filter(|k| under(k, &linked_prefixes) || own.contains(*k))
+            .cloned()
+            .collect()
+    };
     let show = list(&flags, "show");
     let why = list(&flags, "why");
     let changed = list(&flags, "changed");
