@@ -131,8 +131,14 @@ struct Ran {
 }
 
 impl Ran {
+    /// Whether hushrun printed `line`, or `line` with the time it would save after it
+    /// (`, saving about 1s`), which depends on how long the reused tests took.
     fn says(&self, line: &str) -> bool {
-        self.stderr.lines().any(|l| l == line)
+        self.stderr.lines().any(|l| {
+            l == line
+                || l.strip_prefix(line)
+                    .is_some_and(|rest| rest.starts_with(", saving about "))
+        })
     }
 }
 

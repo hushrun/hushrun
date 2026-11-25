@@ -694,6 +694,7 @@ mod tests {
                 ignore: &[],
                 compile_env: &[],
                 assigned,
+                by_test: false,
             };
             recognized.compiled_with(&at, path.clone())
         };

@@ -56,6 +56,10 @@ pub struct RunFile {
     /// whose dep-info its key holds: the target runner reuses only a binary that is that one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<Binary>,
+    /// \[C-146\] The test binaries some of whose tests `reuseTests` lists, each as `binaries` names
+    /// one: the target runner leaves those tests out of a list of that binary alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_binaries: Vec<Binary>,
     /// \[ADR 0071\] The test files the plan classified as such, from the root: Vitest's adapter
     /// deselects nothing when its own list isn't this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -360,6 +364,10 @@ pub struct Invocation {
     /// \[ADR 0070\] The test log had more lines than hushrun reads.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub testlog_truncated: bool,
+    /// \[C-146\] For a `--list`, the tests the runner left out of what it passed on, as
+    /// `reuseTests` lists them: nextest starts none of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_out: Vec<String>,
 }
 
 /// Every adapter file of a run's directory, in name order, with those that don't parse or have

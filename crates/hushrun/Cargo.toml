@@ -36,6 +36,7 @@ hushrun-artifact.workspace = true
 hushrun-attest = { workspace = true, features = ["sigstore"] }
 # Build blocks (B-1 … B-22): the wrapper `main` hands over to, and `hushrun build`.
 hushrun-build.workspace = true
+hushrun-graph.workspace = true
 hushrun-ci.workspace = true
 hushrun-ledger = { workspace = true, features = ["cloud"] }
 hushrun-tlog.workspace = true

@@ -528,6 +528,7 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
             .collect(),
         not_kept: None,
         list: None,
+        trusted: None,
     };
     let mut with_tests = mapped(&[("tests/test_a.py", HASH_A)]);
     with_tests.tests = BTreeMap::from([
@@ -539,6 +540,15 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
         (
             "test_spawns".to_string(),
             row(State::NotObserved, 1, Some("subprocess")),
+        ),
+        // covers: C-151
+        // \[C-151\] A test the map trusted a marked function's spawn of keeps which.
+        (
+            "test_trusted".to_string(),
+            TestRow {
+                trusted: Some("crates/t/src/tool.rs:3 `command`".into()),
+                ..row(State::Passed, 2, None)
+            },
         ),
     ]);
     let r = run(
