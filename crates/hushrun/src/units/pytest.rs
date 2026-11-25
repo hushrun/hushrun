@@ -11,8 +11,10 @@ use hushrun_core::units::{self, Facts, Set, Sets, Sources};
 
 use super::Seen;
 use super::adapter::{
-    Adapter, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
+use super::python::fnmatch;
 use super::shared::Shared;
 use super::store::Map;
 
@@ -21,7 +23,7 @@ const SHIM: &str = include_str!("hushrun_pytest.py");
 /// The adapter.
 const ADAPTER: &str = include_str!("hushrun_pytest_impl.py");
 /// \[ADR 0110\] The observer the adapter drives, which unittest's adapter drives too.
-pub const OBSERVE: &str = include_str!("hushrun_observe.py");
+pub use super::python::OBSERVE;
 /// The module `-p` names.
 pub const MODULE: &str = "hushrun_pytest";
 /// The adapter's word (C-36).
@@ -256,44 +258,6 @@ pub fn is_test_file(patterns: &[String], path: &str) -> Option<bool> {
     Some(path.ends_with(".py") && patterns.iter().any(|p| fnmatch(p, name)))
 }
 
-/// Python's `fnmatch` on a file name: `*`, `?`, `[seq]` and `[!seq]`; \[ADR 0110\] unittest's
-/// discovery matches its pattern so too.
-pub(super) fn fnmatch(pattern: &str, name: &str) -> bool {
-    fn go(p: &[char], n: &[char]) -> bool {
-        match p.first() {
-            None => n.is_empty(),
-            Some('*') => (0..=n.len()).any(|i| go(&p[1..], &n[i..])),
-            Some('?') => !n.is_empty() && go(&p[1..], &n[1..]),
-            Some('[') => {
-                let Some(close) = p.iter().skip(2).position(|c| *c == ']').map(|i| i + 2) else {
-                    return n.first() == Some(&'[') && go(&p[1..], &n[1..]);
-                };
-                let Some(c) = n.first() else { return false };
-                let (negate, set) = match p[1] {
-                    '!' => (true, &p[2..close]),
-                    _ => (false, &p[1..close]),
-                };
-                let mut hit = false;
-                let mut i = 0;
-                while i < set.len() {
-                    if i + 2 < set.len() && set[i + 1] == '-' {
-                        hit |= set[i] <= *c && *c <= set[i + 2];
-                        i += 3;
-                    } else {
-                        hit |= set[i] == *c;
-                        i += 1;
-                    }
-                }
-                hit != negate && go(&p[close + 1..], &n[1..])
-            }
-            Some(c) => n.first() == Some(c) && go(&p[1..], &n[1..]),
-        }
-    }
-    let p: Vec<char> = pattern.chars().collect();
-    let n: Vec<char> = name.chars().collect();
-    go(&p, &n)
-}
-
 /// \[ADR 0068, 0080\] The pytest adapter, which any COMMAND no other adapter takes gets: it does
 /// nothing where pytest never starts.
 #[derive(Debug, Clone, Copy)]
@@ -332,6 +296,30 @@ impl Adapter for Pytest {
             unit: true,
             reads: true,
         }
+    }
+
+    // `test_file`, `hints`, `binds`, `keys` and `start_variables` are the trait's defaults, written
+    // out: a call on this type then names this impl's own method, which the static test map
+    // follows to it alone, where the trait's would count every adapter that overrides it
+    // (CONTRIBUTING.md, "Which tests CI runs again").
+    fn test_file(&self) -> &'static str {
+        "test file"
+    }
+
+    fn hints(&self) -> Hints {
+        Hints::Sources
+    }
+
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, _: &Path) -> Vec<(String, Option<OsString>)> {
+        Vec::new()
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

@@ -23,7 +23,8 @@ use hushrun_core::units::{self, Facts, Set, Sets, Sources};
 
 use super::Seen;
 use super::adapter::{
-    Adapter, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
 use super::command::program_name;
 use super::shared::Shared;
@@ -53,7 +54,7 @@ const PARALLEL: &str = "Django's --parallel runs the tests in worker processes, 
 /// The directory that holds the adapter for this binary, written whole when it isn't there yet:
 /// `<cache dir>/adapters/unittest-<first 16 hex of its SHA-256>`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
-    let observe = super::pytest::OBSERVE;
+    let observe = super::python::OBSERVE;
     let digest = hushrun_core::Digest::of(format!("{SITE}\0{ADAPTER}\0{observe}").as_bytes()).hex();
     let dir = cache
         .join("adapters")
@@ -366,9 +367,9 @@ pub fn is_test_file(pattern: &str, path: &str) -> bool {
         return false;
     }
     if cfg!(windows) {
-        super::pytest::fnmatch(&pattern.to_lowercase(), &name.to_lowercase())
+        super::python::fnmatch(&pattern.to_lowercase(), &name.to_lowercase())
     } else {
-        super::pytest::fnmatch(pattern, name)
+        super::python::fnmatch(pattern, name)
     }
 }
 
@@ -409,6 +410,26 @@ impl Adapter for Unittest {
             unit: true,
             reads: true,
         }
+    }
+
+    // `hints`, `binds`, `keys` and `start_variables` are the trait's defaults, written out: a call
+    // on this type then names this impl's own method, which the static test map follows to it
+    // alone, where the trait's would count every adapter that overrides it (CONTRIBUTING.md,
+    // "Which tests CI runs again").
+    fn hints(&self) -> Hints {
+        Hints::Sources
+    }
+
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, _: &Path) -> Vec<(String, Option<OsString>)> {
+        Vec::new()
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

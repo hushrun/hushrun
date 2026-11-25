@@ -44,6 +44,7 @@ pub mod node_test;
 pub mod phpunit;
 pub mod program;
 pub mod pytest;
+pub mod python;
 pub mod ruby;
 pub mod runner;
 pub mod rustdoc;
