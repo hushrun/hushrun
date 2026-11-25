@@ -5,227 +5,33 @@
 //! `reads: test` is known to miss (RFC 0004 §3.2, C-40), yes, which a test names as a known miss.
 //! One more shows an audit run catching such a miss and suspending reuse.
 //!
+//! In-process (CONTRIBUTING.md, "Which tests CI runs again"): each test runs a check as `hushrun
+//! run unit -- python -m pytest …` would, through pytest's adapter's own type, `pytest::Pytest`,
+//! and the code every adapter shares, and never starts the `hushrun` binary (`common/pytest.rs`).
+//! pytest runs as COMMAND, for real. Nothing here needs the CLI, so `e2e_pytest/reads_test.rs`
+//! holds no test.
+//!
 //! They need Python 3.12 or later with pytest, to watch a test, and say so and pass otherwise,
 //! unless `HUSHRUN_TEST_TOOLS=required`, which CI sets.
 
+#[path = "common/reads_test.rs"]
+mod fixtures;
+#[path = "common/in_process.rs"]
+mod in_process;
+#[path = "common/pytest.rs"]
+mod pytest;
+#[path = "common/python.rs"]
+mod python;
+#[path = "common/repo.rs"]
+mod repo;
 #[path = "common/store.rs"]
 mod store;
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use serde_json::json;
 
-use hushrun_testkit::git;
-use serde_json::{Value, json};
-
-/// Environment variables a test must never inherit: CI's, hushrun's, an outer run's, and what
-/// says a coding agent runs it.
-const CLEARED: &[&str] = &[
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "BUILDKITE",
-    "CIRCLECI",
-    "ACTIONS_ID_TOKEN_REQUEST_URL",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "HUSHRUN_AGENT",
-    "HUSHRUN_BACKEND",
-    "HUSHRUN_TOKEN",
-    "HUSHRUN_CONFIG",
-    "HUSHRUN_FORMAT",
-    "HUSHRUN_PROVIDER",
-    "HUSHRUN_INSIDE_RUN",
-    "HUSHRUN_UNITS",
-    "HUSHRUN_INVOKED_BY",
-    "HUSHRUN_REPORTS_READ",
-    "PYTEST_ADDOPTS",
-    "PYTHONPATH",
-    "CARGO_TARGET_DIR",
-    "npm_lifecycle_event",
-    "AI_AGENT",
-    "CLAUDECODE",
-    "CLAUDE_CODE",
-    "CODEX_SANDBOX",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "OPENCODE",
-    "OPENCODE_CLIENT",
-    "CURSOR_AGENT",
-    "CURSOR_EXTENSION_HOST_ROLE",
-    "GEMINI_CLI",
-    "AUGMENT_AGENT",
-    "ANTIGRAVITY_AGENT",
-    "COPILOT_MODEL",
-    "COPILOT_ALLOW_ALL",
-    "COPILOT_GITHUB_TOKEN",
-    "CLAUDE_CODE_REMOTE",
-    "CURSOR_AGENT_SOCKET",
-    "COPILOT_AGENT_SESSION_ID",
-    "CODEX_PROXY_CERT",
-    "HUSHRUN_SANDBOX",
-    // B-1, B-2: the developer's build mode, store and wrapper stay out: a test run that cargo
-    // itself compiles through the wrapper doesn't pass its session on to a fixture's cargo.
-    "HUSHRUN_BUILD",
-    "HUSHRUN_BUILD_KEEP_DAYS",
-    "HUSHRUN_BUILD_DIR",
-    "HUSHRUN_BUILD_SESSION",
-    "HUSHRUN_CC",
-    "CMAKE_C_COMPILER_LAUNCHER",
-    "CMAKE_CXX_COMPILER_LAUNCHER",
-    "RUSTC_WRAPPER",
-];
-
-const NO_HOST: &str = "http://127.0.0.1:9";
-const REPOSITORY: &str = "example.com/acme/shop";
-
-struct Repo {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    repo: PathBuf,
-    cache: PathBuf,
-}
-
-impl Repo {
-    fn new(files: &[(&str, &str)]) -> Repo {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("real path");
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("mkdir");
-        git::init(&repo, "sha1");
-        let r = Repo {
-            _dir: dir,
-            cache: root.join("cache"),
-            root,
-            repo,
-        };
-        for (path, text) in files {
-            r.write(path, text);
-        }
-        git::commit_all(&r.repo, "init");
-        r
-    }
-
-    fn write(&self, path: &str, text: &str) {
-        let path = self.repo.join(path);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, text).expect("write");
-    }
-
-    fn hushrun(&self) -> assert_cmd::Command {
-        let mut cmd = assert_cmd::Command::cargo_bin("hushrun").expect("binary");
-        cmd.current_dir(&self.repo)
-            .env("HUSHRUN_CACHE_DIR", &self.cache)
-            .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
-            .env("HUSHRUN_HOST", NO_HOST)
-            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
-            .env("HOME", self.root.join("home"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            );
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        // What the developer's shell exports never reaches a runner a test starts.
-        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("NEXTEST")
-                || (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("RUSTC_WORKSPACE_WRAPPER")
-                || name.starts_with("CLAUDE")
-            {
-                cmd.env_remove(name.as_ref());
-            }
-        }
-        cmd
-    }
-
-    fn run(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
-        let mut cmd = self.hushrun();
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-        let output = cmd.args(args).output().expect("hushrun");
-        Ran {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
-    }
-
-    /// The newest result this machine recorded for the check.
-    fn newest_result(&self) -> Value {
-        let mut files = Vec::new();
-        collect(&self.cache.join("results/results/v0"), &mut files);
-        files.sort_by_key(|p| p.file_name().map(|n| n.to_owned()));
-        let newest = files.last().expect("a result");
-        serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
-    }
-
-    /// How many unit results this machine holds.
-    fn unit_results(&self) -> usize {
-        let mut files = Vec::new();
-        collect(&self.cache.join("results/units/v0"), &mut files);
-        files.len()
-    }
-}
-
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect(&path, out);
-        } else if path.extension().is_some_and(|e| e == "json") {
-            out.push(path);
-        }
-    }
-}
-
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-fn tools(what: &str, here: bool) -> bool {
-    if here {
-        return true;
-    }
-    if std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required") {
-        panic!("{what} is missing, and HUSHRUN_TEST_TOOLS=required");
-    }
-    eprintln!("note: skipping: {what} is missing (HUSHRUN_TEST_TOOLS=required makes this fail)");
-    false
-}
-
-fn python() -> String {
-    std::env::var("HUSHRUN_TEST_PYTHON").unwrap_or_else(|_| "python3".into())
-}
-
-fn has_pytest() -> bool {
-    Command::new(python())
-        .args([
-            "-c",
-            "import sys, pytest, xdist; sys.exit(0 if sys.version_info >= (3, 8) else 1)",
-        ])
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-/// Whether the Python the tests run has `sys.monitoring` (3.12 and later).
-fn watches() -> bool {
-    Command::new(python())
-        .args([
-            "-c",
-            "import sys; sys.exit(0 if hasattr(sys, 'monitoring') else 1)",
-        ])
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
+use fixtures::*;
+use in_process::{Ran, Repo};
+use python::{has_pytest, python, tools, watches};
 
 /// Whether these tests can run here: pytest, on a Python that watches a test. Below 3.12 there is
 /// nothing to watch with, which isn't a missing tool: `test_as_unit`'s observe test holds what a
@@ -241,45 +47,13 @@ fn can_watch() -> bool {
     true
 }
 
-fn yaml(tests: &str) -> String {
-    format!("version: 1\nrepository: {REPOSITORY}\nchecks:\n  unit:\n    tests: {tests}\n")
-}
-
 fn repo_of(files: &[(&str, &str)], tests: &str) -> Repo {
-    let mut all: Vec<(String, String)> = vec![
-        ("hushrun.yaml".into(), yaml(tests)),
-        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
-        (
-            "pytest.ini".into(),
-            "[pytest]\ntestpaths = tests\npythonpath = .\n".into(),
-        ),
-        ("app/__init__.py".into(), String::new()),
-        // A test file every change runs, so that the check's own key misses.
-        (
-            "tests/test_other.py".into(),
-            "def test_other():\n    assert True\n".into(),
-        ),
-    ];
-    for (path, text) in files {
-        all.retain(|(p, _)| p != path);
-        all.push((path.to_string(), text.to_string()));
-    }
-    let borrowed: Vec<(&str, &str)> = all.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
-    Repo::new(&borrowed)
+    pytest::repo(&files_of(files, tests))
 }
 
-fn pytest_args(python: &str) -> Vec<&str> {
-    vec![
-        "run",
-        "unit",
-        "--",
-        python,
-        "-m",
-        "pytest",
-        "-q",
-        "-p",
-        "no:cacheprovider",
-    ]
+/// `hushrun run unit -- python -m pytest -q -p no:cacheprovider`, in-process.
+fn run_pytest(r: &Repo, python: &str) -> Ran {
+    pytest::run(r, &pytest::pytest_command(python, &[]), &[])
 }
 
 /// Whether `observe`, with `reads`, would have reused `test_target` of `tests/test_a.py` after
@@ -290,23 +64,24 @@ fn would_reuse(files: &[(&str, &str)], change: (&str, &str), reads: &str) -> boo
         &format!("{{mode: observe, unit: test, reads: {reads}}}"),
     );
     let python = python();
-    let first = r.run(&pytest_args(&python), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let first = run_pytest(&r, &python);
+    assert_eq!(first.code, 0, "{}", first.said());
     assert!(
-        !first.stderr.contains("each test is taken to have read"),
+        !first.said().contains("each test is taken to have read"),
         "{}",
-        first.stderr
+        first.said()
     );
     r.write(change.0, change.1);
-    let second = r.run(&pytest_args(&python), &[]);
+    let second = run_pytest(&r, &python);
     assert_eq!(
-        second.code, 1,
-        "the change makes test_target fail:\n{}\n{}",
-        second.stdout, second.stderr
+        second.code,
+        1,
+        "the change makes test_target fail:\n{}",
+        second.said()
     );
     assert!(second.stdout.contains("test_target"), "{}", second.stdout);
-    second.stderr.contains(
-        "hushrun: unit: tests/test_a.py::test_target failed, though it passed before on the same files it read: with `tests: reuse` it would have been reused",
+    second.lines.iter().any(|l| l ==
+        "unit: tests/test_a.py::test_target failed, though it passed before on the same files it read: with `tests: reuse` it would have been reused",
     )
 }
 
@@ -665,24 +440,6 @@ fn a_known_miss_of_reads_test_a_value_two_imports_away() {
     known_miss(&two_imports_away(), ("app/defaults.py", "RATE = 4\n"));
 }
 
-/// A registry plugins.py fills as app/__init__.py imports it: the test file imports the registry
-/// and nothing of plugins.py, whose code runs at import only. An `import` statement binds no name
-/// it re-exports (a `from app import plugins` in a package's `__init__.py` would, C-40).
-fn a_registry() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("app/__init__.py", "import app.plugins\n"),
-        ("app/registry.py", "HANDLERS = {}\n"),
-        (
-            "app/plugins.py",
-            "from app.registry import HANDLERS\nHANDLERS['x'] = 41\n",
-        ),
-        (
-            "tests/test_a.py",
-            "from app.registry import HANDLERS\n\ndef test_target():\n    assert HANDLERS['x'] == 41\n",
-        ),
-    ]
-}
-
 // covers: C-40
 #[test]
 fn a_known_miss_of_reads_test_a_registry_another_file_filled_at_import() {
@@ -732,8 +489,8 @@ fn an_audit_catches_a_known_miss_of_reads_test_and_suspends_reuse() {
     // fails, runs once more alone, fails again, and the check's reuse is suspended.
     let r = repo_of(&a_registry(), "{mode: reuse, unit: test, reads: test}");
     let python = python();
-    let first = r.run(&pytest_args(&python), &[]);
-    assert_eq!(first.code, 0, "{}", first.stderr);
+    let first = run_pytest(&r, &python);
+    assert_eq!(first.code, 0, "{}", first.said());
     r.write(
         "app/plugins.py",
         "from app.registry import HANDLERS\nHANDLERS['x'] = 42\n",
@@ -742,19 +499,11 @@ fn an_audit_catches_a_known_miss_of_reads_test_and_suspends_reuse() {
         "tests/test_other.py",
         "def test_other():\n    assert True  # changed\n",
     );
-    let caught = r.run(&pytest_args(&python), &[]);
-    assert_eq!(caught.code, 1, "{}", caught.stderr);
-    assert!(
-        caught.stderr.contains(
-            "hushrun: unit: tests/test_a.py::test_target failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"
-        ),
-        "{}",
-        caught.stderr
-    );
-    assert_eq!(
-        store::disagreements(&r.cache),
-        ["tests/test_a.py::test_target"]
-    );
+    let caught = run_pytest(&r, &python);
+    assert_eq!(caught.code, 1, "{}", caught.said());
+    // The second run disagreed, which suspends reuse; the CLI's line that says so is end to end
+    // (`e2e_pytest/reads_test.rs`).
+    assert_eq!(r.disagreements(), ["tests/test_a.py::test_target"]);
 }
 
 // covers: C-40, C-42, C-36
@@ -784,10 +533,10 @@ fn with_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_te
     ];
     let r = repo_of(&files, "{mode: reuse, unit: test, reads: test}");
     let python = python();
-    let first = r.run(&pytest_args(&python), &[]);
-    assert_eq!(first.code, 0, "{}", first.stderr);
+    let first = run_pytest(&r, &python);
+    assert_eq!(first.code, 0, "{}", first.said());
     // A test file that passed whole records its own pass and each test's.
-    let map = store::map(&r.cache);
+    let map = r.map();
     assert_eq!(
         map["units"]["tests/test_a.py"]["tests"]
             .as_object()
@@ -795,18 +544,18 @@ fn with_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_te
             .len(),
         61
     );
-    assert_eq!(r.unit_results(), 2 + 61 + 1);
+    assert_eq!(r.unit_results().values().sum::<usize>(), 2 + 61 + 1);
     r.write("app/a.py", "def f():\n    return 1  # changed\n");
-    let second = r.run(&pytest_args(&python), &[]);
-    assert_eq!(second.code, 0, "{}", second.stderr);
+    let second = run_pytest(&r, &python);
+    assert_eq!(second.code, 0, "{}", second.said());
     assert!(
-        second.stderr.lines().any(|l| hushrun_testkit::lines::drawn(l)
-            == hushrun_testkit::lines::drawn("hushrun: unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
+        second.lines.iter().any(|l| hushrun_testkit::lines::drawn(l)
+            == hushrun_testkit::lines::drawn("unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
         "{}",
-        second.stderr
+        second.said()
     );
     assert_eq!(
-        r.newest_result()["units"]["tests"],
+        second.units["tests"],
         json!({"total": 62, "ran": 3, "reused": 59})
     );
     // With `reads: file` the same change runs every test of the file.
@@ -815,11 +564,11 @@ fn with_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_te
         &yaml("{mode: reuse, unit: test, reads: file}"),
     );
     r.write("app/a.py", "def f():\n    return 1  # changed again\n");
-    let whole = r.run(&pytest_args(&python), &[]);
-    assert_eq!(whole.code, 0, "{}", whole.stderr);
+    let whole = run_pytest(&r, &python);
+    assert_eq!(whole.code, 0, "{}", whole.said());
     assert!(
-        !whole.stderr.contains("58 already passed"),
+        !whole.said().contains("58 already passed"),
         "{}",
-        whole.stderr
+        whole.said()
     );
 }
