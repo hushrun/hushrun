@@ -462,10 +462,10 @@ impl Adapter for Recognized {
         }
     }
 
-    // `hints`, `binds` and `keys` are the trait's defaults, written out: a call on this type then
-    // names this impl's own method, which the static test map follows to it alone, where the
-    // trait's would count every adapter that overrides it (CONTRIBUTING.md, "Which tests CI runs
-    // again").
+    // `hints`, `binds`, `keys`, `not_by_test` and `not_watched` are the trait's defaults, written
+    // out: a call on this type then names this impl's own method, which the static test map
+    // follows to it alone, where the trait's would count every adapter that overrides it
+    // (CONTRIBUTING.md, "Which tests CI runs again").
     fn hints(&self) -> Hints {
         Hints::Sources
     }
@@ -476,6 +476,14 @@ impl Adapter for Recognized {
 
     fn keys(&self) -> KeysOutside {
         KeysOutside::None
+    }
+
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

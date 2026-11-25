@@ -1392,6 +1392,17 @@ impl Adapter for Swift {
         }
     }
 
+    // \[C-146\] `not_by_test` and `not_watched` are the trait's defaults, written out: a call on
+    // this type then names this impl's own method, which the static test map follows to it alone
+    // (CONTRIBUTING.md, "Which tests CI runs again").
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
+    }
+
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
         let path = (at.env)("PATH");
         let search = path.clone().unwrap_or_default();
