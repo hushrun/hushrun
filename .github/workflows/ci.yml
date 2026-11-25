@@ -144,12 +144,17 @@ jobs:
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
       # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
-      # offline against a local repository: filled here once by running those tests online.
+      # offline against a local repository: filled by running those tests online, then kept in
+      # Actions' cache under what decides what they download (their fixtures, the adapter, the JVM
+      # jars, Maven's version, the runner). A hit skips the online run, which otherwise ran the
+      # whole test binary outside hushrun on every run, a docs-only pull request's too (5 to 6
+      # minutes). Only a fill whose tests all passed online is kept. A Maven test that fails
+      # offline for want of an artifact means the key misses a file that decides it: add it below.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21.0.11"
-      - name: Install Maven and fill its repository for the test-class tests
+      - name: Install Maven for the test-class tests
         run: |
           set -euo pipefail
           curl -fsSLo "$RUNNER_TEMP/maven.tar.gz" https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz
@@ -157,21 +162,43 @@ jobs:
           tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
           echo "HUSHRUN_TEST_MAVEN=$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
-          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
-            cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+      - name: Restore Maven's repository for the test-class tests
+        id: maven-repo
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/m2
+          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
+      - name: Fill Maven's repository for the test-class tests
+        id: maven-fill
+        if: steps.maven-repo.outputs.cache-hit != 'true'
+        run: |
+          if HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast; then
+            echo "filled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "filling Maven's repository failed: the test run says what is missing, and the cache keeps none of it"
+          fi
+      - name: Keep Maven's repository for the next runs
+        if: steps.maven-fill.outputs.filled == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/m2
+          key: ${{ steps.maven-repo.outputs.cache-primary-key }}
       # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
-      # published checksum, and a Gradle user home filled here once by running those tests online,
-      # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
-      # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
+      # published checksum, and a Gradle user home filled by running those tests online and kept
+      # in Actions' cache, as Maven's repository is: what they need is their own builds (JUnit 5
+      # and 4, TestNG, Spock, Kotest, Android's Gradle plugin), never a list beside them. The tests
+      # then run offline. A hit skips the online run (5 to 7 minutes); the key holds whether
+      # the Android SDK is here, since the fill downloads Android's plugin only then.
       # The Android test runs against the runner's own SDK (`ANDROID_HOME`) when it holds the
       # platform the test compiles for, android-36; otherwise this job opts out of it by name
       # (`HUSHRUN_TEST_ANDROID=skip`) and says so, since under `required` a missing SDK fails it.
       # Kotlin (ADR 0117): Kotlin/Native's test runs here, on Linux x86-64 only, since its
       # toolchain (hundreds of megabytes from download.jetbrains.com) lands in the Gradle user
-      # home's `hushrun-konan` when the next step fills that home online.
+      # home's `hushrun-konan` when that home is filled online.
       - name: Opt in to the Kotlin/Native test-class test
         run: echo "HUSHRUN_TEST_KOTLIN_NATIVE=1" >> "$GITHUB_ENV"
-      - name: Install Gradle and fill its user home for the test-class tests
+      - name: Install Gradle for the test-class tests
+        id: gradle
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -182,15 +209,39 @@ jobs:
           echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
           if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/platforms/android-36" ]; then
             echo "HUSHRUN_TEST_ANDROID_SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
-            export HUSHRUN_TEST_ANDROID_SDK="$ANDROID_HOME"
+            echo "android=android-36" >> "$GITHUB_OUTPUT"
           else
             echo "No Android SDK with android-36 here: the Android test is skipped by name (HUSHRUN_TEST_ANDROID=skip)"
             echo "HUSHRUN_TEST_ANDROID=skip" >> "$GITHUB_ENV"
-            export HUSHRUN_TEST_ANDROID=skip
+            echo "android=none" >> "$GITHUB_OUTPUT"
           fi
-          cd "$GITHUB_WORKSPACE"
-          HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
-            cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
+      - name: Restore Gradle's user home for the test-class tests
+        id: gradle-home
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/gradle-home
+            !${{ runner.temp }}/gradle-home/daemon
+          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
+      - name: Fill Gradle's user home for the test-class tests
+        id: gradle-fill
+        if: steps.gradle-home.outputs.cache-hit != 'true'
+        run: |
+          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast; then
+            echo "filled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "filling Gradle's user home failed: the test run says what is missing, and the cache keeps none of it"
+          fi
+          # The fill's daemons stop, so that nothing writes to the home while it is saved.
+          GRADLE_USER_HOME="$HUSHRUN_TEST_GRADLE_USER_HOME" "$HUSHRUN_TEST_GRADLE" --stop || true
+      - name: Keep Gradle's user home for the next runs
+        if: steps.gradle-fill.outputs.filled == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/gradle-home
+            !${{ runner.temp }}/gradle-home/daemon
+          key: ${{ steps.gradle-home.outputs.cache-primary-key }}
       # Jest 29 and 30 for the tests of the Jest adapter (ADR 0085), with ts-jest for its type check.
       - name: Install Jest for the test-file tests
         run: |
@@ -333,7 +384,11 @@ jobs:
   # The same checks on macOS. clippy and the tests run as `clippy-macos`, `test-macos` and
   # `doctest-macos`, whose rule in hushrun.yaml is `os: macos`: a pass here skips this job's next
   # run on the same code, and nothing on Linux skips on it, nor the other way round. The Python
-  # references and the npm tests take seconds, and run every time.
+  # references and the npm tests take seconds, and run every time. Like `test`, `test-macos`
+  # reuses whole test binaries: every integration test of crates/hushrun starts the hushrun binary
+  # and so reads all of crates/hushrun/src, and a change there runs all of them here, about 45
+  # minutes. Which change runs what, and how to keep a pull request from it: CONTRIBUTING.md,
+  # "Which tests CI runs again".
   macos:
     name: clippy, test, references, npm (macOS)
     runs-on: macos-latest
@@ -400,12 +455,17 @@ jobs:
       - name: Name Xcode for the xcodebuild test-target tests
         run: echo "HUSHRUN_TEST_XCODEBUILD=$(command -v xcodebuild)" >> "$GITHUB_ENV"
       # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
-      # offline against a local repository: filled here once by running those tests online.
+      # offline against a local repository: filled by running those tests online, then kept in
+      # Actions' cache under what decides what they download (their fixtures, the adapter, the JVM
+      # jars, Maven's version, the runner). A hit skips the online run, which otherwise ran the
+      # whole test binary outside hushrun on every run, a docs-only pull request's too (5 to 6
+      # minutes). Only a fill whose tests all passed online is kept. A Maven test that fails
+      # offline for want of an artifact means the key misses a file that decides it: add it below.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21.0.11"
-      - name: Install Maven and fill its repository for the test-class tests
+      - name: Install Maven for the test-class tests
         run: |
           set -euo pipefail
           curl -fsSLo "$RUNNER_TEMP/maven.tar.gz" https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz
@@ -413,16 +473,38 @@ jobs:
           tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
           echo "HUSHRUN_TEST_MAVEN=$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
-          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
-            cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+      - name: Restore Maven's repository for the test-class tests
+        id: maven-repo
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/m2
+          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
+      - name: Fill Maven's repository for the test-class tests
+        id: maven-fill
+        if: steps.maven-repo.outputs.cache-hit != 'true'
+        run: |
+          if HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast; then
+            echo "filled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "filling Maven's repository failed: the test run says what is missing, and the cache keeps none of it"
+          fi
+      - name: Keep Maven's repository for the next runs
+        if: steps.maven-fill.outputs.filled == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/m2
+          key: ${{ steps.maven-repo.outputs.cache-primary-key }}
       # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
-      # published checksum, and a Gradle user home filled here once by running those tests online,
-      # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
-      # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
+      # published checksum, and a Gradle user home filled by running those tests online and kept
+      # in Actions' cache, as Maven's repository is: what they need is their own builds (JUnit 5
+      # and 4, TestNG, Spock, Kotest, Android's Gradle plugin), never a list beside them. The tests
+      # then run offline. A hit skips the online run (5 to 7 minutes); the key holds whether
+      # the Android SDK is here, since the fill downloads Android's plugin only then.
       # The Android test runs against the runner's own SDK (`ANDROID_HOME`) when it holds the
       # platform the test compiles for, android-36; otherwise this job opts out of it by name
       # (`HUSHRUN_TEST_ANDROID=skip`) and says so, since under `required` a missing SDK fails it.
-      - name: Install Gradle and fill its user home for the test-class tests
+      - name: Install Gradle for the test-class tests
+        id: gradle
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -433,15 +515,39 @@ jobs:
           echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
           if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/platforms/android-36" ]; then
             echo "HUSHRUN_TEST_ANDROID_SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
-            export HUSHRUN_TEST_ANDROID_SDK="$ANDROID_HOME"
+            echo "android=android-36" >> "$GITHUB_OUTPUT"
           else
             echo "No Android SDK with android-36 here: the Android test is skipped by name (HUSHRUN_TEST_ANDROID=skip)"
             echo "HUSHRUN_TEST_ANDROID=skip" >> "$GITHUB_ENV"
-            export HUSHRUN_TEST_ANDROID=skip
+            echo "android=none" >> "$GITHUB_OUTPUT"
           fi
-          cd "$GITHUB_WORKSPACE"
-          HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
-            cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
+      - name: Restore Gradle's user home for the test-class tests
+        id: gradle-home
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/gradle-home
+            !${{ runner.temp }}/gradle-home/daemon
+          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
+      - name: Fill Gradle's user home for the test-class tests
+        id: gradle-fill
+        if: steps.gradle-home.outputs.cache-hit != 'true'
+        run: |
+          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast; then
+            echo "filled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "filling Gradle's user home failed: the test run says what is missing, and the cache keeps none of it"
+          fi
+          # The fill's daemons stop, so that nothing writes to the home while it is saved.
+          GRADLE_USER_HOME="$HUSHRUN_TEST_GRADLE_USER_HOME" "$HUSHRUN_TEST_GRADLE" --stop || true
+      - name: Keep Gradle's user home for the next runs
+        if: steps.gradle-fill.outputs.filled == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/gradle-home
+            !${{ runner.temp }}/gradle-home/daemon
+          key: ${{ steps.gradle-home.outputs.cache-primary-key }}
       # Jest 29 and 30 for the tests of the Jest adapter (ADR 0085), with ts-jest for its type check.
       - name: Install Jest for the test-file tests
         run: |
