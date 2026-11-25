@@ -186,9 +186,10 @@ why` and `hushrun ready`, the hook, and CI's detection. Those tests are the end-
   and says so, and whatever of the list above the adapter has (`e2e_gradle.rs`). They include
   `tests/common/cli.rs`, the one file of `tests/common/` that names the binary; an in-process
   test file never includes it.
-- an adapter whose COMMAND runs the hushrun binary itself as a helper: Cargo's target runner, the
-  programs `units::program` puts on `PATH` (CTest, Swift, Meson, xcodebuild), Bats' hook, the
-  VSTest step, and the build blocks' wrapper, launcher and helpers. A flow that runs the helper
+- an adapter whose COMMAND runs the hushrun binary itself as a helper: Cargo's target runner, Go's
+  (`-exec` in `GOFLAGS`), the programs `units::program` puts on `PATH` (CTest, Swift, Meson,
+  xcodebuild), Bats' hook, the VSTest step, and the build blocks' wrapper, launcher and helpers.
+  So does asking such an adapter's `variables`, which finds where hushrun is (`StartAt::exe`). A flow that runs the helper
   reaches the whole binary, as it should, and stays end to end: never fake the helper. What of
   that adapter needs no helper, such as reading a runner's output or facts, or making its plan
   and keys, is tested in-process all the same, in `units_<adapter>.rs`.
