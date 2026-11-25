@@ -54,8 +54,11 @@ binaries, and nearly all of its test time.
 | `Cargo.lock`, `rust-toolchain.toml` or a build script | all 108 |
 
 With `tests.unit: test` ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)), which
-`hushrun.yaml` doesn't turn on yet, a Rust test is reused on its own when nothing it can reach
-changed, by a static map made with rust-analyzer. An integration test that starts the binary still
+`hushrun.yaml` turns on for `test` and `test-macos`, a Rust test is reused on its own when nothing
+it can reach changed, by a static map made with rust-analyzer (`rust-toolchain.toml` installs it).
+CI's `hushrun` is the newest release: one older than the map says `cargo's tests can't be reused one
+by one yet` and reuses whole binaries, as the table above says. The index costs CI about 2 minutes
+on each new tree, since a fresh runner keeps none. An integration test that starts the binary still
 reads all of `crates/hushrun/src/`. The in-process adapter tests, the `tests/units_<adapter>.rs`
 files written as [An adapter test the map can narrow](#an-adapter-test-the-map-can-narrow) says,
 link the library instead and narrow as the unit tests do:
@@ -66,9 +69,10 @@ link the library instead and narrow as the unit tests do:
 | one module of a library crate, such as `crates/hushrun-core/src/glob.rs` | that crate's tests that reach it (54 of 171), the binary's unit tests that reach it (about 350 of 751), the in-process tests that reach it, the other integration binaries of the crates that link it, and the audit |
 | anything, on a machine without rust-analyzer | the same as the table above, and the log says `rustup component add rust-analyzer` |
 
-So a pull request that changes `crates/hushrun/src/` runs every test binary on every push, on both
-systems. That is reuse working: each of those tests runs the binary that changed. The macOS job is
-the longest, so that is where it shows. To keep a pull request from running more than it must:
+So a pull request that changes `crates/hushrun/src/` runs every integration test that starts the
+binary on every push, on both systems. That is reuse working: each of those tests runs the binary
+that changed. The macOS job is the longest, so that is where it shows. To keep a pull request from
+running more than it must:
 
 - **Push once the branch is ready**, after `hushrun ready` here. A push cancels the pull request's
   running jobs (`cancel-in-progress` in `ci.yml`), and a cancelled `hushrun run` records nothing:

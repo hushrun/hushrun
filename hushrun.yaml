@@ -37,10 +37,12 @@ checks:
   test-macos:
     counts_from:
       os: macos
-    # A test binary that already passed on the files it read doesn't run again, but for audit
-    # runs. The ignore list is the same as `test`'s below, and says why.
+    # A test that already passed on the files it can reach doesn't run again, but for audit runs:
+    # `unit: test` narrows by test, as `test`'s below says. The ignore list is the same as
+    # `test`'s, and says why.
     tests:
       mode: reuse
+      unit: test
       ignore:
         - docs/adr/**
         - docs/guides/**
@@ -81,8 +83,15 @@ checks:
     # tools/*.py, dist-workspace.toml and .github/workflows/hushrun-deploy.yml. A glob matches from
     # the root, so `*.md` is the root's own, and it can't leave one file out, so .github/ is named
     # file by file: a new file there counts until it is listed.
+    #
+    # [ADR 0145] `unit: test`: under `cargo nextest run`, each test is reused on its own when
+    # nothing it can reach changed, by a static map rust-analyzer's index makes
+    # (rust-toolchain.toml installs it). A test that starts the hushrun binary still reads all of
+    # it; the in-process `tests/units_<adapter>.rs` tests reach only their adapter. Without
+    # rust-analyzer, or with a hushrun older than the map, a test binary is reused whole, as before.
     tests:
       mode: reuse
+      unit: test
       ignore:
         - docs/adr/**
         - docs/guides/**
