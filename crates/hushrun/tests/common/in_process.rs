@@ -4,9 +4,12 @@
 //! (CONTRIBUTING.md, "Which tests CI runs again").
 //!
 //! A test file includes this module (`#[path = "common/in_process.rs"] mod in_process;`), with
-//! `common/repo.rs` as `repo` and `common/store.rs` as `store`, and never `common/cli.rs`; names
-//! its adapter by its own type (`gradle::Recognized`) and runs a check with [`hushrun_run!`],
-//! which makes each adapter call `hushrun run` makes, in the order it makes them, on that value.
+//! `common/repo.rs` as `repo` and `common/store.rs` as `store`, and never `common/cli.rs`. It
+//! names its adapter by its own type (`gradle::Recognized`), and runs a check with a function of
+//! its own (`observe` in `units_gradle.rs`, which it copies): the steps of [`Run`] and
+//! [`Observer`], and between them each call `hushrun run` makes of the adapter, in order, on that
+//! value. It is a function, not a macro: the static map resolves each call in a function to its
+//! own item, and only by its name in a macro's body, where every adapter's `read` is a `read`.
 //! What a test must never call: `units::adapter::choose`, `choose_kept`, `RECOGNIZED`, anything
 //! that takes a `Box<dyn Adapter>` or `&dyn Adapter` (`units::Session`, `units::why`), a function
 //! generic over `Adapter`, the CLI (`cmd::…`, `hushrun::cli`), or the binary: each reaches every
@@ -102,8 +105,8 @@ impl Ran {
     }
 }
 
-/// One run of a check, as [`hushrun_run!`] makes it: what it goes by besides its observer, and
-/// what it said.
+/// One run of a check, as a test's own function makes it: what it goes by besides its observer,
+/// and what it said.
 pub struct Run<'r> {
     pub repo: &'r Repo,
     pub check: hushrun_core::CheckName,
@@ -473,89 +476,4 @@ fn counts(run: &RunResult) -> bool {
 /// An empty map, for [`Observer::again_read_at`].
 pub fn no_map() -> Map {
     Map::default()
-}
-
-/// One run of a check, as `hushrun run CHECK -- COMMAND` makes it, for one adapter: `$adapter`
-/// is a value of the adapter's own type, whose methods each step calls on it, so that the static
-/// map sees that adapter's code and no other; `$plan` the method of it that makes the plan, the
-/// one its `impl Adapter` defines (`plan`, or `plan_from_files` where it keeps `plan`'s default);
-/// `$profile` its [`Profile`]. It evaluates to a [`Ran`].
-///
-/// ```ignore
-/// let ran = hushrun_run!(&r, "unit", &args, &[("FAIL", "1")], gradle, plan_from_files, profile(&gradle));
-/// ```
-#[macro_export]
-macro_rules! hushrun_run {
-    ($repo:expr, $check:expr, $args:expr, $env:expr, $adapter:expr, $plan:ident, $profile:expr) => {{
-        let adapter = $adapter;
-        let mut run = in_process::Run::new($repo, $check, $args, $env);
-        match run.open($profile) {
-            None => run.plain(),
-            Some(mut observer) => {
-                let env = run.env();
-                let variables = adapter.variables(&observer.start_at(&env));
-                drop(env);
-                run.started(&mut observer, variables);
-                if let Some(input) = run.plan_input() {
-                    let planned = match observer.plan_context(&input) {
-                        Ok(context) => {
-                            let planning = adapter.$plan(&observer.plan_at(&input, &context));
-                            observer.planned(&input, context, planning)
-                        }
-                        Err(planned) => planned,
-                    };
-                    drop(input);
-                    run.planned(&observer, planned);
-                }
-                let mut starts = 0;
-                let (code, observed) = loop {
-                    starts += 1;
-                    let start = adapter.start_variables(observer.run_dir());
-                    let (code, passed) = run.start_command(&observer, &start);
-                    let end = run.finish_input(passed);
-                    let observed = match observer.read_context(&end) {
-                        Ok(context) => {
-                            let read = adapter.read(&observer.read_at(&end, &context));
-                            observer.finished(&end, context, read)
-                        }
-                        Err(observed) => observed.map(|observed| *observed),
-                    };
-                    drop(end);
-                    // \[C-32\] Left out what the plan didn't list: once more, with nothing left out.
-                    if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
-                        let extras =
-                            adapter.again(observer.root(), observer.cwd(), &Default::default());
-                        if observer.whole_again(extras).is_ok() {
-                            continue;
-                        }
-                    }
-                    break (code, observed);
-                };
-                let mut observed = observed;
-                // \[C-34\] An audited unit that failed runs once more, alone.
-                if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
-                    let wanted: std::collections::BTreeSet<String> = o.again.keys().cloned().collect();
-                    let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
-                    let ended = match observer.again(o, &wanted, extras) {
-                        Some(again) => {
-                            let start = adapter.start_variables(again.dir());
-                            let again = again.with_start(start);
-                            let first = adapter.start_variables(observer.run_dir());
-                            let passed = run.start_again(&observer, &first, &again);
-                            let files = again.files();
-                            let map = in_process::no_map();
-                            let read = adapter
-                                .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
-                                .ok()
-                                .flatten();
-                            observer.again_ended(&again, o, passed, read)
-                        }
-                        None => in_process::Run::not_again(&wanted),
-                    };
-                    run.disagreements(o, ended);
-                }
-                run.record(code, observed)
-            }
-        }
-    }};
 }

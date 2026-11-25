@@ -66,16 +66,83 @@ fn run(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
     if let Some(why) = gradle::unloadable(&adapter, &r.repo) {
         return in_process::Run::new(r, "unit", args, env).unobserved(&why);
     }
-    // Gradle's adapter keeps the trait's `plan`, which is its `plan_from_files`.
-    hushrun_run!(
-        r,
-        "unit",
-        args,
-        env,
-        &adapter,
-        plan_from_files,
-        profile(&adapter)
-    )
+    observe(r, args, env, &adapter)
+}
+
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order. Every call is on `gradle::Recognized` itself, which the static map resolves to its
+/// own `impl Adapter`; through a trait object or a generic it would reach every adapter
+/// (CONTRIBUTING.md, "Which tests CI runs again"). Another adapter's test file copies this
+/// function and changes the type.
+fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &gradle::Recognized) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // Gradle's adapter keeps the trait's `plan`, which is its `plan_from_files`.
+            Ok(context) => {
+                let planning = adapter.plan_from_files(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
+        };
+        drop(input);
+        run.planned(&observer, planned);
+    }
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
+            }
+        }
+        break (code, observed);
+    };
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
+            }
+            None => in_process::Run::not_again(&wanted),
+        };
+        run.disagreements(o, ended);
+    }
+    run.record(code, observed)
 }
 
 // covers: C-30, C-31, C-32, C-34, C-46
