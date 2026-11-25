@@ -1097,7 +1097,7 @@ fn build_what_is_missing(
     ));
     // ADR 0102: the backend's token is the bake's, had before the build starts; the build gets
     // no credential of the job's.
-    if let Err(why) = relay.bearer_now(std::time::Duration::from_secs(30)) {
+    if let Err(why) = relay.bearer_now() {
         say(&format!(
             "the backend's token couldn't be had before the build: {why}"
         ));
@@ -1628,13 +1628,11 @@ fn hosted_target(
             "the backend's registry names this repository's image {image}, not {given}"
         )));
     }
-    let token = relay
-        .bearer_now(std::time::Duration::from_secs(30))
-        .map_err(|why| {
-            failed(format!(
-                "no credential to read the backend's registry with: {why}"
-            ))
-        })?;
+    let token = relay.bearer_now().map_err(|why| {
+        failed(format!(
+            "no credential to read the backend's registry with: {why}"
+        ))
+    })?;
     let mut insecure = args.registry.insecure.clone();
     if access.host.starts_with("http://") {
         insecure.push(image.host.clone());
@@ -1710,11 +1708,7 @@ fn publish_image(
     let root = bake_image::run_root(&env);
     let vouch = relay.map(|relay| {
         let relay = relay.clone();
-        move |rows: &[hushrun_build::baked::PackRow]| {
-            relay
-                .vouched_rows(rows, std::time::Duration::from_secs(30))
-                .map(|(rows, _)| rows)
-        }
+        move |rows: &[hushrun_build::baked::PackRow]| relay.vouched_rows(rows).map(|(rows, _)| rows)
     });
     let publishing = bake_image::Publishing {
         latest: latest.is_ok(),

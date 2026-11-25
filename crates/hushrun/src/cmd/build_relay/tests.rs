@@ -46,13 +46,8 @@ fn tuning() -> Tuning {
     Tuning {
         open: Duration::from_secs(2),
         lookup: Duration::from_secs(5),
-        most_cost: Duration::from_secs(60),
         rest: Duration::from_secs(30),
-        end_wait: Duration::from_secs(2),
         close: Duration::from_secs(2),
-        ci_open: Duration::from_secs(2),
-        ci_trusted_wait: Duration::from_secs(120),
-        ci_wait: Duration::from_secs(20),
         downloads: 8,
         tick: Duration::from_millis(5),
         spill: super::pack::IN_MEMORY,
@@ -190,14 +185,36 @@ fn waiting(m: &Machine) -> Vec<Marker> {
 
 // covers: B-26
 #[test]
-fn a_server_that_sleeps_on_open_doesnt_delay_cargo() {
+fn a_question_before_open_answers_waits_for_it_and_is_answered_as_after() {
+    // ADR 0144: `open` answers late; a fetch asked before it answers waits for it, then gets
+    // the block, as it would have once `open` had answered: what cargo's first compiles reuse
+    // never depends on how fast the run started.
+    let fake = FakeBuild::start();
+    let crates = served(&fake, 1, 5_000, 2_000);
+    fake.delay(route::OPEN, Duration::from_millis(1500));
+    let m = machine();
+    let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_secs(10));
+    begin(&relay, &m);
+    let (key, step) = crates[0];
+    let answer = ask(
+        &relay,
+        Request::Fetch {
+            step,
+            keys: vec![key],
+            class: LocalClass::Library,
+            local_ms: None,
+        },
+    );
+    assert_eq!(answer, Answer::Ready { key });
+    relay.end_check(&[]);
+
+    // A server silent on `open` past its silence, twice: `open` failed, and every question is
+    // a miss.
     let fake = FakeBuild::start();
     fake.delay(route::OPEN, Duration::from_secs(10));
     let m = machine();
-    let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_secs(10));
-    let started = Instant::now();
+    let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_millis(300));
     begin(&relay, &m);
-    // Until `open` answers, every request is a miss, at once.
     let (key, step) = (Digest::of(b"k"), Digest::of(b"s"));
     let answer = ask(
         &relay,
@@ -210,11 +227,8 @@ fn a_server_that_sleeps_on_open_doesnt_delay_cargo() {
     );
     assert_eq!(answer, Answer::None);
     assert_eq!(ask(&relay, Request::Hints { step }), Answer::None);
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    assert!(matches!(relay.state().phase, super::Phase::Stopped(_)));
+    relay.end_check(&[]);
 }
 
 // covers: B-26, B-28, B-29, B-32
@@ -529,27 +543,26 @@ fn no_claims(m: &Machine) -> bool {
     })
 }
 
-// covers: B-29
+// covers: B-29, B-49
 #[test]
-fn a_put_the_end_of_the_command_cuts_off_counts_a_cut_off_and_the_third_drops_it() {
+fn a_put_a_stopped_command_cuts_off_counts_a_cut_off_and_the_third_drops_it() {
     let fake = FakeBuild::start();
     let m = machine();
     let (key, step) = block(&m.store, 9, 400_000, Some(me(&fake)));
-    // 400 kB at 20 kB/s: the PUT can't finish in the end's wait.
+    // 400 kB at 20 kB/s: the PUT is under way when each run is asked to stop.
     fake.throttle_store(20_000);
     for n in 1..=3u32 {
-        let relay = start(&fake, &m, |c| {
-            c.tuning.end_wait = Duration::from_millis(200)
-        });
+        let relay = start(&fake, &m, |_| {});
         begin(&relay, &m);
         until("open", || answering(&relay));
         if n == 1 {
             ask(&relay, built(key, step));
         }
         until("put under way", || !relay.state().puts.is_empty());
+        relay.ask_to_stop();
         relay.end_check(&[]);
-        // Each run tried once, and its end cut the PUT off before it arrived whole: no claim
-        // is left behind.
+        // Each run tried once, and its stopped end cut the PUT off before it arrived whole: no
+        // claim is left behind.
         assert_eq!(fake.count(route::BEGIN), n as usize);
         assert_eq!(fake.count(route::STORE_PUT), 0);
         assert!(no_claims(&m), "run {n} left its claim");
@@ -647,6 +660,49 @@ fn killing_the_relay_after_begin_and_running_again_ends_with_the_block_stored() 
 /// starts to be the run that panics: the store, the session folder, the fake's URL and origin,
 /// one a line.
 const PANICKING_RUN: &str = "HUSHRUN_TEST_PANICKING_RUN";
+
+// covers: B-29, B-31
+#[test]
+fn the_end_of_a_command_waits_for_a_slow_put_to_its_end_and_closes_with_it() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, step) = block(&m.store, 19, 400_000, Some(me(&fake)));
+    // ADR 0144: 400 kB at 100 kB/s takes four seconds, on any machine, past every bound the end
+    // of a command used to have on a person's machine. The end waits for the store's answer,
+    // and the manifest names the block.
+    fake.throttle_store(100_000);
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    ask(&relay, built(key, step));
+    until("put under way", || !relay.state().puts.is_empty());
+    let built_here = hushrun_build::session::Entry {
+        go: None,
+        step: Some(step),
+        portable: Some(hushrun_build::portable::Portability {
+            portable: true,
+            ..Default::default()
+        }),
+        ..go_entry(key, hushrun_build::model::Outcome::BuiltAndStored)
+    };
+    relay.end_check(&[built_here]);
+    assert_eq!(fake.count(route::STORE_PUT), 1);
+    assert!(
+        fake.block(address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    );
+    assert!(waiting(&m).is_empty() && no_claims(&m));
+    let closes = fake.closes();
+    assert_eq!(closes.len(), 1);
+    assert!(
+        closes[0]
+            .manifest
+            .iter()
+            .any(|pair| pair.1 == address(&key)),
+        "{:?}",
+        closes[0].manifest
+    );
+}
 
 // covers: B-14, B-26, B-29
 #[cfg(unix)]
@@ -746,7 +802,6 @@ fn panicking_run(world: &str) {
         |c| {
             // Packs go to a file in the run's folder, where a panic leaves them.
             c.tuning.spill = 1 << 10;
-            c.tuning.end_wait = Duration::from_secs(3);
             c.tuning.close = Duration::from_secs(3);
         },
     );
@@ -756,8 +811,8 @@ fn panicking_run(world: &str) {
     until("open", || answering(&relay));
     let wait = hushrun_build::relay::WAIT;
     let (key, step) = (Digest::of(&[13, 1]), Digest::of(&[13, 2]));
-    // A wrapper's fetch: the thread answering it panics, and the wrapper has a miss at once.
-    let asked = Instant::now();
+    // A wrapper's fetch: the thread answering it panics, and the wrapper has a miss, the
+    // connection's end, with no heartbeat left to keep it waiting.
     let fetch = Request::Fetch {
         step,
         keys: vec![key],
@@ -765,7 +820,6 @@ fn panicking_run(world: &str) {
         local_ms: None,
     };
     assert_eq!(hushrun_build::relay::ask(&share.socket, &fetch, wait), None);
-    assert!(asked.elapsed() < Duration::from_secs(2));
     // What a compile built: taken, claimed, begun, and then the upload loop panics.
     assert_eq!(
         hushrun_build::relay::ask(&share.socket, &built(key, step), wait),
@@ -776,14 +830,9 @@ fn panicking_run(world: &str) {
     });
     // The relay still answers the next wrapper.
     assert!(hushrun_build::relay::ask(&share.socket, &Request::Hints { step }, wait).is_some());
-    // The end doesn't wait for a loop that is gone: well within its 6 seconds, `close` sent.
-    let ended = Instant::now();
+    // The end doesn't wait for a loop that is gone (it has no deadline: one that waited would
+    // never return), and `close` is sent.
     relay.end_check(&[]);
-    assert!(
-        ended.elapsed() < Duration::from_secs(2),
-        "the end took {:?}",
-        ended.elapsed()
-    );
 }
 
 // covers: B-29, B-32
@@ -1570,12 +1619,12 @@ fn served(fake: &FakeBuild, n: u8, size: usize, cost_ms: u32) -> Vec<(Digest, Di
 
 // covers: B-26
 #[test]
-fn on_a_slow_link_with_no_manifest_a_build_waits_for_no_download() {
-    // 1 Mbit/s for the whole link, crates of 300 ms that pack to about 1 MB: a download takes
-    // about 8 seconds, against a budget of 150 ms, half a crate's compile.
+fn on_a_slow_link_with_no_manifest_a_build_waits_for_every_download_and_reuses_it() {
+    // ADR 0144: 1 Mbit/s for the whole link, crates of 300 ms that pack to 100 kB: a download
+    // takes most of a second, longer than half a crate's compile. Each is waited for and
+    // reused all the same, so what a build reuses never depends on its link or its load.
     const RATE: u64 = 125_000;
-    const SIZE: usize = 1_000_000;
-    let download = Duration::from_secs(SIZE as u64 / RATE);
+    const SIZE: usize = 100_000;
     let fake = FakeBuild::start();
     fake.throttle_store(RATE);
     let crates = served(&fake, 8, SIZE, 300);
@@ -1583,65 +1632,50 @@ fn on_a_slow_link_with_no_manifest_a_build_waits_for_no_download() {
     let relay = start(&fake, &m, |_| {});
     begin(&relay, &m);
     until("open", || answering(&relay));
-    let compile = Duration::from_millis(300);
-    // What the build pays for sharing: the time its eight questions take, the compiles left
-    // out. The bound is a quarter of one download, far above what a loaded machine adds to
-    // eight answers on a local socket and far below what waiting for any download costs.
-    let mut waited = Duration::ZERO;
     for (key, step) in &crates {
-        let asked = Instant::now();
         let answer = ask(
             &relay,
             Request::Fetch {
                 step: *step,
                 keys: vec![*key],
                 class: LocalClass::Library,
-                local_ms: None,
+                local_ms: Some(300),
             },
         );
-        waited += asked.elapsed();
-        assert_eq!(answer, Answer::None);
-        std::thread::sleep(compile);
+        assert_eq!(answer, Answer::Ready { key: *key });
     }
     relay.end_check(&[]);
-    assert!(
-        waited < download / 4,
-        "the questions took {waited:?}, where one download takes {download:?}"
-    );
-    // A fetch expected to lose is never started: only the first, the measurement, went out.
-    assert_eq!(fake.count(route::STORE_GET), 1);
+    assert_eq!(fake.count(route::STORE_GET), crates.len());
 }
 
 // covers: B-26
 #[test]
-fn a_block_whose_stated_cost_is_absurd_waits_at_most_the_ceiling() {
-    let fake = FakeBuild::start();
-    fake.throttle_store(10_000);
-    let crates = served(&fake, 1, 500_000, u32::MAX);
-    let m = machine();
-    let relay = start(&fake, &m, |c| {
-        c.tuning.most_cost = Duration::from_millis(600)
-    });
-    begin(&relay, &m);
-    until("open", || answering(&relay));
-    let (key, step) = crates[0];
-    let started = Instant::now();
-    let answer = ask(
-        &relay,
-        Request::Fetch {
-            step,
-            keys: vec![key],
-            class: LocalClass::Library,
-            local_ms: None,
-        },
-    );
-    assert_eq!(answer, Answer::None);
-    assert!(
-        started.elapsed() < Duration::from_millis(600),
-        "{:?}",
-        started.elapsed()
-    );
-    relay.end_check(&[]);
+fn a_download_is_waited_for_to_its_end_whatever_its_cost_says() {
+    // ADR 0144: 500 kB at 250 kB/s takes two seconds, a thousand times the millisecond this
+    // machine's own compile took, whatever the uploader says its compile took (a millisecond,
+    // the most there is, or nothing): each is waited for to its end and reused, so whether a
+    // block is reused never depends on how fast this machine or its link is.
+    for cost_ms in [1, u32::MAX, 0] {
+        let m = machine();
+        let fake = FakeBuild::start();
+        fake.throttle_store(250_000);
+        let crates = served(&fake, 1, 500_000, cost_ms);
+        let relay = start(&fake, &m, |_| {});
+        begin(&relay, &m);
+        until("open", || answering(&relay));
+        let (key, step) = crates[0];
+        let answer = ask(
+            &relay,
+            Request::Fetch {
+                step,
+                keys: vec![key],
+                class: LocalClass::Library,
+                local_ms: Some(1),
+            },
+        );
+        assert_eq!(answer, Answer::Ready { key }, "cost {cost_ms}");
+        relay.end_check(&[]);
+    }
 }
 
 // covers: B-26
@@ -2517,35 +2551,37 @@ fn a_caller_the_policy_lets_write_nothing_or_ci_without_an_id_token_uploads_noth
 
 // covers: B-2
 #[test]
-fn a_ci_job_waits_for_open_at_most_its_wait_and_never_holds_the_relay_meanwhile() {
+fn a_ci_job_waits_for_open_until_it_answers_and_never_holds_the_relay_meanwhile() {
     let fake = FakeBuild::start();
     let m = machine();
     let relay = start(&fake, &m, with_id_token(&fake));
     begin(&relay, &m);
-    let started = Instant::now();
-    assert_eq!(
-        relay.wait_open(Duration::from_secs(5)),
-        super::Opened::Answering
-    );
-    // `open` itself is quick: the wait took no more than it.
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    assert_eq!(relay.wait_open(), super::Opened::Answering);
     relay.end_check(&[]);
 
+    // ADR 0144: an `open` that answers late, past the five seconds a CI job used to give it, is
+    // waited for, and the job shares: whether it does never depends on how fast it got there.
     let fake = FakeBuild::start();
-    fake.delay(route::OPEN, Duration::from_secs(3));
+    fake.delay(route::OPEN, Duration::from_millis(1500));
     let m = machine();
-    let relay = start(&fake, &m, with_id_token(&fake));
+    let relay = start(&fake, &m, |c| {
+        with_id_token(&fake)(c);
+        c.tuning.open = Duration::from_secs(5);
+    });
     begin(&relay, &m);
-    let started = Instant::now();
-    assert_eq!(
-        relay.wait_open(Duration::from_millis(500)),
-        super::Opened::Unanswered
-    );
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(relay.wait_open(), super::Opened::Answering);
+    relay.end_check(&[]);
+
+    // A server that says nothing for the whole silence, twice, can't be reached.
+    let fake = FakeBuild::start();
+    fake.delay(route::OPEN, Duration::from_secs(10));
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        with_id_token(&fake)(c);
+        c.tuning.open = Duration::from_millis(300);
+    });
+    begin(&relay, &m);
+    assert!(matches!(relay.wait_open(), super::Opened::Stopped(_)));
     relay.end_check(&[]);
 
     let fake = FakeBuild::start();
@@ -2553,7 +2589,7 @@ fn a_ci_job_waits_for_open_at_most_its_wait_and_never_holds_the_relay_meanwhile(
     let m = machine();
     let relay = start(&fake, &m, with_id_token(&fake));
     begin(&relay, &m);
-    assert_eq!(relay.wait_open(Duration::from_secs(5)), super::Opened::Off);
+    assert_eq!(relay.wait_open(), super::Opened::Off);
     relay.end_check(&[]);
 }
 
@@ -2569,7 +2605,7 @@ fn an_org_whose_plan_sets_storage_by_contract_is_told_to_get_in_touch_once() {
     // Also where `open` decides whether the org shares, which is otherwise silent.
     let relay = start(&fake, &m, |c| c.open_decides = true);
     begin(&relay, &m);
-    assert_eq!(relay.wait_open(Duration::from_secs(5)), super::Opened::Off);
+    assert_eq!(relay.wait_open(), super::Opened::Off);
     let lines = relay.end_check(&[]);
     let said: Vec<&String> = lines.iter().filter(|l| l.contains("contract")).collect();
     assert_eq!(said.len(), 1, "{lines:?}");
@@ -2693,7 +2729,7 @@ fn a_block_bound_to_folders_goes_up_from_a_ci_job_and_from_no_person() {
 
 // covers: B-31
 #[test]
-fn a_ci_job_s_end_sends_what_it_built_last_and_waits_no_longer_than_its_context_allows() {
+fn a_ci_job_s_end_sends_everything_it_built_however_long_the_store_takes() {
     // What the job built just before its command ended still goes up: its store goes with it.
     let fake = FakeBuild::start();
     let m = machine();
@@ -2711,64 +2747,43 @@ fn a_ci_job_s_end_sends_what_it_built_last_and_waits_no_longer_than_its_context_
     );
     assert!(waiting(&m).is_empty(), "{lines:?}");
 
-    // A stalled upload: the wait is a quarter of what the block's compile took (4 s here), and
-    // the job's own most (20 s, or a trusted job's 2 minutes) never comes into it.
-    for trusted in [false, true] {
+    // ADR 0144: a slow store, whatever the job writes (a pull request's `ci/…`, an untrusted
+    // event's, the repository's trusted `protected/…`) and whatever the block's compile cost:
+    // the end waits for the store's answer, the block is stored, and nothing waits after.
+    for (write, untrusted) in [
+        ("ci/1/pr7", false),
+        ("ci/1/pr7", true),
+        ("protected/1", false),
+    ] {
         let fake = FakeBuild::start();
-        if !trusted {
+        fake.set_scopes(Some(write), &[write, "protected/1"]);
+        if untrusted {
             fake.set_policy(|p| p.untrusted = Some(blocks::Untrusted::Event));
         }
-        fake.delay(route::STORE_PUT, Duration::from_secs(10));
+        fake.delay(route::STORE_PUT, Duration::from_millis(1500));
         let m = machine();
         let relay = start(&fake, &m, with_id_token(&fake));
         begin(&relay, &m);
         until("open", || answering(&relay));
         let by = job_identity(&fake, &relay);
         let (key, step) = block(&m.store, 62, 5_000, Some(by));
-        assert_eq!(ask(&relay, built_costing(key, step, 4_000)), Answer::Ok);
+        assert_eq!(ask(&relay, built_costing(key, step, 4)), Answer::Ok);
         until("its PUT started", || fake.count(route::STORE_PUT) > 0);
-        let started = Instant::now();
-        relay.end_check(&[]);
-        let took = started.elapsed();
+        let lines = relay.end_check(&[]);
         assert!(
-            took >= Duration::from_millis(900),
-            "trusted {trusted}: {took:?}"
+            fake.block(address(&key))
+                .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored),
+            "{write} {untrusted}: {lines:?}"
         );
-        assert!(took < Duration::from_secs(3), "trusted {trusted}: {took:?}");
+        assert!(
+            waiting(&m).is_empty() && no_claims(&m),
+            "{write}: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("uploaded before")),
+            "{write}: {lines:?}"
+        );
     }
-
-    // A job that isn't trusted waits at most its 20 seconds (shortened to 1 here) whatever the
-    // blocks cost; and for the whole `hushrun run` call, so a second check waits what is left.
-    let fake = FakeBuild::start();
-    fake.set_policy(|p| p.untrusted = Some(blocks::Untrusted::Event));
-    fake.delay(route::STORE_PUT, Duration::from_secs(10));
-    let m = machine();
-    let relay = start(&fake, &m, |c| {
-        with_id_token(&fake)(c);
-        c.tuning.ci_wait = Duration::from_secs(1);
-    });
-    begin(&relay, &m);
-    until("open", || answering(&relay));
-    let by = job_identity(&fake, &relay);
-    let (key, step) = block(&m.store, 63, 5_000, Some(by));
-    assert_eq!(ask(&relay, built_costing(key, step, 400_000)), Answer::Ok);
-    until("its PUT started", || fake.count(route::STORE_PUT) > 0);
-    let started = Instant::now();
-    relay.end_check(&[]);
-    let took = started.elapsed();
-    assert!(
-        took >= Duration::from_millis(900) && took < Duration::from_secs(3),
-        "{took:?}"
-    );
-    begin(&relay, &m);
-    until("open", || answering(&relay));
-    let started = Instant::now();
-    relay.end_check(&[]);
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "{:?}",
-        started.elapsed()
-    );
 }
 
 /// A block only downloaded into `m`'s store, vouched for two days ago, whose compile took
@@ -2800,73 +2815,34 @@ fn stale_download(fake: &FakeBuild, m: &Machine, cost_ms: u64) -> (Digest, Diges
     (key, step)
 }
 
-// covers: B-31
-#[test]
-fn only_a_job_writing_the_repository_s_trusted_blocks_gets_the_trusted_job_s_wait() {
-    // A pull request's job writes `ci/…`, with no reason it isn't trusted; a push to the listed
-    // branch writes `protected/…`. Both have a stalled upload whose compile took 400 seconds.
-    for (write, trusted) in [("ci/1/pr7", false), ("protected/1", true)] {
-        let fake = FakeBuild::start();
-        fake.set_scopes(Some(write), &[write, "protected/1"]);
-        fake.delay(route::STORE_PUT, Duration::from_secs(10));
-        let m = machine();
-        let relay = start(&fake, &m, |c| {
-            with_id_token(&fake)(c);
-            c.tuning.ci_wait = Duration::from_secs(1);
-            c.tuning.ci_trusted_wait = Duration::from_secs(6);
-        });
-        begin(&relay, &m);
-        until("open", || answering(&relay));
-        let by = job_identity(&fake, &relay);
-        let (key, step) = block(&m.store, 66, 5_000, Some(by));
-        assert_eq!(ask(&relay, built_costing(key, step, 400_000)), Answer::Ok);
-        until("its PUT started", || fake.count(route::STORE_PUT) > 0);
-        let started = Instant::now();
-        relay.end_check(&[]);
-        let took = started.elapsed();
-        if trusted {
-            assert!(took >= Duration::from_millis(3_500), "{write}: {took:?}");
-        } else {
-            assert!(took < Duration::from_millis(2_500), "{write}: {took:?}");
-        }
-    }
-}
-
 // covers: B-26, B-34
 #[test]
-fn a_stale_vouch_counts_as_unreachable_only_when_open_failed_or_missed_the_block_s_budget() {
-    // `open` takes 10 seconds, and the block's compile took 400 ms: its question waits 200 ms
-    // for `open`, then the server can't be reached, for it.
+fn a_stale_vouch_counts_as_unreachable_only_when_open_failed() {
+    // ADR 0144: `open` answers late, long past half of the block's 400 ms compile: the question
+    // waits for it, then for its own lookup, which the server answers. It knows nothing of the
+    // block: a "no", never "can't be reached".
     let fake = FakeBuild::start();
-    fake.delay(route::OPEN, Duration::from_secs(10));
+    fake.delay(route::OPEN, Duration::from_millis(1500));
     let m = machine();
     let (key, step) = stale_download(&fake, &m, 400);
-    let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_secs(10));
+    let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_secs(5));
     begin(&relay, &m);
     let vouch = Request::Vouch {
         key,
         step,
         outputs: Hex32([1; 32]),
     };
-    let started = Instant::now();
-    let answer = ask(&relay, vouch.clone());
-    let took = started.elapsed();
-    assert_eq!(answer, Answer::Offline);
-    assert!(
-        took >= Duration::from_millis(150) && took < Duration::from_secs(1),
-        "{took:?}"
-    );
-    assert_eq!(fake.count(route::LOOKUP), 0);
+    assert_eq!(ask(&relay, vouch.clone()), Answer::None);
+    assert!(fake.count(route::LOOKUP) >= 1);
+    relay.end_check(&[]);
 
-    // Once `open` has answered, a lookup slower than the budget is a miss: never a reuse.
+    // An `open` that fails, its server silent twice over: the server can't be reached, for it.
     let fake = FakeBuild::start();
-    fake.delay(route::LOOKUP, Duration::from_secs(3));
+    fake.delay(route::OPEN, Duration::from_secs(10));
     let m = machine();
     let (key, step) = stale_download(&fake, &m, 400);
-    let relay = start(&fake, &m, |_| {});
+    let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_millis(300));
     begin(&relay, &m);
-    until("open", || answering(&relay));
-    let started = Instant::now();
     let answer = ask(
         &relay,
         Request::Vouch {
@@ -2875,9 +2851,31 @@ fn a_stale_vouch_counts_as_unreachable_only_when_open_failed_or_missed_the_block
             outputs: Hex32([1; 32]),
         },
     );
-    let took = started.elapsed();
+    assert_eq!(answer, Answer::Offline);
+    assert_eq!(fake.count(route::LOOKUP), 0);
+    relay.end_check(&[]);
+
+    // Once `open` has answered, a lookup slower than the block's budget used to be is waited
+    // for: the server's answer decides, never a reuse it didn't vouch for.
+    let fake = FakeBuild::start();
+    fake.delay(route::LOOKUP, Duration::from_millis(1500));
+    let m = machine();
+    let (key, step) = stale_download(&fake, &m, 400);
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let answer = ask(
+        &relay,
+        Request::Vouch {
+            key,
+            step,
+            outputs: Hex32([1; 32]),
+        },
+    );
     assert_eq!(answer, Answer::None);
-    assert!(took < Duration::from_secs(1), "{took:?}");
+    let address = Relay::address_in(hushrun_build::model::Kind::Rustc, &key);
+    assert_eq!(relay.state().vouched.get(&address), Some(&None));
+    relay.end_check(&[]);
 }
 
 /// Every vouch `store` holds for `key`, dated at the epoch: two days old and more.
@@ -3000,12 +2998,11 @@ const ID_TOKEN: &str = "/id-token";
 
 // covers: B-26, B-31
 #[test]
-fn a_slow_id_token_endpoint_holds_no_request_past_its_deadline_nor_the_end_past_its_wait() {
+fn a_slow_id_token_endpoint_holds_no_request_that_has_a_token_and_the_end_mints_none() {
     // Tokens that live 61 seconds, so that every request finds the one held within a minute of
-    // its expiry, from an endpoint that takes 3 seconds to answer.
+    // its expiry, from an endpoint that answers a renewal only after 20 seconds.
     let fake = FakeBuild::start();
     fake.set_id_token_seconds(61);
-    fake.delay(ID_TOKEN, Duration::from_secs(3));
     let m = machine();
     let relay = start(&fake, &m, |c| {
         with_id_token(&fake)(c);
@@ -3013,8 +3010,10 @@ fn a_slow_id_token_endpoint_holds_no_request_past_its_deadline_nor_the_end_past_
     });
     begin(&relay, &m);
     until("open", || answering(&relay));
+    fake.delay(ID_TOKEN, Duration::from_secs(20));
     // Each request carries the token held while a renewal runs: none waits for the endpoint.
-    let started = Instant::now();
+    // Shown by what was sent, not by time: a request that waited for the renewal would carry
+    // the second token, which the endpoint issues only 20 seconds on.
     for n in 0..4u8 {
         assert_eq!(
             ask(
@@ -3026,19 +3025,17 @@ fn a_slow_id_token_endpoint_holds_no_request_past_its_deadline_nor_the_end_past_
             Answer::None
         );
     }
-    let took = started.elapsed();
-    assert!(took < Duration::from_millis(1_500), "{took:?}");
-    until("the renewal reached the endpoint", || {
-        fake.count(ID_TOKEN) >= 2
-    });
-    // The end mints nothing: `close` carries the token held, and the end doesn't wait.
-    let minted = fake.count(ID_TOKEN);
-    let started = Instant::now();
+    // The end mints nothing: `close` carries the token held.
     relay.end_check(&[]);
-    let took = started.elapsed();
-    assert!(took < Duration::from_secs(1), "{took:?}");
-    assert_eq!(fake.count(ID_TOKEN), minted);
     assert_eq!(fake.count(route::CLOSE), 1);
+    let tokens = fake.id_tokens();
+    assert_eq!(tokens.len(), 1);
+    let sent = bearers(&fake);
+    assert!(sent.len() >= 6, "{sent:?}");
+    assert!(
+        sent.iter().all(|b| *b == format!("Bearer {}", tokens[0])),
+        "{sent:?}"
+    );
 
     // A renewal that fails leaves the token held in use until its real expiry.
     let fake = FakeBuild::start();
@@ -3068,77 +3065,66 @@ fn a_slow_id_token_endpoint_holds_no_request_past_its_deadline_nor_the_end_past_
         "{sent:?}"
     );
 
-    // With no token to send, a mint later than the request's deadline is, for that request, a
-    // server that can't be reached: `open`'s two tries take their deadlines, not the endpoint's.
+    // ADR 0144: with no token to send, a mint that answers late is waited for, however long
+    // it takes, and `open` goes with its token: whether the job shares never depends on how
+    // fast the endpoint answered.
     let fake = FakeBuild::start();
-    fake.delay(ID_TOKEN, Duration::from_secs(3));
+    fake.delay(ID_TOKEN, Duration::from_millis(1500));
     let m = machine();
     let relay = start(&fake, &m, |c| {
         with_id_token(&fake)(c);
         c.tuning.open = Duration::from_millis(500);
     });
-    let started = Instant::now();
     begin(&relay, &m);
-    until("stopped", || {
-        matches!(relay.state().phase, super::Phase::Stopped(_))
-    });
-    let took = started.elapsed();
-    assert!(took < Duration::from_secs(2), "{took:?}");
+    until("open", || answering(&relay));
     let lines = relay.end_check(&[]);
     assert!(
-        lines.iter().any(|l| l.contains("can't be reached")),
+        !lines.iter().any(|l| l.contains("can't be reached")),
         "{lines:?}"
     );
 }
 
 // covers: B-29, B-31
 #[test]
-fn a_stalled_begin_or_commit_is_cut_off_at_the_end_s_one_deadline() {
-    // A CI job whose uploads may take 3 seconds: a `begin`, then a `commit`, that never answer,
-    // each of which would otherwise run out its own 10 seconds.
-    for stalled in [route::BEGIN, route::COMMIT] {
+fn a_silent_begin_or_commit_puts_its_upload_off_and_the_end_still_closes() {
+    // ADR 0144: a `begin`, then a `commit`, whose server says nothing for the request's whole
+    // silence fails as any unreachable server does: the block waits with a date, never cut off,
+    // and `close` goes. In CI and on a person's machine alike.
+    for (stalled, ci) in [
+        (route::BEGIN, true),
+        (route::COMMIT, true),
+        (route::BEGIN, false),
+    ] {
         let fake = FakeBuild::start();
         fake.delay(stalled, Duration::from_secs(30));
         let m = machine();
         let relay = start(&fake, &m, |c| {
-            with_id_token(&fake)(c);
-            c.tuning.lookup = Duration::from_secs(10);
-            c.tuning.ci_wait = Duration::from_secs(3);
-            c.tuning.ci_trusted_wait = Duration::from_secs(3);
+            if ci {
+                with_id_token(&fake)(c);
+            }
+            c.tuning.lookup = Duration::from_millis(500);
         });
         begin(&relay, &m);
         until("open", || answering(&relay));
-        let by = job_identity(&fake, &relay);
+        let by = if ci {
+            job_identity(&fake, &relay)
+        } else {
+            me(&fake)
+        };
         let (key, step) = block(&m.store, 64, 5_000, Some(by));
         assert_eq!(ask(&relay, built_costing(key, step, 400_000)), Answer::Ok);
         until("the stalled request was sent", || fake.count(stalled) > 0);
-        let started = Instant::now();
         relay.end_check(&[]);
-        let took = started.elapsed();
-        assert!(took < Duration::from_secs(4), "{stalled}: {took:?}");
-        // `close` went within it, and the block waits, claimed by nobody, with a cut-off.
         assert_eq!(fake.count(route::CLOSE), 1, "{stalled}");
         assert!(no_claims(&m), "{stalled}");
         let left = waiting(&m);
         assert_eq!(left.len(), 1, "{stalled}");
-        assert_eq!(left[0].cutoffs, 1, "{stalled}");
+        assert_eq!(left[0].cutoffs, 0, "{stalled}");
+        assert!(
+            left[0].not_before_ms > super::now_ms(),
+            "{stalled}: put off with a date"
+        );
     }
-    // On a person's machine: 2 seconds for uploads in flight and 2 for `close`, 4 in all.
-    let fake = FakeBuild::start();
-    fake.delay(route::BEGIN, Duration::from_secs(30));
-    let m = machine();
-    let relay = start(&fake, &m, |c| c.tuning.lookup = Duration::from_secs(10));
-    begin(&relay, &m);
-    until("open", || answering(&relay));
-    let (key, step) = block(&m.store, 65, 5_000, Some(me(&fake)));
-    ask(&relay, built(key, step));
-    until("begin was sent", || fake.count(route::BEGIN) > 0);
-    let started = Instant::now();
-    relay.end_check(&[]);
-    let took = started.elapsed();
-    assert!(took < Duration::from_secs(3), "{took:?}");
-    assert_eq!(fake.count(route::CLOSE), 1);
-    assert!(no_claims(&m));
 }
 
 /// A cold machine whose prefetch of `crates` (their hints and their packs) has arrived.
@@ -3205,7 +3191,7 @@ fn eight_wrappers(relay: &Arc<Relay>, crates: &[(Digest, Digest)]) -> Vec<(Answe
 
 // covers: B-26, B-30
 #[test]
-fn a_give_up_is_no_failure_and_a_rest_still_serves_what_arrived() {
+fn a_slow_download_is_no_failure_and_a_rest_still_serves_what_arrived() {
     // Eight small crates the prefetch brought, and three more blocks outside the manifest.
     let fake = FakeBuild::start();
     let crates = served(&fake, 8, 5_000, 2_000);
@@ -3227,9 +3213,9 @@ fn a_give_up_is_no_failure_and_a_rest_still_serves_what_arrived() {
         .collect();
     let m = machine();
     let relay = prefetched(&fake, &crates, &m);
-    // The store stalls once the rate is known: three fetches that rate lets start are given up
-    // within their budgets.
-    fake.delay(route::STORE_GET, Duration::from_secs(2));
+    // ADR 0144: the store answers slowly, past what these compiles took here: each fetch is
+    // waited for and reused, and three slow answers are no failures.
+    fake.delay(route::STORE_GET, Duration::from_millis(500));
     for (key, step) in &stalled {
         let answer = ask(
             &relay,
@@ -3237,14 +3223,13 @@ fn a_give_up_is_no_failure_and_a_rest_still_serves_what_arrived() {
                 step: *step,
                 keys: vec![*key],
                 class: LocalClass::Library,
-                local_ms: Some(600),
+                local_ms: Some(10),
             },
         );
-        assert_eq!(answer, Answer::None);
+        assert_eq!(answer, Answer::Ready { key: *key });
     }
-    // Each was started, then given up.
     assert_eq!(fake.count(route::STORE_GET), crates.len() + stalled.len());
-    assert!(answering(&relay), "three give-ups rested the relay");
+    assert!(answering(&relay), "three slow answers rested the relay");
     for (n, (hints, fetched)) in eight_wrappers(&relay, &crates).into_iter().enumerate() {
         assert_eq!(hints, Answer::Hints { count: 1 }, "{n}");
         assert_eq!(fetched, Answer::Ready { key: crates[n].0 }, "{n}");
@@ -3392,8 +3377,8 @@ fn a_lookup_of_stale_vouches_that_panics_holds_up_neither_questions_nor_the_end(
 }
 
 /// The run whose lookup of stale vouches panics as `open` answers, in a process of its own: a
-/// wrapper's question about a stale download still gets a lookup of its own and an answer well
-/// within its budget, and the end of the command doesn't wait for the lookup that is gone.
+/// wrapper's question about a stale download still gets a lookup of its own and its answer, and
+/// the end of the command doesn't wait for the lookup that is gone.
 #[cfg(unix)]
 fn panicking_vouches(world: &str) {
     use std::sync::atomic::Ordering;
@@ -3408,7 +3393,6 @@ fn panicking_vouches(world: &str) {
     );
     super::fault::VOUCHES.store(true, Ordering::Relaxed);
     let relay = start_at(store, access_at(base, host, FakeBuild::TOKEN), |c| {
-        c.tuning.end_wait = Duration::from_secs(6);
         c.tuning.close = Duration::from_secs(3);
     });
     relay
@@ -3418,7 +3402,6 @@ fn panicking_vouches(world: &str) {
     until("the lookup's panic", || {
         super::fault::VOUCHES_PANICKED.load(Ordering::Relaxed)
     });
-    let asked = Instant::now();
     let answer = ask(
         &relay,
         Request::Vouch {
@@ -3427,22 +3410,15 @@ fn panicking_vouches(world: &str) {
             outputs: Hex32([1; 32]),
         },
     );
-    // The server doesn't know it: a "no", from a lookup, not from a budget run out. A "no" is
-    // what a budget run out gives too, so what tells them apart is that the run's lookup
-    // recorded it, and that it came before the budget, which is what would answer otherwise.
+    // The server doesn't know it: a "no", from the question's own lookup, which the run
+    // recorded (ADR 0144: no budget answers in its place).
     assert_eq!(answer, Answer::None);
-    let took = asked.elapsed();
-    let budget = relay.vouch_budget(&key);
-    assert_eq!(budget, Duration::from_secs(2));
-    assert!(took < budget, "{took:?}");
     let address = Relay::address_in(hushrun_build::model::Kind::Rustc, &key);
     assert_eq!(relay.state().vouched.get(&address), Some(&None));
     assert!(answering(&relay));
-    // The end doesn't wait for a lookup that is gone: well within its 6 seconds, `close` sent.
-    let ended = Instant::now();
+    // The end doesn't wait for a lookup that is gone (it has no deadline: one that waited would
+    // never return), and `close` is sent.
     relay.end_check(&[]);
-    let took = ended.elapsed();
-    assert!(took < Duration::from_secs(3), "{took:?}");
 }
 
 /// A Go package archive's block in `store`, built here by `by`: kind `go/1`, its first key its
@@ -3618,8 +3594,8 @@ fn a_go_fetch_asks_the_server_only_about_what_the_checks_go_manifest_names() {
 fn a_go_fetch_that_comes_before_the_opens_answer_waits_for_them() {
     // \[ADR 0111\] Go asks for its first packages as COMMAND starts, while the check's `open`s
     // are still on the wire: a slow server used to make those packages compile whatever the
-    // manifest named. Both `open`s answer 400 ms late; the fetch, asked at once, still gets its
-    // block.
+    // manifest named. Both `open`s answer two seconds late; the fetch, asked at once, still gets
+    // its block.
     let fake = FakeBuild::start();
     let a = machine();
     let named = go_block(&a.store, 74, Some(me(&fake)));
@@ -3633,9 +3609,9 @@ fn a_go_fetch_that_comes_before_the_opens_answer_waits_for_them() {
         blocks::Class::Library,
     );
     fake.set_manifest(vec![Pair(go_address(&named), go_address(&named))]);
-    fake.delay(route::OPEN, Duration::from_millis(400));
+    fake.delay(route::OPEN, Duration::from_secs(2));
     let b = machine();
-    let relay = start(&fake, &b, |_| {});
+    let relay = start(&fake, &b, |c| c.tuning.open = Duration::from_secs(10));
     relay
         .begin_check(&b.session, None, Some("linux_amd64".into()), false, &|_| {
             None
@@ -3658,19 +3634,26 @@ fn a_go_fetch_that_comes_before_the_opens_answer_waits_for_them() {
     );
     relay.end_check(&[]);
 
-    // Within its bound only: with this machine's own compile of the key at 100 ms, it waits
-    // 50 ms, and the open still on the wire makes it a miss, as before.
+    // ADR 0144: whatever this machine's own compile of the key took (100 ms here), the fetch
+    // waits for the `open` still on the wire, and for the manifest's prefetch, and reuses.
     let fake = FakeBuild::start();
+    fake.put_block(
+        go_address(&named),
+        "person/1",
+        &packed.pack.bytes().unwrap(),
+        packed.outputs,
+        1000,
+        blocks::Class::Library,
+    );
     fake.set_manifest(vec![Pair(go_address(&named), go_address(&named))]);
-    fake.delay(route::OPEN, Duration::from_secs(3));
+    fake.delay(route::OPEN, Duration::from_millis(1500));
     let c = machine();
-    let relay = start(&fake, &c, |_| {});
+    let relay = start(&fake, &c, |c| c.tuning.open = Duration::from_secs(10));
     relay
         .begin_check(&c.session, None, Some("linux_amd64".into()), false, &|_| {
             None
         })
         .unwrap();
-    let asked = Instant::now();
     assert_eq!(
         ask(
             &relay,
@@ -3679,12 +3662,7 @@ fn a_go_fetch_that_comes_before_the_opens_answer_waits_for_them() {
                 local_ms: Some(100)
             }
         ),
-        Answer::None
-    );
-    assert!(
-        asked.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        asked.elapsed()
+        Answer::Ready { key: named }
     );
     relay.end_check(&[]);
 }
@@ -4464,9 +4442,7 @@ fn as_a_run_begins_the_relay_vouches_for_what_its_backend_serves_trusted_and_see
     let b = machine();
     let relay = start(&fake, &b, |_| {});
     begin(&relay, &b);
-    let checked = relay
-        .check_baked(&stored, Duration::from_secs(10))
-        .expect("the backend answered");
+    let checked = relay.check_baked(&stored).expect("the backend answered");
     // Only the row the backend serves in this repository's trusted scope with that row's
     // outputs, pack and size, whole.
     assert_eq!(checked.verified, vec![stored.packs[0].clone()]);
@@ -4475,7 +4451,7 @@ fn as_a_run_begins_the_relay_vouches_for_what_its_backend_serves_trusted_and_see
     assert!(baked::is_replaced(b.store.root(), &stored.manifest));
     relay.end_check(&[]);
 
-    // A backend that doesn't answer in time is no evidence and no replacement.
+    // A backend that can't be reached is no evidence and no replacement.
     let other = machine();
     let silent = FakeBuild::start();
     let relay = start(&silent, &other, |c| {
@@ -4483,7 +4459,7 @@ fn as_a_run_begins_the_relay_vouches_for_what_its_backend_serves_trusted_and_see
         c.tuning.open = Duration::from_millis(300);
     });
     begin(&relay, &other);
-    assert!(relay.check_baked(&stored, Duration::from_secs(2)).is_none());
+    assert!(relay.check_baked(&stored).is_none());
     assert!(!baked::is_replaced(other.store.root(), &stored.manifest));
     relay.end_check(&[]);
 }
@@ -4596,9 +4572,7 @@ fn a_pack_named_twice_never_gets_an_unvouched_block_past_the_start_of_run_check(
     let b = machine();
     let relay = start(&fake, &b, |_| {});
     begin(&relay, &b);
-    let checked = relay
-        .check_baked(&forged, Duration::from_secs(10))
-        .expect("answered");
+    let checked = relay.check_baked(&forged).expect("answered");
     relay.end_check(&[]);
     assert_eq!(checked.verified, vec![forged.packs[0].clone()]);
     let contents = Hex32::sha256(&std::fs::read(folder.join("baked.json")).unwrap());
@@ -4765,9 +4739,7 @@ fn one_failed_lookup_at_the_start_of_a_run_keeps_the_evidence_of_the_others() {
     let relay = start(&fake, &b, |_| {});
     begin(&relay, &b);
     fake.fail(route::LOOKUP, 400, 1);
-    let checked = relay
-        .check_baked(&stored, Duration::from_secs(10))
-        .expect("open answered");
+    let checked = relay.check_baked(&stored).expect("open answered");
     relay.end_check(&[]);
     // The lookups go together, so whichever failed, the other's evidence stands.
     assert_eq!(checked.verified.len(), 1, "{:?}", checked.verified);
@@ -5070,9 +5042,7 @@ fn a_baked_store_s_rows_are_looked_up_together_within_the_wait() {
     begin(&relay, &b);
     assert!(until_open(&relay));
     fake.delay(route::LOOKUP, Duration::from_millis(700));
-    let checked = relay
-        .check_baked(&stored, Duration::from_secs(3))
-        .expect("open answered");
+    let checked = relay.check_baked(&stored).expect("open answered");
     relay.end_check(&[]);
     // One after another, eight lookups of 0.7 s don't fit in 3 s.
     assert_eq!(checked.verified.len(), 8, "{:?}", checked.verified.len());
@@ -5121,7 +5091,7 @@ fn two_trusted_scopes_in_open_s_answer_vouch_for_nothing() {
     let b = machine();
     let relay = start(&fake, &b, |_| {});
     begin(&relay, &b);
-    assert!(relay.check_baked(&stored, Duration::from_secs(5)).is_none());
+    assert!(relay.check_baked(&stored).is_none());
     relay.end_check(&[]);
 }
 

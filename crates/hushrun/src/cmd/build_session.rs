@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use hushrun_build::session::{self, NotBegun, Session};
 use hushrun_build::share::Caller;
@@ -16,10 +16,6 @@ use hushrun_core::time::Time;
 
 use crate::context;
 use crate::credentials::Credentials;
-
-/// The longest the check before COMMAND may take (B-23): past it, the crates left are not
-/// checked this run.
-const CHECK_BUDGET: Duration = Duration::from_secs(2);
 
 /// What every line that says why a run has no session starts with.
 const OFF: &str = "build reuse is off for this run";
@@ -157,7 +153,7 @@ pub(crate) fn begin_for_bake(
             return Err(line.unwrap_or_else(|| format!("{OFF}: the backend doesn't share")));
         }
     };
-    match relay.wait_open(crate::cmd::build_relay::Tuning::default().ci_open) {
+    match relay.wait_open() {
         crate::cmd::build_relay::Opened::Answering => {}
         _ => {
             relay.end_check(&[]);
@@ -451,13 +447,9 @@ pub(crate) fn compiler_host(
         .filter(|host| hushrun_core::blocks::is_platform(host))
 }
 
-/// B-63 how long a run waits, as it begins, for its relay's answer about its baked store: the
-/// same as a CI job waits for `open`.
-const BAKED_CHECK_WAIT: Duration = Duration::from_secs(5);
-
 /// B-63, B-64: records the baked store the run reads, before COMMAND starts. When the run's
 /// relay talks to the backend the store was baked from, for its repository, the relay first
-/// checks it (within [`BAKED_CHECK_WAIT`]): what the backend vouches for in the trusted scope,
+/// checks it (until its requests are answered, ADR 0144): what the backend vouches for in the trusted scope,
 /// for the very bytes of `baked.json` read here, is the run's evidence, and a newer manifest of
 /// one of its checks marks it replaced before anything is reused. A store the run ignores costs a
 /// line, never the run. `go` is Go's platform (`GOOS_GOARCH`) in a Go module's run.
@@ -492,7 +484,7 @@ fn give_lower(
             scope: String::new(),
         };
         if baked::server_verifies(&baked, &server)
-            && let Some(checked) = relay.check_baked(&baked, BAKED_CHECK_WAIT)
+            && let Some(checked) = relay.check_baked(&baked)
         {
             vouched = Some(baked::Vouched {
                 server: baked::Server {
@@ -510,9 +502,7 @@ fn give_lower(
     let may_write_trusted = !accepting
         || baked::authority(
             in_ci,
-            relay
-                .as_ref()
-                .map(|(_, relay)| relay.writes_trusted_within(BAKED_CHECK_WAIT)),
+            relay.as_ref().map(|(_, relay)| relay.writes_trusted()),
         );
     let session_folder = session.current().folder.clone();
     let (state, unsigned) = lower_state(
@@ -813,7 +803,7 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
     give_cc(&mut session, here);
     give_tsc(&mut session, here);
     if let Some(folder) = &here.folder {
-        session.check(folder, Some(Instant::now() + CHECK_BUDGET));
+        session.check(folder, None);
         if let Some(sysroot) = (here.sysroot)(folder) {
             session.hide_sources(&sysroot);
         }
@@ -825,7 +815,7 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
 /// on here, in the store, unless `HUSHRUN_BUILD` says otherwise, and the relay shares as the org's
 /// mode says. A run that made no results lookup (`open_decides`) learns whether the org shares
 /// only from `open`, which it waits for as a CI job does: an org that doesn't share then leaves
-/// no session, silently, and one that doesn't answer in time leaves none with one line.
+/// no session, silently, and one whose `open` fails leaves none with one line.
 fn begin_sandbox_sharing(
     here: &Here<'_>,
     start: ShareStart,
@@ -855,13 +845,11 @@ fn begin_sandbox_sharing(
     if !open_decides {
         return Ok(session);
     }
-    let wait = crate::cmd::build_relay::Tuning::default().ci_open;
-    match relay.wait_open(wait) {
+    match relay.wait_open() {
         crate::cmd::build_relay::Opened::Answering => Ok(session),
         opened => {
             let said = relay.end_check(&[]);
             let line = match opened {
-                crate::cmd::build_relay::Opened::Unanswered => Some(NO_ANSWER.to_string()),
                 crate::cmd::build_relay::Opened::Stopped(_) => said.into_iter().next(),
                 // Silent, but for an org whose plan sets its storage by contract.
                 crate::cmd::build_relay::Opened::Off => said
@@ -875,9 +863,9 @@ fn begin_sandbox_sharing(
     }
 }
 
-/// The line a CI job reads when the backend didn't answer in time, the results lookup or `open`
+/// The line a CI job reads when the backend didn't answer, the results lookup or `open`
 /// (B-2): COMMAND runs as it would without hushrun.
-const NO_ANSWER: &str = "build reuse is off for this run: the backend didn't answer in time";
+const NO_ANSWER: &str = "build reuse is off for this run: the backend didn't answer";
 
 /// What every CI store's folder is named with.
 const CI_STORE: &str = "hushrun-build";
@@ -1330,13 +1318,11 @@ fn begin_in_ci(
         Ok(relay) => relay,
         Err(line) => return abandon(session, line),
     };
-    let wait = crate::cmd::build_relay::Tuning::default().ci_open;
-    match relay.wait_open(wait) {
+    match relay.wait_open() {
         crate::cmd::build_relay::Opened::Answering => Ok(session),
         opened => {
             let said = relay.end_check(&[]);
             let line = match opened {
-                crate::cmd::build_relay::Opened::Unanswered => Some(NO_ANSWER.to_string()),
                 crate::cmd::build_relay::Opened::Stopped(_) => said.into_iter().next(),
                 // Silent, but for an org whose plan sets its storage by contract (B-25).
                 crate::cmd::build_relay::Opened::Off => said
@@ -1943,7 +1929,7 @@ fn begin_with(
     // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {
-        session.check(folder, Some(Instant::now() + CHECK_BUDGET));
+        session.check(folder, None);
         // B-9: the view without sources is made now, before any compile, so wrappers only
         // read it.
         if let Some(sysroot) = (here.sysroot)(folder) {

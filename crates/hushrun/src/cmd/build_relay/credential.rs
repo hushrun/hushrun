@@ -14,7 +14,8 @@
 //!   refused) waits for the mint in flight, within its own deadline: a mint that fails or is late
 //!   is, for that request, a server that can't be reached.
 //!
-//! At most one mint is in flight, and it gets [`MINT_FOR`] whoever waits for it. None starts once
+//! At most one mint is in flight, and it waits at most [`super::http::SILENCE`] on a silent token
+//! endpoint, whoever waits for it. None starts once
 //! the end of the command has begun ([`Credential::ending`]).
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,8 +28,6 @@ use super::http::Failure;
 
 /// A token is minted again when it has less than this left.
 const FRESH_FOR: Duration = Duration::from_secs(60);
-/// How long one mint gets, whoever waits for it.
-const MINT_FOR: Duration = Duration::from_secs(5);
 
 pub(crate) enum Credential {
     /// B-36: a sandbox's run from what a fetch saved: nothing is sent anywhere.
@@ -200,13 +199,13 @@ impl Credential {
         }
     }
 
-    /// The bearer token for a request whose deadline is `deadline`; `refused` is the token a
+    /// The bearer token for a request, once a mint in flight ends (ADR 0144: a mint ends on its
+    /// answer or on its server's silence, never on how long it took); `refused` is the token a
     /// 401 just refused, never sent again.
     pub(crate) async fn bearer(
         &self,
         http: &reqwest::Client,
         refused: Option<&str>,
-        deadline: tokio::time::Instant,
     ) -> Result<String, Failure> {
         let oidc = match self {
             Credential::Token(token) => return Ok(token.clone()),
@@ -252,14 +251,11 @@ impl Credential {
                 ));
             }
         }
-        // The mint in flight, within this request's deadline.
-        match tokio::time::timeout_at(deadline, minted.changed()).await {
-            Ok(Ok(())) => {}
-            _ => {
-                return Err(Failure::Unreachable(
-                    "the job's ID token: not minted in time".into(),
-                ));
-            }
+        // The mint in flight, until it ends.
+        if minted.changed().await.is_err() {
+            return Err(Failure::Unreachable(
+                "the job's ID token: the mint ended with none".into(),
+            ));
         }
         let tokens = oidc.tokens();
         match tokens
@@ -283,7 +279,7 @@ impl Oidc {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// One mint, within [`MINT_FOR`]: its token replaces the one held; a failure leaves the one
+    /// One mint, waiting at most [`super::http::SILENCE`] of silence: its token replaces the one held; a failure leaves the one
     /// held as it is.
     async fn mint(oidc: Arc<Oidc>, http: reqwest::Client) {
         let minted = oidc.ask(&http).await;
@@ -315,7 +311,6 @@ impl Oidc {
             .get(&request)
             .bearer_auth(&self.request_token)
             .header("accept", "application/json")
-            .timeout(MINT_FOR)
             .send()
             .await
             .map_err(|err| super::http::chain(&err))?;

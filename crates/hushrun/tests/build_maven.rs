@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hushrun_testkit::fake_build::FakeBuild;
+use hushrun_testkit::fake_build::{FakeBuild, route};
 use hushrun_testkit::git;
 
 const CLEARED: &[&str] = &[
@@ -276,6 +276,39 @@ fn maven_blocks(fake: &FakeBuild) -> usize {
         .filter(|b| b.kind == "maven/1")
         .map(|b| b.blocks.len())
         .sum()
+}
+
+// covers: B-26, B-174
+#[test]
+fn a_module_whose_download_is_slow_is_waited_for_and_comes_from_the_shared_store() {
+    // ADR 0144: every download from the store B reads takes three seconds, so each of Maven's
+    // `GET`s is answered only after three heartbeats of `102 Processing`. Maven's client reads
+    // past them, its socket timeout never runs out on a download that is only slow, and both
+    // modules come from what A built.
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let Some(a) = Machine::new(dir.path(), "a", None, true) else {
+        return;
+    };
+    let (code, out, err) = a.run(&fake, &["package"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(maven_blocks(&fake), 2, "{err}");
+    fake.delay(route::STORE_GET, std::time::Duration::from_secs(3));
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), true).unwrap();
+    let (code, out, err) = b.run(&fake, &["package"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("Found cached build, restoring demo:core from cache"),
+        "{out}\n{err}"
+    );
+    assert!(
+        out.contains("Found cached build, restoring demo:app from cache"),
+        "{out}\n{err}"
+    );
+    assert!(
+        maven_line(&err).contains("2 modules: 2 from hushrun's cache (2 from the shared store)"),
+        "{err}"
+    );
 }
 
 // covers: B-170, B-174, B-175, B-176, B-177

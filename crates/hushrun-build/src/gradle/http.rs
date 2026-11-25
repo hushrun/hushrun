@@ -18,6 +18,8 @@ pub struct Request {
     pub body: Body,
     /// The client asked to close the connection after this request.
     pub close: bool,
+    /// HTTP/1.1: the client takes interim `1xx` responses before the answer (ADR 0144).
+    pub interim: bool,
 }
 
 /// A request's body.
@@ -138,6 +140,51 @@ pub fn read(
         authorization,
         body,
         close,
+        interim: version != "HTTP/1.0",
+    })
+}
+
+/// ADR 0144: what is written to a client while its answer is worked on, once a
+/// [`crate::relay::HEARTBEAT`]: an interim response, which an HTTP/1.1 client reads past to the
+/// answer, and which keeps its socket's read timeout from running out on an answer that is only
+/// slow.
+pub const PROCESSING: &[u8] = b"HTTP/1.1 102 Processing\r\n\r\n";
+
+/// `answer`'s result, with a [`PROCESSING`] written to `stream` each heartbeat until it is known,
+/// for a `GET` from an HTTP/1.1 client (ADR 0144): the client's socket timeout then ends only a
+/// cache that is frozen or gone, never one whose download is only slow. Gradle's and Maven's
+/// caches both answer so.
+pub fn answer_alive<T>(
+    request: &Request,
+    stream: &std::net::TcpStream,
+    answer: impl FnOnce() -> T,
+) -> T {
+    use std::io::Write as _;
+    if request.method != "GET" || !request.interim {
+        return answer();
+    }
+    let done = std::sync::Mutex::new(false);
+    std::thread::scope(|scope| {
+        let heartbeats = scope.spawn(|| {
+            loop {
+                std::thread::park_timeout(crate::relay::HEARTBEAT);
+                let done = done.lock().unwrap_or_else(|p| p.into_inner());
+                if *done || (&*stream).write_all(PROCESSING).is_err() {
+                    return;
+                }
+            }
+        });
+        // However the answer ends, a panic included, no interim response follows: the answer
+        // comes next on the same stream.
+        struct Over<'a>(&'a std::sync::Mutex<bool>, &'a std::thread::Thread);
+        impl Drop for Over<'_> {
+            fn drop(&mut self) {
+                *self.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
+                self.1.unpark();
+            }
+        }
+        let _over = Over(&done, heartbeats.thread());
+        answer()
     })
 }
 

@@ -33,11 +33,10 @@ use crate::relay::{self, Answer, Problem, Request};
 use crate::session::{Current, Entry, MavenEntry};
 use crate::store::{Block, NewFile, Store};
 
-/// The longest a `GET` waits for the relay: the relay answers sooner by its own budget, half
-/// the module's cost (B-26).
-const RELAY_WAIT: Duration = Duration::from_secs(30);
-/// How long a question the relay answers from what it holds may take.
-const QUICK_WAIT: Duration = Duration::from_secs(2);
+/// The longest a question waits on a relay that says nothing (ADR 0144): a relay working on an
+/// answer says so every heartbeat, so this bounds a frozen or gone relay only, and every question
+/// waits the same, whatever its module costs.
+const RELAY_WAIT: Duration = relay::WAIT;
 /// The most bytes one `PUT`'s body may hold.
 pub const MOST_BODY: u64 = 512 << 20;
 /// The most bytes held for modules whose entry isn't whole yet: what comes beyond it stays in the
@@ -257,7 +256,9 @@ impl Cache {
                     return;
                 }
             };
-            let (status, body) = self.answer(&request);
+            // ADR 0144: `102 Processing` each heartbeat while a `GET` is worked on, so that the
+            // extension's client never times out on a download that is only slow.
+            let (status, body) = http::answer_alive(&request, &stream, || self.answer(&request));
             let head = request.method == "HEAD";
             if respond(&mut output, status, &body, head, request.close).is_err() || request.close {
                 return;
@@ -379,16 +380,10 @@ impl Cache {
             outputs: super::outputs_of(&block),
         };
         let cost = block.description["rustc_ms"].as_u64().unwrap_or(0);
-        let vouch_wait = (Duration::from_millis(cost) / 2 + QUICK_WAIT).min(RELAY_WAIT);
         let reusable =
             self.current
                 .may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
-                    let wait = if matches!(request, Request::Sharing) {
-                        QUICK_WAIT
-                    } else {
-                        vouch_wait
-                    };
-                    self.ask(request, wait)
+                    self.ask(request, RELAY_WAIT)
                 });
         if !reusable {
             return None;
@@ -404,7 +399,7 @@ impl Cache {
                         key: *key,
                         problem: Problem::Rejected,
                     },
-                    QUICK_WAIT,
+                    RELAY_WAIT,
                 );
                 let until = at + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
                 let _ = store.suspend_until(
@@ -754,7 +749,7 @@ impl Cache {
             return;
         }
         if let Some(share) = self.current.share.relay()
-            && !relay::tell(&share.socket, request, QUICK_WAIT)
+            && !relay::tell(&share.socket, request, RELAY_WAIT)
         {
             self.relay_down.store(true, Ordering::SeqCst);
         }

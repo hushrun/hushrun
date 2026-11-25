@@ -48,12 +48,12 @@ would without hushrun's reuse, and where the run's results lookup said the org s
 (`Hushrun-Build: on`) the run says one line, `build reuse is off for this run: another compiler
 wrapper is set (RUSTC_WRAPPER)`; elsewhere it says nothing. In CI (C-14's detection) it sets it only when the run's results
 lookup carried `Hushrun-Build: on`, the job can be asked as itself (B-31), and the relay's `open`
-answers within 5 seconds of its start: then in the job's own store (B-31), and only then does
-cargo start. In CI only `NAME -- COMMAND` sets it (B-25); `CHECK…` never does there. With no
+answers, however long that takes (ADR 0144: a server silent for 30 seconds, twice, has failed):
+then in the job's own store (B-31), and only then does cargo start. In CI only `NAME -- COMMAND` sets it (B-25); `CHECK…` never does there. With no
 answer to the results lookup and a fetch an earlier step of the job saved
 that serves the run (B-36), it sets it too, and the run reads that fetch only. With no answer to
-the results lookup or to `open` in time otherwise, COMMAND runs unwrapped and the run says one
-line, `build reuse is off for this run: the backend didn't answer in time`; a job
+the results lookup or with `open` failed otherwise, COMMAND runs unwrapped and the run says one
+line, `build reuse is off for this run: the backend didn't answer`; a job
 whose org doesn't share runs exactly as it would without any of this, and says nothing, but for
 `open`'s reason `contract`, which it says in B-25's one line. A job with no backend named
 (B-25's "CI otherwise"; `HUSHRUN_BACKEND=""`, or nothing names one) keeps no compiled code in
@@ -564,7 +564,7 @@ SHA-256 and size, in the repository's trusted scope given as this run began; or 
 signer the repository names that passes `not_before`, where the run has no backend that could say
 the store was replaced or a block withdrawn: `baked::Evidence::current`, B-63, B-67) is never
 audited at its first reuse here, and one in fifty at each later one, as any reuse is. A signed
-store whose backend didn't answer in time, or isn't its source, keeps the one in ten: that audit took a C++ test build
+store whose backend couldn't be reached, or isn't its source, keeps the one in ten: that audit took a C++ test build
 from 6 seconds to 58 on every sandbox start and found nothing, and those blocks are the ones CI on
 the default branch built, whose bytes the server or the signer vouches for. A store the person
 accepted unverified keeps the one in ten (`Current::reuse_pick` decides which, and
@@ -927,8 +927,9 @@ wrapper answers by content as usual. Nothing is asked of the person.
   the unit record; the dep-info stays, so the rebuild of a crate cargo builds incrementally stays
   incremental (B-9), and a program's debug bundle stays for the next compile to replace (B-9). It
   reads no file but to settle a differing stat, never touches a source file or a file no record
-  names, and stops at a deadline (two seconds), leaving the rest for the next run. A record that
-  can't be read is ignored.
+  names, and runs to its end (ADR 0144): a check stopped by a deadline would leave a crate whose
+  inputs changed unchecked on a loaded machine, and cargo would reuse its stale outputs. A record
+  that can't be read is ignored.
 - *What it says.* For each crate it removed, one line in the run's summary after the totals, at
   most three: `build: <crate> is rebuilt: <what changed>, which cargo doesn't watch`, the path
   from the folder `hushrun run` runs in. When nothing was removed it says nothing.
@@ -1128,7 +1129,7 @@ A **sandbox**, for this purpose, is a machine where no person is signed in to th
 as the one function that maps a run's credential to its row says (`build_session::caller`, with
 `build_session::signed_in_here`, for the session, the relay and `hushrun build status`). An
 agent token's run there whose org shares (its results lookup said so, or, with none made, `open`
-says so within 5 seconds, which the run waits for as a CI job does) begins a session in the
+says so, which the run waits for as a CI job does) begins a session in the
 store with reuse on, and its relay shares as the org's mode says. A written `off` wins there as
 it does everywhere: where the machine's settings file says `"mode": "off"`, as `hushrun build
 off` writes it, the run has no session, reuses and shares nothing, and says nothing. Nothing
@@ -1171,27 +1172,25 @@ mode 0700, under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`, each tried whe
 isn't set, isn't a folder, or would give a path too long, so that a long `$TMPDIR` costs nothing. Before binding, the folder MUST
 be a real folder, not a link, owned by this user, with mode 0700; before sending a key, a
 wrapper MUST find the socket owned by its own user. A check that fails turns sharing off for the
-run with one line. A wrapper waits at most 30 seconds; no socket, no answer, an answer it can't
-read and a late answer are a miss, and the compile goes on as without a shared store (B-19).
+run with one line. While the relay works on an answer it writes one space every second
+(`relay::HEARTBEAT`), which a wrapper's read takes for the answer still coming and JSON reads as
+nothing; a wrapper waits on a relay that says nothing at most 30 seconds (`relay::WAIT`), and no
+socket, no answer, an answer it can't read and a relay silent that long are a miss, and the
+compile goes on as without a shared store (B-19). An answer that panics ends its heartbeats and
+its connection: a miss at once.
 
-Cargo never waits for the network on a person's machine: `open` is sent as the run starts, gets
-10 seconds and one retry, and until it answers every request is a miss. A fetch a wrapper waits
-on has a **cost**: the smallest of what its compile cost on the machine that built it (scaled by
-this machine's speed against the uploaders', learned from this run's own compiles whose cost the
-server also knew, and taken as equal until it has three), what this machine's own last compile of
-the same first key took, and 60 seconds. The **rate** is the link's throughput over all
-downloads together, partial and abandoned ones included; with no rate yet, the first fetch a
-wrapper asks for runs to its end as the measurement, its wrapper waiting no longer than half the
-cost, and every other request is a miss until a rate exists, unless its download is under way
-already. One estimate (`State::to_finish`) decides a start and a give-up: a download's own bytes
-still to come over the rate, and, while it waits in the queue, those of the downloads running
-ahead of it and a round trip. A fetch whose estimate isn't under half the cost is not started
-and not waited for; one that is goes to the front of the queue, and it is given up as soon as
-elapsed time and the estimate pass half the cost. A miss and a give-up are no failure: nothing
-errored, and a parallel build's first small crates give up by the dozen. A **failure** is a
-request that errored or timed out: a network error, a 5xx, a lookup or a download that failed
+**No time limit decides what a build reuses** (ADR 0144). `open` is sent as the run starts, and a
+question that comes before it answers waits for it: until it answers, or fails, its server silent
+for 30 seconds (`Tuning::open`) and once more. A fetch a wrapper waits on goes to the front of
+the queue and is waited for to its end, however long the download takes and whatever its
+compile cost here or on the machine that built it: what the shared store holds is reused, on a
+slow link or a loaded machine alike. Every request to the backend or the object store waits on
+its server's **silence**, 30 seconds (`http::SILENCE`): its head, then each piece of its body,
+each byte starting it again; a PUT's body goes a piece at a time and fails when it stops moving
+for the silence. How long an answer takes, on its own, never makes it a failure. A **failure**
+is a request that errored or whose server was silent for the silence: a network error, a 5xx, a lookup or a download that failed
 (a download that fails its checks included), and an upload's `begin`, PUT or `commit` that
-errored or timed out; a download that arrives ends the row. Three in a row **rest** the relay for
+errored or whose server went silent; a download that arrives ends the row. Three in a row **rest** the relay for
 30 seconds, and the run's first rest says so in one line, once: the backend stopped answering
 mid-run, and why. While it rests no new request goes to the network (no lookup, hint lookup,
 download, `begin`, report; the upload loop claims nothing new), and
@@ -1205,12 +1204,13 @@ reaches the backend and not the store) says, once per run, which host to allow:
 only some hosts, allow <host> to reuse what other machines built`, the host alone
 (`build_relay::store_host`), never the link, its path or its query, which hold a signature; no
 error that names a link reaches any line. `hushrun build fetch` says it too. Every failure ends
-in rustc running as asked. *Rests on:* a wrapper being worth at most half its compile in waiting, so that
-the worst a wrong guess adds to one crate is half its compile time; packs already downloaded
-costing nothing more to open, so a rest that dropped them would only waste them; and the socket
-being no boundary inside one OS user, whose processes can read the machine's key anyway.
-*Breaks if:* the link's rate falls after a fetch started: the fetch is given up within half its
-cost, and its bytes so far are spent for nothing.
+in rustc running as asked. *Rests on:* what one machine reuses of another's being worth more
+than the time a slow link or a loaded machine adds to a build, so that the outcome is the
+backend's answers alone; a server that stopped answering going silent, which a working one never
+does for 30 seconds; packs already downloaded costing nothing more to open, so a rest that
+dropped them would only waste them; and the socket being no boundary inside one OS user, whose
+processes can read the machine's key anyway. *Breaks if:* the link is slower than compiling: the
+build waits for downloads it could have beaten, by choice.
 
 **B-27 Addresses and sealing.** A block's **address** is SHA-256 of `hushrun.block-address/v1`,
 a newline, the kind, a newline and the key's 32 bytes; a first key's address is the same of the
@@ -1281,16 +1281,19 @@ move is a file written whole or a rename:
 
 `begin` is sent a few blocks at a time, just before their PUTs, signed by the machine; PUTs run 4
 at a time, 2 while downloads are in flight; a stored block's newest hints go up with it, sealed
-with its first key. When the command ends, no new PUT starts, and everything after the command
-has one deadline (`upload::wait_at_end`, the one place that says): on a person's machine 5
-seconds for the uploads in flight and 5 for `close`, 10 in all; in CI what B-31 says, `close`
-within it. Uploads (the drain in CI, the PUTs, and the `begin` and `commit` requests in flight)
-are cut off when `close`'s 5 seconds, or half the deadline if that is less, are all that is
-left, and `close` goes within what is left; a request still waited on at the deadline, whatever
-its own timeout, is abandoned. The rest waits for the next run, and the run says how many wait.
-An upload loop that panics is over when it panics, as one that returned is (`upload::uploads`
-marks it so however it ends): the end of its command waits for it no longer and sends `close`
-within what is left, and a later check of the same process starts its own loop. The claims it
+with its first key. When the command ends, nothing after it has a deadline unless a stop signal
+came (`upload::wait_at_end`, the one place that says; ADR 0144), on a person's machine, in a
+sandbox and in CI alike: the upload loop goes on claiming what the run built until none is left
+to go now (each one done, or put off by an answer or a server's silence), or the relay rests or
+stops; then `close` names what went up. What a run leaves out of its manifest depends on the
+backend's answers alone, never on how fast the machine was. On a terminal the run says, while it
+waits, `hushrun: build: uploading N blocks before the run ends (Ctrl-C leaves the rest for the
+next run)`. Asked to stop (B-49), it starts no PUT, cuts off those in flight and the `begin`
+and `commit` requests at once, and gives `close` 2 seconds. The rest waits for the next run, and
+the run says how many wait. An upload loop that panics is over when it panics, as one that
+returned is (`upload::uploads` marks it so however it ends, and `Relay::start_uploads` marks it
+running before it is spawned, so that an end that comes first waits for it): the end of its
+command waits for it no longer and sends `close`, and a later check of the same process starts its own loop. The claims it
 held stay claimed until its run is dead, then go back at the next relay's start or in the sweep
 (B-14), as a crash's do; its packs under `outbox/tmp/<run>/` go with the dead run's folders. A
 wrapper whose answering thread panics gets no answer, which is a miss; every later reader of the
@@ -1363,10 +1366,10 @@ Actions every build request carries the job's ID token, whose audience is the ba
 when an agent token is set beside it. One place decides what a request carries
 (`Credential::bearer`): a token with more than a minute left is sent; one with less starts a
 mint in the background and is still sent until its real expiry, also when that renewal fails;
-a 401 gets a fresh one and one more try. At most one mint is in flight, and it gets 5 seconds
-whoever waits for it; a request with no token it may send (none yet, the held one expired, or
-the one a 401 refused) waits for that mint only within its own deadline, and a mint that fails
-or comes later counts, for that request, as a server that can't be reached (B-26). No mint
+a 401 gets a fresh one and one more try. At most one mint is in flight, and it waits on its
+endpoint's silence (B-26) whoever waits for it; a request with no token it may send (none yet,
+the held one expired, or the one a 401 refused) waits for that mint to end, and a mint that fails
+counts, for that request, as a server that can't be reached (B-26). No mint
 starts once the end of the command has begun: `close` and the last uploads carry the token held
 while it is good, or go unsent. The results lookup whose `Hushrun-Build` answer sets the
 wrapper carries the ID token too, before any token the environment holds (C-13), so the answer is
@@ -1394,27 +1397,26 @@ tracked file before building (a version bump, a nightly `cargo update`) names no
 backend counts as a commit other than its token's, so it writes no trusted block. A file git
 doesn't track, and changes inside a submodule's own checkout, are not compared; a job the
 policy calls untrusted says once, in plain words, why it writes nothing to the repository's
-trusted blocks. The end of the command waits for uploads as one function of its context says
-(`upload::wait_at_end`): a job writing trusted blocks (the scope the policy says it writes is the
-repository's trusted one, `protected/…`, and nothing else decides it: `Policy::writes_trusted`; a
-pull request's job writes `ci/…` with no reason it isn't trusted, and is not trusted) up to 2
-minutes, any other up to 20 seconds,
-never longer than a quarter of what the compiles of the blocks still to go took, and both for the
-whole `hushrun run` call; meanwhile uploads go on, since the store goes with the job. That is one
-deadline for everything after the command, `close` included, which keeps its 5 seconds (B-29):
-never less than those, so a job with nothing to upload still sends its manifest. *Rests on:*
+trusted blocks. The end of the command waits for every upload the job built (B-29, ADR 0144),
+whatever it writes and whatever the blocks cost: the store goes with the job, and what it leaves
+unsent is left out of its manifest for every later job. Whether a job writes the repository's
+trusted blocks (the scope the policy says it writes is the repository's trusted one,
+`protected/…`, and nothing else decides it: `Policy::writes_trusted`; a pull request's job writes
+`ci/…` with no reason it isn't trusted, and is not trusted) decides what it writes, never how
+long it waits. *Rests on:*
 the runner emptying its temporary folder when the job ends; the ID token's claims being what the
 backend trusts a job by, so a token copied out of one job can do no more than that job could, for
 minutes; the commit being what the backend checks a trusted job's token against, and the
-tracked files being as it has them; and a quarter of
-a block's compile being worth waiting for once, since the next job of the repository then
-downloads it rather than compiling; and the request token being the job's alone. *Breaks if:*
+tracked files being as it has them; every block a job built being worth its upload, since every
+later job of the repository then downloads it rather than compiling; and the request token
+being the job's alone. *Breaks if:*
 a job's build reads a file git doesn't track (one an earlier step generated outside
 `.gitignore`): the job names its commit while building other code, and the commit check, a guard
 against honest mistakes, doesn't see it (keys still commit to every file read, so no wrong bytes
 follow); the token endpoint fails for longer than a token lives (5 minutes on GitHub): from the held
 token's expiry, every request is a miss and the job compiles as it would without a shared store,
-its uploads lost; a self-hosted runner keeps `RUNNER_TEMP` between jobs and the next job can't remove what the last
+its uploads lost; the end's uploads outlast the token held, since no mint starts once the end has
+begun: what is left unsent is said, and left out of the manifest; a self-hosted runner keeps `RUNNER_TEMP` between jobs and the next job can't remove what the last
 one left there (a file it lacks permission to delete): that store is never read or uploaded, but
 it takes disk; the legs of one matrix job, which share the run, attempt and job name, run one
 after another on one runner and the runner gives them the same request token (then a leg reuses
@@ -1613,12 +1615,12 @@ under 24 hours old, unless the relay says sharing stopped for the run by a decis
 said the org doesn't share or that the run's sharing is off, or a request was refused with 401,
 403 or 404), which the wrapper asks it before each such reuse and the relay answers from its
 phase, at once and without the network; a relay that doesn't answer is no decision. On an older
-entry the wrapper asks the relay, which answers within the block's **budget**, half
-what its compile took (B-26). "Served, with these outputs" lets it be reused. **The server can't
-be reached** means `open` failed, or hasn't answered within that budget: only then does an entry
-of any age count, and the block is reused. Once `open` has answered, a stale entry is never
-enough: the wrapper waits for the server's answer within its budget and, without one (a lookup
-slower than that, or one that failed), it is a miss: rustc runs, and the block that compile
+entry the wrapper asks the relay, which waits for `open` and then for the server's answer,
+however long they take (ADR 0144: no budget). "Served, with these outputs" lets it be reused.
+**The server can't be reached** means `open` failed: only then does an entry of any age count,
+and the block is reused. Once `open` has answered, a stale entry is never enough: the wrapper
+waits for the server's answer and, without one (a lookup that failed, or a relay resting after
+failures, which asks nothing new), it is a miss: rustc runs, and the block that compile
 builds takes the downloaded one's place and is from then on built here (B-32). The relay asks
 the server, without fetching, about every block in the store only downloaded whose entry for
 this run's host, org and repository is stale, as the store's records list them, as soon as
@@ -1654,9 +1656,8 @@ environment as a list (B-37), so two that disagree can be laid side by side. *Re
 caller, so that a withdrawn block stops being reused on laptops within a day without a list of
 withdrawals, and a "no" from it being final for that copy; a lookup without fetching counting as
 a use, so blocks in daily use don't expire (a stale block the run doesn't reuse, asked about with
-the rest, counts as used too); and cargo never waiting on the network longer than the compile it
-may save. *Breaks if:* `open` takes longer than a block's budget: that block is reused as on a
-machine that can't reach the server, until a run whose `open` answers in time; or a server says
+the rest, counts as used too); and a slow answer being worth its wait, since a reuse the server
+didn't vouch for is never one. *Breaks if:* a server says
 "no" by mistake (a lookup answered for the wrong repository): the block compiles here from then
 on, a cost and never a wrong reuse; or the results lookup is answered by something that is not the
 backend (a proxy's error page): the run takes that for an org that doesn't share, and compiles
@@ -1851,14 +1852,13 @@ only for those bytes:
   COMMAND starts and so before anything is reused: it waits for the check's `open` and looks every
   pack up (B-36's lookup, fetching nothing, the lookups of all its kinds 8 at a time so a large
   store's last rows are asked as soon as its first), and asks `open` for each part of each check it
-  names, all within 5 seconds, the wait a CI job gives `open`. A row the backend serves in the
+  names, each until it answers or fails (ADR 0144: no time limit). A row the backend serves in the
   repository's trusted scope (the one `protected/…` scope `open` names, `protected/<repository
   id>`, never another repository's; two such scopes are no evidence, since which is the
   repository's would rest on their order) with that row's digest of outputs, SHA-256 and size is
   **verified** (its class, cost and link environment are the store's claim, which the key
-  decides nothing by). Evidence is per block: a lookup that fails, or the time running out, leaves
-  out only the blocks it hadn't vouched for yet; no answer from `open`, or no trusted scope in it,
-  is no evidence and no replacement. The server's word comes first even when it vouches for
+  decides nothing by). Evidence is per block: a lookup that fails leaves out only the blocks it
+  was for; an `open` that fails, or no trusted scope in it, is no evidence and no replacement. The server's word comes first even when it vouches for
   fewer rows than a signature covers (a signed store older than the backend's kept days reuses
   only what the backend still keeps): the backend is what knows a block was withdrawn. Each opened block's record carries the server's word (B-32). A
   newer manifest marks the store replaced (below) before the run reads it.
@@ -1929,8 +1929,7 @@ for its platform, and only then in a relay:
 
 - **The wrapper**: its own hints, then the blocks they lead to; then, where the upper has no
   downloaded hint for the first key, each of the baked store's sealed hints of it, opened with the
-  first key and written where downloaded hints live (B-30), followed within their budget; then a
-  relay (B-26).
+  first key and written where downloaded hints live (B-30), followed; then a relay (B-26).
 - **The Go cache program** (B-39), which a run sets only where it shares or a baked store is
   named: on a get whose action id the upper lacks, the baked store's `go/1` pack of it; then a
   relay.
@@ -2548,9 +2547,8 @@ subreaper, and when a check's command ends whatever it left running is stopped a
 and all, and reaped.
 
 A check's build **closes a manifest only when it is whole**: its command succeeded and every
-block it built went up (`Ending::Bake`: its uploads are waited for up to 10 minutes,
-`UPLOADS_WITHIN`, without the share of the compiles' cost a CI run's end allows, since the bake's
-store goes with its job). One that failed, was stopped, left blocks unsent, or made a block `begin`
+block it built went up (`Ending::Bake`: its uploads are waited for as at every end, B-29, since
+the bake's store goes with its job). One that failed, was stopped, left blocks unsent, or made a block `begin`
 refused for good (`too_large`, `unsupported`, `no_scope`, `suspended`: never on the backend, though
 its marker is done) closes nothing, said, a refusal naming each block and why: the backend's newest build stays the last whole one, and the next bake builds again, where a
 manifest naming the commit with a part of its blocks would have been taken for the commit's build
@@ -2651,23 +2649,22 @@ format: hushrun names the versions it knows, so a newer Go gets no program until
 **B-40 Answers.** The program writes `{"ID":0,"KnownCommands":["get","put","close"]}` before
 reading anything, then answers every request exactly once: each request is `open` until one
 compare-and-set makes it `answered`, and its handler's answer, a panic's (every handler runs under
-`catch_unwind`) and a watchdog's for a request open past 40 seconds race for that one move, so a
+`catch_unwind`) and a watchdog's for a request with no sign of life for 40 seconds (its reading,
+then each heartbeat of the relay its handler waits on: ADR 0144) race for that one move, so a
 second answer, which Go takes as fatal, is never written. A `get` that fails in any way is a
 miss. A `put` answers a file holding exactly the body: in Go's cache, else (a write that failed,
 a panic, the watchdog) in a folder of the program's own, removed at `close`; only a body whose
 SHA-256 isn't its `OutputID` is answered with an error. The program's stdout carries protocol
 lines only: no child it starts inherits it (it would hold Go's `close` open), and a panic prints
-nothing on its stderr, which is the person's. `close` waits for the handlers still running at
-most the watchdog's time, answers, and the process exits. Every call to the relay is bounded: a
-fetch by at most 30 seconds (half B-26's most cost; less when this machine's own last compile of
-the key says so), a vouch by half the block's compile, whether the run still shares by 2
-seconds; a notice (a block built, a report) is written and not waited for; connecting to the
-relay's socket is bounded by the same wait. After one call fails or times out the relay is down
-for the rest of the run, not only of that `go` command: a file in the session's folder
-(`go-relay-down`) tells every later `go` command of the run, which asks it nothing, so a frozen
-relay costs a run one wait (F10). The one exception is a fetch whose wait ran out on a relay that
-still answers whether the run shares within 2 seconds: it was only slow (a large download), that
-`get` is a miss, and the relay stays on. A panic while the program starts it starts again with no
+nothing on its stderr, which is the person's. `close` waits for the handlers still running while
+one has shown life within the watchdog's time, answers, and the process exits. Every call to the
+relay waits on its silence alone, 30 seconds (B-26's `relay::WAIT`), whatever the key's compile
+cost: a relay working on an answer (a large download) says so every heartbeat and is waited for;
+a notice (a block built, a report) is written and not waited for; connecting to the relay's
+socket is bounded by the same wait. After one call fails, or meets a relay silent for the whole
+wait, the relay is down for the rest of the run, not only of that `go` command: a file in the
+session's folder (`go-relay-down`) tells every later `go` command of the run, which asks it
+nothing, so a frozen relay costs a run one wait (F10). A panic while the program starts it starts again with no
 session (B-47); one while it reads a request answers that request with an error, which Go takes
 as a miss for a `get` and leaves its own build output in place of for a `put`, and reading goes
 on: the program never exits before `close`. Side effects of serving a block (its use, a
@@ -2778,9 +2775,11 @@ counted and not listed. A Go fetch is looked up only when that manifest names it
 about every entry its cache misses, most of them local ones no server holds. The first Go fetch
 of the check starts the prefetch of what the manifest names that the store lacks (a machine
 whose `go` finds everything in its own cache asks nothing and downloads nothing); a fetch that
-comes while that lookup runs waits for it, at most a second or half its local cost; [ADR 0111] so
-does one that comes while the check's `open` or its `go/1` `open` is still under way, within the
-same bound, which it then shares with the lookup (Go asks for its first packages as COMMAND starts). *Rests on:*
+comes while that lookup runs waits for it to end; [ADR 0111] so does one that comes while the
+check's `open` or its `go/1` `open` is still under way (Go asks for its first packages as COMMAND
+starts). ADR 0144: no bound on either wait, so that a package the manifest names is reused
+whatever the machine's load. The manifest is taken and its prefetch marked under one lock: a
+fetch that came between the two would find neither, and miss. *Rests on:*
 the server keeping manifests per repository, check, platform and kind, and taking any kind that
 `is_kind` reads (no server change). *Breaks if:* a check's manifest names other packages than
 its next run asks for: they compile here, a cost and never a wrong block.
@@ -3136,12 +3135,12 @@ The relay asks `open` a further time, kind `cc/1`, with the platform the compile
 when the first launcher compiling for that triple asks (at most eight triples a check), and keeps
 the answer only while the check that asked is still the relay's, and
 answers a launcher's hints and fetch only for a first key that manifest names: any other is a
-miss, without the network. A question waits for the check's `open` and that manifest at most half
-what this machine's last compile of the first key took, and at most a second. The first question
-about a first key the manifest names starts the prefetch of what it names that the store lacks
-(their hints, then their blocks) and waits for its lookups. A question to the relay waits at most
-half what the compile last took and 2 seconds, and at most 30 seconds; one that gets no answer,
-when a quick question about the run gets none either, marks the relay down in the session's folder
+miss, without the network. A question waits for the check's `open` and that manifest until they
+answer or fail (ADR 0144: no bound). The first question about a first key the manifest names
+starts the prefetch of what it names that the store lacks (their hints, then their blocks) and
+waits for its lookups. A question to the relay waits on its silence alone, 30 seconds (B-26),
+whatever the compile last took; one that meets a relay silent that long, or that hung up, marks
+the relay down in the session's folder
 (a mark the Go cache program's also stands for), and no launcher of the run asks it anything
 after. A block stored with no reason to stay (B-56) is told to the relay, which gives it an outbox
 marker (B-29) when the policy lets the run write and its record says this run's host, org and
@@ -3342,8 +3341,10 @@ as B-78 says once `Current::may_reuse` allows it (B-34), the question to the rel
 `gradle_vouch`. Else, in a run whose mode is `on`, the cache asks the relay `gradle_fetch`, which
 answers only while sharing is on and the check's `gradle/1` manifest (B-82) names the key, as a Go
 fetch is answered (B-45): the first such question starts the manifest's prefetch, and one asked
-while it looks up waits for it at most a second, and at most half what this machine's own last
-execution took; then the download is waited for within half the cost (B-26). Every other answer is
+while it looks up waits for it to end; then the download is waited for to its end (B-26, ADR
+0144). While a `GET` is worked on, the cache writes `HTTP/1.1 102 Processing` each heartbeat:
+Gradle's client reads past it, and its socket timeout ends only a cache that stopped answering,
+never one whose download is slow, so Gradle never turns its remote cache off for a busy machine. Every other answer is
 404, and Gradle runs the task. A download that fails B-78's checks is reported `rejected` to the
 scope it came from, its key suspended for the kept days, and removed. A served block's use is dated
 (B-14), and a download's first reuse here is recorded (B-32). A relay that doesn't answer once is
@@ -3452,13 +3453,16 @@ compressed entries hide what they hold, as B-24 says of every kind.
 the store is served as B-172 says once `Current::may_reuse` allows it (B-34), the question to the
 relay being `maven_vouch`. Else, in a run whose mode is `on`, the cache asks the relay
 `maven_fetch`, which answers only while sharing is on and the check's `maven/1` manifest (B-176)
-names the key, as a Gradle fetch is answered (B-80). Every other answer is 404, and Maven builds the
-module. A download that fails B-172's checks is reported `rejected` to the scope it came from, its
+names the key, as a Gradle fetch is answered (B-80), and the download is waited for to its end
+(B-26, ADR 0144). While a `GET` is worked on, the cache writes `HTTP/1.1 102 Processing` each
+heartbeat, as Gradle's does: the extension's client reads past it, and its socket timeout ends
+only a cache that stopped answering. Every other answer is 404, and Maven builds the module. A download that fails B-172's checks is reported `rejected` to the scope it came from, its
 key suspended for the kept days, and removed. A served block's use is dated (B-14), and a
 download's first reuse here is recorded (B-32). Of another file: served from the block of a module
 whose `buildinfo.xml` this run served, when the block holds it with its size and SHA-256, else 404.
 A `HEAD` is 200 when the store holds a block of the module that isn't suspended and holds the file,
-else 404, with no body: it downloads nothing and logs nothing. A relay that doesn't answer once is
+else 404, with no body: it downloads nothing and logs nothing. Every question to the relay waits
+on its silence alone (B-26), whatever the module's cost; a relay silent for the whole wait once is
 asked nothing more by the cache for the rest of the run.
 
 **B-175 A `PUT`.** Answered 200 whatever becomes of the file. The files of a module are held in
@@ -3579,8 +3583,8 @@ the log names why. A block is stored as built here by this run (B-32), and told 
 
 **B-90 Sharing (Xcode).** The platform of an Xcode block is `xcode-` and `xcodebuild -version`'s
 build, lower case. A `GetValue` the cache and the store don't answer is asked of the run's baked
-store (B-64), then, in a run that shares `on`, of the relay, within 10 seconds or half this
-machine's last compile of the key. The relay asks the server only for a key the check's `xcode/1`
+store (B-64), then, in a run that shares `on`, of the relay, which it waits on while the relay
+works (B-26's silence, 30 seconds, whatever the key's compile cost; ADR 0144). The relay asks the server only for a key the check's `xcode/1`
 manifest for the platform names (asked with `open` at the first such question, as B-60's), and the
 first key it names starts the prefetch of the rest. A check closes once for each Xcode build its
 values were compiled with, under a run made from the check's, the kind and the platform, with the
@@ -3738,7 +3742,7 @@ under its first key, class `library`, its platform Node's `process.platform`, wh
 the relay it was built; a check closes once for each platform its compiles ran on, with the pairs
 of its reuses and blocks, as B-60's. A lookup that finds nothing here asks the relay for the first
 key's hints only when the check's `tsc/1` manifest for the platform names it (asked with `open` at
-the first such question), within 10 seconds or half this machine's last compile of the key, and
+the first such question), waiting on the relay's silence alone (B-26; ADR 0144), and
 fetches one of at most eight second keys the downloaded hints lead to. A downloaded hint is followed
 only when every path it names is under `{root}` or a name above it, with at most 200,000 paths.
 A downloaded block is served only as `Shared::may_reuse` says (B-34), its files' sizes and SHA-256

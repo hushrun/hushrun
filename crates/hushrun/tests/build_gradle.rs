@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hushrun_testkit::fake_build::FakeBuild;
+use hushrun_testkit::fake_build::{FakeBuild, route};
 use hushrun_testkit::git;
 
 const CLEARED: &[&str] = &[
@@ -242,6 +242,40 @@ fn a_task_one_machine_ran_comes_from_the_shared_store_on_another() {
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(out.contains("Reusing configuration cache."), "{out}");
     assert!(out.contains("> Task :compileJava FROM-CACHE"), "{out}");
+}
+
+// covers: B-26, B-80
+#[test]
+fn a_task_whose_download_outlasts_gradles_socket_timeout_still_comes_from_the_shared_store() {
+    if !have_gradle() {
+        return;
+    }
+    // ADR 0144: B's downloads take three seconds, twice Gradle's socket timeout set to 1.5 s
+    // for this build. The cache writes `102 Processing` each heartbeat while the `GET` waits, so
+    // Gradle's timeout never runs out on a download that is only slow, it never turns its
+    // remote cache off for the build, and the task comes from what A ran.
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None, true);
+    let (code, out, err) = a.run(&fake, &["compileJava", "--configuration-cache"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(gradle_blocks(&fake) > 0, "nothing went up: {err}");
+    fake.delay(route::STORE_GET, std::time::Duration::from_secs(3));
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), true);
+    let (code, out, err) = b.run(
+        &fake,
+        &[
+            "compileJava",
+            "--configuration-cache",
+            "-Dorg.gradle.internal.http.socketTimeout=1500",
+        ],
+    );
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("> Task :compileJava FROM-CACHE"),
+        "{out}\n{err}"
+    );
+    assert!(gradle_line(&err).contains("from the shared store"), "{err}");
 }
 
 // covers: B-77

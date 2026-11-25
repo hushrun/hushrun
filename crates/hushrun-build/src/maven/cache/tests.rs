@@ -240,6 +240,7 @@ fn request(method: &str, path: &str, body: &[u8]) -> http::Request {
         authorization: None,
         body: Body::Bytes(body.to_vec()),
         close: false,
+        interim: true,
     }
 }
 

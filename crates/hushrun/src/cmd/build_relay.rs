@@ -56,27 +56,20 @@ use self::http::{Client, Failure};
 /// The kind of the blocks this relay shares: the rustc adapter, its keys' version.
 pub(crate) const KIND: &str = "rustc/1";
 
-/// How long the relay's numbers are: the defaults of B-26, which tests shorten.
+/// How long the relay's numbers are: the defaults of B-26, which tests shorten. ADR 0144: none
+/// of them is a budget for work. The three silences bound only a server that stopped sending
+/// (each byte that comes starts one again), and the rest follows failures, never slowness: how
+/// long an answer takes never decides what the run does.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Tuning {
-    /// `open` gets this long, and one more try.
+    /// `open` waits at most this on a silent server, and one more try.
     pub(crate) open: Duration,
-    /// A lookup a wrapper waits on gets at most this long.
+    /// A lookup, `begin` or `commit` waits at most this on a silent server.
     pub(crate) lookup: Duration,
-    /// The most a fetch's cost is taken to be.
-    pub(crate) most_cost: Duration,
     /// Three failures in a row rest the relay this long.
     pub(crate) rest: Duration,
-    /// How long uploads in flight get when the command ends, on a person's machine.
-    pub(crate) end_wait: Duration,
-    /// How long `close` gets.
+    /// `close` waits at most this on a silent server.
     pub(crate) close: Duration,
-    /// How long a CI job waits for `open` before cargo starts (B-2).
-    pub(crate) ci_open: Duration,
-    /// The most the end of a CI job's `hushrun run` call waits for uploads, writing trusted
-    /// blocks or not (B-31).
-    pub(crate) ci_trusted_wait: Duration,
-    pub(crate) ci_wait: Duration,
     /// Downloads at once.
     pub(crate) downloads: usize,
     /// How often a waiting fetch looks at its progress.
@@ -88,15 +81,10 @@ pub(crate) struct Tuning {
 impl Default for Tuning {
     fn default() -> Tuning {
         Tuning {
-            open: Duration::from_secs(10),
-            lookup: Duration::from_secs(10),
-            most_cost: Duration::from_secs(60),
+            open: http::SILENCE,
+            lookup: http::SILENCE,
             rest: Duration::from_secs(30),
-            end_wait: Duration::from_secs(5),
-            close: Duration::from_secs(5),
-            ci_open: Duration::from_secs(5),
-            ci_trusted_wait: Duration::from_secs(120),
-            ci_wait: Duration::from_secs(20),
+            close: http::SILENCE,
             downloads: 8,
             tick: Duration::from_millis(20),
             spill: pack::IN_MEMORY,
@@ -104,39 +92,10 @@ impl Default for Tuning {
     }
 }
 
-/// The most a Go fetch waits for the Go manifest's prefetch to look up what it names (B-45).
-const GO_PREFETCH_WAIT: Duration = Duration::from_secs(1);
-/// The most a C or C++ launcher's question waits for the check's `open` and its `cc/1` manifest
-/// to answer (B-60): a cold build's first compiles pay at most this once, and every later one
-/// is answered from the manifest without the network.
-const CC_MANIFEST_WAIT: Duration = Duration::from_secs(1);
-
-/// [`CC_MANIFEST_WAIT`]; in a debug build, `HUSHRUN_CC_MANIFEST_WAIT_MS` when set, so that an
-/// end-to-end test on a loaded machine doesn't depend on how fast the fake server answers
-/// `open`. Never read in a release build.
-fn cc_manifest_wait() -> Duration {
-    #[cfg(debug_assertions)]
-    if let Some(ms) = std::env::var("HUSHRUN_CC_MANIFEST_WAIT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        return Duration::from_millis(ms);
-    }
-    CC_MANIFEST_WAIT
-}
 /// The most target triples a check asks `cc/1` manifests for: each is one more `open`.
 const MOST_CC_PLATFORMS: usize = 8;
 /// How many failures in a row rest the relay.
 const FAILURES_TO_REST: u32 = 3;
-/// How many of this machine's compiles, with a cost the server also knew, it takes to learn
-/// the machine's speed against the uploaders'.
-const SPEED_SAMPLES: usize = 3;
-/// A fetch's expected finish adds one round trip of this much, until one is measured.
-const ROUND_TRIP: Duration = Duration::from_millis(50);
-/// The rate is known once this many bytes were measured over at least [`MEASURED_FOR`], or a
-/// download finished.
-const MEASURED_BYTES: u64 = 256 << 10;
-const MEASURED_FOR: Duration = Duration::from_millis(100);
 /// A download's unpacked size is taken as this many times its pack, for the free-space floor.
 const UNPACKED_PER_PACKED: u64 = 4;
 
@@ -191,8 +150,6 @@ pub(crate) enum Opened {
     Off,
     /// The server couldn't be reached or refused: why.
     Stopped(String),
-    /// No answer within the wait.
-    Unanswered,
 }
 
 /// Why sharing stopped for the rest of the run.
@@ -246,44 +203,6 @@ struct Fetch {
 
 /// The rate of the link: bytes over the time any download was running, partial and abandoned
 /// downloads included (B-26).
-#[derive(Default)]
-struct Meter {
-    bytes: u64,
-    busy: Duration,
-    running: usize,
-    since: Option<Instant>,
-    finished: bool,
-}
-
-impl Meter {
-    fn start(&mut self, now: Instant) {
-        if self.running == 0 {
-            self.since = Some(now);
-        }
-        self.running += 1;
-    }
-
-    fn stop(&mut self, now: Instant, finished: bool) {
-        self.running = self.running.saturating_sub(1);
-        if self.running == 0
-            && let Some(since) = self.since.take()
-        {
-            self.busy += now.saturating_duration_since(since);
-        }
-        self.finished |= finished;
-    }
-
-    /// Bytes a second, once measured.
-    fn rate(&self, now: Instant) -> Option<f64> {
-        let busy = self.busy
-            + self
-                .since
-                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
-        let measured = self.finished || (self.bytes >= MEASURED_BYTES && busy >= MEASURED_FOR);
-        (measured && !busy.is_zero()).then(|| self.bytes as f64 / busy.as_secs_f64())
-    }
-}
-
 /// What `close` counts beyond the wrappers' log.
 #[derive(Default, Clone)]
 struct Tally {
@@ -392,11 +311,7 @@ struct State {
     hints_asked: HashSet<Hex32>,
     fetches: HashMap<Hex32, Fetch>,
     queue: VecDeque<Hex32>,
-    meter: Meter,
     failures: u32,
-    measuring: Option<Hex32>,
-    /// This machine's compile time over the uploader's, per sample.
-    speed: Vec<f64>,
     tally: Tally,
     /// Blocks built before `open` answered, decided once it has.
     pending: Vec<Request>,
@@ -539,38 +454,6 @@ impl State {
             self.lines.push(line);
         }
     }
-
-    /// The machine's speed against the uploaders': their cost times this is the cost here.
-    fn speed(&self) -> f64 {
-        if self.speed.len() < SPEED_SAMPLES {
-            return 1.0;
-        }
-        let mut sorted = self.speed.clone();
-        sorted.sort_by(f64::total_cmp);
-        sorted[sorted.len() / 2]
-    }
-
-    /// Bytes still to come before a fetch put at the front: the downloads running now.
-    fn ahead(&self) -> u64 {
-        self.fetches
-            .values()
-            .filter(|f| f.state == Download::Downloading)
-            .map(|f| f.found.bytes.saturating_sub(f.bytes))
-            .sum()
-    }
-
-    /// How long `fetch` would take from now at `rate`, the one estimate a start and a give-up are
-    /// decided by (B-26): its own bytes still to come, and, while it waits in the queue, those of
-    /// the downloads running ahead of it and a round trip.
-    fn to_finish(&self, fetch: &Fetch, rate: f64) -> Duration {
-        let remaining = fetch.found.bytes.saturating_sub(fetch.bytes);
-        let (behind, extra) = if fetch.state == Download::Downloading {
-            (remaining, Duration::ZERO)
-        } else {
-            (self.ahead() + remaining, ROUND_TRIP)
-        };
-        Duration::from_secs_f64(behind as f64 / rate.max(1.0)) + extra
-    }
 }
 
 /// The relay.
@@ -585,14 +468,13 @@ pub(crate) struct Relay {
     machine: Option<crate::machine::Machine>,
     /// The command ended: no new PUT starts.
     ending: AtomicBool,
+    /// B-49: this run alone was asked to stop (`Relay::ask_to_stop`, a test's).
+    asked_to_stop: AtomicBool,
     /// B-36: it reads only a fetch, and sends nothing.
     saved: bool,
     /// B-63: a bake's relay: its prefetch downloads every block a manifest names, programs too,
     /// since nothing will ask for them later and the store holds what the manifest names.
     whole: AtomicBool,
-    /// What the ends of this process's checks waited in CI, which the next one's wait is less
-    /// (B-31).
-    waited: Mutex<Duration>,
     /// A marker was written: the upload loop looks now rather than at its next turn.
     wake: tokio::sync::Notify,
     /// The end of the command cut uploads off: the upload loop's requests in flight are given up
@@ -611,10 +493,10 @@ pub(crate) enum Ending {
     /// A run's: uploads waited for as [`upload::wait_at_end`] says, then `close` names what
     /// went up.
     Usual,
-    /// B-75: a bake's build of what's missing. Every upload is waited for, up to `within`, with
-    /// no cut at a share of the compiles' cost (the bake's store goes with its job); `close`
-    /// goes only when the command `succeeded` and nothing it built is left unsent.
-    Bake { succeeded: bool, within: Duration },
+    /// B-75: a bake's build of what's missing. Every upload is waited for, as at every end
+    /// (ADR 0144); `close` goes only when the command `succeeded` and nothing it built is left
+    /// unsent.
+    Bake { succeeded: bool },
 }
 
 /// B-49: the run was asked to stop (a GitLab job cancelled or timed out): its end waits for no
@@ -694,9 +576,9 @@ impl Relay {
             run,
             machine,
             ending: AtomicBool::new(false),
+            asked_to_stop: AtomicBool::new(false),
             saved: config.saved.is_some(),
             whole: AtomicBool::new(false),
-            waited: Mutex::new(Duration::ZERO),
             wake: tokio::sync::Notify::new(),
             cut: tokio::sync::watch::Sender::new(false),
             state: Mutex::new(State {
@@ -725,10 +607,7 @@ impl Relay {
                 hints_asked: HashSet::new(),
                 fetches: HashMap::new(),
                 queue: VecDeque::new(),
-                meter: Meter::default(),
                 failures: 0,
-                measuring: None,
-                speed: Vec::new(),
                 tally: Tally::default(),
                 pending: Vec::new(),
                 check: None,
@@ -834,8 +713,7 @@ impl Relay {
                         .await;
                 });
             }
-            let relay = self.clone();
-            self.runtime.spawn(async move { relay.uploads().await });
+            self.start_uploads();
         }
         Ok(Share {
             socket: path,
@@ -845,9 +723,6 @@ impl Relay {
         })
     }
 
-    /// B-2, B-31: waits at most `within` for the check's `open` to answer, for a CI job, whose
-    /// wrapper is set only once the org said it shares. What it found: answering, the org's
-    /// no, a stop with its line, or no answer yet.
     /// The lines the relay has said and no check's end has taken: for `hushrun build fetch`
     /// (B-36), which ends no check.
     /// What the relay's requests reach and carry: the org's base URL, the backend's origin, the
@@ -857,11 +732,11 @@ impl Relay {
     }
 
     /// B-70: the bearer token the relay's requests carry now (a CI job's ID token minted for the
-    /// org's URL), within `timeout`: what the backend's registry takes as a password for the same
-    /// caller.
-    pub(crate) fn bearer_now(&self, timeout: std::time::Duration) -> Result<String, String> {
+    /// org's URL), once its mint ends: what the backend's registry takes as a password for the
+    /// same caller.
+    pub(crate) fn bearer_now(&self) -> Result<String, String> {
         self.runtime
-            .block_on(self.client.bearer_now(timeout))
+            .block_on(self.client.bearer_now())
             .map_err(|f| f.line())
     }
 
@@ -869,8 +744,12 @@ impl Relay {
         std::mem::take(&mut self.state().lines)
     }
 
-    pub(crate) fn wait_open(&self, within: Duration) -> Opened {
-        let deadline = Instant::now() + within;
+    /// B-2, B-31: waits for the check's `open` to answer, for a CI job, whose wrapper is set only
+    /// once the org said it shares. ADR 0144: until it answers or fails (a server silent for
+    /// [`Tuning::open`] is one), however long that takes: whether a job shares never depends on
+    /// how fast its machine got to it. What it found: answering, the org's no, or a stop with its
+    /// line.
+    pub(crate) fn wait_open(&self) -> Opened {
         loop {
             // The phase alone: the state's lock is not held while this waits.
             let phase = self.state().phase_now(Instant::now()).clone();
@@ -880,14 +759,13 @@ impl Relay {
                 Phase::Stopped(Stop::Offline(why) | Stop::Refused(why)) => {
                     return Opened::Stopped(why);
                 }
-                Phase::Opening if Instant::now() >= deadline => return Opened::Unanswered,
                 Phase::Opening => std::thread::sleep(self.config.tuning.tick),
             }
         }
     }
 
     /// Accepts the wrappers' connections: one request each, each in its own thread, answered
-    /// within the wrapper's wait.
+    /// when its answer is known, with heartbeats until then (ADR 0144).
     #[cfg(unix)]
     fn serve(self: Arc<Relay>, listener: std::os::unix::net::UnixListener, stop: Arc<AtomicBool>) {
         for stream in listener.incoming() {
@@ -912,17 +790,45 @@ impl Relay {
         {
             return;
         }
-        let answer = match serde_json::from_str::<Request>(line.trim_end()) {
-            Ok(request) => {
-                let relay = self.clone();
-                self.runtime
-                    .block_on(async move { relay.answer(request).await })
-            }
-            Err(_) => Answer::None,
+        let Ok(request) = serde_json::from_str::<Request>(line.trim_end()) else {
+            let _ = (&stream).write_all(b"{\"answer\":\"none\"}\n");
+            return;
         };
-        let mut bytes = serde_json::to_vec(&answer).unwrap_or_default();
-        bytes.push(b'\n');
-        let _ = (&stream).write_all(&bytes);
+        // ADR 0144: while the answer is worked on, one space every heartbeat, so that the
+        // wrapper's wait bounds a relay that is frozen or gone and never one that is slow. The
+        // answer and the heartbeats are written under one lock: no space lands inside the line.
+        let written = std::sync::Mutex::new(false);
+        std::thread::scope(|scope| {
+            let heartbeats = scope.spawn(|| {
+                loop {
+                    std::thread::park_timeout(hushrun_build::relay::HEARTBEAT);
+                    let done = written.lock().unwrap_or_else(|p| p.into_inner());
+                    if *done || (&stream).write_all(b" ").is_err() {
+                        return;
+                    }
+                }
+            });
+            // However the answer ends, a panic included, the heartbeats stop: a wrapper whose
+            // answer panicked gets the connection's end, a miss, and never waits on a relay that
+            // only says it is working.
+            struct Over<'a>(&'a std::sync::Mutex<bool>, &'a std::thread::Thread);
+            impl Drop for Over<'_> {
+                fn drop(&mut self) {
+                    *self.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
+                    self.1.unpark();
+                }
+            }
+            let _over = Over(&written, heartbeats.thread());
+            let relay = self.clone();
+            let answer = self
+                .runtime
+                .block_on(async move { relay.answer(request).await });
+            let mut bytes = serde_json::to_vec(&answer).unwrap_or_default();
+            bytes.push(b'\n');
+            let mut done = written.lock().unwrap_or_else(|p| p.into_inner());
+            let _ = (&stream).write_all(&bytes);
+            *done = true;
+        });
     }
 
     /// One wrapper's request.
@@ -1224,8 +1130,8 @@ impl Relay {
     /// Go manifest names it: the program asks about every entry Go's cache misses, and most of
     /// them are local ones no server holds. The first Go fetch starts the prefetch of what the
     /// manifest names (a warm machine, whose `go` finds everything in its own cache, asks
-    /// nothing and downloads nothing); one that comes while it looks up waits for it, within
-    /// half what this machine's own last compile of the key took, and at most a second.
+    /// nothing and downloads nothing); one that comes while it looks up waits for it, however
+    /// long that takes (ADR 0144).
     ///
     /// B-80: Gradle's cache asks the same way, for an entry of kind `gradle/1` the check's Gradle
     /// manifest names: Gradle asks about every task its own cache misses.
@@ -1235,10 +1141,7 @@ impl Relay {
         key: Digest,
         local_ms: Option<u64>,
     ) -> Answer {
-        let wait = local_ms
-            .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
-            .min(GO_PREFETCH_WAIT);
-        let until = Instant::now() + wait;
+        // ADR 0144: no bound. Each loop below ends on what it waits for, whatever the time.
         // \[ADR 0111\] The cache program starts with COMMAND, as the check's `open`s go out: a
         // fetch that comes while one is under way (the policy, or this kind's manifest) waits for
         // it within the same bound as for the lookup below, else Go's first packages compiled
@@ -1249,12 +1152,15 @@ impl Relay {
                 let now = Instant::now();
                 let opening = matches!(state.phase_now(now), Phase::Opening);
                 let asking = *state.named_manifest(kind) == GoManifest::Asking;
-                if !(opening || asking) || now >= until {
+                if !(opening || asking) {
                     break;
                 }
             }
             tokio::time::sleep(self.config.tuning.tick).await;
         }
+        // The manifest is taken, and its prefetch marked as under way, under one lock: a fetch
+        // that came between the two found it taken and no prefetch looking up, and missed what
+        // the manifest named.
         let manifest = {
             let mut state = self.state();
             let now = Instant::now();
@@ -1264,7 +1170,10 @@ impl Relay {
             let got = matches!(state.named_manifest(kind), GoManifest::Got(_));
             if got && state.answering(now) {
                 match std::mem::replace(state.named_manifest(kind), GoManifest::Taken) {
-                    GoManifest::Got(manifest) => Some(manifest),
+                    GoManifest::Got(manifest) => {
+                        *state.named_prefetching(kind) = true;
+                        Some(manifest)
+                    }
                     _ => None,
                 }
             } else {
@@ -1272,9 +1181,16 @@ impl Relay {
             }
         };
         if let Some(manifest) = manifest {
-            *self.state().named_prefetching(kind) = true;
+            // However the prefetch ends, a panic included, it is no longer under way: a fetch
+            // waiting for it stops waiting.
+            struct Prefetched<'a>(&'a Relay, Kind);
+            impl Drop for Prefetched<'_> {
+                fn drop(&mut self) {
+                    *self.0.state().named_prefetching(self.1) = false;
+                }
+            }
+            let _prefetched = Prefetched(&self, kind);
             self.clone().prefetch_in(kind, manifest).await;
-            *self.state().named_prefetching(kind) = false;
         }
         let address = Relay::address_in(kind, &key);
         loop {
@@ -1291,7 +1207,7 @@ impl Relay {
                     Kind::Maven => state.maven_prefetching,
                     _ => state.go_prefetching,
                 };
-                if !prefetching || Instant::now() >= until {
+                if !prefetching {
                     return Answer::None;
                 }
             }
@@ -1346,28 +1262,24 @@ impl Relay {
     }
 
     /// B-60: whether the check's `cc/1` manifest for `platform` names the first key `step`,
-    /// waiting at most half what this machine's own last compile of it took (`local_ms`), and
-    /// at most [`CC_MANIFEST_WAIT`], for the check's `open` and the manifest to answer; the first
-    /// question of a platform asks for its manifest. The first question about a first key it
-    /// names starts the prefetch of what it names, and waits for its lookups. `false`, at once,
-    /// for a run that doesn't share `on`, a manifest that doesn't name it, or one that hasn't
-    /// answered within the wait.
+    /// waiting for the check's `open` and the manifest to answer, however long that takes (ADR
+    /// 0144); the first question of a platform asks for its manifest. The first question about a
+    /// first key it names starts the prefetch of what it names, and waits for its lookups.
+    /// `false`, at once, for a run that doesn't share `on`, or a manifest that doesn't name it
+    /// or failed.
     async fn platform_names(
         self: &Arc<Relay>,
         kind: Kind,
         step: &Digest,
         platform: &str,
-        local_ms: Option<u64>,
+        _local_ms: Option<u64>,
     ) -> bool {
         if !blocks::is_platform(platform) {
             return false;
         }
         let address = Relay::address_in(kind, step);
         let slot = (kind, platform.to_string());
-        let wait = local_ms
-            .map_or(cc_manifest_wait(), |ms| Duration::from_millis(ms) / 2)
-            .min(cc_manifest_wait());
-        let until = Instant::now() + wait;
+        // ADR 0144: no bound. Each loop below ends on what it waits for, whatever the time.
         let pairs = loop {
             {
                 let mut state = self.state();
@@ -1406,23 +1318,26 @@ impl Relay {
                     }
                     break taken;
                 }
-                if now >= until {
-                    return false;
-                }
             }
             tokio::time::sleep(self.config.tuning.tick).await;
         };
         match pairs {
             Some(pairs) => {
-                // Answering: the prefetch's lookups are this question's.
+                // Answering: the prefetch's lookups are this question's. However it ends, a
+                // panic included, it is no longer under way: the questions waiting for it stop.
+                struct Prefetched<'a>(&'a Relay);
+                impl Drop for Prefetched<'_> {
+                    fn drop(&mut self) {
+                        let mut state = self.0.state();
+                        state.cc_prefetching = state.cc_prefetching.saturating_sub(1);
+                    }
+                }
+                let _prefetched = Prefetched(self);
                 self.clone().prefetch_in(kind, pairs).await;
-                let mut state = self.state();
-                state.cc_prefetching = state.cc_prefetching.saturating_sub(1);
             }
             None => {
                 // Another question started the prefetch: what it looks up answers this one.
-                let until = Instant::now() + wait;
-                while self.state().cc_prefetching > 0 && Instant::now() < until {
+                while self.state().cc_prefetching > 0 {
                     tokio::time::sleep(self.config.tuning.tick).await;
                 }
             }
@@ -1722,11 +1637,22 @@ impl Relay {
         }
     }
 
+    /// ADR 0144: waits while the check's `open` is on the wire, until it answers or fails (its
+    /// server silent for [`Tuning::open`] is a failure): a question that comes before is
+    /// answered as one that comes after, so what a build reuses never depends on how fast its
+    /// first compiles started.
+    async fn opened(&self) {
+        while matches!(self.state().phase_now(Instant::now()), Phase::Opening) {
+            tokio::time::sleep(self.config.tuning.tick).await;
+        }
+    }
+
     // --- hints ---------------------------------------------------------------------------
 
     /// B-30: the shared store's hints of a first key, opened with it and written where
     /// downloaded hints live.
     async fn hints(self: Arc<Relay>, step: Digest) -> Answer {
+        self.opened().await;
         self.clone().prefetch_at_first_miss().await;
         self.hints_in(Kind::Rustc, step).await
     }
@@ -1787,6 +1713,7 @@ impl Relay {
         local_ms: Option<u64>,
     ) -> Answer {
         let _ = class;
+        self.opened().await;
         {
             let mut state = self.state();
             if !state.serving(Instant::now()) || state.sharing != Sharing::On {
@@ -1854,10 +1781,9 @@ impl Relay {
         key: Digest,
         step: Digest,
         address: Hex32,
-        local_ms: Option<u64>,
+        _local_ms: Option<u64>,
     ) -> Answer {
         let tuning = self.config.tuning;
-        let started = Instant::now();
         // A pack that arrived before anyone asked: open it now.
         let arrived = matches!(
             self.state().fetches.get(&address),
@@ -1869,7 +1795,7 @@ impl Relay {
         if arrived {
             return self.publish(key, step, address).await;
         }
-        let budget = {
+        {
             let mut state = self.state();
             let now = Instant::now();
             if !state.fetches.contains_key(&address) {
@@ -1890,7 +1816,6 @@ impl Relay {
                     },
                 );
             }
-            let speed = state.speed();
             let resting = !state.answering(now);
             let Some(fetch) = state.fetches.get(&address) else {
                 return Answer::None;
@@ -1898,40 +1823,13 @@ impl Relay {
             if matches!(fetch.state, Download::Dropped | Download::Published) {
                 return Answer::None;
             }
-            // Resting: a download not under way would be a new request.
+            // Resting after failures (B-26): a download not under way would be a new request.
             if resting && fetch.state == Download::Queued {
                 return Answer::None;
             }
-            // The cost: the smallest of the uploader's (scaled by this machine's speed), this
-            // machine's own last compile of the first key, and the ceiling.
-            let theirs = Duration::from_millis((f64::from(fetch.found.cost_ms) * speed) as u64);
-            let mut cost = theirs.min(tuning.most_cost);
-            if let Some(ms) = local_ms {
-                cost = cost.min(Duration::from_millis(ms));
-            }
-            let budget = cost / 2;
-            match state.meter.rate(now) {
-                None => {
-                    // No rate yet: the first fetch asked for runs to its end as the
-                    // measurement; every other one is "none" until a rate exists, unless it is
-                    // under way already.
-                    if fetch.state == Download::Queued
-                        && state.measuring.is_some_and(|m| m != address)
-                    {
-                        return Answer::None;
-                    }
-                    if state.measuring.is_none() {
-                        state.measuring = Some(address);
-                    }
-                }
-                Some(rate) => {
-                    // One that wouldn't finish within its budget is not started, nor waited
-                    // for: a miss, which counts as no failure.
-                    if state.to_finish(fetch, rate) >= budget {
-                        return Answer::None;
-                    }
-                }
-            }
+            // ADR 0144: waited for to its end, however long it takes; what the shared store
+            // holds is reused, whatever this machine's load or link. Nothing about how fast it
+            // goes decides whether it is waited for.
             if let Some(fetch) = state.fetches.get_mut(&address) {
                 fetch.waited = true;
             }
@@ -1946,8 +1844,7 @@ impl Relay {
                 state.queue.remove(at);
                 state.queue.push_front(address);
             }
-            budget
-        };
+        }
         self.pump();
         loop {
             tokio::time::sleep(tuning.tick).await;
@@ -1967,8 +1864,6 @@ impl Relay {
                 return Answer::None;
             }
             let resting = !state.answering(now);
-            let measuring = state.measuring == Some(address);
-            let rate = state.meter.rate(now);
             let Some(fetch) = state.fetches.get(&address) else {
                 return Answer::None;
             };
@@ -1977,21 +1872,11 @@ impl Relay {
                 Download::Dropped | Download::Published => return Answer::None,
                 Download::Queued | Download::Downloading => {}
             }
-            let elapsed = now.saturating_duration_since(started);
-            // Given up as soon as the projected finish passes half the cost, or, resting, while
-            // it hasn't started: no new request goes until the rest is over.
-            let projected = match rate {
-                Some(rate) => elapsed + state.to_finish(fetch, rate),
-                None => elapsed,
-            };
-            let queued_at_rest = resting && fetch.state == Download::Queued;
-            if projected > budget || elapsed >= budget || queued_at_rest {
+            // Resting after failures, while it hasn't started: no new request goes until the
+            // rest is over (B-26). A download under way goes on, and is waited for.
+            if resting && fetch.state == Download::Queued {
                 if let Some(fetch) = state.fetches.get_mut(&address) {
                     fetch.waited = false;
-                }
-                // A give-up is no failure: nothing errored (B-26).
-                if !measuring && let Some(fetch) = state.fetches.get(&address) {
-                    fetch.cancel.store(true, Ordering::Relaxed);
                 }
                 return Answer::None;
             }
@@ -2042,10 +1927,6 @@ impl Relay {
                     fetch.cancel.clone(),
                 ));
                 running += 1;
-            }
-            let now = Instant::now();
-            for _ in &starts {
-                state.meter.start(now);
             }
         }
         for (address, kind, found, looked_up, cancel) in starts {
@@ -2130,7 +2011,6 @@ impl Relay {
                 std::io::Write::write_all(&mut file, &chunk)
                     .map_err(|err| Failure::Failed(err.to_string()))?;
                 let mut state = self.state();
-                state.meter.bytes += chunk.len() as u64;
                 state.tally.bytes_down += chunk.len() as u64;
                 if let Some(fetch) = state.fetches.get_mut(&address) {
                     fetch.bytes = got;
@@ -2148,10 +2028,6 @@ impl Relay {
         let unreadable = matches!(&outcome, Err(Failure::Failed(why)) if why == "unreadable" || why.starts_with("longer"));
         {
             let mut state = self.state();
-            state.meter.stop(now, outcome.is_ok());
-            if state.measuring == Some(address) {
-                state.measuring = None;
-            }
             match &outcome {
                 Ok(()) => {
                     state.succeeded();
@@ -2291,17 +2167,18 @@ impl Relay {
     }
 
     /// B-34: whether a server the run belongs to still serves the downloaded block `key` with
-    /// `outputs`, for a wrapper whose entry is stale, answered within the block's budget, half
-    /// what its compile took. The server can't be reached (an entry of any age counts) only when
-    /// `open` failed, or hasn't answered within that budget. Once `open` has answered, a stale
-    /// entry is never enough: the run's lookup of stale vouches answers, or it is a miss.
+    /// `outputs`, for a wrapper whose entry is stale: once `open` has answered, the run's lookup
+    /// of stale vouches answers, or it is a miss; the server can't be reached (an entry of any
+    /// age counts) only when `open` failed. ADR 0144: no budget; the answer waits for `open` and
+    /// the lookup, however long they take, so that it never depends on the machine's speed.
+    /// Resting after failures (B-26), a block no lookup named is a miss at once: no new request
+    /// goes until the rest is over.
     async fn vouch(self: Arc<Relay>, kind: Kind, key: Digest, outputs: Hex32) -> Answer {
         // A run from a saved fetch reaches no server (B-36).
         if self.saved {
             return Answer::Offline;
         }
         let address = Relay::address_in(kind, &key);
-        let deadline = Instant::now() + self.vouch_budget(&key);
         // A lookup naming it was under way since this question came.
         let mut named = false;
         loop {
@@ -2311,7 +2188,6 @@ impl Relay {
                 match state.phase_now(now).clone() {
                     Phase::Stopped(Stop::Offline(_)) => return Answer::Offline,
                     Phase::Stopped(_) => return Answer::None,
-                    Phase::Opening if now >= deadline => return Answer::Offline,
                     Phase::Opening => {}
                     Phase::Resting(_) | Phase::Answering => {
                         if let Some(served) = state.vouched.get(&address) {
@@ -2326,7 +2202,9 @@ impl Relay {
                         } else if named {
                             // The lookup that named it got no answer: a miss.
                             return Answer::None;
-                        } else if !state.vouching && state.answering(now) {
+                        } else if !state.answering(now) {
+                            return Answer::None;
+                        } else if !state.vouching {
                             // A block no lookup of the run named: one more, once none is under
                             // way.
                             state.vouching = true;
@@ -2335,9 +2213,6 @@ impl Relay {
                             let relay = self.clone();
                             self.runtime
                                 .spawn(async move { relay.ask_vouches(Some((kind, key))).await });
-                        }
-                        if now >= deadline {
-                            return Answer::None;
                         }
                     }
                 }
@@ -2553,20 +2428,6 @@ impl Relay {
             .collect()
     }
 
-    /// How long a question about `key`'s vouch may take (B-26, B-34): half what its compile
-    /// took, as the store's record says, under the ceiling of a fetch's cost.
-    fn vouch_budget(&self, key: &Digest) -> Duration {
-        let cost_ms = self
-            .config
-            .store
-            .block(key)
-            .ok()
-            .flatten()
-            .and_then(|block| block.description["rustc_ms"].as_u64())
-            .unwrap_or(0);
-        Duration::from_millis(cost_ms).min(self.config.tuning.most_cost) / 2
-    }
-
     // --- what was built ------------------------------------------------------------------
 
     /// B-60: the C and C++ objects the run's log says were stored with nothing keeping them on
@@ -2704,13 +2565,6 @@ impl Relay {
             if state.phase == Phase::Opening {
                 state.pending.push(request);
                 return;
-            }
-            // The machine's speed: its compile against the uploader's, where the server knew one.
-            if let Some((found, _)) = state.found.get(&address)
-                && found.cost_ms > 0
-            {
-                let sample = cost_ms as f64 / f64::from(found.cost_ms);
-                state.speed.push(sample);
             }
             // A run that uploads nothing (a fetch's, B-36; an agent token's in CI) leaves no
             // marker nobody could send.
@@ -3007,21 +2861,25 @@ impl Relay {
         self.sweep_cc_built(entries);
         // B-31: no ID token is minted once the end has begun.
         self.client.ending(true);
-        let mut end = self.end();
-        if let Ending::Bake { within, .. } = ending {
-            end.bake = Some(within);
-        }
-        // One deadline for everything after the command (B-29, B-31): uploads are cut off at
-        // `cut`, and `close` goes within what is left before `deadline`.
+        let end = self.end();
+        // ADR 0144 (B-29, B-31): unless a stop signal came, nothing after the command has a
+        // deadline. Every upload this run built goes on, on any machine, until it is done or an
+        // answer (or a server's silence) puts it off; then `close` names what went up. What the
+        // manifest leaves out depends on the backend's answers alone, never on the machine's
+        // speed. Asked to stop (B-49), uploads are cut off at once and `close` gets its short
+        // grace.
         let wait = upload::wait_at_end(&self.config.tuning, &end);
         let started = Instant::now();
-        let cut = started + wait.uploads;
-        let deadline = started + wait.total;
+        let cut = wait.map(|wait| started + wait.uploads);
+        let deadline = wait.map(|wait| started + wait.total);
+        if cut.is_none() {
+            self.say_uploading();
+        }
         let relay = self.clone();
         self.runtime.block_on(async move {
             // B-34: the lookup of stale vouches still in flight ends, so that what it learnt is
             // written; then the downloaded blocks this check reused that no lookup answered for
-            // are asked about once more, beside the last uploads and within the same cut.
+            // are asked about once more, beside the last uploads (cut off with them on a stop).
             let renewals = async {
                 let ask = async {
                     while relay.state().vouching {
@@ -3032,12 +2890,19 @@ impl Relay {
                         relay.ask_about(&reused).await;
                     }
                 };
-                let _ = tokio::time::timeout_at(cut.into(), ask).await;
+                match cut {
+                    Some(cut) => {
+                        let _ = tokio::time::timeout_at(cut.into(), ask).await;
+                    }
+                    None => ask.await,
+                }
             };
             let uploads = async {
-                // CI: the loop goes on claiming what waits, since the store goes with the job.
-                if end.in_ci {
-                    upload::drain(&relay, cut).await;
+                // The loop goes on claiming what this run built until none is left to go, on
+                // any machine: a CI job's store goes with the job, and every other run's would
+                // leave its manifest short.
+                if cut.is_none() {
+                    upload::drain(&relay, None).await;
                 }
                 relay.ending.store(true, Ordering::Relaxed);
                 upload::settle(&relay, cut, deadline).await;
@@ -3058,7 +2923,9 @@ impl Relay {
             !matches!(state.phase, Phase::Stopped(_) | Phase::Opening) && state.policy.is_some()
         };
         let left = deadline
-            .saturating_duration_since(Instant::now())
+            .map_or(self.config.tuning.close, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            })
             .min(self.config.tuning.close);
         // B-75: a bake's build closes only a whole build: one that failed, was stopped, or left
         // blocks it built unsent would name the commit with a part of its blocks, and every later
@@ -3167,13 +3034,6 @@ impl Relay {
                 let _ = futures_util::future::join3(rust, go, cc).await;
             });
         }
-        if end.in_ci {
-            let mut spent = self
-                .waited
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *spent += started.elapsed();
-        }
         // Downloads nobody opened are dropped and counted; the run's folder goes.
         let mut state = self.state();
         for fetch in state.fetches.values() {
@@ -3226,7 +3086,8 @@ impl Relay {
                 self.config.keep_days,
             ));
         }
-        if waiting > 0 && end.in_ci && state.uploads {
+        let in_ci = matches!(self.config.caller, Caller::Ci { .. });
+        if waiting > 0 && in_ci && state.uploads {
             // B-31: the job's store goes with the job.
             lines.push(format!(
                 "build: {waiting} {} uploaded before the job's command ended",
@@ -3237,7 +3098,7 @@ impl Relay {
                 },
             ));
         } else if waiting > 0
-            && !end.in_ci
+            && !in_ci
             && state.uploads
             && !matches!(state.phase, Phase::Stopped(Stop::Off(_)))
         {
@@ -3257,31 +3118,34 @@ impl Relay {
 
     /// What the end of this check's command waits by (B-31).
     fn end(&self) -> upload::End {
-        let in_ci = matches!(self.config.caller, Caller::Ci { .. });
-        let trusted = in_ci
-            && self
-                .state()
-                .policy
-                .as_ref()
-                .is_some_and(Policy::writes_trusted);
-        let outbox = Outbox::new(&self.config.store);
-        let cost_ms: u64 = outbox
-            .waiting()
-            .iter()
-            .filter(|m| m.by == self.by)
-            .chain(outbox.claimed(&self.run).iter())
-            .map(|m| m.cost_ms)
-            .sum();
         upload::End {
-            in_ci,
-            stopping: STOPPING.load(Ordering::SeqCst),
-            trusted,
-            waiting_cost: Duration::from_millis(cost_ms),
-            waited: *self
-                .waited
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            bake: None,
+            stopping: STOPPING.load(Ordering::SeqCst) || self.asked_to_stop.load(Ordering::SeqCst),
+        }
+    }
+
+    /// B-49: this relay's run was asked to stop, as a stop signal asks every run of the process:
+    /// its end then cuts its uploads off. For a test, which can't send this process a signal
+    /// without stopping every other test's run.
+    #[cfg(test)]
+    pub(crate) fn ask_to_stop(&self) {
+        self.asked_to_stop.store(true, Ordering::SeqCst);
+    }
+
+    /// ADR 0144: the line a person watching sees while the end of the command waits for this
+    /// run's uploads, when any is left: on a terminal only, since the run's own lines come after.
+    fn say_uploading(&self) {
+        use std::io::IsTerminal as _;
+        if !std::io::stderr().is_terminal() {
+            return;
+        }
+        let outbox = Outbox::new(&self.config.store);
+        let left = outbox.waiting().iter().filter(|m| m.by == self.by).count()
+            + outbox.claimed(&self.run).len();
+        if left > 0 && self.state().uploads {
+            eprintln!(
+                "hushrun: build: uploading {left} {} before the run ends (Ctrl-C leaves the rest for the next run)",
+                if left == 1 { "block" } else { "blocks" }
+            );
         }
     }
 

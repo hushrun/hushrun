@@ -10,7 +10,7 @@
 //!
 //! **Each request is a state machine** of two states, `open` and `answered`, moved by one
 //! compare-and-set (`Program::answer`): the handler's answer, the answer a panic leaves
-//! (`catch_unwind`), and the watchdog's for a request open past its budget all race for it, and
+//! (`catch_unwind`), and the watchdog's for a request silent past its budget all race for it, and
 //! only the first is written. A `get` that fails in any way is a miss; a `put` always answers a
 //! file holding the body, in Go's cache, else in a folder of the program's own.
 //!
@@ -49,13 +49,13 @@ use crate::relay::{self, Answer, Problem, Request};
 use crate::session::{Current, Entry, GoEntry};
 use crate::store::{NewFile, Store};
 
-/// The longest a `get` waits for the relay (B-40's ceiling: half of a fetch's most cost).
-const RELAY_WAIT: Duration = Duration::from_secs(30);
-/// How long a question the relay answers from what it holds may take: whether the run still
-/// shares, a notice.
-const QUICK_WAIT: Duration = Duration::from_secs(2);
-/// A request still open this long is answered by the watchdog: a miss for a `get`, the body in a
-/// file of the program's own for a `put`.
+/// The longest the program waits on a relay that says nothing (B-40, ADR 0144): a relay working
+/// on an answer says so every heartbeat, so this bounds a frozen or gone relay only, and every
+/// question waits the same, whatever its compile costs.
+const RELAY_WAIT: Duration = crate::relay::WAIT;
+/// A request with no sign of life this long is answered by the watchdog: a miss for a `get`, the
+/// body in a file of the program's own for a `put`. Its handler shows life while it works: each
+/// heartbeat of the relay it waits on (ADR 0144).
 const BUDGET: Duration = Duration::from_secs(40);
 /// How often the watchdog looks.
 const TICK: Duration = Duration::from_millis(50);
@@ -124,12 +124,59 @@ enum Fallback {
     Close,
 }
 
+/// What the watchdog and `close` read the time from: the wall clock, or a test's, which moves only
+/// when the test moves it, so that whether a request is late is decided by the test's events and
+/// never by how fast the machine ran.
+#[derive(Clone)]
+pub(crate) enum Clock {
+    Wall,
+    #[cfg(test)]
+    Manual(Arc<Mutex<Instant>>),
+}
+
+impl Clock {
+    fn now(&self) -> Instant {
+        match self {
+            Clock::Wall => Instant::now(),
+            #[cfg(test)]
+            Clock::Manual(at) => *lock(at),
+        }
+    }
+}
+
 /// One request: open, then answered once (rule 1).
 struct Slot {
     id: i64,
     answered: AtomicBool,
-    since: Instant,
+    /// Its last sign of life: when it was read, then each heartbeat of the relay its handler
+    /// waits on (ADR 0144).
+    alive: Mutex<Instant>,
     fallback: Fallback,
+}
+
+impl Slot {
+    fn new(id: i64, fallback: Fallback, now: Instant) -> Slot {
+        Slot {
+            id,
+            answered: AtomicBool::new(false),
+            alive: Mutex::new(now),
+            fallback,
+        }
+    }
+
+    /// How long, at `now`, it has shown no sign of life.
+    fn silent_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(*lock(&self.alive))
+    }
+
+    fn touch(&self, now: Instant) {
+        *lock(&self.alive) = now;
+    }
+}
+
+std::thread_local! {
+    /// The request this handler thread works on: the relay's heartbeats it reads are its life.
+    static WORKING: std::cell::RefCell<Option<Arc<Slot>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The program's output, which a program that failed to start hands to the one that replaces it.
@@ -184,8 +231,6 @@ struct Audit {
 struct Waits {
     budget: Duration,
     relay: Duration,
-    /// A question the relay answers from what it holds.
-    quick: Duration,
 }
 
 /// Faults a test injects into handlers (never in a release build).
@@ -220,6 +265,9 @@ struct Program {
     open: Mutex<HashMap<i64, Arc<Slot>>>,
     /// Handlers still running, answered or not: `close` waits for them, within the budget.
     busy: AtomicUsize,
+    /// The handlers' last sign of life, any of them: a request read, a heartbeat of the relay one
+    /// waits on, a handler done (ADR 0144). `close` waits for busy handlers while there is one.
+    alive: Arc<Mutex<Instant>>,
     /// When each action missed, for its compile's cost (the time between Go's miss and its put).
     misses: Mutex<HashMap<[u8; 32], Instant>>,
     /// The size of each body put by action: Go puts a compile's output (`Subkey(id, "stdout")`)
@@ -233,6 +281,8 @@ struct Program {
     env: HashMap<String, OsString>,
     /// `close` was answered, or the input ended: the watchdog stops.
     done: AtomicBool,
+    /// What the watchdog and `close` read the time from ([`Clock`]).
+    clock: Clock,
     parent: Parent,
     /// What opens a baked store's packs (B-64): the binary's, when it installed one.
     unseal: Option<&'static dyn crate::baked::Unseal>,
@@ -328,6 +378,17 @@ pub(crate) fn serve_with(
     env: HashMap<String, OsString>,
     parent: Parent,
 ) {
+    serve_clocked(input, output, env, parent, Clock::Wall);
+}
+
+/// [`serve_with`], its watchdog and `close` reading the time from `clock`.
+pub(crate) fn serve_clocked(
+    input: impl BufRead,
+    output: Box<dyn Write + Send>,
+    env: HashMap<String, OsString>,
+    parent: Parent,
+    clock: Clock,
+) {
     // A panic while starting (a session's file that can't be read as expected, say) must not
     // end the process before `close`, which fails the whole `go` command: the program starts
     // again with no session, Go's own cache only (B-47).
@@ -353,7 +414,7 @@ pub(crate) fn serve_with(
             )
         }
     };
-    let program = Arc::new(program);
+    let program = Arc::new(Program { clock, ..program });
     program.write(&json!({"ID": 0, "KnownCommands": ["get", "put", "close"]}));
     program.start_background();
     let watchdog = {
@@ -403,7 +464,6 @@ impl Program {
         let mut waits = Waits {
             budget: BUDGET,
             relay: RELAY_WAIT,
-            quick: QUICK_WAIT,
         };
         #[allow(unused_mut)]
         let mut faults = Faults::default();
@@ -415,7 +475,6 @@ impl Program {
             {
                 waits.budget = Duration::from_millis(ms);
                 waits.relay = Duration::from_millis(ms / 2);
-                waits.quick = Duration::from_millis(ms / 4);
             }
             if let Some(text) = get(FAULT_VAR).and_then(|v| v.into_string().ok()) {
                 for part in text.split(',') {
@@ -444,6 +503,7 @@ impl Program {
             out: Mutex::new(output),
             open: Mutex::new(HashMap::new()),
             busy: AtomicUsize::new(0),
+            alive: Arc::new(Mutex::new(Instant::now())),
             misses: Mutex::new(HashMap::new()),
             put_sizes: Mutex::new(HashMap::new()),
             audits: Mutex::new(HashMap::new()),
@@ -453,6 +513,7 @@ impl Program {
             faults,
             env,
             done: AtomicBool::new(false),
+            clock: Clock::Wall,
             parent,
         }
     }
@@ -582,12 +643,7 @@ impl Program {
                 Ok(Next::Closed) => return,
                 Ok(Next::End) => break,
                 Err(_) => {
-                    let slot = Slot {
-                        id,
-                        answered: AtomicBool::new(false),
-                        since: Instant::now(),
-                        fallback: Fallback::Miss,
-                    };
+                    let slot = Slot::new(id, Fallback::Miss, self.clock.now());
                     let _ = self.answer(&slot, json!({"Err": "the program failed to read it"}));
                 }
             }
@@ -656,12 +712,7 @@ impl Program {
                 Asked::Close => Fallback::Close,
                 Asked::Get { .. } | Asked::Bad(_) => Fallback::Miss,
             };
-            let slot = Arc::new(Slot {
-                id: wire.id,
-                answered: AtomicBool::new(false),
-                since: Instant::now(),
-                fallback,
-            });
+            let slot = Arc::new(Slot::new(wire.id, fallback, self.clock.now()));
             if closing {
                 self.close(&slot);
                 return Next::Closed;
@@ -672,17 +723,21 @@ impl Program {
             let nth = self.nth(&asked);
             lock(&self.open).insert(slot.id, slot.clone());
             self.busy.fetch_add(1, Ordering::AcqRel);
+            *lock(&self.alive) = self.clock.now();
             let program = self.clone();
             let handler_slot = slot.clone();
             let spawned = std::thread::Builder::new()
                 .name("hushrun-gocache".into())
                 .spawn(move || {
+                    WORKING.with(|working| *working.borrow_mut() = Some(handler_slot.clone()));
                     let handled = catch_unwind(AssertUnwindSafe(|| {
                         program.handle(&handler_slot, asked, nth)
                     }));
+                    WORKING.with(|working| *working.borrow_mut() = None);
                     if handled.is_err() {
                         program.fall_back(&handler_slot);
                     }
+                    *lock(&program.alive) = program.clock.now();
                     program.busy.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {
@@ -694,11 +749,17 @@ impl Program {
         Next::Go
     }
 
-    /// Waits for the handlers still running, at most the budget: the watchdog answers what they
-    /// don't.
+    /// Waits for the handlers still running, however long they take, while they show life: a
+    /// handler done, or a heartbeat of the relay one waits on, within the budget (ADR 0144).
+    /// Handlers silent past it are hung; the watchdog answers what they left open.
     fn drain(&self) {
-        let deadline = Instant::now() + self.waits.budget + TICK * 4;
-        while self.busy.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+        while self.busy.load(Ordering::Acquire) > 0
+            && self
+                .clock
+                .now()
+                .saturating_duration_since(*lock(&self.alive))
+                < self.waits.budget + TICK * 4
+        {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -726,7 +787,7 @@ impl Program {
             std::thread::sleep(TICK);
             let late: Vec<Arc<Slot>> = lock(&self.open)
                 .values()
-                .filter(|slot| slot.since.elapsed() >= self.waits.budget)
+                .filter(|slot| slot.silent_for(self.clock.now()) >= self.waits.budget)
                 .cloned()
                 .collect();
             for slot in late {
@@ -738,7 +799,7 @@ impl Program {
     fn handle(&self, slot: &Slot, asked: Asked, nth: u64) {
         match asked {
             Asked::Get { action } => {
-                self.fault_get(nth);
+                self.fault_get(nth, slot);
                 let (value, served) = self.get(&action);
                 // What serving from the store records happens only when Go got that answer.
                 if self.answer(slot, value)
@@ -780,22 +841,28 @@ impl Program {
         0
     }
 
+    /// A test's faults, keyed to events, never to time: a hung handler holds until the program
+    /// is done; a slow one goes on only once the watchdog has answered its request, then answers
+    /// too, an answer that must never be written.
     #[cfg(debug_assertions)]
-    fn fault_get(&self, n: u64) {
+    fn fault_get(&self, n: u64, slot: &Slot) {
         if self.faults.panic_get == Some(n) {
             panic!("the test's panic: a get");
         }
         if self.faults.hang_get == Some(n) {
-            std::thread::sleep(Duration::from_secs(3600));
+            while !self.done.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
         }
-        // Slower than the budget, then answering: the watchdog has answered it already.
         if self.faults.slow_get == Some(n) {
-            std::thread::sleep(self.waits.budget * 2);
+            while !slot.answered.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
         }
     }
 
     #[cfg(not(debug_assertions))]
-    fn fault_get(&self, _: u64) {
+    fn fault_get(&self, _: u64, _: &Slot) {
         let _ = &self.faults;
     }
 
@@ -890,10 +957,7 @@ impl Program {
             key,
             local_ms: store.step_cost(&key),
         };
-        let wait = store.step_cost(&key).map_or(self.waits.relay, |ms| {
-            (Duration::from_millis(ms) / 2 + self.waits.quick).min(self.waits.relay)
-        });
-        match self.ask(&asked, wait) {
+        match self.ask(&asked, self.waits.relay) {
             Some(Answer::Ready { key: got }) if got == key => {
                 self.serve(current, &store, &key, action, true, at)
             }
@@ -954,15 +1018,9 @@ impl Program {
         let outputs = outputs_of(file.size, &file.sha256);
         let vouch = Request::GoVouch { key: *key, outputs };
         let cost = block.description["rustc_ms"].as_u64().unwrap_or(0);
-        let vouch_wait = (Duration::from_millis(cost) / 2 + self.waits.quick).min(self.waits.relay);
         let reusable =
             current.may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
-                let wait = if matches!(request, Request::Sharing) {
-                    self.waits.quick
-                } else {
-                    vouch_wait
-                };
-                self.ask(request, wait)
+                self.ask(request, self.waits.relay)
             });
         if !reusable {
             return None;
@@ -1359,22 +1417,26 @@ impl Program {
             return None;
         }
         let share = self.current.as_ref()?.share.relay()?;
-        let answer = relay::ask(&share.socket, request, wait);
+        // Each heartbeat of a relay still working on the answer is this request's life.
+        let answer = relay::ask_alive(&share.socket, request, wait, &mut || {
+            let now = self.clock.now();
+            *lock(&self.alive) = now;
+            WORKING.with(|working| {
+                if let Some(slot) = working.borrow().as_ref() {
+                    slot.touch(now);
+                }
+            });
+        });
+        // No answer and no heartbeat for the whole wait: the relay is frozen or gone (ADR 0144).
         if answer.is_none() {
-            // A fetch's wait can run out on a relay that is only slow (a large download): it is
-            // down only when a quick question gets no answer either.
-            let slow_fetch = matches!(request, Request::GoFetch { .. })
-                && relay::ask(&share.socket, &Request::Sharing, self.waits.quick).is_some();
-            if !slow_fetch {
-                self.set_relay_down();
-            }
+            self.set_relay_down();
         }
         answer
     }
 
-    /// [`Program::ask`] within the quick wait.
+    /// [`Program::ask`] within the relay's wait: every question waits the same.
     fn ask_quick(&self, request: &Request) -> Option<Answer> {
-        self.ask(request, self.waits.quick)
+        self.ask(request, self.waits.relay)
     }
 
     /// Whether a call to the run's relay failed or timed out, in this `go` command or in an
@@ -1410,7 +1472,7 @@ impl Program {
         let Some(share) = self.current.as_ref().and_then(|c| c.share.relay()) else {
             return;
         };
-        if !relay::tell(&share.socket, request, self.waits.quick) {
+        if !relay::tell(&share.socket, request, self.waits.relay) {
             self.set_relay_down();
         }
     }
