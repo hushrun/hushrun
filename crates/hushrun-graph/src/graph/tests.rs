@@ -830,9 +830,12 @@ fn a_name_with_no_path_is_its_own_modules_item_first() {
     // A path before the name (`super::`) resolves it elsewhere: the local item shadows nothing.
     let fake = Fake {
         files: &[
-            ("src/lib.rs", "mod inner;
+            (
+                "src/lib.rs",
+                "mod inner;
 pub fn gated() {}
-"),
+",
+            ),
             (
                 "src/inner.rs",
                 "fn gated() {}
