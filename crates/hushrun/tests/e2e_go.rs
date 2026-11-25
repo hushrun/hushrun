@@ -30,10 +30,6 @@ use fixtures::*;
 use repo::Repo;
 
 impl Repo {
-    fn remove(&self, path: &str) {
-        std::fs::remove_file(self.repo.join(path)).expect("remove");
-    }
-
     /// `go test -json` with everything run, outside hushrun and Go's own cache: what fails.
     fn truth(&self, flags: &[&str]) -> BTreeSet<String> {
         let mut cmd = Command::new("go");
