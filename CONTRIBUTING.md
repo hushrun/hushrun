@@ -53,6 +53,17 @@ binaries, and nearly all of its test time.
 | anything in `crates/hushrun/src/` | all 108: 25 to 40 minutes on Linux, about 45 on macOS |
 | `Cargo.lock`, `rust-toolchain.toml` or a build script | all 108 |
 
+With `tests.unit: test` ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)), which
+`hushrun.yaml` doesn't turn on yet, a Rust test is reused on its own when nothing it can reach
+changed, by a static map made with rust-analyzer. The integration tests still start the binary, so
+they still read all of `crates/hushrun/src/`. Only the unit tests narrow:
+
+| A pull request that changes | runs, with `unit: test` |
+| --- | --- |
+| one adapter, such as `crates/hushrun/src/units/gradle.rs` | the binary's unit tests that reach it (about 290 of 751), the 80 integration binaries, and the audit |
+| one module of a library crate, such as `crates/hushrun-core/src/glob.rs` | that crate's tests that reach it (54 of 171), the binary's unit tests that reach it (about 350 of 751), the integration binaries of the crates that link it, and the audit |
+| anything, on a machine without rust-analyzer | the same as the table above, and the log says `rustup component add rust-analyzer` |
+
 So a pull request that changes `crates/hushrun/src/` runs every test binary on every push, on both
 systems. That is reuse working: each of those tests runs the binary that changed. The macOS job is
 the longest, so that is where it shows. To keep a pull request from running more than it must:

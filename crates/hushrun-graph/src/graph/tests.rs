@@ -117,6 +117,14 @@ impl Fake<'_> {
         test: &str,
         external: &dyn Fn(&str, &str, &str) -> Option<crate::external::Macro>,
     ) -> Result<BTreeSet<String>, String> {
+        self.reached_with(test, external).map(|r| r.files)
+    }
+
+    fn reached_with(
+        &self,
+        test: &str,
+        external: &dyn Fn(&str, &str, &str) -> Option<crate::external::Macro>,
+    ) -> Result<Reached, String> {
         let g = self.graph(external);
         let all: BTreeSet<String> = self.files.iter().map(|(p, _)| p.to_string()).collect();
         g.reach(test, &all, &all)
@@ -436,6 +444,51 @@ fn a_procedural_macro_of_the_workspace_falls_back() {
     let all = set(&["src/lib.rs"]);
     let why = g.reach("t", &all, &all).unwrap_err();
     assert!(why.contains("procedural macro of the workspace"), "{why}");
+}
+
+// covers: C-151
+#[test]
+fn a_marked_function_s_own_command_is_trusted_but_never_a_binary_it_names() {
+    let files: &[(&str, &str)] = &[(
+        "tests/run.rs",
+        "#[doc(alias = \"hushrun::starts_no_workspace_binary\")]\nfn tool(p: &str) { Command::new(p); }\n#[doc(alias = \"hushrun::starts_no_workspace_binary\")]\nfn named() { Command::new(env!(\"CARGO_BIN_EXE_hushrun\")); }\n#[doc(alias = \"hushrun::starts_no_workspace_binary\")]\nfn itself() { std::env::current_exe(); }\nfn bare(p: &str) { Command::new(p); }\n#[test]\nfn uses_tool() { tool(\"gradle\"); }\n#[test]\nfn uses_named() { named(); }\n#[test]\nfn uses_itself() { itself(); }\n#[test]\nfn uses_bare() { bare(\"x\"); }\n",
+    )];
+    let symbols: &[(&str, &str)] = &[
+        ("tool", "tool()."),
+        ("named", "named()."),
+        ("itself", "itself()."),
+        ("bare", "bare()."),
+        ("uses_tool", "uses_tool()."),
+        ("uses_named", "uses_named()."),
+        ("uses_itself", "uses_itself()."),
+        ("uses_bare", "uses_bare()."),
+        ("p", "local 1"),
+        ("new", "rust-analyzer cargo std 1.0 process/Command#new()."),
+        ("Command", "rust-analyzer cargo std 1.0 process/Command#"),
+        (
+            "current_exe",
+            "rust-analyzer cargo std 1.0 env/current_exe().",
+        ),
+        ("env", "rust-analyzer cargo core 1.0 macros/builtin/env!"),
+        ("doc", "rust-analyzer cargo core 1.0 doc:"),
+        ("alias", ""),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+    ];
+    let fake = Fake {
+        files,
+        symbols,
+        at: &[],
+    };
+    let reached = fake.reached_with("uses_tool", &|_, _, _| None).unwrap();
+    assert_eq!(reached.trusted, ["tests/run.rs:1 `tool`"]);
+    for test in ["uses_named", "uses_itself"] {
+        let why = fake.reach(test).unwrap_err();
+        assert!(
+            why.contains("marker of its function doesn't cover"),
+            "{test}: {why}"
+        );
+    }
+    assert!(fake.reach("uses_bare").is_err());
 }
 
 // covers: C-151

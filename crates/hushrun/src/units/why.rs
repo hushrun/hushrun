@@ -630,6 +630,13 @@ fn explain_test(
         says(out, Decision::Runs, "not-kept", why.into());
         return;
     }
+    // \[C-151\] A spawn the map trusted, by its function's marker.
+    if let Some(marked) = row.and_then(|r| r.trusted.as_deref()) {
+        out.detail.push(format!(
+            "it starts programs through {marked}, marked `{}`: the static map takes those to start no binary of the workspace, as that function's own code must make sure of",
+            hushrun_graph::items::MARKER
+        ));
+    }
     let seen = at.shared.test_seen(at.unit, at.id);
     // \[C-146\] A test whose adapter maps it: the list its row keeps, the map's of its last run
     // here, with what its test file's keys hold of what isn't a file; none, its test file's.

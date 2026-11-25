@@ -170,6 +170,7 @@ fn sent_tests(
             not_followed: BTreeSet::new(),
             not_kept: None,
             list: list.clone(),
+            trusted: None,
         };
         mapped.tests.insert("test_ok".into(), row(State::Passed));
         mapped.tests.insert(
@@ -556,6 +557,7 @@ fn a_test_not_followed_keeps_its_file_from_being_reused_whole_for_either_unit() 
             }]),
             not_kept: None,
             list: None,
+            trusted: None,
         },
     );
     map.units.insert("tests/test_a.py".into(), mapped);
@@ -825,6 +827,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         not_followed: BTreeSet::new(),
         not_kept: None,
         list: None,
+        trusted: None,
     };
     // \[C-33\] A run that reused nothing took a second here: what reuse can save at most.
     let mut map = store::Map {
@@ -1082,6 +1085,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
         not_followed: BTreeSet::new(),
         not_kept: None,
         list: None,
+        trusted: None,
     };
     let mut map = store::Map::default();
     for (unit, n) in [("tests/test_a.py", 25_000), ("tests/test_b.py", 25_001)] {
@@ -1156,6 +1160,7 @@ fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
         not_followed: BTreeSet::new(),
         not_kept: None,
         list: None,
+        trusted: None,
     };
     // \[C-33\] A run that reused nothing took a second here: what reuse can save at most.
     let mut map = store::Map {

@@ -2590,6 +2590,7 @@ fn decide(
         not_kept: _,
         test_lists,
         notes: adapter_notes,
+        trusted,
     } = read;
     let mut seen = seen;
     // \[C-39, C-10\] A test file reused whole whose adapter told none of its tests (it left the
@@ -3082,6 +3083,7 @@ fn decide(
                                 not_followed: BTreeSet::new(),
                                 not_kept: None,
                                 list,
+                                trusted: None,
                             },
                         ));
                     }
@@ -3115,6 +3117,7 @@ fn decide(
                                 &mode.words,
                             ),
                             list,
+                            trusted: trusted.get(unit.as_str()).and_then(|t| t.get(id)).cloned(),
                         },
                     ))
                 })

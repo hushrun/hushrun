@@ -51,7 +51,10 @@ narrower than can be shown.
      that name that the identifier's place in a path can name.
    - A test that can start a binary of the workspace falls back: `env!("CARGO_BIN_EXE_…")`,
      `current_exe`, `cargo_bin`, and `Command::new` of anything but a literal that names no
-     workspace binary and holds no path.
+     workspace binary and holds no path. A function marked
+     `#[doc(alias = "hushrun::starts_no_workspace_binary")]` promises its own `Command::new` starts
+     none, and must check that at run time: the marker is inert, needs no dependency, sits next to
+     what it promises where review sees it, and never covers a binary named outright.
 
 3. **A test's key** (C-146) is made of what its binary's key holds (its files, `env`, `scripts`),
    less the `.rs` sources of its own crate, of the workspace libraries it may link and of its
@@ -73,6 +76,29 @@ narrower than can be shown.
    SHA-256 of rust-analyzer's version, its configuration (COMMAND's features and target) and every
    file of the workspace in the scope. The four newest are kept, a plan and its reading share one,
    and a run on files already indexed starts nothing.
+
+6. **tree-sitter's C code** is a deliberate exception, as ring's, mimalloc's, SQLite's and zstd's
+   are: its runtime and its generated Rust grammar are C, built with `cc` for every release
+   target. syn would have been pure Rust, but the decomposition follows cg's, and tree-sitter
+   parses a file with errors in it without giving up on the rest (a file that doesn't parse whole
+   is one the map lacks, C-147).
+
+## What CI pays
+
+- **rust-analyzer** must be installed for the toolchain (`rustup component add rust-analyzer`,
+  or `components = ["rust-analyzer"]` in `rust-toolchain.toml`). hushrun installs nothing. Without
+  it, a CI job runs as it does today, by test binary, and its log says how to add it.
+- **The index** of a tree costs `rust-analyzer scip` once: about 2 minutes 10 seconds and 70 MB on
+  this workspace, on top of the build, which rust-analyzer reuses for build scripts and procedural
+  macros. It is kept in hushrun's cache directory (`<cache dir>/units/rust-analyzer/`). A job
+  whose cache directory doesn't survive it (a fresh runner) pays it on every run whose tree is
+  new, which is every push. A rerun of the same commit pays nothing. The plan and the reading after
+  COMMAND share one index.
+- **The map** is built in about 10 seconds (release build), and each test's walk takes about a
+  millisecond.
+- What it saves is the test time of every test the change doesn't reach. A change to one adapter
+  of `crates/hushrun/src` runs about 40% of the binary's unit tests instead of all of them. The
+  integration tests in `crates/hushrun/tests/` start the binary, so they all still run.
 
 ## Consequences
 

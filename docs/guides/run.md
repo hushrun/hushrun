@@ -1171,6 +1171,25 @@ hushrun keeps it in its cache, so a run on files already indexed doesn't start r
 Plain `cargo test` starts each binary once for all its tests, so it keeps reusing whole test
 binaries.
 
+A test that starts a program from a variable (`Command::new(path)`) keeps its binary's reads, since
+that program could be one of your binaries. A helper that only ever starts other programs, such as
+the real test runner of an adapter test, can say so with a marker. A wrong marker hides a failure,
+so the helper must check at run time that the program isn't one of your binaries, and panic when it
+is:
+
+```rust
+#[doc(alias = "hushrun::starts_no_workspace_binary")]
+pub fn command(program: &Path) -> Command {
+    // Never a binary this workspace builds: panic rather than let a test pass on stale reads.
+    assert!(!is_workspace_binary(program), "{} is a binary of this workspace", program.display());
+    Command::new(program)
+}
+```
+
+The marker covers that function's own `Command::new`, not `env!("CARGO_BIN_EXE_…")`,
+`current_exe` or `cargo_bin` inside it. `hushrun why` names the marked functions a test went
+through.
+
 ### Xcode
 
 Xcode apps (iOS, iPadOS, macOS) reuse compiles through Xcode's own compilation cache, which hushrun

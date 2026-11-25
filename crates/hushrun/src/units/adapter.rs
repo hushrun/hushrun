@@ -312,6 +312,9 @@ pub struct Read {
     pub test_lists: TestLists,
     /// \[C-152\] What the run says once, after COMMAND, of what the adapter couldn't do.
     pub notes: Vec<String>,
+    /// \[C-151\] Each test, by its unit and id, that the map took to start programs through a
+    /// marked function, with the functions: what its row keeps for `hushrun why`.
+    pub trusted: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// What `hushrun why` has to go by: this machine's store and the files now, and no tool.

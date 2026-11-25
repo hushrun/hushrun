@@ -123,7 +123,9 @@ x509-cert = { version = "0.2.5", default-features = false, features = ["std", "p
 cms = { version = "0.2.3", default-features = false, features = ["std"] }
 
 # \[ADR 0145\] Rust sources split into items, for the static map of what each Rust test reaches:
-# tree-sitter's parser runtime and its Rust grammar, C code built with cc, as ring's and zstd's are.
+# tree-sitter's parser runtime and its Rust grammar. C code built with cc for every release target,
+# a deliberate exception as ring, mimalloc, SQLite (rusqlite's bundled build) and zstd are; only
+# hushrun-graph uses it, which the binary builds and the backend doesn't.
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
 

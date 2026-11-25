@@ -24,7 +24,9 @@
 //!   string that the index resolves to nothing reaches every item of that name.
 //! - \[C-151\] An item that can start a workspace binary makes a test that reaches it fall back:
 //!   `env!("CARGO_BIN_EXE_…")`, `std::env::current_exe`, `cargo_bin`, and `Command::new` of anything
-//!   but a string literal that names no binary of the workspace and holds no path.
+//!   but a string literal that names no binary of the workspace and holds no path, unless it is
+//!   in a function marked `#[doc(alias = "hushrun::starts_no_workspace_binary")]`, whose own code
+//!   must make sure of it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -121,6 +123,9 @@ pub struct Graph {
     flags: Vec<Option<String>>,
     /// \[C-149\] Nodes every test of a binary built from their file reaches.
     roots: Vec<u32>,
+    /// \[C-151\] Nodes whose `Command::new` the map takes to start no workspace binary, as their
+    /// function's marker says.
+    trusted: Vec<bool>,
     /// Each test function that may be one, by the id libtest names it with (`a::tests::t`).
     fns_by_path: HashMap<String, Vec<u32>>,
     /// \[C-152\] Sources that couldn't be split or have no document in the index, and why.
@@ -131,6 +136,14 @@ pub struct Graph {
 /// \[C-152\] Why a test falls back to its binary's reads.
 pub type Fallback = String;
 
+/// What a test reaches: the sources, and \[C-151\] each marked function it reaches whose
+/// `Command::new` the map trusted, for people (`<file>:<line> `<name>``).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reached {
+    pub files: BTreeSet<String>,
+    pub trusted: Vec<String>,
+}
+
 impl Graph {
     /// The map of `inputs`.
     pub fn build(inputs: &Inputs<'_>) -> Graph {
@@ -140,6 +153,7 @@ impl Graph {
             edges: Vec::new(),
             flags: Vec::new(),
             roots: Vec::new(),
+            trusted: Vec::new(),
             fns_by_path: HashMap::new(),
             unmapped: BTreeMap::new(),
             by_path: HashMap::new(),
@@ -234,6 +248,7 @@ impl Graph {
         }
         g.edges = vec![Vec::new(); g.nodes.len()];
         g.flags = vec![None; g.nodes.len()];
+        g.trusted = vec![false; g.nodes.len()];
         Linker::new(&mut g, &symbols, inputs).link();
         g
     }
@@ -257,17 +272,24 @@ impl Graph {
         id: &str,
         own: &BTreeSet<String>,
         linked: &BTreeSet<String>,
-    ) -> Result<BTreeSet<String>, Fallback> {
+    ) -> Result<Reached, Fallback> {
         let start = self.test_node(id, own)?;
         let seen = self.walk(start, linked)?;
-        Ok(seen
-            .into_keys()
-            .map(|n| {
-                self.files[self.nodes[n as usize].file as usize]
-                    .path
-                    .clone()
-            })
-            .collect())
+        let mut trusted: Vec<String> = seen
+            .keys()
+            .filter(|n| self.trusted[**n as usize])
+            .map(|n| self.describe(*n))
+            .collect();
+        trusted.sort();
+        let path = |n: u32| {
+            self.files[self.nodes[n as usize].file as usize]
+                .path
+                .clone()
+        };
+        Ok(Reached {
+            files: seen.into_keys().map(path).collect(),
+            trusted,
+        })
     }
 
     /// \[C-152\] Why a test reaches `file`, for people: the items from the test, or from a root,
@@ -931,7 +953,15 @@ impl<'g, 'i> Linker<'g, 'i> {
             .collect();
         for s in &strings {
             if s.text.contains("CARGO_BIN_EXE_") {
-                self.flag(n, "it starts a binary of the workspace (`CARGO_BIN_EXE_…`), and so reads all its binary is built from".into());
+                let unmarked = if it.marked {
+                    format!(
+                        ", which the `{}` marker of its function doesn't cover",
+                        items::MARKER
+                    )
+                } else {
+                    String::new()
+                };
+                self.flag(n, format!("it starts a binary of the workspace (`CARGO_BIN_EXE_…`), and so reads all its binary is built from{unmarked}"));
             }
             // A string shaped as a path names what it says (`#[serde(with = "a::b")]`); any
             // other names its `{captures}` alone.
@@ -1172,10 +1202,20 @@ impl<'g, 'i> Linker<'g, 'i> {
     /// can be a binary of the workspace.
     fn spawns(&mut self, n: u32, p: &Symbol<'_>, range: &Range<usize>) {
         let d = p.descriptors;
+        // \[C-151\] A marked function's own `Command::new` is trusted; never a binary it names.
+        let marked = self.item(n).marked && self.item(n).kind == Kind::Fn;
+        let unmarked = if marked {
+            format!(
+                ", which the `{}` marker of its function doesn't cover",
+                items::MARKER
+            )
+        } else {
+            String::new()
+        };
         if p.package == "std" && d.ends_with("env/current_exe().") {
-            self.flag(n, "it starts its own executable (`std::env::current_exe`), which can be a binary of the workspace".into());
+            self.flag(n, format!("it starts its own executable (`std::env::current_exe`), which can be a binary of the workspace{unmarked}"));
         } else if d.contains("cargo_bin") {
-            self.flag(n, "it starts a binary of the workspace (`cargo_bin`), and so reads all its binary is built from".into());
+            self.flag(n, format!("it starts a binary of the workspace (`cargo_bin`), and so reads all its binary is built from{unmarked}"));
         } else if p.package == "std" && d.ends_with("process/Command#new().") {
             let entry = self.entry(n);
             let text = &self.inputs.sources[&entry.path];
@@ -1190,10 +1230,12 @@ impl<'g, 'i> Linker<'g, 'i> {
                 .map(|(program, _)| program);
             let safe = literal.is_some_and(|program| {
                 !program.is_empty()
-                    && !program.contains(['/', '\\', '\\'])
+                    && !program.contains(['/', '\\'])
                     && !self.inputs.binaries.contains(program)
             });
-            if !safe {
+            if marked && !safe {
+                self.g.trusted[n as usize] = true;
+            } else if !safe {
                 self.flag(n, "it starts a program (`Command::new`) that can be a binary of the workspace, and so reads all its binary is built from".into());
             }
         }

@@ -53,6 +53,9 @@ pub struct Binary<'a> {
 pub struct Mapped {
     pub lists: TestLists,
     pub notes: Vec<String>,
+    /// \[C-151\] Of each unit's tests, those that start a program through a marked function, with
+    /// the functions, for people.
+    pub trusted: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// \[C-146\] Each test's list of each of `binaries`, by its unit. \[C-152\] When rust-analyzer is
@@ -90,6 +93,7 @@ pub fn lists(
         }
     };
     let mut fell_back: Vec<(String, String)> = Vec::new();
+    let mut trusted_tests: Vec<String> = Vec::new();
     let mut total = 0usize;
     for (unit, b) in binaries {
         let mut tests: BTreeMap<String, Result<BTreeSet<String>, String>> = BTreeMap::new();
@@ -107,10 +111,17 @@ pub fn lists(
                     "its test binary is built from {file}, which the static map lacks: {why}"
                 )),
                 None => graph.reach(id, b.own, &linked).map(|reached| {
+                    if !reached.trusted.is_empty() {
+                        trusted_tests.push(format!("{unit} {id}"));
+                        out.trusted
+                            .entry(unit.clone())
+                            .or_default()
+                            .insert(id.clone(), reached.trusted.join(", "));
+                    }
                     // What its binary read, less what it may leave out and doesn't reach.
                     b.reads
                         .iter()
-                        .filter(|f| !b.mappable.contains(*f) || reached.contains(*f))
+                        .filter(|f| !b.mappable.contains(*f) || reached.files.contains(*f))
                         .cloned()
                         .collect()
                 }),
@@ -127,6 +138,16 @@ pub fn lists(
             "{} of {} Rust tests are taken to have read what their test binary read, as the static map can't narrow them: {test}: {why}",
             fell_back.len(),
             total
+        ));
+    }
+    // \[C-151\] What the marker made the map trust, once.
+    if let Some(first) = trusted_tests.first()
+        && let Some(by) = out.trusted.values().flat_map(|t| t.values()).next()
+    {
+        out.notes.push(format!(
+            "{} of {total} Rust tests start programs through a function marked `{}` ({by}), which the static map takes to start no binary of the workspace, as that function's own code must make sure of: {first}",
+            trusted_tests.len(),
+            hushrun_graph::items::MARKER,
         ));
     }
     tracing::debug!(

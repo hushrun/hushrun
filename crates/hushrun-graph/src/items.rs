@@ -61,7 +61,13 @@ pub struct Item {
     pub impl_trait: Option<Range<usize>>,
     /// For an `impl`, the bytes of its self type.
     pub impl_self: Option<Range<usize>>,
+    /// \[C-151\] Its attributes hold `#[doc(alias = "hushrun::starts_no_workspace_binary")]`.
+    pub marked: bool,
 }
+
+/// \[C-151\] The marker a function's attributes hold when the programs it starts are never a
+/// binary of the workspace, which its own code makes sure of.
+pub const MARKER: &str = "hushrun::starts_no_workspace_binary";
 
 /// An identifier of a file: a name, a type's name, a field's, a macro's.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,6 +356,10 @@ fn items_in(
             continue;
         };
         let start = attrs.first().map_or(child.start_byte(), |a| a.start_byte());
+        let marked = attrs.iter().any(|a| {
+            let text = &source[a.byte_range()];
+            text.contains("alias") && text.contains(&format!("\"{MARKER}\""))
+        });
         let attr_paths = attrs
             .iter()
             .filter_map(|a| a.named_child(0))
@@ -368,6 +378,7 @@ fn items_in(
             attrs: attr_paths,
             impl_trait,
             impl_self,
+            marked,
         });
         out.push(at);
         let body = match kind {

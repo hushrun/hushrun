@@ -2204,7 +2204,7 @@ impl Adapter for Recognized {
             })
             .collect();
         // \[C-146\] Each test the run told, by the map: what it is recorded under.
-        let (test_lists, notes) = if at.by_test && self.nextest && !self.doc {
+        let (test_lists, notes, trusted) = if at.by_test && self.nextest && !self.doc {
             let binaries = observed
                 .units
                 .iter()
@@ -2235,9 +2235,9 @@ impl Adapter for Recognized {
                 &binaries,
                 at.assigned,
             );
-            (mapped.lists, mapped.notes)
+            (mapped.lists, mapped.notes, mapped.trusted)
         } else {
-            (TestLists::new(), Vec::new())
+            (TestLists::new(), Vec::new(), BTreeMap::new())
         };
         Ok(Some(Read {
             seen: observed.units,
@@ -2247,6 +2247,7 @@ impl Adapter for Recognized {
             executables: observed.executables,
             test_lists,
             notes,
+            trusted,
             ..Read::default()
         }))
     }
