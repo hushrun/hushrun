@@ -150,13 +150,16 @@ fn observe_vitest(
 /// What a run's lines say, as the tests ask it: each is a line `hushrun run` writes after
 /// `hushrun: `.
 trait Said {
-    /// Whether one of the lines is `line`.
+    /// Whether one of the lines is `line`, but for the `, saving about …` that `observe`'s line
+    /// gains when what it would have reused took a second or more, which is the run's timing.
     fn says(&self, line: &str) -> bool;
 }
 
 impl Said for Ran {
     fn says(&self, line: &str) -> bool {
-        self.lines.iter().any(|l| l == line)
+        self.lines
+            .iter()
+            .any(|l| hushrun_testkit::lines::without_saving(l) == line)
     }
 }
 

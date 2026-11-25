@@ -20,9 +20,13 @@ use fixtures::*;
 
 const VITEST_RUN: &[&str] = &["run", "unit", "--", "node_modules/.bin/vitest", "run"];
 
-/// Whether one of the lines hushrun wrote is `line`.
+/// Whether one of the lines hushrun wrote is `line`, but for the `, saving about …` that
+/// `observe`'s line gains when what it would have reused took a second or more, which is the run's
+/// timing.
 fn says(ran: &Output, line: &str) -> bool {
-    ran.stderr.lines().any(|l| l == line)
+    ran.stderr
+        .lines()
+        .any(|l| hushrun_testkit::lines::without_saving(l) == line)
 }
 
 // covers: C-62, C-63
