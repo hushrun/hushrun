@@ -50,10 +50,8 @@ fn profile(adapter: &gradle::Recognized) -> Profile {
         hints: adapter.hints(),
         binds: adapter.binds(),
         keys: adapter.keys(),
-        // Gradle's adapter says nothing of its own here; calling the trait's defaults would reach
-        // every adapter that overrides them.
-        not_by_test: None,
-        not_watched: None,
+        not_by_test: adapter.not_by_test(),
+        not_watched: adapter.not_watched(),
     }
 }
 
