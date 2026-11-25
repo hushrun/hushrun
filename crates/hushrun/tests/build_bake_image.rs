@@ -1379,7 +1379,10 @@ fn pull(machine: &Machine<'_>, image: &str, tag: &str, to: &Path) -> Value {
         ])
         .arg(to));
     assert_eq!(pulled.code, 0, "{}", pulled.stderr);
-    serde_json::from_str(&pulled.stdout).expect(&pulled.stdout)
+    let said: Value = serde_json::from_str(&pulled.stdout).expect(&pulled.stdout);
+    let schema = hushrun_testkit::schema::load("build-pull.v1.schema.json");
+    hushrun_testkit::schema::assert_valid(&schema, &said);
+    said
 }
 
 // covers: B-240
