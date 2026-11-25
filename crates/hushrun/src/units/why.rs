@@ -306,8 +306,11 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     let assigned = super::command::assignments(&input.base.command);
     let getenv = (adapter.keys() == super::adapter::KeysOutside::Getenv)
         .then(|| super::gotest::Getenv::of_command(input.root, &assigned));
-    let lists =
-        shared::lists(&unit, own, &shared, input.tree, None, getenv.as_ref()).unwrap_or_default();
+    let keys = getenv
+        .as_ref()
+        .map(|getenv| move |names: &BTreeSet<String>| getenv.outside(names));
+    let keys = keys.as_ref().map(|keys| keys as &shared::KeysEnv<'_>);
+    let lists = shared::lists(&unit, own, &shared, input.tree, None, keys).unwrap_or_default();
     if lists.is_empty() {
         says(
             &mut out,
@@ -739,7 +742,7 @@ fn explain_test(
         Some(list) => {
             let files: BTreeSet<String> = list.reads.keys().cloned().collect();
             let mut files_now = files.clone();
-            files_now.extend(super::gotest::under(input.tree, &list.dirs));
+            files_now.extend(super::shared::under(input.tree, &list.dirs));
             changes_of(Some(&list.reads), at.map, at.sets, input.tree, &files_now)
         }
         None => {

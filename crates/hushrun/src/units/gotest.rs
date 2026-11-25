@@ -34,6 +34,7 @@ use super::adapter::{
 };
 use super::facts::{FactsFile, Invocation};
 use super::runner;
+use super::shared::under;
 
 /// The adapter's name in a facts file.
 pub const ADAPTER: &str = "go";
@@ -953,24 +954,6 @@ pub fn observe(
     Ok(out)
 }
 
-/// Every file of `tree` in one of `dirs` or below it: what listing a directory read.
-pub fn under(tree: &Tree, dirs: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for dir in dirs {
-        if dir.is_empty() || dir == "." {
-            out.extend(tree.paths().map(str::to_string));
-            continue;
-        }
-        let prefix = format!("{dir}/");
-        out.extend(
-            tree.paths()
-                .filter(|p| p.starts_with(&prefix))
-                .map(str::to_string),
-        );
-    }
-    out
-}
-
 /// What a test log says a package's tests did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Log {
@@ -1622,6 +1605,7 @@ impl Adapter for Recognized {
         }
         let listed = list(self, at.root, at.cwd, at.assigned)?;
         let getenv = Getenv::of_command(at.root, at.assigned);
+        let keys = |names: &BTreeSet<String>| getenv.outside(names);
         let sets = sets_of(at.tree, &listed.unit_files, at.ignore);
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let known = listed
@@ -1637,7 +1621,7 @@ impl Adapter for Recognized {
                             &shared,
                             at.tree,
                             Some(&u.reads),
-                            Some(&getenv),
+                            Some(&keys),
                         )
                     })
                     .flatten();
@@ -1662,6 +1646,7 @@ impl Adapter for Recognized {
         // the core counts the tests this machine knows of it (C-39).
         let told = super::facts::merged(at.files, ADAPTER);
         let getenv = Getenv::of_command(at.root, at.assigned);
+        let keys = |names: &BTreeSet<String>| getenv.outside(names);
         for (unit, seen) in &mut observed.units {
             if let Some(tests) = told.get(unit).and_then(|m| m.tests.clone()) {
                 if tests.values().any(|t| t.deselected) {
@@ -1684,14 +1669,8 @@ impl Adapter for Recognized {
             .iter()
             .filter_map(|(unit, compiled)| {
                 let own = at.map.units.get(unit);
-                let lists = super::shared::lists(
-                    unit,
-                    own,
-                    &shared,
-                    at.tree,
-                    Some(compiled),
-                    Some(&getenv),
-                )?;
+                let lists =
+                    super::shared::lists(unit, own, &shared, at.tree, Some(compiled), Some(&keys))?;
                 Some((unit.clone(), lists))
             })
             .collect();

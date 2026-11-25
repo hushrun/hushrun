@@ -27,10 +27,10 @@ use hushrun_core::glob::Pattern;
 use hushrun_core::hints::{self, Key, Os};
 use hushrun_core::units::{self, KeyBase, Set, Sets, Sources, Tree};
 
+use super::MOST_UNITS;
 use super::adapter::Hints;
 use super::db::{HintHow, HintKnown};
 use super::store::{Found, HintPlace, Lookup, Mapped, Origin, UnitResults};
-use super::{MOST_UNITS, gotest};
 use crate::results::RunResult;
 
 /// The most lists a test file's key is computed from.
@@ -260,6 +260,28 @@ impl List {
     }
 }
 
+/// Every file of `tree` in one of `dirs` or below it: what listing a directory read.
+pub fn under(tree: &Tree, dirs: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for dir in dirs {
+        if dir.is_empty() || dir == "." {
+            out.extend(tree.paths().map(str::to_string));
+            continue;
+        }
+        let prefix = format!("{dir}/");
+        out.extend(
+            tree.paths()
+                .filter(|p| p.starts_with(&prefix))
+                .map(str::to_string),
+        );
+    }
+    out
+}
+
+/// \[ADR 0096\] What a list's key holds of what isn't a file (C-31's `env`), from the names of
+/// the variables its tests read: Go's adapter keys it by their values now (`gotest::Getenv`).
+pub type KeysEnv<'a> = dyn Fn(&BTreeSet<String>) -> units::Outside + 'a;
+
 /// \[C-38\] The one function that answers which lists of files `unit`'s key might be made from:
 /// this machine's own entry, `own`, when it has one; then the lists of the hints, newest first;
 /// the same list once, and [`MOST_LISTS`] at most. For Go, `compiled` is what its test binary is
@@ -278,7 +300,7 @@ pub fn lists(
     shared: &Shared,
     tree: &Tree,
     compiled: Option<&BTreeSet<String>>,
-    getenv: Option<&gotest::Getenv>,
+    getenv: Option<&KeysEnv<'_>>,
 ) -> Option<Vec<List>> {
     let none = BTreeSet::new();
     let make = |reads: &BTreeSet<String>,
@@ -288,12 +310,12 @@ pub fn lists(
                 from: From| {
         let mut files = compiled.cloned().unwrap_or_default();
         files.extend(reads.iter().cloned());
-        files.extend(gotest::under(tree, dirs));
+        files.extend(under(tree, dirs));
         List {
             files,
             reads: reads.clone(),
             dirs: dirs.clone(),
-            outside: getenv.map_or(outside, |getenv| getenv.outside(names)),
+            outside: getenv.map_or(outside, |getenv| getenv(names)),
             from,
         }
     };
@@ -380,7 +402,7 @@ pub fn test_lists(
     }
     let own = |reads: BTreeSet<String>, dirs: &BTreeSet<String>, from: From| {
         let mut files = reads.clone();
-        files.extend(gotest::under(tree, dirs));
+        files.extend(under(tree, dirs));
         TestList {
             list: List {
                 files,

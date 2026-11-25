@@ -136,10 +136,12 @@ fn for_go_each_lists_env_is_the_variables_its_entry_names_with_their_values_now(
     };
     let name = "HUSHRUN_TEST_LISTS_VARIABLE";
     let getenv = |value: &'static str| {
-        gotest::Getenv::of(std::path::Path::new("/home/dev/shop"), move |n| {
+        crate::units::gotest::Getenv::of(std::path::Path::new("/home/dev/shop"), move |n| {
             (n == name).then(|| value.to_string())
         })
     };
+    let getenv_a = getenv("a");
+    let keys_a = |names: &BTreeSet<String>| getenv_a.outside(names);
     let mut own = mapped(&["data/data.go"], Origin::SeenHere);
     own.getenv = Some(set(&[name]));
     let lists = lists(
@@ -148,7 +150,7 @@ fn for_go_each_lists_env_is_the_variables_its_entry_names_with_their_values_now(
         &shared,
         &t,
         Some(&compiled),
-        Some(&getenv("a")),
+        Some(&keys_a),
     )
     .expect("lists");
     assert_eq!(lists.len(), 2, "{lists:?}");
@@ -166,7 +168,7 @@ fn for_go_each_lists_env_is_the_variables_its_entry_names_with_their_values_now(
         &Shared::default(),
         &t,
         Some(&compiled),
-        Some(&getenv("a")),
+        Some(&keys_a),
     )
     .expect("lists");
     assert_eq!(alone.len(), 1);
