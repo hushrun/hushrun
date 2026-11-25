@@ -28,7 +28,8 @@ use serde::Deserialize;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources, Tree};
 
 use super::adapter::{
-    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
 use super::facts::{FactsFile, MergedTest, Unfollowed};
 use super::jvm::{self, JvmEvents};
@@ -1112,6 +1113,22 @@ impl Adapter for Recognized {
 
     fn hints(&self) -> Hints {
         Hints::Kinds(SOURCE_KINDS)
+    }
+
+    // `binds`, `keys` and `start_variables` are the trait's defaults, written out: a call on this
+    // type then names this impl's own method, which the static test map follows to it alone,
+    // where the trait's would count every adapter that overrides it (CONTRIBUTING.md, "Which
+    // tests CI runs again").
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, _: &Path) -> Vec<(String, Option<OsString>)> {
+        Vec::new()
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

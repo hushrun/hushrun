@@ -832,7 +832,7 @@ impl Observer {
     ) -> Result<(), String> {
         let mut variables = variables?;
         variables.push((
-            runner::UNITS_VAR.to_string(),
+            facts::UNITS_VAR.to_string(),
             self.dir.clone().into_os_string(),
         ));
         self.variables = variables;
@@ -1233,7 +1233,9 @@ impl Observer {
         // counted, in the write that follows the run's record, and the second such run in a row
         // forgets the word, so the next run chooses afresh. One silent run proves nothing (a ctest
         // whose build directory is empty finds no test and passes), nor does a run that failed.
-        if self.kept && end.command_passed && !files.iter().any(|f| f.adapter == pytest::WORD) {
+        // `kept` is only ever pytest's (`Session::start`), so its word is the profile's.
+        if self.kept && end.command_passed && !files.iter().any(|f| f.adapter == self.profile.word)
+        {
             let line = if db::silent_runs(&at.path, &at.check_id) >= 1 {
                 "pytest reported none, so the next run chooses how to observe them afresh"
             } else {
@@ -1469,7 +1471,7 @@ impl Observer {
         write_run_file(&dir, &self.root, &listed)
             .map_err(|err| format!("can't write its plan: {err}"))?;
         for (name, value) in &mut self.variables {
-            if name == runner::UNITS_VAR {
+            if name == facts::UNITS_VAR {
                 *value = dir.clone().into_os_string();
             }
         }
@@ -1538,7 +1540,7 @@ impl Observer {
         write_run_file(&dir, &self.root, &listed).ok()?;
         let mut variables = self.variables.clone();
         for (name, value) in &mut variables {
-            if name == runner::UNITS_VAR {
+            if name == facts::UNITS_VAR {
                 *value = dir.clone().into_os_string();
             }
         }

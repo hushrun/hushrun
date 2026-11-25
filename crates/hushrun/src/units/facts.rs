@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 
 use hushrun_core::units::NotFollowed;
 
+/// The variable that names a run's directory (C-32), where every adapter writes its facts. Here,
+/// beside the facts, rather than in `runner.rs`: what every adapter shares reaches no adapter's
+/// file (CONTRIBUTING.md, "Which tests CI runs again").
+pub const UNITS_VAR: &str = "HUSHRUN_UNITS";
+
 /// The schema of `hushrun.json`.
 pub const RUN_SCHEMA: &str = "hushrun.units/v0";
 /// The schema of an adapter's file.
