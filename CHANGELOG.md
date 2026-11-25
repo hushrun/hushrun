@@ -15,6 +15,24 @@ project's new branch starts from what main's CI already ran.
 
 ### Changed
 
+- **No time limit decides what a build reuses** ([ADR 0144](docs/adr/0144-no-time-limit-decides-what-a-build-reuses.md)):
+  what one machine reuses of another's no longer depends on how loaded either was.
+  - **Uploads:** the end of a `hushrun run` waits for every upload the run built, on a person's
+    machine, in a sandbox and in CI alike, then closes its manifest. On a terminal it says
+    `uploading N blocks before the run ends`, and Ctrl-C leaves the rest for the next run. This
+    replaces the 5 seconds on a person's machine, and the 20 seconds or 2 minutes (at most a
+    quarter of the compiles' cost) in CI.
+  - **Downloads** are waited for to their end, whatever the link or the compile they save. A
+    Go, Gradle, C, C++ or Xcode fetch waits for the check's `open` and its manifest, and a rustc
+    question that comes before `open` answers waits for it.
+  - **CI's `open` and other checks:** a CI job waits for `open` however long it takes, and so do
+    vouches, a baked store's check, a sandbox's check of what cargo can't see (B-23) and
+    `hushrun build fetch`.
+  - **Only silence ends a wait:** the relay writes a heartbeat while it works, Gradle's and
+    Maven's caches an interim `102 Processing`, and every wait ends only on 30 seconds of silence:
+    a frozen relay or a backend that stopped answering.
+  - The line for a CI job whose backend fails is now `build reuse is off for this run: the
+    backend didn't answer`.
 - **`hushrun.whoami/v1`'s `credential`** adds `session`, `bearer` and `proxy`.
 - **A hosted platform's own variable makes a sandbox** (C-140): `CLAUDE_CODE_REMOTE` (Claude Code on
   the web), `CURSOR_AGENT_SOCKET` (Cursor's cloud agents), `COPILOT_AGENT_SESSION_ID` (Copilot's
@@ -26,6 +44,16 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Maven's modules shared through Apache's build cache extension, kind `maven/1`** (B-170 to
+  B-177, ADR 0113, a draft). In a run with a relay, in a Maven build whose `.mvn/extensions.xml`
+  loads `maven-build-cache-extension`, `hushrun run` serves the extension's remote cache on the
+  loopback, under a token made for the run, and gives Maven its URL in `MAVEN_OPTS` (merged with
+  the Maven test adapter's). A module's `buildinfo.xml` and the files it names are one block,
+  checked whole, `buildinfo.xml` kept in a canonical form; it is searched for the machine's folders
+  before it may leave, fetched only where the check's `maven/1` manifest names it, and never
+  audited or compared. A run whose Maven skips tests shares nothing it builds. The summary says
+  `build: maven: N modules: …`. A build without the extension, or with a remote of its own, is
+  said in one line. Not yet in baked stores or `hushrun build fetch`.
 - **Svelte's tests reuse** (C-62 to C-65, ADR 0109). With Vitest, `.svelte` components are
   sources, vite-plugin-svelte's, SvelteKit's and Testing Library's `svelteTesting()` plugins are
   known, what a Svelte preprocessor reads (its `dependencies`) is read by whoever runs the
@@ -232,6 +260,12 @@ project's new branch starts from what main's CI already ran.
 - **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
   find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
   holds; the plugin now adds its own directory there.
+- **A Go or Gradle package the manifest named, compiled anyway** (B-45, B-82): a fetch that came
+  just as another took the check's manifest found it taken and no prefetch under way, and missed.
+  The manifest is taken and its prefetch marked under one lock.
+- **Uploads left for the next run by a command that ended early** (B-29): an end that came before
+  the upload loop first ran found no loop and waited for none. The loop is marked as running when
+  it is started.
 
 
 ## [0.19.1] - 2026-11-23

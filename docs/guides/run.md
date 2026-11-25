@@ -909,6 +909,38 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   branches hushrun.yaml's backend lists; a person's entries reach that person, or the team where
   the org pools them.
 
+- **Maven.** Where the org shares, `hushrun run` is the remote cache of Apache's build cache
+  extension, so a Maven reactor's modules built on one machine are restored on another: a
+  branch's first CI job takes from main's what main's CI built, and a laptop takes what CI built.
+  The build chooses the extension itself, in `.mvn/extensions.xml`:
+
+  ```xml
+  <extensions>
+    <extension>
+      <groupId>org.apache.maven.extensions</groupId>
+      <artifactId>maven-build-cache-extension</artifactId>
+      <version>1.2.0</version>
+    </extension>
+  </extensions>
+  ```
+
+  hushrun gives it the remote through `MAVEN_OPTS`, with a token made for the run, which Maven
+  prints with each file it saves or downloads and which opens nothing once the run ends. The
+  extension's local cache stays its own; a remote the build names itself stays, and hushrun steps
+  aside; the run says which applies. A restored module skips its mojos, tests included, as the
+  extension decides; so a run whose Maven skips tests (`-DskipTests`, `-Dmaven.test.skip`) shares
+  none of the modules it builds, which another build would restore without ever running their
+  tests. An entry that holds your checkout's folder, Maven's local repository or your home folder
+  never leaves the machine. The summary counts modules apart:
+
+  ```text
+  $ hushrun run build -- mvn -B verify
+  hushrun: build: maven: 12 modules: 11 from hushrun's cache (11 from the shared store), 1 built and stored, saving about 1m 50s
+  ```
+
+  As for Gradle, a jar keeps its files' dates, so hushrun can't compare an entry with a fresh build:
+  trusted copies come only from CI on the branches hushrun.yaml's backend lists.
+
 - **Baked into an image.** `hushrun build bake --out DIR` writes the crates, Go packages and C and
   C++ objects the last run of each check here used (`--check NAME` narrows it) into a folder of
   sealed packs, for an image or a read-only volume a sandbox starts from. A run there reads it

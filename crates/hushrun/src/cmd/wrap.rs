@@ -465,6 +465,13 @@ fn skip_or_run(
     // B-50: a build folder COMMAND names that was configured before the launcher is said when
     // the run ends.
     build.command = Some((command.to_vec(), dir.to_path_buf()));
+    // B-175: a Maven COMMAND that skips tests shares none of the modules it builds.
+    if let Some(build_session) = build.session.as_mut()
+        && let Some(property) =
+            hushrun_build::maven::skips_tests(command.iter().map(String::as_str))
+    {
+        build_session.maven_skips_tests(property, "the command");
+    }
     if let Some(session) = session.as_deref_mut() {
         session.compile_with(build.env());
     }

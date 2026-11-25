@@ -6,13 +6,21 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
 use serde::Serialize;
+
+/// ADR 0144: the longest a request to the backend or the object store waits on a server that
+/// sends nothing, by default: each byte that comes starts it again, so a slow answer is waited
+/// for and only a server that stopped answering is a failure. How long an answer takes, on its
+/// own, never makes it one.
+pub(crate) const SILENCE: Duration = Duration::from_secs(30);
 use serde::de::DeserializeOwned;
 
 /// Why a request didn't give an answer to use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Failure {
-    /// The server or the object store couldn't be reached, or didn't answer in time.
+    /// The server or the object store couldn't be reached, or sent nothing for the request's
+    /// silence (ADR 0144).
     Unreachable(String),
     /// 401, 403 or 404: the caller is refused (a removed member, a revoked machine, sharing
     /// turned off). The status and the error's code.
@@ -86,6 +94,9 @@ impl Client {
         install_crypto_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
+            // ADR 0144: every read, a download's included, waits at most this on a server that
+            // sends nothing; a request's own silence can be shorter.
+            .read_timeout(SILENCE)
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("hushrun/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -131,17 +142,18 @@ impl Client {
         self.credential.can_begin(std::time::SystemTime::now())
     }
 
-    /// `POST {base}/{path}` with `body`, within `timeout`; one more try after a 503 or 429 whose
+    /// `POST {base}/{path}` with `body`, waiting at most `silence` on a server that sends nothing
+    /// (ADR 0144); one more try after a 503 or 429 whose
     /// `Retry-After` fits, or a connection that failed at once (every request may be sent again).
     pub(crate) async fn post<B: Serialize, R: DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
-        timeout: Duration,
+        silence: Duration,
         signature: Option<String>,
     ) -> Result<Answered<R>, Failure> {
         let bytes = serde_json::to_vec(body).map_err(|e| Failure::Failed(e.to_string()))?;
-        self.post_bytes(path, bytes, timeout, signature).await
+        self.post_bytes(path, bytes, silence, signature).await
     }
 
     /// [`Client::post`] of a body already serialized: what a signature covers.
@@ -149,11 +161,11 @@ impl Client {
         &self,
         path: &str,
         bytes: Vec<u8>,
-        timeout: Duration,
+        silence: Duration,
         signature: Option<String>,
     ) -> Result<Answered<R>, Failure> {
         let url = format!("{}/{path}", self.base);
-        let reply = self.post_raw(path, bytes, timeout, signature).await?;
+        let reply = self.post_raw(path, bytes, silence, signature).await?;
         match reply.status {
             200..=299 => serde_json::from_slice(&reply.body)
                 .map(|body| Answered {
@@ -166,7 +178,8 @@ impl Client {
         }
     }
 
-    /// `POST {base}/{path}` of `bytes`, within `timeout`, with the credential and the headers
+    /// `POST {base}/{path}` of `bytes`, waiting at most `silence` on a server that sends nothing
+    /// and however long one that answers takes (ADR 0144), with the credential and the headers
     /// every build request carries: whatever status the server answers, with its body. A 401 to
     /// an ID token is tried once more with a fresh one; a 503 or 429 whose `Retry-After` fits, or
     /// a connection that failed at once, once more (every request may be sent again). `Err` only
@@ -175,31 +188,31 @@ impl Client {
         &self,
         path: &str,
         bytes: Vec<u8>,
-        timeout: Duration,
+        silence: Duration,
         signature: Option<String>,
     ) -> Result<Reply, Failure> {
         let url = format!("{}/{path}", self.base);
-        let deadline = tokio::time::Instant::now() + timeout;
+        let silent = || {
+            Failure::Unreachable(format!(
+                "{url}: no answer, and nothing for {}s",
+                silence.as_secs_f32()
+            ))
+        };
         let mut tries = 0;
         // The token a 401 refused: never sent again.
         let mut refused: Option<String> = None;
         loop {
             tries += 1;
-            // B-31: a token to mint is waited for within this request's deadline.
+            // B-31: a token to mint is waited for until its mint ends.
             let token = self
                 .credential
-                .bearer(&self.http, refused.as_deref(), deadline)
+                .bearer(&self.http, refused.as_deref())
                 .await?;
-            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if left.is_zero() {
-                return Err(Failure::Unreachable(format!("{url}: no answer in time")));
-            }
             let mut request = self
                 .http
                 .post(&url)
                 .bearer_auth(&token)
                 .header("content-type", "application/json")
-                .timeout(left)
                 .body(bytes.clone());
             if let Some(signature) = &signature {
                 request = request.header("hushrun-signature", signature);
@@ -211,11 +224,13 @@ impl Client {
             if self.says_ci() {
                 request = request.header(hushrun_core::blocks::CI_HEADER, "1");
             }
-            let response = match request.send().await {
-                Ok(response) => response,
-                Err(err) => {
+            // The answer's head: nothing for `silence`, and the server stopped answering.
+            let response = match tokio::time::timeout(silence, request.send()).await {
+                Err(_) => return Err(silent()),
+                Ok(Ok(response)) => response,
+                Ok(Err(err)) => {
                     if tries < 2 && err.is_connect() && !err.is_timeout() {
-                        tokio::time::sleep(Duration::from_millis(200).min(left)).await;
+                        tokio::time::sleep(Duration::from_millis(200)).await;
                         continue;
                     }
                     return Err(Failure::Unreachable(format!("{url}: {}", chain(&err))));
@@ -233,11 +248,19 @@ impl Client {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .map(Duration::from_secs);
-            let body = response
-                .bytes()
-                .await
-                .map_err(|err| Failure::Unreachable(format!("{url}: {}", chain(&err))))?
-                .to_vec();
+            // The body, each piece within `silence` of the one before.
+            let mut body = Vec::new();
+            let mut pieces = response.bytes_stream();
+            loop {
+                match tokio::time::timeout(silence, pieces.next()).await {
+                    Err(_) => return Err(silent()),
+                    Ok(None) => break,
+                    Ok(Some(Ok(piece))) => body.extend_from_slice(&piece),
+                    Ok(Some(Err(err))) => {
+                        return Err(Failure::Unreachable(format!("{url}: {}", chain(&err))));
+                    }
+                }
+            }
             let reply = Reply {
                 status,
                 body,
@@ -250,10 +273,11 @@ impl Client {
                     refused = Some(token);
                     tries -= 1;
                 }
+                // The server's own word for when to ask again, when it is within the silence:
+                // the answer, not this machine's speed, decides.
                 429 | 503 if tries < 2 => {
                     let wait = retry_after.unwrap_or(Duration::from_secs(1));
-                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if wait >= left {
+                    if wait >= silence {
                         return Ok(reply);
                     }
                     tokio::time::sleep(wait).await;
@@ -264,12 +288,10 @@ impl Client {
     }
 
     /// The bearer token this client's requests carry now (B-31: an ID token minted for the org's
-    /// URL, within `timeout`): what the backend's registry takes as a password, for the same
+    /// URL, once its mint ends): what the backend's registry takes as a password, for the same
     /// caller.
-    pub(crate) async fn bearer_now(&self, timeout: Duration) -> Result<String, Failure> {
-        self.credential
-            .bearer(&self.http, None, tokio::time::Instant::now() + timeout)
-            .await
+    pub(crate) async fn bearer_now(&self) -> Result<String, Failure> {
+        self.credential.bearer(&self.http, None).await
     }
 
     /// The object store's request for a link, the token never sent.

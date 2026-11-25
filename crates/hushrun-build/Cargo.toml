@@ -17,6 +17,8 @@ workspace = true
 hushrun-core.workspace = true
 hushrun-digest.workspace = true
 memchr.workspace = true
+# \[B-172\] Maven's buildinfo.xml, read as a stream: no DTD, no entity expanded.
+quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

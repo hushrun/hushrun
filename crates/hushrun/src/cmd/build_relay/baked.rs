@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use hushrun_build::baked::{
     self, BAKED_JSON, Baked, BakedCheck, PackRow, Part, Source, Trust, Unseal, Untrusted,
@@ -179,6 +179,8 @@ fn kept_here(kind: Kind, description: &serde_json::Value) -> Option<String> {
             .map(str::to_string),
         // Gradle's entries aren't baked yet (B-82).
         Kind::Gradle => Some("Gradle entries aren't baked".into()),
+        // Nor are Maven's (B-176).
+        Kind::Maven => Some("Maven entries aren't baked".into()),
         Kind::Tsc => Some("TypeScript blocks aren't baked".into()),
     }
 }
@@ -669,29 +671,24 @@ pub(crate) struct Checked {
 }
 
 impl Relay {
-    /// B-63: as a run begins, within `within`: waits for the check's `open`, then looks every
-    /// pack of `baked` up (without fetching) for the run's repository, keeping each row the
-    /// backend serves in the repository's trusted scope (the `protected/…` scope `open` named
-    /// among those the run reads) with that row's outputs, SHA-256 and size, and asks `open` for
-    /// each part of each check, which marks the store replaced in this machine's store when
-    /// another, not empty, is named. Evidence is per block: a lookup that fails, or the time
-    /// running out, leaves out only the blocks it hadn't vouched for yet. `None`: `open` didn't
-    /// answer in time, or named no trusted scope, which is no evidence and no replacement.
-    pub(crate) fn check_baked(
-        self: &Arc<Relay>,
-        baked: &Baked,
-        within: Duration,
-    ) -> Option<Checked> {
-        let started = Instant::now();
-        let (verified, scope) = self.vouched_rows(&baked.packs, within)?;
-        let left = within.saturating_sub(started.elapsed());
+    /// B-63: as a run begins: waits for the check's `open`, then looks every pack of `baked` up
+    /// (without fetching) for the run's repository, keeping each row the backend serves in the
+    /// repository's trusted scope (the `protected/…` scope `open` named among those the run
+    /// reads) with that row's outputs, SHA-256 and size, and asks `open` for each part of each
+    /// check, which marks the store replaced in this machine's store when another, not empty, is
+    /// named. Evidence is per block: a lookup that fails leaves out only the blocks it was for.
+    /// ADR 0144: no time limit; each request ends on its answer or its server's silence, so what
+    /// is vouched for never depends on the machine's speed. `None`: `open` failed or was refused,
+    /// or named no trusted scope, which is no evidence and no replacement.
+    pub(crate) fn check_baked(self: &Arc<Relay>, baked: &Baked) -> Option<Checked> {
+        let (verified, scope) = self.vouched_rows(&baked.packs)?;
         let newer = Arc::new(std::sync::Mutex::new(None::<Hex32>));
         let relay = self.clone();
         let owned = baked.clone();
         let newer_into = newer.clone();
         self.runtime.block_on(async move {
             let baked = owned;
-            let _ = tokio::time::timeout(left, async move {
+            async move {
                 // A check of none (the repository's newest build of any check) is never asked:
                 // the newest of any check would replace it at every other run.
                 for entry in baked.checks.iter().filter(|c| c.check.is_some()) {
@@ -724,7 +721,7 @@ impl Relay {
                         }
                     }
                 }
-            })
+            }
             .await;
         });
         let newer = *newer.lock().ok()?;
@@ -747,17 +744,14 @@ impl Relay {
 
     /// B-63, B-65: of `rows`, those the backend serves for the run's repository in its trusted
     /// scope (the one `protected/…` scope `open` named among those the run reads) with that
-    /// row's outputs, SHA-256 and size, looked up (without fetching) within `within`, with that
-    /// scope. Evidence is per block: a lookup that fails, or the time running out, leaves out only
-    /// the blocks it hadn't vouched for yet. `None`: `open` didn't answer in time, or named no
-    /// trusted scope.
+    /// row's outputs, SHA-256 and size, looked up (without fetching), with that scope. Evidence is
+    /// per block: a lookup that fails leaves out only the blocks it was for (ADR 0144: no time
+    /// limit). `None`: `open` failed or was refused, or named no trusted scope.
     pub(crate) fn vouched_rows(
         self: &Arc<Relay>,
         rows: &[PackRow],
-        within: Duration,
     ) -> Option<(Vec<PackRow>, String)> {
-        let started = Instant::now();
-        if !matches!(self.wait_open(within), Opened::Answering) {
+        if !matches!(self.wait_open(), Opened::Answering) {
             return None;
         }
         let (scope, limit) = {
@@ -766,11 +760,9 @@ impl Relay {
             let scope = trusted_scope(&policy.read)?.to_string();
             (scope, policy.limits.lookup.max(1) as usize)
         };
-        let left = within.saturating_sub(started.elapsed());
         let verified = Arc::new(std::sync::Mutex::new(Vec::<PackRow>::new()));
         let relay = self.clone();
-        // Every chunk of every kind, looked up a few at a time, so a large store's last rows get
-        // their answer within the same wait as its first.
+        // Every chunk of every kind, looked up a few at a time.
         let mut chunks: Vec<(Kind, Vec<PackRow>)> = Vec::new();
         for kind in baked::KINDS {
             let of_kind: Vec<PackRow> = rows
@@ -811,16 +803,16 @@ impl Relay {
                     }
                     std::future::ready(())
                 });
-            let _ = tokio::time::timeout(left, lookups).await;
+            lookups.await;
         });
         let verified = std::mem::take(&mut *verified.lock().ok()?);
         Some((verified, scope))
     }
 
-    /// B-63: whether this run may write the repository's trusted blocks, as `open` answered
-    /// within `within`: `None` when it didn't answer.
-    pub(crate) fn writes_trusted_within(&self, within: Duration) -> Option<bool> {
-        if !matches!(self.wait_open(within), Opened::Answering) {
+    /// B-63: whether this run may write the repository's trusted blocks, as `open` answered:
+    /// `None` when it failed or was refused.
+    pub(crate) fn writes_trusted(&self) -> Option<bool> {
+        if !matches!(self.wait_open(), Opened::Answering) {
             return None;
         }
         self.state().policy.as_ref().map(Policy::writes_trusted)

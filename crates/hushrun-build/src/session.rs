@@ -99,6 +99,12 @@ pub struct Session {
     gradle_env: Vec<(OsString, OsString)>,
     /// hushrun's Gradle cache while it serves (B-77): it stops with the session.
     gradle_cache: Option<crate::gradle::cache::Running>,
+    /// What COMMAND gets for Maven (B-170): `MAVEN_OPTS` with the cache's properties.
+    maven_env: Vec<(OsString, OsString)>,
+    /// hushrun's Maven cache while it serves (B-170): it stops with the session.
+    maven_cache: Option<crate::maven::cache::Running>,
+    /// Where the cache learns that COMMAND's Maven skips tests (B-175).
+    maven_skips: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
     /// What COMMAND gets for TypeScript (B-100): `NODE_OPTIONS` with the hook, and `HUSHRUN_TSC`.
     tsc_env: Vec<(OsString, OsString)>,
 }
@@ -172,6 +178,9 @@ pub struct Current {
     /// What hushrun's Gradle cache reads (B-79): absent, the run serves Gradle nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradle: Option<crate::gradle::GradleRun>,
+    /// What hushrun's Maven cache reads (B-173): absent, the run serves Maven nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maven: Option<crate::maven::MavenRun>,
     /// What the TypeScript helper reads (B-100): absent, it passes every call through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tsc: Option<crate::tsc::TscRun>,
@@ -518,9 +527,21 @@ pub struct Entry {
     /// others'. Its task is in `crate_name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradle: Option<GradleEntry>,
+    /// A Maven module's line, logged by hushrun's Maven cache (B-177): absent for the others'.
+    /// Its module is in `crate_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maven: Option<MavenEntry>,
     /// A TypeScript compile's line, logged by the helper (B-109): absent for the others'.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tsc: Option<crate::tsc::helper::TscEntry>,
+}
+
+/// What a Maven module's line says beside the rest (B-177).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MavenEntry {
+    /// Why it stays on this machine, when Maven stored it and it doesn't go up (B-173).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<crate::maven::Local>,
 }
 
 /// What a Gradle entry's line says beside the rest (B-83).
@@ -576,6 +597,8 @@ impl Entry {
             crate::model::Kind::Cc
         } else if self.gradle.is_some() {
             crate::model::Kind::Gradle
+        } else if self.maven.is_some() {
+            crate::model::Kind::Maven
         } else if self.tsc.is_some() {
             crate::model::Kind::Tsc
         } else {
@@ -721,6 +744,97 @@ pub struct Counts {
     pub tsc: TscCounts,
     /// What hushrun's Gradle cache's lines came to (B-83), counted apart from the crates.
     pub gradle: GradleCounts,
+    /// What hushrun's Maven cache's lines came to (B-177), counted apart from the crates.
+    pub maven: MavenCounts,
+}
+
+/// What a run's Maven modules came to (B-177).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MavenCounts {
+    /// Modules Maven asked hushrun's cache for and found, or stored in it.
+    pub modules: u64,
+    /// Served to Maven from hushrun's store.
+    pub reused: u64,
+    /// Of those, downloaded from the shared store for it.
+    pub downloaded: u64,
+    /// Stored by Maven after it built the module.
+    pub built: u64,
+    /// Milliseconds the modules served took where they were built.
+    pub saved_ms: u64,
+    /// Modules Maven stored that stay on this machine, by reason, in the order first seen.
+    pub local: Vec<(crate::maven::Local, u64)>,
+}
+
+impl MavenCounts {
+    fn add(&mut self, entry: &Entry) {
+        let Some(maven) = &entry.maven else {
+            return;
+        };
+        self.modules += 1;
+        match entry.outcome {
+            Outcome::Reused => {
+                self.reused += 1;
+                self.downloaded += u64::from(entry.downloaded);
+                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
+            }
+            Outcome::BuiltAndStored | Outcome::BuiltNotStored(_) | Outcome::PassedThrough(_) => {
+                self.built += 1;
+            }
+        }
+        if let Some(local) = maven.local {
+            match self.local.iter_mut().find(|(seen, _)| *seen == local) {
+                Some((_, n)) => *n += 1,
+                None => self.local.push((local, 1)),
+            }
+        }
+    }
+
+    /// B-177's lines for Maven, without a prefix. Empty when Maven asked nothing.
+    pub fn lines(&self) -> Vec<String> {
+        if self.modules == 0 {
+            return Vec::new();
+        }
+        let modules = |n: u64| {
+            if n == 1 {
+                "1 module".to_string()
+            } else {
+                format!("{n} modules")
+            }
+        };
+        let mut parts = Vec::new();
+        if self.reused > 0 {
+            let mut part = format!("{} from hushrun's cache", self.reused);
+            part.push_str(&from_where(self.downloaded, 0));
+            parts.push(part);
+        }
+        if self.built > 0 {
+            parts.push(format!("{} built and stored", self.built));
+        }
+        let mut first = format!(
+            "build: maven: {}: {}",
+            modules(self.modules),
+            parts.join(", ")
+        );
+        if self.saved_ms >= 1_000 {
+            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
+        }
+        let mut lines = vec![first];
+        let kept: u64 = self.local.iter().map(|(_, n)| n).sum();
+        if kept > 0 {
+            let why: Vec<String> = self
+                .local
+                .iter()
+                .map(|(local, n)| format!("{n}: {}", local.words()))
+                .collect();
+            lines.push(format!(
+                "build: maven: {} built here {} on this machine ({})",
+                modules(kept),
+                if kept == 1 { "stays" } else { "stay" },
+                why.join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 /// What a run's Gradle entries came to (B-83).
@@ -1247,6 +1361,10 @@ impl Counts {
                 counts.gradle.add(entry);
                 continue;
             }
+            if entry.maven.is_some() {
+                counts.maven.add(entry);
+                continue;
+            }
             if entry.tsc.is_some() {
                 counts.tsc.add(entry);
                 continue;
@@ -1359,6 +1477,7 @@ fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
     lines.extend(counts.go.lines());
     lines.extend(counts.cc.lines(counts.mode));
     lines.extend(counts.gradle.lines());
+    lines.extend(counts.maven.lines());
     lines.extend(counts.tsc.lines(counts.mode));
     lines
 }
@@ -1588,6 +1707,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         share_setting: settings.share,
         cc: None,
         gradle: None,
+        maven: None,
         tsc: None,
         lower: None,
         stub: None,
@@ -1609,6 +1729,9 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         slot: None,
         gradle_env: Vec::new(),
         gradle_cache: None,
+        maven_env: Vec::new(),
+        maven_cache: None,
+        maven_skips: None,
         tsc_env: Vec::new(),
     })
 }
@@ -1746,6 +1869,7 @@ impl Session {
         }
         env.extend(self.cc_env.iter().cloned());
         env.extend(self.gradle_env.iter().cloned());
+        env.extend(self.maven_env.iter().cloned());
         env.extend(self.tsc_env.iter().cloned());
         if let Some(xcconfig) = &self.xcode {
             env.push((
@@ -1802,6 +1926,54 @@ impl Session {
     /// Whether the run serves Gradle hushrun's cache (B-77).
     pub fn serves_gradle(&self) -> bool {
         self.gradle_cache.is_some()
+    }
+
+    /// B-170: serves Maven's build cache extension hushrun's cache for this run, on a port and
+    /// under a token of the run's own, and gives COMMAND `MAVEN_OPTS`: what `env` has, then the
+    /// extension's properties for it. `run` is what the cache searches entries for (B-173),
+    /// written into `session.json` before COMMAND starts. Called once the session shares (B-26):
+    /// the cache asks its relay. The URL Maven is given.
+    pub fn set_maven(
+        &mut self,
+        run: crate::maven::MavenRun,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> std::io::Result<String> {
+        let (listener, token) = crate::maven::cache::bind()?;
+        let url = crate::maven::cache::url(&listener, &token)?;
+        self.current.maven = Some(run);
+        write_current(&self.current)?;
+        let cache = crate::maven::cache::Cache::new(self.current.clone(), &token);
+        self.maven_skips = Some(cache.skips_tests());
+        self.maven_cache = Some(crate::maven::cache::start(listener, cache)?);
+        let mut opts = env(crate::maven::OPTS_VARIABLE)
+            .map(|v| v.to_string_lossy().trim().to_string())
+            .unwrap_or_default();
+        if !opts.is_empty() {
+            opts.push(' ');
+        }
+        opts.push_str(&crate::maven::properties(&url));
+        self.maven_env = vec![(crate::maven::OPTS_VARIABLE.into(), opts.into())];
+        Ok(url)
+    }
+
+    /// Whether the run serves Maven hushrun's cache (B-170).
+    pub fn serves_maven(&self) -> bool {
+        self.maven_cache.is_some()
+    }
+
+    /// B-175: Maven skips tests in this run, by `property` (`skipTests` or `maven.test.skip`) in
+    /// `place` (COMMAND, `MAVEN_OPTS`, a file of `.mvn`): the cache keeps none of the modules it
+    /// builds, and the run says so once. Nothing when the run doesn't serve Maven.
+    pub fn maven_skips_tests(&mut self, property: &str, place: &str) {
+        let Some(skips) = &self.maven_skips else {
+            return;
+        };
+        if let Ok(mut skips) = skips.lock() {
+            *skips = Some(property.to_string());
+        }
+        self.add_line(format!(
+            "build: maven: {place} sets {property}, so the modules this run builds aren't shared: another build would skip tests that never ran"
+        ));
     }
 
     /// Gives COMMAND the C and C++ launcher (B-50): `checkout` is the repository's folder as the
@@ -2332,6 +2504,7 @@ mod tests {
             xcode: None,
             cc: None,
             gradle: None,
+            maven: None,
             tsc: None,
         };
         found.log(&entry);
@@ -2449,6 +2622,7 @@ mod tests {
             xcode: None,
             cc: None,
             gradle: None,
+            maven: None,
             tsc: None,
         }
     }

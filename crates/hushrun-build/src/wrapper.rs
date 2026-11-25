@@ -287,6 +287,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         xcode: None,
         cc: None,
         gradle: None,
+        maven: None,
         tsc: None,
     }
 }
@@ -443,8 +444,10 @@ const DOWNLOADED_HINT_BUDGET: u64 = 64 << 20;
 /// The most second keys a compile asks the relay to fetch, the likeliest first.
 const MOST_FETCH_KEYS: usize = 4;
 
-/// How long a wrapper waits for the relay to take a notice: what it built, a problem.
-const NOTICE_WAIT: Duration = Duration::from_secs(2);
+/// How long a wrapper waits on a relay that doesn't take a notice (what it built, a problem):
+/// the relay's silence, as for any question (ADR 0144). A notice not taken is a block that never
+/// goes up, so only a relay that is frozen or gone may cost one.
+const NOTICE_WAIT: Duration = relay::WAIT;
 
 /// The digest of a stored block's outputs, as the shared store's rows hold it (B-28).
 fn outputs_of(block: &Block) -> hushrun_core::blocks::Hex32 {
@@ -3438,10 +3441,19 @@ mod tests {
         let stat = |p: &Path| Stat::of(&std::fs::metadata(p).unwrap());
         let before = dir.path().join("generated.rs");
         std::fs::write(&before, b"").unwrap();
-        // A build script's output, a few milliseconds before cargo starts the compile that
-        // reads it: more than a tick of Linux's file clock, less than its fixed slack.
-        std::thread::sleep(Duration::from_millis(5));
-        let floor = inputs::floor(file_clock(dir.path(), 1), SystemTime::now());
+        // A build script's output, then the compile that reads it in a later tick of the file
+        // system's clock: the compile's probe is asked again until that clock has moved past the
+        // output's date, whatever a tick is on this machine and however long this thread waited.
+        // Each probe leaves nothing behind.
+        let floor = loop {
+            let floor = inputs::floor(file_clock(dir.path(), 1), SystemTime::now());
+            if !inputs::dated_after(&stat(&before), floor) {
+                break floor;
+            }
+            std::thread::yield_now();
+        };
+        // Dated before the probe: not taken for a file written during the compile, though it was
+        // written within the fixed slack a clock that couldn't be read would get.
         assert!(!inputs::dated_after(&stat(&before), floor));
         // Anything written after it is dated at or after it.
         let during = dir.path().join("during.rs");

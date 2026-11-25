@@ -7,7 +7,8 @@
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use hushrun_build::origin::Origin;
 use hushrun_build::store::{NewFile, Replaced, Store};
@@ -48,9 +49,23 @@ impl Spool {
 
     /// A PUT's body (B-29): the bytes held in memory as they are, or the file streamed a chunk
     /// at a time, never read whole. The file, to remove once the PUT is done.
-    pub(crate) fn into_body(self) -> io::Result<(reqwest::Body, Option<PathBuf>)> {
+    /// Streamed a piece at a time, each piece taken marking `moved` (ADR 0144): an upload whose
+    /// body stops moving is one whose store stopped reading, whatever the time it has taken.
+    pub(crate) fn into_body(self, moved: &Moved) -> io::Result<(reqwest::Body, Option<PathBuf>)> {
+        let moved = moved.clone();
+        let mark = move |piece: &Result<Vec<u8>, io::Error>| {
+            if piece.is_ok() {
+                moved.mark();
+            }
+        };
+        use futures_util::StreamExt as _;
         match self {
-            Spool::Memory(bytes) => Ok((reqwest::Body::from(bytes), None)),
+            Spool::Memory(bytes) => {
+                let pieces: Vec<Result<Vec<u8>, io::Error>> =
+                    bytes.chunks(PUT_CHUNK).map(|c| Ok(c.to_vec())).collect();
+                let stream = futures_util::stream::iter(pieces).inspect(mark);
+                Ok((reqwest::Body::wrap_stream(stream), None))
+            }
             Spool::File(path, _) => {
                 let file = File::open(&path)?;
                 let chunks = futures_util::stream::unfold(Some(file), |file| async move {
@@ -69,7 +84,7 @@ impl Spool {
                         Err(err) => Some((Err(err), None)),
                     }
                 });
-                Ok((reqwest::Body::wrap_stream(chunks), Some(path)))
+                Ok((reqwest::Body::wrap_stream(chunks.inspect(mark)), Some(path)))
             }
         }
     }
@@ -84,6 +99,26 @@ impl Spool {
 
 /// How much of a spilled pack a PUT reads at once.
 const PUT_CHUNK: usize = 1 << 20;
+
+/// ADR 0144: when an upload's body last moved, so that one whose store stopped reading ends on
+/// that silence, not on how long the upload has taken.
+#[derive(Clone)]
+pub(crate) struct Moved(Arc<Mutex<Instant>>);
+
+impl Moved {
+    pub(crate) fn new() -> Moved {
+        Moved(Arc::new(Mutex::new(Instant::now())))
+    }
+
+    fn mark(&self) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Instant::now();
+    }
+
+    /// How long the body has not moved.
+    pub(crate) fn still_for(&self) -> Duration {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).elapsed()
+    }
+}
 
 /// A writer that spills into `dir` past `limit` bytes ([`IN_MEMORY`] but in tests).
 struct Spilling<'a> {
@@ -337,6 +372,7 @@ pub(crate) fn publish(
             hushrun_build::model::Kind::Go
             | hushrun_build::model::Kind::Cc
             | hushrun_build::model::Kind::Gradle
+            | hushrun_build::model::Kind::Maven
             | hushrun_build::model::Kind::Xcode
             | hushrun_build::model::Kind::Tsc => {
                 object.insert("kind".into(), kind.word().into());

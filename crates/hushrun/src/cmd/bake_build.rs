@@ -601,10 +601,6 @@ pub(crate) fn descends(checkout: &Path, older: &str) -> Option<bool> {
     }
 }
 
-/// B-75: how long a bake's build waits, after each check, for what it built to go up: the bake
-/// closes a check's build only once all of it is on the backend (its store goes with its job).
-pub(crate) const UPLOADS_WITHIN: Duration = Duration::from_secs(10 * 60);
-
 /// B-75 (ADR 0102): the variables a bake's build never hands its commands: the credentials the
 /// bake itself signs, reads the backend and pushes with. The bake holds what it needs of them;
 /// what the build runs (build scripts, proc macros, tests, a copied step's tools) gets none.
@@ -691,7 +687,6 @@ pub(crate) fn build_missing(
             SystemTime::now(),
             super::build_relay::Ending::Bake {
                 succeeded: ran.is_ok(),
-                within: UPLOADS_WITHIN,
             },
         );
         let counts = summary.counts();

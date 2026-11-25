@@ -23,23 +23,25 @@ const GO_RELAY_DOWN: &str = "go-relay-down";
 #[derive(Debug, Clone, Copy)]
 pub struct Waits {
     /// A question the relay answers from what it holds: whether the run still shares, a report.
+    /// The relay's silence too: every question waits the same (ADR 0144).
     pub quick: Duration,
-    /// The most any question waits: a lookup, a download.
+    /// The most any question waits on a relay that says nothing: a relay working on a lookup or
+    /// a download says so every heartbeat (ADR 0144).
     pub most: Duration,
 }
 
-/// Test only, never read in a release build: the most a question waits, in milliseconds, and
-/// the quick wait at a quarter of it.
+/// Test only, never read in a release build: the relay's silence a question waits, in
+/// milliseconds, for a test of a frozen relay.
 #[cfg(debug_assertions)]
 pub const WAIT_VAR: &str = "HUSHRUN_CC_RELAY_WAIT_MS";
 
 impl Waits {
-    /// The waits of a run: B-26's ceiling for a lookup or a download, 2 seconds for the rest.
+    /// The waits of a run: the relay's silence, [`crate::relay::WAIT`], for every question.
     pub fn of(var: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Waits {
         let _ = var;
         #[allow(unused_mut)]
         let mut waits = Waits {
-            quick: Duration::from_secs(2),
+            quick: crate::relay::WAIT,
             most: crate::relay::WAIT,
         };
         #[cfg(debug_assertions)]
@@ -48,18 +50,18 @@ impl Waits {
             .and_then(|v| v.parse::<u64>().ok())
         {
             waits.most = Duration::from_millis(ms);
-            waits.quick = Duration::from_millis(ms / 4);
+            waits.quick = Duration::from_millis(ms);
         }
         waits
     }
 
-    /// What a question about first key `step` waits, from what its compile here last took: half
-    /// of it and the quick wait, under the ceiling, so that a hit never costs more than half the
-    /// compile it saves. Unknown, the ceiling.
+    /// What a question about first key `step` waits: the relay's silence, whatever its compile
+    /// here last took. A relay working on the answer says so every heartbeat, so the wait ends
+    /// a question to a frozen or gone relay only, and how long an answer takes never decides it
+    /// (ADR 0144).
     pub fn within(&self, local_ms: Option<u64>) -> Duration {
-        local_ms.map_or(self.most, |ms| {
-            (Duration::from_millis(ms) / 2 + self.quick).min(self.most)
-        })
+        let _ = local_ms;
+        self.most
     }
 }
 

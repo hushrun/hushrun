@@ -37,10 +37,10 @@ use crate::relay::{self, Answer, Problem};
 use crate::session::{Current, Entry, XcodeEntry};
 use crate::store::{NewFile, Store};
 
-/// The longest a `GetValue` waits for the relay: Xcode waits on it before it compiles.
-const RELAY_WAIT: Duration = Duration::from_secs(10);
-/// How long a question the relay answers from what it holds may take.
-const QUICK_WAIT: Duration = Duration::from_secs(2);
+/// The longest a question waits on a relay that says nothing (ADR 0144): a relay working on an
+/// answer says so every heartbeat, so this bounds a frozen or gone relay only, and every question
+/// waits the same, whatever its compile costs.
+const RELAY_WAIT: Duration = relay::WAIT;
 /// Bytes from this many on go to a file when the plugin asks for one (`write_to_disk`).
 pub const EXPORT_AT: usize = 1 << 20;
 /// The most bytes of a file a `Put` or `Save` names that the service reads.
@@ -137,7 +137,6 @@ pub struct Service {
 #[derive(Debug, Clone, Copy)]
 struct Waits {
     relay: Duration,
-    quick: Duration,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -163,10 +162,7 @@ impl Service {
             audits: Mutex::new(HashMap::new()),
             relay_down: AtomicBool::new(false),
             counts: Mutex::new(Counts::default()),
-            waits: Waits {
-                relay: RELAY_WAIT,
-                quick: QUICK_WAIT,
-            },
+            waits: Waits { relay: RELAY_WAIT },
         }
     }
 
@@ -356,10 +352,7 @@ impl Service {
             platform,
             local_ms,
         };
-        let wait = local_ms.map_or(self.waits.relay, |ms| {
-            (Duration::from_millis(ms) / 2 + self.waits.quick).min(self.waits.relay)
-        });
-        match self.ask(&asked, wait) {
+        match self.ask(&asked, self.waits.relay) {
             Some(Answer::Ready { key: got }) if got == key => {
                 self.serve(current, &store, &key, xcode_key, true, now)
             }
@@ -390,14 +383,9 @@ impl Service {
         let outputs = outputs_of(&found);
         let vouch = relay::Request::XcodeVouch { key: *key, outputs };
         let cost = found.description["rustc_ms"].as_u64().unwrap_or(0);
-        let vouch_wait = (Duration::from_millis(cost) / 2 + self.waits.quick).min(self.waits.relay);
         let reusable =
             current.may_reuse(origin.as_ref(), epoch_ms(now), vouch, &mut |_, request| {
-                let wait = if matches!(request, relay::Request::Sharing) {
-                    self.waits.quick
-                } else {
-                    vouch_wait
-                };
+                let wait = self.waits.relay;
                 self.ask(request, wait)
             });
         if !reusable {
@@ -429,7 +417,7 @@ impl Service {
                             key: *key,
                             problem: Problem::Rejected,
                         },
-                        self.waits.quick,
+                        self.waits.relay,
                     );
                     let until = now + Duration::from_secs(u64::from(current.keep_days) * 86_400);
                     let _ = store.suspend_until(
@@ -714,7 +702,7 @@ impl Service {
                     key: *key,
                     problem: Problem::Differs,
                 },
-                self.waits.quick,
+                self.waits.relay,
             );
         }
         let until = now + Duration::from_secs(u64::from(current.keep_days) * 86_400);
@@ -759,12 +747,9 @@ impl Service {
         }
         let share = self.current.as_ref()?.share.relay()?;
         let answer = relay::ask(&share.socket, request, wait);
+        // No answer and no heartbeat for the whole wait: the relay is frozen or gone (ADR 0144).
         if answer.is_none() {
-            let slow_fetch = matches!(request, relay::Request::XcodeFetch { .. })
-                && relay::ask(&share.socket, &relay::Request::Sharing, self.waits.quick).is_some();
-            if !slow_fetch {
-                self.set_relay_down();
-            }
+            self.set_relay_down();
         }
         answer
     }
@@ -797,7 +782,7 @@ impl Service {
         let Some(share) = self.current.as_ref().and_then(|c| c.share.relay()) else {
             return;
         };
-        if !relay::tell(&share.socket, request, self.waits.quick) {
+        if !relay::tell(&share.socket, request, self.waits.relay) {
             self.set_relay_down();
         }
     }
@@ -830,6 +815,7 @@ impl Service {
     fn entry(&self, outcome: Outcome, key: &Digest) -> Entry {
         Entry {
             gradle: None,
+            maven: None,
             tsc: None,
             outcome,
             class: Some(Class::Library),

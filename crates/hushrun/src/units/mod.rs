@@ -805,6 +805,18 @@ impl Session {
     /// B-2: the variables every start of COMMAND gets to compile through the build blocks'
     /// wrapper, which the plan's build gets too: it is COMMAND's build, made first.
     pub fn compile_with(&mut self, env: Vec<(OsString, OsString)>) {
+        // B-170: the build's Maven cache rides on `MAVEN_OPTS` too, which the Maven adapter sets
+        // last from the person's: its value gains the cache's properties.
+        let opts = hushrun_build::maven::OPTS_VARIABLE;
+        if let Some((_, build)) = env.iter().find(|(name, _)| name == opts)
+            && let Some((_, ours)) = self.variables.iter_mut().find(|(name, _)| name == opts)
+        {
+            *ours = hushrun_build::maven::with_cache_properties(
+                &ours.to_string_lossy(),
+                &build.to_string_lossy(),
+            )
+            .into();
+        }
         self.compile_env = env;
     }
 
