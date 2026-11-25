@@ -75,17 +75,24 @@ pub struct Recognized {
 /// which bypass `PATH`. `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     let found = recognize(command, cwd)?;
-    Some(found.map(|direct| {
-        Box::new(Recognized {
-            direct,
-            dir: OnceLock::new(),
-        }) as Box<dyn Adapter>
+    Some(found.map(|adapter| Box::new(adapter) as Box<dyn Adapter>))
+}
+
+/// [`recognized`], as the adapter's own type: what a test of it calls, with no trait object.
+pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
+    let found = recognize_command(command, cwd)?;
+    Some(found.map(|direct| Recognized {
+        direct,
+        dir: OnceLock::new(),
     }))
 }
 
 /// What COMMAND is to the CTest adapter: `Some(Ok(Some(args)))` for `ctest …` itself,
 /// `Some(Ok(None))` for a COMMAND that starts it by name through something else.
-fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>, String>> {
+fn recognize_command(
+    command: &[String],
+    cwd: &Path,
+) -> Option<Result<Option<Vec<String>>, String>> {
     let first = command.first()?;
     let rest = &command[1..];
     match &*program_name(first) {
@@ -584,7 +591,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         assert!(matches!(
-            recognize(&words("ctest --test-dir build -j8"), cwd),
+            recognize_command(&words("ctest --test-dir build -j8"), cwd),
             Some(Ok(Some(args))) if args == words("--test-dir build -j8")
         ));
         for refused in [
@@ -594,55 +601,55 @@ mod tests {
             "cmake --build build --target=test",
         ] {
             assert!(
-                matches!(recognize(&words(refused), cwd), Some(Err(_))),
+                matches!(recognize_command(&words(refused), cwd), Some(Err(_))),
                 "{refused}"
             );
         }
         std::fs::create_dir_all(cwd.join("build")).unwrap();
         std::fs::write(cwd.join("build/CMakeCache.txt"), "").unwrap();
         assert!(matches!(
-            recognize(&words("make -C build test"), cwd),
+            recognize_command(&words("make -C build test"), cwd),
             Some(Err(_))
         ));
         assert!(matches!(
-            recognize(&words("ninja -C build test"), cwd),
+            recognize_command(&words("ninja -C build test"), cwd),
             Some(Err(_))
         ));
-        assert!(recognize(&words("ninja -C build"), cwd).is_none());
+        assert!(recognize_command(&words("ninja -C build"), cwd).is_none());
         // A shell line, a script and a Makefile that start ctest by name; not one that runs pytest.
         let sh = |line: &str| vec!["sh".to_string(), "-c".to_string(), line.to_string()];
         assert!(matches!(
-            recognize(&sh("cmake --build build && cd build && ctest -j8"), cwd),
+            recognize_command(&sh("cmake --build build && cd build && ctest -j8"), cwd),
             Some(Ok(None))
         ));
-        assert!(recognize(&sh("ctest && pytest"), cwd).is_none());
-        assert!(recognize(&sh("cmake --build build"), cwd).is_none());
+        assert!(recognize_command(&sh("ctest && pytest"), cwd).is_none());
+        assert!(recognize_command(&sh("cmake --build build"), cwd).is_none());
         // \[ADR 0090, amended\] A shell line that starts ctest by its path goes round hushrun's
         // ctest, and says so in the words COMMAND would.
         assert_eq!(
-            recognize(&sh("/opt/cmake/bin/ctest --test-dir build -j3"), cwd)
+            recognize_command(&sh("/opt/cmake/bin/ctest --test-dir build -j3"), cwd)
                 .unwrap()
                 .err()
                 .unwrap(),
             "COMMAND starts ctest by its path (/opt/cmake/bin/ctest), which hushrun's ctest on PATH can't stand in for: start it as `ctest`"
         );
-        assert!(recognize(&sh("/opt/cmake/bin/ctest && pytest"), cwd).is_none());
+        assert!(recognize_command(&sh("/opt/cmake/bin/ctest && pytest"), cwd).is_none());
         std::fs::write(
             cwd.join("check.sh"),
             "#!/bin/sh\nset -e\nctest --test-dir build\n",
         )
         .unwrap();
         assert!(matches!(
-            recognize(&words("./check.sh"), cwd),
+            recognize_command(&words("./check.sh"), cwd),
             Some(Ok(None))
         ));
         std::fs::write(cwd.join("Makefile"), "check:\n\tctest --test-dir build\n").unwrap();
         assert!(matches!(
-            recognize(&words("make check"), cwd),
+            recognize_command(&words("make check"), cwd),
             Some(Ok(None))
         ));
-        assert!(recognize(&words("go test ./..."), cwd).is_none());
-        assert!(recognize(&words("pytest"), cwd).is_none());
+        assert!(recognize_command(&words("go test ./..."), cwd).is_none());
+        assert!(recognize_command(&words("pytest"), cwd).is_none());
     }
 
     // covers: C-49, C-32

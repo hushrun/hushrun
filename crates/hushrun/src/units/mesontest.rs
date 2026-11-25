@@ -67,14 +67,18 @@ pub struct Recognized {
 /// `PATH`. `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     let found = recognize(command, cwd)?;
-    Some(found.map(|()| {
-        Box::new(Recognized {
-            dir: OnceLock::new(),
-        }) as Box<dyn Adapter>
+    Some(found.map(|adapter| Box::new(adapter) as Box<dyn Adapter>))
+}
+
+/// [`recognized`], as the adapter's own type: what a test of it calls, with no trait object.
+pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
+    let found = recognize_command(command, cwd)?;
+    Some(found.map(|()| Recognized {
+        dir: OnceLock::new(),
     }))
 }
 
-fn recognize(command: &[String], cwd: &Path) -> Option<Result<(), String>> {
+fn recognize_command(command: &[String], cwd: &Path) -> Option<Result<(), String>> {
     let first = command.first()?;
     let test = command.get(1).is_some_and(|w| w == "test");
     match &*program_name(first) {
@@ -388,28 +392,31 @@ mod tests {
     fn meson_test_by_name_is_recognized_and_by_its_path_says_why() {
         let cwd = Path::new("/nonexistent");
         assert!(matches!(
-            recognize(&words("meson test -C build"), cwd),
+            recognize_command(&words("meson test -C build"), cwd),
             Some(Ok(()))
         ));
-        assert!(matches!(recognize(&words("meson test"), cwd), Some(Ok(()))));
-        assert!(recognize(&words("meson setup build"), cwd).is_none());
-        assert!(recognize(&words("meson compile -C build"), cwd).is_none());
         assert!(matches!(
-            recognize(&words("/usr/bin/meson test -C build"), cwd),
+            recognize_command(&words("meson test"), cwd),
+            Some(Ok(()))
+        ));
+        assert!(recognize_command(&words("meson setup build"), cwd).is_none());
+        assert!(recognize_command(&words("meson compile -C build"), cwd).is_none());
+        assert!(matches!(
+            recognize_command(&words("/usr/bin/meson test -C build"), cwd),
             Some(Err(why)) if why.contains("by its path")
         ));
         // A shell line that starts meson test by name, and one by its path.
         let line = |text: &str| vec!["sh".to_string(), "-c".to_string(), text.to_string()];
         assert!(matches!(
-            recognize(&line("meson setup b && meson test -C b"), cwd),
+            recognize_command(&line("meson setup b && meson test -C b"), cwd),
             Some(Ok(()))
         ));
         assert!(matches!(
-            recognize(&line("/opt/meson/meson test -C b"), cwd),
+            recognize_command(&line("/opt/meson/meson test -C b"), cwd),
             Some(Err(_))
         ));
         // One that names another runner too is pytest's, as C-32's rule says.
-        assert!(recognize(&line("meson test -C b && pytest"), cwd).is_none());
-        assert!(recognize(&line("ninja -C b"), cwd).is_none());
+        assert!(recognize_command(&line("meson test -C b && pytest"), cwd).is_none());
+        assert!(recognize_command(&line("ninja -C b"), cwd).is_none());
     }
 }

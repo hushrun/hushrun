@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 
 use hushrun_core::units::{self, Sets, Sources};
 
-use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
+use super::adapter::{
+    Adapter, Hints, KeysOutside, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+};
 use super::ctest::{self, build, run, select};
 use super::facts::{self, FactsFile, TestFacts, Unfollowed, UnitFacts};
 
@@ -157,6 +159,12 @@ fn program_of(first: &str, cwd: &Path) -> Option<PathBuf> {
 /// build directory, started by its path (C-106): `Some(Err)` for one hushrun can't observe
 /// (doctest's, Catch2 2's, or COMMAND's arguments), `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    let found = recognize(command, cwd)?;
+    Some(found.map(|adapter| Box::new(adapter) as Box<dyn Adapter>))
+}
+
+/// [`recognized`], as the adapter's own type: what a test of it calls, with no trait object.
+pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
     let first = command.first()?;
     let program = program_of(first, cwd)?;
     let bytes = std::fs::read(&program).ok()?;
@@ -165,14 +173,12 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
         Err(why) => return Some(Err(why)),
     };
     let args = command[1..].to_vec();
-    Some(framework.args(&args).map(|observe| {
-        Box::new(Recognized {
-            program,
-            framework,
-            args,
-            observe,
-            started: OnceLock::new(),
-        }) as Box<dyn Adapter>
+    Some(framework.args(&args).map(|observe| Recognized {
+        program,
+        framework,
+        args,
+        observe,
+        started: OnceLock::new(),
     }))
 }
 
@@ -454,6 +460,22 @@ impl Adapter for Recognized {
             unit: true,
             reads: false,
         }
+    }
+
+    // `hints`, `binds` and `keys` are the trait's defaults, written out: a call on this type then
+    // names this impl's own method, which the static test map follows to it alone, where the
+    // trait's would count every adapter that overrides it (CONTRIBUTING.md, "Which tests CI runs
+    // again").
+    fn hints(&self) -> Hints {
+        Hints::Sources
+    }
+
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
