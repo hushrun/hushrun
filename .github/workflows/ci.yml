@@ -168,13 +168,13 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/m2
-          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/build_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun-build/src/maven/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
+          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/e2e_maven.rs', 'crates/hushrun/tests/build_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun-build/src/maven/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
       - name: Fill Maven's repository for the test-class tests
         id: maven-fill
         if: steps.maven-repo.outputs.cache-hit != 'true'
         run: |
           filled=true
-          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || {
+          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --test e2e_maven --locked --no-fail-fast || {
             filled=false
             echo "filling Maven's repository failed: the test run says what is missing, and the cache keeps none of it"
           }
@@ -486,13 +486,13 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/m2
-          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/build_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun-build/src/maven/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
+          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/e2e_maven.rs', 'crates/hushrun/tests/build_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun-build/src/maven/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
       - name: Fill Maven's repository for the test-class tests
         id: maven-fill
         if: steps.maven-repo.outputs.cache-hit != 'true'
         run: |
           filled=true
-          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || {
+          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --test e2e_maven --locked --no-fail-fast || {
             filled=false
             echo "filling Maven's repository failed: the test run says what is missing, and the cache keeps none of it"
           }
