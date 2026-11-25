@@ -42,6 +42,7 @@ pub mod jvm;
 pub mod maven;
 pub mod mesontest;
 pub mod mocha;
+pub mod node;
 pub mod node_test;
 pub mod phpunit;
 pub mod program;

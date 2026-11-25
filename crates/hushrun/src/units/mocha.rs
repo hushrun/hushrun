@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources, Tree};
 
 use super::adapter::{
-    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
 use super::command::program_name;
 use super::facts::FactsFile;
@@ -25,7 +26,7 @@ use super::facts::FactsFile;
 /// The adapter's word: its facts files, this machine's store and a hint name it so.
 pub const ADAPTER: &str = "mocha";
 /// What the adapter observes being read: its sources (C-30). Every other kind is rest.
-pub const SOURCE_KINDS: &[&str] = super::node_test::SOURCE_KINDS;
+pub const SOURCE_KINDS: &[&str] = super::node::SOURCE_KINDS;
 /// The file every Node process of COMMAND loads.
 const PRELOAD: &str = include_str!("hushrun_mocha.cjs");
 /// The Mocha majors the adapter knows.
@@ -267,9 +268,10 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Observed, String> {
     Ok(out)
 }
 
-/// \[ADR 0107\] The Mocha adapter for a COMMAND that starts one run of Mocha 10 or 11; `None`
-/// for any other COMMAND.
-pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+/// What `command` in `cwd` is for the Mocha adapter, as [`recognized`] finds it, without the
+/// trait object: a test calls the adapter on its own type (CONTRIBUTING.md, "Which tests CI runs
+/// again").
+pub fn recognize_in(command: &[String], cwd: &Path) -> Option<Result<Recognized, String>> {
     let mut recognized = match recognize(command)? {
         Ok(recognized) => recognized,
         Err(why) => return Some(Err(why)),
@@ -286,7 +288,13 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
             )));
         }
     }
-    Some(Ok(Box::new(recognized)))
+    Some(Ok(recognized))
+}
+
+/// \[ADR 0107\] The Mocha adapter for a COMMAND that starts one run of Mocha 10 or 11; `None`
+/// for any other COMMAND.
+pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    Some(recognize_in(command, cwd)?.map(|r| Box::new(r) as Box<dyn Adapter>))
 }
 
 impl Adapter for Recognized {
@@ -314,12 +322,36 @@ impl Adapter for Recognized {
         Hints::Kinds(SOURCE_KINDS)
     }
 
+    // `binds`, `keys`, `not_by_test`, `not_watched` and `start_variables` are the trait's
+    // defaults, written out: a call on this type then names this impl's own method, which the
+    // static test map follows to it alone, where the trait's would count every adapter that
+    // overrides it (CONTRIBUTING.md, "Which tests CI runs again").
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn not_by_test(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn not_watched(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn start_variables(&self, _: &Path) -> Vec<(String, Option<OsString>)> {
+        Vec::new()
+    }
+
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
         let dir =
             install(at.cache).map_err(|err| format!("can't write its Mocha adapter: {err}"))?;
         Ok(vec![(
             "NODE_OPTIONS".to_string(),
-            super::node_test::require(&dir.join("hushrun-mocha.cjs"), (at.env)("NODE_OPTIONS"))?,
+            super::node::require(&dir.join("hushrun-mocha.cjs"), (at.env)("NODE_OPTIONS"))?,
         )])
     }
 

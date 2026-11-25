@@ -10,6 +10,12 @@
 //! runs online and fills that repository instead, which is how CI fills it before its test run.
 //! The tests say so and pass where Maven is missing, unless `HUSHRUN_TEST_TOOLS=required`, which
 //! CI sets. (`-o` leaves the extension's remote on: it isn't Maven's repository transport.)
+//!
+//! Every test here stays end to end (CONTRIBUTING.md, "When a test is end to end"): what it checks
+//! is the extension served by the build session and the relay, which run in the `hushrun` process
+//! that `hushrun run` starts, and what the run's lines say of it. What of Maven's build block needs
+//! no run, its cache's protocol, its buildinfo and `MAVEN_OPTS`, is tested in-process in
+//! `hushrun-build` (`maven/`); the Maven adapter's own tests are in `units_maven.rs`.
 
 #![cfg(unix)]
 
