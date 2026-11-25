@@ -284,11 +284,25 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
         assert!(notes.is_empty(), "{notes:?}");
     }
     // Tests, of an adapter that knows none: by test file, said once, in the runner's words.
-    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &cargo);
+    // covers: C-146
+    // \[C-146\] `cargo test` starts a binary once: by test binary, said once, and why.
+    let cargo_test = cargo::recognize(&words("cargo test --workspace")).unwrap();
+    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &cargo_test);
     assert_eq!(unit, Unit::File);
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].starts_with("its tests are reused by test binary: `cargo test` runs each test binary's tests in one start"),
+        "{notes:?}"
+    );
+    // `cargo nextest run` starts each test on its own: one by one, each taken to have read
+    // what the static map gives, never watched.
+    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &cargo);
+    assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert_eq!(
         notes,
-        ["its tests are reused by test binary: cargo's tests can't be reused one by one yet"]
+        [
+            "each test is taken to have read what the static map of its sources says it reaches, with what its test binary read besides: cargo nextest's tests aren't watched one by one"
+        ]
     );
     // \[ADR 0086\] Go knows tests, unless COMMAND chooses its own.
     let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &go);
@@ -1087,6 +1101,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
     let passed = BTreeMap::new();
     let plan = |map: &store::Map| {
         plan_tests(&TestsAt {
+            test_lists: &adapter::TestLists::new(),
             keyer: &keyer,
             reads: Reads::File,
             tree: &tree,

@@ -31,7 +31,8 @@ use hushrun_core::digest::Digest;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources};
 
 use super::adapter::{
-    Adapter, Hints, KeysOutside, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    TestLists, WhyAt,
 };
 use super::facts::{FactsFile, Invocation};
 use super::runner;
@@ -401,6 +402,10 @@ pub struct Observed {
     pub named: BTreeSet<String>,
     /// \[ADR 0069\] Each test binary's executable, by its unit.
     pub executables: BTreeMap<String, PathBuf>,
+    /// \[C-146\] Each test binary's own files and those its tests' lists may leave out, by its
+    /// unit, and the workspace: what the static map is made with.
+    pub mapping: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)>,
+    pub workspace: Workspace,
 }
 
 /// \[ADR 0069\] What a build says of its test binaries before any runs: the plan's.
@@ -410,6 +415,25 @@ pub struct Built {
     pub units: BTreeMap<String, BuiltUnit>,
     pub unit_files: BTreeSet<String>,
     pub named: BTreeSet<String>,
+    /// \[C-146\] What the static map of the workspace is made with.
+    pub workspace: Workspace,
+}
+
+/// \[C-146\] The workspace as the static map needs it, from `cargo metadata`.
+#[derive(Debug, Default, Clone)]
+pub struct Workspace {
+    /// Its folder, absolute, where rust-analyzer is started.
+    pub root: PathBuf,
+    /// Its folder from the repository's root, with a `/`, or empty at the root.
+    pub prefix: String,
+    /// Its members' package names.
+    pub packages: BTreeSet<String>,
+    /// Of those, the procedural macro packages.
+    pub proc_macros: BTreeSet<String>,
+    /// Its members' binary targets' names.
+    pub binaries: BTreeSet<String>,
+    /// Each package outside it, by name and version: its folder, where its macros are read.
+    pub external: BTreeMap<(String, String), PathBuf>,
 }
 
 /// One test binary of a build.
@@ -426,6 +450,14 @@ pub struct BuiltUnit {
     /// \[ADR 0096\] What `hushrun why` compares of its build scripts' declared variables.
     pub declared: super::store::Declared,
     pub not_followed: BTreeSet<NotFollowed>,
+    /// \[C-146\] The files its own crate is built from: where its test functions are.
+    pub own: BTreeSet<String>,
+    /// \[C-146\] Of `reads`, the `.rs` files a test's own list may leave out when the static map
+    /// shows the test reaches nothing of them: its own crate's, the workspace libraries' it may
+    /// link (not a procedural macro's), and for an integration test its package's other targets'.
+    /// Every other file it read (a build script's, a procedural macro's, a file a build script
+    /// watches, anything but a `.rs` source) stays in every test's list.
+    pub mappable: BTreeSet<String>,
 }
 
 /// \[ADR 0096\] The SHA-256 of the values of `names` that `var` gives, raw, as [`units::env()`]
@@ -686,6 +718,11 @@ impl Resolve {
 #[derive(Debug, Deserialize)]
 struct Package {
     id: String,
+    /// \[C-146\] Its name and version, as rust-analyzer's symbols name its crates.
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    version: String,
     /// \[ADR 0096\] Where it comes from (`registry+…`, `git+…`): `None` for a path package, a
     /// member's or another's, whatever replaces the source (a vendored registry crate keeps its
     /// registry source).
@@ -707,6 +744,9 @@ struct Dependency {
 #[derive(Debug, Clone, Deserialize)]
 struct Target {
     kind: Vec<String>,
+    /// \[C-151\] Its name: a binary's is what `CARGO_BIN_EXE_<name>` and a path name it by.
+    #[serde(default)]
+    name: String,
     src_path: PathBuf,
     #[serde(default)]
     test: bool,
@@ -829,10 +869,14 @@ pub fn observe(
     }
     let mut units = BTreeMap::new();
     let mut executables = BTreeMap::new();
+    let mut mapping = BTreeMap::new();
     for (unit, b) in built.units {
         let facts_of = started.get(&real(&b.executable)).map(Vec::as_slice);
         let starts = facts_of.unwrap_or(&[]);
         let (complete, failed, duration_ms) = ended(starts, recognized, command_passed);
+        // \[C-146\] nextest starts a binary once per test: each test's start is its own.
+        let tests = recognized.nextest.then(|| tests_of(starts)).flatten();
+        mapping.insert(unit.clone(), (b.own.clone(), b.mappable.clone()));
         let outside = b.outside();
         let declared = Some(b.declared.clone());
         units.insert(
@@ -850,7 +894,7 @@ pub fn observe(
                 reads: b.reads,
                 getenv: BTreeSet::new(),
                 duration_ms,
-                tests: None,
+                tests,
             },
         );
         executables.insert(unit, b.executable);
@@ -860,7 +904,51 @@ pub fn observe(
         unit_files: built.unit_files,
         named: built.named,
         executables,
+        mapping,
+        workspace: built.workspace,
     })
+}
+
+/// \[C-146\] A binary's tests, from nextest's starts of it: each test a start ran with
+/// `--exact <name>`, finished when every start of it ended, failed when one didn't exit 0; and
+/// each test the target runner left out of a list, deselected. `None` when no start ran or left
+/// out a test: a binary reused whole, or one `cargo test` started once.
+fn tests_of(starts: &[&Invocation]) -> Option<BTreeMap<String, super::facts::MergedTest>> {
+    let mut out: BTreeMap<String, super::facts::MergedTest> = BTreeMap::new();
+    let mut runs: BTreeMap<&str, Vec<&Invocation>> = BTreeMap::new();
+    for start in starts.iter().filter(|s| !s.reused) {
+        for name in &start.left_out {
+            out.entry(name.clone()).or_default().deselected = true;
+        }
+        if start.listed.is_some() {
+            continue;
+        }
+        if let Some(name) = start
+            .args
+            .iter()
+            .position(|a| a == "--exact")
+            .and_then(|at| start.args.get(at + 1))
+        {
+            runs.entry(name.as_str()).or_default().push(start);
+        }
+    }
+    // A test started more than once (a retry) finished when each start did, and failed when any
+    // did.
+    for (name, starts) in runs {
+        let test = out.entry(name.to_string()).or_default();
+        test.deselected = false;
+        test.finished = starts
+            .iter()
+            .all(|s| s.exit.is_some() || s.signal.is_some());
+        test.failed = starts
+            .iter()
+            .any(|s| s.exit != Some(0) || s.signal.is_some());
+        test.duration_ms = starts
+            .iter()
+            .map(|s| s.duration_ms)
+            .fold(0, u64::saturating_add);
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// \[ADR 0069\] Whether the target runner reused a binary every time it was asked to start it:
@@ -1043,9 +1131,18 @@ fn read_build(
             continue;
         };
         let mut not_followed = BTreeSet::new();
+        // \[C-146\] Each dep-info, and whether its `.rs` files are ones a test's own list may
+        // leave out (`mappable`): its own crate's, a library's it links, a target the package
+        // rule adds; never a build script's or a procedural macro's.
         let mut depinfos: Vec<PathBuf> = Vec::new();
+        let mut mappable_depinfos: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut own_depinfo: Option<PathBuf> = None;
         match &artifact.depinfo {
-            Some(d) => depinfos.push(d.clone()),
+            Some(d) => {
+                depinfos.push(d.clone());
+                mappable_depinfos.insert(d.clone());
+                own_depinfo = Some(d.clone());
+            }
             None => {
                 not_followed.insert(NotFollowed {
                     why: "no-dep-info".into(),
@@ -1068,8 +1165,14 @@ fn read_build(
             if !wanted {
                 continue;
             }
+            let proc_macro = other.target.kind.iter().any(|k| k == "proc-macro");
             match &other.depinfo {
-                Some(d) => depinfos.push(d.clone()),
+                Some(d) => {
+                    depinfos.push(d.clone());
+                    if !script && !proc_macro {
+                        mappable_depinfos.insert(d.clone());
+                    }
+                }
                 None => {
                     not_followed.insert(NotFollowed {
                         why: "target-without-dep-info".into(),
@@ -1123,6 +1226,9 @@ fn read_build(
         }
         let mut given: BTreeSet<String> = BTreeSet::new();
         let mut declared: BTreeSet<String> = BTreeSet::new();
+        let mut mappable: BTreeSet<String> = BTreeSet::new();
+        let mut kept: BTreeSet<String> = BTreeSet::new();
+        let mut own: BTreeSet<String> = BTreeSet::new();
         for (d, files, sources) in depinfos
             .iter()
             .map(|d| (d, true, true))
@@ -1141,7 +1247,16 @@ fn read_build(
                 continue;
             };
             if files {
-                reads.extend(info.files.iter().filter_map(|p| relative(p)));
+                let named: Vec<String> = info.files.iter().filter_map(|p| relative(p)).collect();
+                if mappable_depinfos.contains(d) {
+                    mappable.extend(named.iter().filter(|f| f.ends_with(".rs")).cloned());
+                } else {
+                    kept.extend(named.iter().cloned());
+                }
+                if own_depinfo.as_ref() == Some(d) {
+                    own.extend(named.iter().cloned());
+                }
+                reads.extend(named);
             }
             env.extend(keyed_env(info.env, keying));
             // \[ADR 0096\] What the compile read that no file of the scope is, by its content: a
@@ -1221,8 +1336,11 @@ fn read_build(
                         .collect()
                 });
                 reads.extend(watched.iter().cloned());
+                kept.extend(watched.iter().cloned());
             }
         }
+        // A file some other dep-info names too stays.
+        let mappable: BTreeSet<String> = mappable.difference(&kept).cloned().collect();
         units.insert(
             unit,
             BuiltUnit {
@@ -1235,13 +1353,56 @@ fn read_build(
                     names: declared,
                 },
                 not_followed,
+                own,
+                mappable,
             },
         );
+    }
+    // \[C-146\] The workspace, for the static map.
+    let workspace_root = real(&metadata.workspace_root);
+    let prefix = workspace_root
+        .strip_prefix(&root)
+        .ok()
+        .map(|p| {
+            let parts: Vec<String> = p
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", parts.join("/"))
+            }
+        })
+        .unwrap_or_default();
+    let mut workspace = Workspace {
+        root: workspace_root,
+        prefix,
+        ..Workspace::default()
+    };
+    for package in &metadata.packages {
+        if members.contains(package.id.as_str()) {
+            workspace.packages.insert(package.name.clone());
+            for target in &package.targets {
+                if target.kind.iter().any(|k| k == "proc-macro") {
+                    workspace.proc_macros.insert(package.name.clone());
+                }
+                if target.kind.iter().any(|k| k == "bin") {
+                    workspace.binaries.insert(target.name.clone());
+                }
+            }
+        } else if let Some(dir) = package.manifest_path.parent() {
+            workspace.external.insert(
+                (package.name.clone(), package.version.clone()),
+                dir.to_path_buf(),
+            );
+        }
     }
     Built {
         units,
         unit_files,
         named,
+        workspace,
     }
 }
 
@@ -1886,6 +2047,30 @@ impl Adapter for Recognized {
         Hints::None
     }
 
+    /// \[C-146\] With `cargo nextest run`, which starts each test on its own, each test one by
+    /// one; with `cargo test`, which starts a binary once, by test binary. What each test read is
+    /// what the static map gives, not what was watched.
+    fn tests(&self) -> KnowsTests {
+        KnowsTests {
+            unit: self.nextest && !self.doc,
+            reads: false,
+        }
+    }
+
+    /// \[C-146\] `cargo test` starts a binary once, for all its tests.
+    fn not_by_test(&self) -> Option<String> {
+        (!self.nextest && !self.doc).then(|| {
+            "`cargo test` runs each test binary's tests in one start, which can't leave one out; `cargo nextest run` starts each test on its own, and reuses them one by one".to_string()
+        })
+    }
+
+    /// \[C-146\] With nextest, the static map stands in for what a test was watched to read.
+    fn not_watched(&self) -> Option<String> {
+        self.nextest.then(|| {
+            "what the static map of its sources says it reaches, with what its test binary read besides: cargo nextest's tests aren't watched one by one".to_string()
+        })
+    }
+
     fn binds(&self) -> bool {
         true
     }
@@ -1938,10 +2123,48 @@ impl Adapter for Recognized {
             .iter()
             .map(|(unit, b)| (unit.clone(), b.executable.clone()))
             .collect();
+        // \[C-146\] Each test this machine knows of a binary that may be keyed, by the map.
+        let (test_lists, notes) = if at.by_test && self.nextest && !self.doc {
+            let binaries = b
+                .units
+                .iter()
+                .filter(|(unit, b)| b.not_followed.is_empty() && at.tree.contains(unit))
+                .map(|(unit, b)| {
+                    let tests = at
+                        .map
+                        .units
+                        .get(unit)
+                        .map(|m| m.tests.keys().cloned().collect())
+                        .unwrap_or_default();
+                    (
+                        unit.clone(),
+                        super::cargo_map::Binary {
+                            reads: &b.reads,
+                            own: &b.own,
+                            mappable: &b.mappable,
+                            tests,
+                        },
+                    )
+                })
+                .collect();
+            let mapped = super::cargo_map::lists(
+                self,
+                at.root,
+                at.tree,
+                &b.workspace,
+                &binaries,
+                at.assigned,
+            );
+            (mapped.lists, mapped.notes)
+        } else {
+            (TestLists::new(), Vec::new())
+        };
         Ok(Some(Planning {
             sets,
             known,
             bound,
+            test_lists,
+            notes,
             ..Planning::default()
         }))
     }
@@ -1975,12 +2198,50 @@ impl Adapter for Recognized {
                 )
             })
             .collect();
+        // \[C-146\] Each test the run told, by the map: what it is recorded under.
+        let (test_lists, notes) = if at.by_test && self.nextest && !self.doc {
+            let binaries = observed
+                .units
+                .iter()
+                .filter(|(unit, seen)| seen.facts.not_followed.is_empty() && at.tree.contains(unit))
+                .filter_map(|(unit, seen)| {
+                    let (own, mappable) = observed.mapping.get(unit)?;
+                    let tests = seen
+                        .tests
+                        .as_ref()
+                        .map(|t| t.keys().cloned().collect())
+                        .unwrap_or_default();
+                    Some((
+                        unit.clone(),
+                        super::cargo_map::Binary {
+                            reads: &seen.reads,
+                            own,
+                            mappable,
+                            tests,
+                        },
+                    ))
+                })
+                .collect();
+            let mapped = super::cargo_map::lists(
+                self,
+                at.root,
+                at.tree,
+                &observed.workspace,
+                &binaries,
+                at.assigned,
+            );
+            (mapped.lists, mapped.notes)
+        } else {
+            (TestLists::new(), Vec::new())
+        };
         Ok(Some(Read {
             seen: observed.units,
             failures_by_unit: true,
             sets,
             planned,
             executables: observed.executables,
+            test_lists,
+            notes,
             ..Read::default()
         }))
     }
@@ -2364,6 +2625,7 @@ mod tests {
             .unwrap()
         };
         let target_of = |package: &str, kind: &str, src: &str| Target {
+            name: String::new(),
             kind: vec![kind.to_string()],
             src_path: root.join(package).join(src),
             test: true,
@@ -2806,6 +3068,7 @@ mod tests {
         std::fs::write(build.join("build-script-build"), "x").unwrap();
         std::fs::write(build.join("build_script_build-0123456789abcdef"), "x").unwrap();
         let target = |kind: &str| Target {
+            name: String::new(),
             kind: vec![kind.to_string()],
             src_path: dir.path().join("build.rs"),
             test: false,
@@ -2885,6 +3148,7 @@ mod tests {
             manifest: root.join(package).join("Cargo.toml"),
             package_id: Some(package.to_string()),
             target: Target {
+                name: String::new(),
                 kind: vec![kind.to_string()],
                 src_path: root.join(package).join(src),
                 test: true,
@@ -3159,6 +3423,7 @@ mod tests {
             dir: None,
             testlog: None,
             testlog_truncated: false,
+            left_out: Vec::new(),
         }
     }
 

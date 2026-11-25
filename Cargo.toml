@@ -37,6 +37,7 @@ hushrun-testkit = { path = "crates/hushrun-testkit" }
 hushrun-tlog = { path = "crates/hushrun-tlog" }
 hushrun-reports = { path = "crates/hushrun-reports" }
 hushrun-build = { path = "crates/hushrun-build" }
+hushrun-graph = { path = "crates/hushrun-graph" }
 
 anyhow = "1.0.100"
 base64 = "0.23"
@@ -120,6 +121,11 @@ oci-client = { version = "0.18.0", default-features = false, features = ["rustls
 der = { version = "0.7.10", features = ["alloc", "derive", "oid"] }
 x509-cert = { version = "0.2.5", default-features = false, features = ["std", "pem"] }
 cms = { version = "0.2.3", default-features = false, features = ["std"] }
+
+# \[ADR 0145\] Rust sources split into items, for the static map of what each Rust test reaches:
+# tree-sitter's parser runtime and its Rust grammar, C code built with cc, as ring's and zstd's are.
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
 
 # Tests only.
 assert_cmd = "2.0.17"

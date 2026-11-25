@@ -205,7 +205,15 @@ pub struct PlanAt<'a> {
     /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool the adapter starts
     /// gets: start them through [`super::command::tool`].
     pub assigned: &'a [(String, String)],
+    /// \[C-146\] The run reuses tests one by one (`tests.unit: test`, C-39): an adapter whose
+    /// tests' own lists cost a tool's run makes them only then.
+    pub by_test: bool,
 }
+
+/// \[C-146\] What an adapter that maps each test's reads itself (Cargo's, from the static map)
+/// says of each test of a unit, by the unit and the test's id: the files its key is made of, or
+/// why it is taken to have read what its unit read.
+pub type TestLists = BTreeMap<String, BTreeMap<String, Result<BTreeSet<String>, String>>>;
 
 /// The units a plan knows of, each with the lists of files its key may be made from (C-38): `None`
 /// when it can't tell, and the unit runs.
@@ -233,6 +241,11 @@ pub struct Planning {
     /// \[ADR 0069\] For an adapter that [binds](Adapter::binds) its units: the file whose bytes
     /// each unit's reuse holds to.
     pub bound: BTreeMap<String, PathBuf>,
+    /// \[C-146\] Each test's own list, as the adapter maps it.
+    pub test_lists: TestLists,
+    /// \[C-152\] What the run says once, before COMMAND, of what the adapter couldn't do: words
+    /// people read, without the check's name.
+    pub notes: Vec<String>,
 }
 
 /// What reading an adapter's files has to go by, after COMMAND.
@@ -249,6 +262,8 @@ pub struct ReadAt<'a> {
     /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool the adapter starts
     /// gets: start them through [`super::command::tool`].
     pub assigned: &'a [(String, String)],
+    /// \[C-146\] As [`PlanAt::by_test`].
+    pub by_test: bool,
 }
 
 /// What an adapter's files came to, before any state is decided.
@@ -292,6 +307,11 @@ pub struct Read {
     /// people read: what `hushrun why` says of each test file and test of the run. (A facts file
     /// can say it too: `notKept`.)
     pub not_kept: Option<String>,
+    /// \[C-146\] Each test's own list, as the adapter maps it: what its key is recorded under,
+    /// and what `observe` would have keyed it by.
+    pub test_lists: TestLists,
+    /// \[C-152\] What the run says once, after COMMAND, of what the adapter couldn't do.
+    pub notes: Vec<String>,
 }
 
 /// What `hushrun why` has to go by: this machine's store and the files now, and no tool.
@@ -343,6 +363,19 @@ pub trait Adapter: std::fmt::Debug {
             unit: false,
             reads: false,
         }
+    }
+
+    /// \[C-146\] Why it doesn't know tests one by one, when [`Adapter::tests`] says so, in words
+    /// people read after `its tests are reused by <test file>: `; `None` for the general words.
+    fn not_by_test(&self) -> Option<String> {
+        None
+    }
+
+    /// \[C-146\] What a test is taken to have read when the check asks `reads: test` and
+    /// [`Adapter::tests`] says it can't watch tests, in words people read after `each test is
+    /// taken to have read `; `None` for the general words.
+    fn not_watched(&self) -> Option<String> {
+        None
     }
 
     /// \[C-38\] How its hints are addressed and keyed.

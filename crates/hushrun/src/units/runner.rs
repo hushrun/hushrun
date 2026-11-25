@@ -19,7 +19,7 @@
 //! after it are the runner the environment had set there, which it chains to and gives back to
 //! the test, or none.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -144,6 +144,7 @@ fn run(args: &[OsString]) -> ExitCode {
                 dir: go.then(|| here.clone()).flatten(),
                 testlog: None,
                 testlog_truncated: false,
+                left_out: Vec::new(),
             },
             None,
         );
@@ -152,6 +153,12 @@ fn run(args: &[OsString]) -> ExitCode {
     if listing {
         command.stdout(Stdio::piped());
     }
+    // \[C-146\] The tests `reuseTests` lists of this binary, when it is the one the plan's keys
+    // were for: left out of what its list passes on.
+    let leave_out: BTreeSet<String> = match (&dir, listing && !go) {
+        (Some(dir), true) => tests_left_out(dir, Path::new(&told.binary)),
+        _ => BTreeSet::new(),
+    };
     let watch = watch.map(|(at, watch)| (at, watch.attach(&mut command)));
     let started = Instant::now();
     let spawned = command.spawn();
@@ -176,6 +183,9 @@ fn run(args: &[OsString]) -> ExitCode {
     });
     // A list goes on to Cargo or nextest byte for byte, as it comes; hushrun keeps a copy.
     let mut listed_bytes = Vec::new();
+    // \[C-146\] With tests to leave out, the list is read whole and passed on without them;
+    // without, byte for byte as it comes.
+    let mut whole_list = Vec::new();
     if let Some(mut out) = child.stdout.take() {
         let mut stdout = std::io::stdout();
         let mut buffer = [0u8; 16 * 1024];
@@ -183,7 +193,11 @@ fn run(args: &[OsString]) -> ExitCode {
             match out.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let _ = stdout.write_all(&buffer[..n]);
+                    if leave_out.is_empty() {
+                        let _ = stdout.write_all(&buffer[..n]);
+                    } else {
+                        whole_list.extend_from_slice(&buffer[..n]);
+                    }
                     if listed_bytes.len() < 64 << 20 {
                         listed_bytes.extend_from_slice(&buffer[..n]);
                     }
@@ -191,6 +205,9 @@ fn run(args: &[OsString]) -> ExitCode {
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => break,
             }
+        }
+        if !leave_out.is_empty() {
+            let _ = stdout.write_all(&without(&whole_list, &leave_out));
         }
         let _ = stdout.flush();
     }
@@ -246,6 +263,18 @@ fn run(args: &[OsString]) -> ExitCode {
     };
     if let Some(dir) = dir {
         let listed = listing.then(|| terse_list(&listed_bytes));
+        // \[C-146\] What it left out of the list, of what the binary listed.
+        let left_out: Vec<String> = listed
+            .iter()
+            .flatten()
+            .filter(|test| leave_out.contains(*test))
+            .cloned()
+            .collect();
+        let listed = listed.map(|all| {
+            all.into_iter()
+                .filter(|test| !leave_out.contains(test))
+                .collect()
+        });
         let (lines, truncated) = match &testlog {
             Some(log) => {
                 let read = read_testlog(log);
@@ -274,6 +303,7 @@ fn run(args: &[OsString]) -> ExitCode {
                 dir: go.then(|| here.clone()).flatten(),
                 testlog: lines,
                 testlog_truncated: truncated,
+                left_out,
             },
             tests,
         );
@@ -575,6 +605,49 @@ fn read_testlog(path: &Path) -> Option<(Vec<String>, bool)> {
 }
 
 /// The tests a libtest `--list --format terse` printed: `name: test` lines.
+/// \[C-146\] The tests of `binary` that the run's `hushrun.json` lets the runner leave out one
+/// by one: those `reuseTests` lists for the unit `testBinaries` names it as, when its bytes are
+/// the ones listed there. Anything that can't be read leaves out nothing.
+fn tests_left_out(dir: &Path, binary: &Path) -> BTreeSet<String> {
+    let Some(run) = run_file(dir) else {
+        return BTreeSet::new();
+    };
+    let Ok(real) = std::fs::canonicalize(binary) else {
+        return BTreeSet::new();
+    };
+    let Some(listed) = run
+        .test_binaries
+        .iter()
+        .find(|b| std::fs::canonicalize(&b.path).is_ok_and(|p| p == real))
+    else {
+        return BTreeSet::new();
+    };
+    if !std::fs::read(&real)
+        .is_ok_and(|bytes| hushrun_core::Digest::of(&bytes).hex() == listed.sha256)
+    {
+        return BTreeSet::new();
+    }
+    run.reuse_tests
+        .get(&listed.unit)
+        .map(|ids| ids.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// \[C-146\] A terse list (`<name>: test`, one a line) without the tests `leave_out` names; every
+/// other line as it was.
+fn without(list: &[u8], leave_out: &BTreeSet<String>) -> Vec<u8> {
+    let text = String::from_utf8_lossy(list);
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let name = line.trim_end_matches(['\n', '\r']).strip_suffix(": test");
+        if name.is_some_and(|name| leave_out.contains(name)) {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out.into_bytes()
+}
+
 fn terse_list(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
         .lines()
