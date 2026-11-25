@@ -107,14 +107,18 @@ project's new branch starts from what main's CI already ran.
   to 18, whose compiles all failed through the launcher, get no include-graph variables (B-243).
 - **`hushrun build pull`** (B-240, [ADR 0143](docs/adr/0143-a-baked-store-pulled-into-a-fixed-sandbox.md)):
   the repository's newest baked store from the backend's registry, checked (and its signature, when
-  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`. Each layer
-  goes to disk as it arrives, never into memory whole, and a pull into a folder that holds the image
-  its tag names already downloads nothing ([ADR 0146](docs/adr/0146-a-pull-streams-its-layers-and-skips-a-store-it-has.md)).
-  `--resolve` prints `<image>@<digest>` only, `--format json` gives `hushrun.build-pull/v1`, and
-  the line names the whole digest.
-- **`hushrun build bake`'s step outputs** (B-66): on GitHub Actions, `manifest`, `platform` and
-  `blocks`, and for an image it published `digest`, `ref` and `tags`, for a later step to pull or
-  deploy by digest.
+  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`
+  ([ADR 0146](docs/adr/0146-a-pull-streams-its-layers-and-skips-a-store-it-has.md)): a pull into a
+  folder that holds the store the image names already downloads nothing (`--force` pulls anyway);
+  each layer goes to disk as it arrives, never into memory whole; `--resolve` prints
+  `<image>@<digest>` only; `--format json` gives `hushrun.build-pull/v1`; `--require-signed`
+  refuses a store no named signer signed; the line names the whole digest; an image on another
+  registry is pulled with docker's credentials; a session the registry refuses is told which token
+  to set. Tested against Distribution and zot.
+- **`hushrun build bake`'s step outputs** (B-244): `hushrun-image`, `hushrun-image-digest`,
+  `hushrun-image-tag`, `hushrun-image-published` and `hushrun-manifest`, on GitHub Actions and, with
+  `HUSHRUN_BAKE_ENV`, in a GitLab dotenv file; `init --bake` wires both up. `build pull` writes
+  `hushrun-image-digest` and `hushrun-manifest`.
 - **Recipes per agent cloud** in `recipes/agent-clouds/`, and a Dev Container Feature in
   `features/src/hushrun`, to publish as `ghcr.io/hushrun/features/hushrun`.
 - **A results outbox** (C-143, [ADR 0142](docs/adr/0142-results-that-wait-and-what-a-sandbox-fetches.md)):

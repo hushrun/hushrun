@@ -34,6 +34,7 @@ fn platform() -> String {
 }
 
 pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
+    use hushrun_artifact::credentials::{Credential, DockerConfig};
     let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("build pull: {why}"));
     let usage = |why: String| Failure::new(Exit::Usage, anyhow!("build pull: {why}"));
     let dest = args
@@ -51,32 +52,70 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
     if args.insecure {
         insecure.push(image.host.clone());
     }
+    // A session reads results, not the registry: said plainly when the registry refuses one.
+    let session = matches!(&credential, Credential::Basic { password, .. }
+        if password.starts_with(crate::session::PREFIX));
+    // Another registry, with no hushrun credential for it: docker's, as `bake --oci` reads them.
+    let theirs = matches!(credential, Credential::Anonymous)
+        && image.host != crate::hosted::registry_host(&crate::hosted::origin());
+    let (docker, credentials) = if theirs {
+        (
+            DockerConfig::load().map_err(|e| failed(e.to_string()))?,
+            Vec::new(),
+        )
+    } else {
+        (
+            DockerConfig::default(),
+            vec![(image.host.clone(), credential)],
+        )
+    };
     let artifacts = hushrun_artifact::Artifacts::connect_with(
-        hushrun_artifact::credentials::DockerConfig::default(),
+        docker,
         &hushrun_artifact::Options {
             insecure_registries: insecure,
-            credentials: vec![(image.host.clone(), credential)],
+            credentials,
         },
     )
     .map_err(|e| failed(e.to_string()))?;
-    let Some(manifest) = artifacts
-        .tagged(&image, &tag)
-        .map_err(|e| failed(format!("{image}:{tag}: {e}")))?
-    else {
+    let refused = |e: hushrun_artifact::ArtifactError| {
+        if session && matches!(e, hushrun_artifact::ArtifactError::Denied { .. }) {
+            return failed(format!(
+                "{image}:{tag}: this sandbox holds a session, which reads results and not the registry: set HUSHRUN_REGISTRY_TOKEN to a pull token an owner or admin makes for this repository"
+            ));
+        }
+        failed(format!("{image}:{tag}: {e}"))
+    };
+    let Some(manifest) = artifacts.tagged(&image, &tag).map_err(refused)? else {
         return Err(failed(format!(
             "{image} has no {tag}: no baked store of this repository for this platform yet"
         )));
     };
-    let digest = manifest.digest();
-    let pulled = Pulled {
+    let label = artifacts.label(&image, &manifest).map_err(refused)?;
+    let mut pulled = Pulled {
         image: image.to_string(),
         tag: tag.clone(),
-        digest: digest.to_string(),
+        digest: manifest.digest().to_string(),
+        manifest: label.as_ref().map(|l| l.manifest.clone()),
+        platform: label.as_ref().map(|l| l.platform.clone()),
         to: dest.clone(),
+        state: State::Resolved,
+        downloaded: 0,
+        signer: None,
     };
     if args.resolve {
-        return said(global, &pulled, "resolved", None);
+        return said(global, &pulled);
     }
+    // B-240: the destination holds this store already: the image's label names the manifest its
+    // `baked.json` has, and it passes the check a run makes as it begins.
+    if !args.force
+        && let Some(manifest) = &pulled.manifest
+        && holds(&dest, manifest)
+    {
+        pulled.state = State::AlreadyThere;
+        return said(global, &pulled);
+    }
+    // Unpacked beside the destination, so the swap is a rename on one file system; the layers
+    // go to files there as they arrive, and each goes once it is unpacked.
     let parent = dest
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -86,16 +125,6 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "hushrun".into());
-    let record = parent.join(format!(".{name}.pulled"));
-    // B-240: the store there is this image's, as the last pull put it: nothing is downloaded.
-    // One whose signature no longer verifies (hushrun.yaml changed) is pulled again.
-    if already(&record, &pulled, &dest).is_some()
-        && let Ok(trust) = signature(global, &dest)
-    {
-        return said(global, &pulled, "unchanged", Some(&trust));
-    }
-    // Unpacked beside the destination, so the swap is a rename on one file system; the layers
-    // go to files there as they arrive, and each goes once it is unpacked.
     fs::create_dir_all(&parent)
         .map_err(|e| failed(format!("creating {}: {e}", parent.display())))?;
     let staging = parent.join(format!(".{name}.pull-{}", std::process::id()));
@@ -105,11 +134,14 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
         let _ = fs::remove_dir_all(&downloads);
     };
     clean();
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<(u64, Option<String>), String> {
         let layers = artifacts
             .pull_layers(&image, &manifest, MOST_LAYER, &downloads)
-            .map_err(|e| format!("{image}:{tag}: {e}"))?;
+            .map_err(|e| refused(e).error.to_string())
+            .map_err(|e| e.trim_start_matches("build pull: ").to_string())?;
+        let mut downloaded = 0;
         for layer in &layers {
+            downloaded += fs::metadata(layer).map(|m| m.len()).unwrap_or(0);
             let file =
                 fs::File::open(layer).map_err(|e| format!("reading {}: {e}", layer.display()))?;
             untar(io::BufReader::new(file), &staging)
@@ -120,101 +152,128 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
         let baked = Baked::read(&store).map_err(|why| format!("{tag}: {}", why.0))?;
         baked::check_contents(&store, Some(&baked), Depth::Bytes)
             .map_err(|why| format!("{tag}: {why}"))?;
-        signature(global, &store)
+        let signer = signature(global, &store, args.require_signed, &dest)?;
+        Ok((downloaded, signer))
     })();
-    let trust = match result {
-        Ok(trust) => trust,
+    let (downloaded, signer) = match result {
+        Ok(done) => done,
         Err(why) => {
             clean();
             return Err(failed(why));
         }
     };
-    let _ = fs::remove_file(&record);
     swap(&staging.join(STORE_ROOT), &dest).map_err(|e| {
         clean();
         failed(format!("putting it at {}: {e}", dest.display()))
     })?;
     clean();
-    // What a later pull compares with; without it, that pull downloads again.
-    if let Some(baked) = baked_digest(&dest) {
-        let _ = fs::write(&record, pulled.record(&baked).to_string());
-    }
-    said(global, &pulled, "pulled", Some(&trust))
+    pulled.state = State::Pulled;
+    pulled.downloaded = downloaded;
+    pulled.signer = signer;
+    said(global, &pulled)
 }
 
-/// What a pull read: the image, its tag, the digest the tag names, and where the store goes.
+/// What a pull did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    Pulled,
+    AlreadyThere,
+    Resolved,
+}
+
+/// What a pull read: the image, its tag, the digest the tag names, the store's manifest and
+/// platform (from the image's label), where the store goes, and what it did.
 struct Pulled {
     image: String,
     tag: String,
     digest: String,
+    manifest: Option<String>,
+    platform: Option<String>,
     to: PathBuf,
+    state: State,
+    downloaded: u64,
+    /// Who signed the store, when `hushrun.yaml` names signers; `None` when it names none.
+    signer: Option<String>,
 }
 
-impl Pulled {
-    /// What the pull keeps beside the store, `.<name>.pulled`.
-    fn record(&self, baked: &str) -> serde_json::Value {
-        serde_json::json!({
-            "image": self.image,
-            "tag": self.tag,
-            "digest": self.digest,
-            "baked": baked,
-        })
-    }
+/// Whether `dest` holds the store whose manifest identity is `manifest`: its `baked.json` says so,
+/// and it passes B-63's check by names, as a run checks a store when it begins.
+fn holds(dest: &Path, manifest: &str) -> bool {
+    Baked::read(dest).is_ok_and(|baked| {
+        baked.manifest.to_string() == manifest
+            && baked::check_contents(dest, Some(&baked), Depth::Names).is_ok()
+    })
 }
 
-/// The digest of `store`'s `baked.json`.
-fn baked_digest(store: &Path) -> Option<String> {
-    let bytes = fs::read(store.join("baked.json")).ok()?;
-    Some(hushrun_core::digest::Digest::of(&bytes).to_string())
-}
-
-/// Whether `dest` holds the store of the image `pulled` names already: the record the last pull
-/// left says the same image and digest, `baked.json` is the one it put there, and the folder
-/// still checks (B-63, names and bytes).
-fn already(record: &Path, pulled: &Pulled, dest: &Path) -> Option<()> {
-    let record: serde_json::Value = serde_json::from_slice(&fs::read(record).ok()?).ok()?;
-    let baked = baked_digest(dest)?;
-    if record != pulled.record(&baked) {
-        return None;
-    }
-    let read = Baked::read(dest).ok()?;
-    baked::check_contents(dest, Some(&read), Depth::Bytes).ok()
-}
-
-/// Says what happened (`pulled`, `unchanged`, or `resolved` with no download), as text on stderr
-/// or `hushrun.build-pull/v1` on stdout.
-fn said(global: &GlobalOpts, pulled: &Pulled, what: &str, trust: Option<&str>) -> CmdResult {
+/// Says what happened: a line on stderr (the reference on stdout for `--resolve`), and with
+/// `--format json` `hushrun.build-pull/v1` on stdout; on GitHub Actions, the step's outputs.
+fn said(global: &GlobalOpts, pulled: &Pulled) -> CmdResult {
     use crate::output::Format;
-    if global.format == Format::Json {
-        crate::output::print_json(&serde_json::json!({
-            "schema": "hushrun.build-pull/v1",
-            "outcome": what,
-            "image": pulled.image,
-            "tag": pulled.tag,
-            "digest": pulled.digest,
-            "reference": format!("{}@{}", pulled.image, pulled.digest),
-            "to": pulled.to.display().to_string(),
-            "trust": trust,
-        }))?;
-        return Ok(Exit::Ok);
-    }
     let (image, tag, digest, to) = (
         &pulled.image,
         &pulled.tag,
         &pulled.digest,
         pulled.to.display(),
     );
-    match trust {
-        // `--resolve` prints the reference, which is what it is asked for.
-        None => crate::output::print(&format!("{image}@{digest}\n"))?,
-        Some(_) if global.quiet > 0 => {}
-        Some(trust) if what == "unchanged" => eprintln!(
-            "hushrun: {to} holds {image}:{tag} ({digest}) already, so nothing was downloaded: {trust}"
-        ),
-        Some(trust) => eprintln!("hushrun: pulled {image}:{tag} ({digest}) into {to}: {trust}"),
+    let mut outputs = crate::output::Outputs::new();
+    outputs.set("hushrun-image-digest", digest);
+    outputs.set(
+        "hushrun-manifest",
+        pulled.manifest.clone().unwrap_or_default(),
+    );
+    crate::ci::Ci::from_process(global)
+        .outputs(&outputs)
+        .map_err(|e| anyhow!("build pull: writing the GitHub step outputs: {e}"))?;
+    let json = global.format == Format::Json;
+    if json {
+        let mut value = serde_json::json!({
+            "schema": "hushrun.build-pull/v1",
+            "image": image,
+            "tag": tag,
+            "digest": digest,
+            "manifest": pulled.manifest,
+            "platform": pulled.platform,
+            "state": match pulled.state {
+                State::Pulled => "pulled",
+                State::AlreadyThere => "already_there",
+                State::Resolved => "resolved",
+            },
+        });
+        if pulled.state != State::Resolved {
+            value["to"] = to.to_string().into();
+            value["downloaded_bytes"] = pulled.downloaded.into();
+            value["signature"] = if pulled.signer.is_some() {
+                "named"
+            } else {
+                "not_checked"
+            }
+            .into();
+            value["signed_by"] = pulled.signer.clone().into();
+        }
+        crate::output::print_json(&value)?;
+    }
+    match pulled.state {
+        State::Resolved if !json => crate::output::print(&format!("{image}@{digest}\n"))?,
+        State::Resolved => {}
+        _ if global.quiet > 0 => {}
+        State::AlreadyThere => {
+            eprintln!(
+                "hushrun: {to} holds {image}:{tag} ({digest}) already: nothing was downloaded"
+            )
+        }
+        State::Pulled => {
+            let trust = match &pulled.signer {
+                Some(signer) => format!("signed by {signer}"),
+                None => UNSIGNED.to_string(),
+            };
+            eprintln!("hushrun: pulled {image}:{tag} ({digest}) into {to}: {trust}")
+        }
     }
     Ok(Exit::Ok)
 }
+
+/// What the line says of a store when `hushrun.yaml` names no signer of baked stores.
+const UNSIGNED: &str = "hushrun.yaml names no signer of baked stores, so a run reuses it as the backend vouches, or with HUSHRUN_BUILD_LOWER_UNTRUSTED=1";
 
 /// The image to pull and the credential to pull it with: `--image`, else the repository's on its
 /// backend's registry; a pull token, else the backend's credential here, else none.
@@ -295,10 +354,15 @@ fn image_and_credential(
     Ok((image, token.map_or(Credential::Anonymous, basic)))
 }
 
-/// B-67: what the store's signature says, checked when `hushrun.yaml` names signers of baked
-/// stores: one that doesn't verify is refused. Without signers, it says the store is unsigned
-/// here, which a run then reads as B-63 says.
-fn signature(global: &GlobalOpts, store: &Path) -> Result<String, String> {
+/// B-67: who signed the store, checked when `hushrun.yaml` names signers of baked stores: one
+/// that doesn't verify is refused. Without signers, `None`, which a run then reads as B-63 says,
+/// unless `required` (`--require-signed`), which refuses it and leaves `dest` as it was.
+fn signature(
+    global: &GlobalOpts,
+    store: &Path,
+    required: bool,
+    dest: &Path,
+) -> Result<Option<String>, String> {
     use crate::context::{Content, Source};
     let signers = Content::open(global, Source::Repo(hushrun_vcs::Snapshot::Worktree))
         .ok()
@@ -313,11 +377,13 @@ fn signature(global: &GlobalOpts, store: &Path) -> Result<String, String> {
                 root.as_ref(),
             )
             .map_err(|why| format!("its signature doesn't verify: {why}"))?;
-            Ok(format!("signed by {}", verified.signer))
+            Ok(Some(verified.signer.to_string()))
         }
-        _ => Ok(
-            "hushrun.yaml names no signer of baked stores, so a run reuses it as the backend vouches, or with HUSHRUN_BUILD_LOWER_UNTRUSTED=1".into(),
-        ),
+        _ if required => Err(format!(
+            "hushrun.yaml names no signer of baked stores, and --require-signed was given: {} is as it was. hushrun init --bake prints the lines to add",
+            dest.display()
+        )),
+        _ => Ok(None),
     }
 }
 

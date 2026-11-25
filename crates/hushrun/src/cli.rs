@@ -570,8 +570,15 @@ pub struct BuildPullArgs {
     #[arg(long, value_name = "FOLDER")]
     pub to: Option<std::path::PathBuf>,
     /// Only say which image the tag names now (`<image>@<digest>`): download and change nothing.
-    #[arg(long, conflicts_with = "to")]
+    #[arg(long, conflicts_with_all = ["to", "force", "require_signed"])]
     pub resolve: bool,
+    /// Download the store even when the folder holds it already.
+    #[arg(long)]
+    pub force: bool,
+    /// Refuse a store no signer hushrun.yaml names signed, also when it names none: for a
+    /// template many sandboxes start from.
+    #[arg(long)]
+    pub require_signed: bool,
     /// The registry is reached over plain HTTP (tests only).
     #[arg(long, hide = true)]
     pub insecure: bool,

@@ -895,13 +895,21 @@ jobs:
     # pull request whose branch has the same name).
     if: (github.event_name == 'workflow_dispatch' && {default_ref}) || github.event_name == 'schedule' || ({after_push})
     runs-on: ubuntu-latest
+    # What the bake published, by digest, for a later job to pull or build a template from.
+    outputs:
+      hushrun-image: ${{{{ steps.bake.outputs.hushrun-image }}}}
+      hushrun-image-digest: ${{{{ steps.bake.outputs.hushrun-image-digest }}}}
+      hushrun-image-tag: ${{{{ steps.bake.outputs.hushrun-image-tag }}}}
+      hushrun-image-published: ${{{{ steps.bake.outputs.hushrun-image-published }}}}
+      hushrun-manifest: ${{{{ steps.bake.outputs.hushrun-manifest }}}}
     steps:
       # The whole history: the bake builds only a commit that comes after the backend's newest
       # build (B-75), which a shallow checkout can't tell.
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-{setup}      - run: npx --yes {package} build bake --from backend --trusted{no_build} --oci {image}
+{setup}      - id: bake
+        run: npx --yes {package} build bake --from backend --trusted{no_build} --oci {image}
 {env}"
         );
     }
@@ -947,15 +955,24 @@ jobs:
       group: hushrun-bake-${{{{ github.event.workflow_run.head_branch || github.ref_name }}}}
       cancel-in-progress: false
     runs-on: ubuntu-latest
+    # What the bake published, by digest, for a later job to pull or build a template from.
+    outputs:
+      hushrun-image: ${{{{ steps.bake.outputs.hushrun-image || steps.bake_branch.outputs.hushrun-image }}}}
+      hushrun-image-digest: ${{{{ steps.bake.outputs.hushrun-image-digest || steps.bake_branch.outputs.hushrun-image-digest }}}}
+      hushrun-image-tag: ${{{{ steps.bake.outputs.hushrun-image-tag || steps.bake_branch.outputs.hushrun-image-tag }}}}
+      hushrun-image-published: ${{{{ steps.bake.outputs.hushrun-image-published || steps.bake_branch.outputs.hushrun-image-published }}}}
+      hushrun-manifest: ${{{{ steps.bake.outputs.hushrun-manifest || steps.bake_branch.outputs.hushrun-manifest }}}}
     steps:
       # The whole history: the bake builds only a commit that comes after the backend's newest
       # build (B-75), which a shallow checkout can't tell.
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-{setup}      - if: {on_default}
+{setup}      - id: bake
+        if: {on_default}
         run: npx --yes {package} build bake --from backend --trusted{no_build} --oci {image}
-{env}      - if: github.event_name != 'schedule' && github.ref != format('refs/heads/{{0}}', github.event.repository.default_branch)
+{env}      - id: bake_branch
+        if: github.event_name != 'schedule' && github.ref != format('refs/heads/{{0}}', github.event.repository.default_branch)
         run: npx --yes {package} build bake --from backend --branch-tag --oci {image}
 {env}  branch:
     # After a branch's build passed for a push to it, in this repository: a run of this workflow
@@ -1036,6 +1053,11 @@ fn gitlab_text(
   # build (B-75), which a shallow clone can't tell.
   variables:
     GIT_DEPTH: \"0\"
+    # What the bake published, by digest, for a later job (`needs: [{GITLAB_JOB}]`) to read.
+    HUSHRUN_BAKE_ENV: hushrun-bake.env
+  artifacts:
+    reports:
+      dotenv: hushrun-bake.env
   id_tokens:
     HUSHRUN_ID_TOKEN:
       aud: {backend}
@@ -1056,7 +1078,7 @@ mod tests {
         Workflow::parse(".github/workflows/ci.yml".into(), text.to_string())
     }
 
-    // covers: B-69
+    // covers: B-69, B-244
     #[test]
     fn a_github_repository_gets_a_bake_workflow_after_its_build() {
         let dir = tempfile::tempdir().unwrap();
@@ -1107,6 +1129,11 @@ mod tests {
         // It reads as YAML, as GitHub must read it.
         let yaml: serde_json::Value = serde_saphyr::from_str(text).unwrap();
         assert_eq!(yaml["jobs"]["bake"]["runs-on"], "ubuntu-latest");
+        // The bake's outputs (B-244) reach the job's, for a later job to pull by digest.
+        assert_eq!(
+            yaml["jobs"]["bake"]["outputs"]["hushrun-image-digest"],
+            "${{ steps.bake.outputs.hushrun-image-digest }}"
+        );
         assert!(bake.notes.iter().any(|n| {
             n.contains("COPY --from=ghcr.io/acme/app:hushrun-linux-x64-latest /hushrun /hushrun")
         }));
@@ -1204,7 +1231,7 @@ mod tests {
         );
     }
 
-    // covers: B-69
+    // covers: B-69, B-244
     #[test]
     fn a_gitlab_pipeline_gets_a_bake_job_appended() {
         let dir = tempfile::tempdir().unwrap();
@@ -1226,6 +1253,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("hushrun-bake:\n  stage: .post"), "{text}");
+        assert!(text.contains("    HUSHRUN_BAKE_ENV: hushrun-bake.env\n  artifacts:\n    reports:\n      dotenv: hushrun-bake.env\n"), "{text}");
         assert!(text.contains("aud: https://hushrun.example/acme"), "{text}");
         assert!(
             text.contains("--trusted --oci \"$CI_REGISTRY_IMAGE\"") && !text.contains("--check"),

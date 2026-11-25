@@ -148,6 +148,17 @@ pub struct Label {
     pub deps_only: bool,
 }
 
+impl Label {
+    /// The label an image's config bytes carry, when a bake published it: `None` for no label or
+    /// another schema.
+    pub fn of_config(config: &[u8]) -> Option<Label> {
+        let config_json: Value = serde_json::from_slice(config).ok()?;
+        let text = config_json["config"]["Labels"][LABEL].as_str()?;
+        let label: Label = serde_json::from_str(text).ok()?;
+        (label.schema == LABEL_SCHEMA).then_some(label)
+    }
+}
+
 /// The image a moving tag points to, as a bake reads it.
 #[derive(Debug, Clone)]
 pub struct Previous {
@@ -162,12 +173,7 @@ impl Previous {
     /// published (no label, another schema, layers that don't match it).
     pub fn read(manifest: &[u8], config: &[u8]) -> Option<Previous> {
         let manifest_json: Value = serde_json::from_slice(manifest).ok()?;
-        let config_json: Value = serde_json::from_slice(config).ok()?;
-        let text = config_json["config"]["Labels"][LABEL].as_str()?;
-        let label: Label = serde_json::from_str(text).ok()?;
-        if label.schema != LABEL_SCHEMA {
-            return None;
-        }
+        let label = Label::of_config(config)?;
         let descriptors = manifest_json["layers"].as_array()?;
         if descriptors.len() != label.layers.len() {
             return None;
@@ -872,6 +878,33 @@ impl crate::Artifacts {
                 .await?;
             Ok(Previous::read(&manifest.bytes, &config))
         })
+    }
+
+    /// \[B-240\] The label of the image `manifest` (of `repository`) names, read from its config
+    /// (at most [`MOST_CONFIG`] bytes, checked against its digest): `None` when it carries none.
+    pub fn label(
+        &self,
+        repository: &Repository,
+        manifest: &Manifest,
+    ) -> Result<Option<Label>, ArtifactError> {
+        let json: Value = serde_json::from_slice(&manifest.bytes).map_err(|e| {
+            ArtifactError::Invalid(format!("{}'s manifest: {e}", manifest.digest()))
+        })?;
+        let Some(config) = json["config"]["digest"]
+            .as_str()
+            .and_then(|d| Digest::parse(d).ok())
+        else {
+            return Ok(None);
+        };
+        let bytes =
+            self.runtime
+                .block_on(self.registry.pull_blob(repository, &config, MOST_CONFIG))?;
+        if Digest::of(&bytes) != config {
+            return Err(ArtifactError::Invalid(format!(
+                "{config}: the config isn't its digest"
+            )));
+        }
+        Ok(Label::of_config(&bytes))
     }
 
     /// \[B-240\] The layers `manifest` (an image of `repository`) names, each written into `dir`
