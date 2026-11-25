@@ -1,0 +1,28 @@
+[package]
+name = "hushrun-packages"
+description = "Baked packages: a package store of a repository's downloaded packages, read by each package manager beside its own cache."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No network and no async: a run reads a package store as it begins.
+[dependencies]
+hushrun-build.workspace = true
+hushrun-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2-hw.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# \[K-11\] A store at the default folder is read only when nobody else may write it: statvfs(2)
+# says whether it is on a read-only mount. The binary builds rustix already.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "process"] }

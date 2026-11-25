@@ -2044,6 +2044,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hushrun-packages"
+version = "0.19.1"
+dependencies = [
+ "hushrun-build",
+ "hushrun-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+]
+
+[[package]]
 name = "hushrun-reports"
 version = "0.19.1"
 dependencies = [

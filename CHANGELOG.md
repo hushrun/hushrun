@@ -44,6 +44,10 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Baked packages, the format** ([ADR 0146](docs/adr/0146-baked-packages.md)): a package store,
+  a folder beside the baked store that holds a repository's downloaded packages, one part per
+  package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to
+  K-3). This release adds its format and its check only; nothing reads or writes one yet.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
