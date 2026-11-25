@@ -158,6 +158,8 @@ pub struct Graph {
     /// \[C-152\] Sources that couldn't be split or have no document in the index, and why.
     unmapped: BTreeMap<String, String>,
     by_path: HashMap<String, usize>,
+    /// \[C-147\] Each file's crates, by their root files' indices.
+    crates_of: Vec<BTreeSet<u32>>,
 }
 
 /// \[C-152\] Why a test falls back to its binary's reads.
@@ -184,6 +186,7 @@ impl Graph {
             fns_by_path: HashMap::new(),
             unmapped: BTreeMap::new(),
             by_path: HashMap::new(),
+            crates_of: Vec::new(),
         };
         let mut symbols: Vec<String> = Vec::new();
         let mut interned: HashMap<String, u32> = HashMap::new();
@@ -278,6 +281,21 @@ impl Graph {
         g.trusted = vec![false; g.nodes.len()];
         Linker::new(&mut g, &symbols, inputs).link();
         g
+    }
+
+    /// \[C-147\] The files of the crate whose root file is `root` (`tests/units.rs`): the root and
+    /// the modules its `mod` declarations reach, `#[path]` included, as the map reads them; empty
+    /// when `root` isn't a source of the map.
+    pub fn crate_files(&self, root: &str) -> BTreeSet<String> {
+        let Some(r) = self.by_path.get(root).map(|r| *r as u32) else {
+            return BTreeSet::new();
+        };
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(f, _)| self.crates_of.get(*f).is_some_and(|c| c.contains(&r)))
+            .map(|(_, e)| e.path.clone())
+            .collect()
     }
 
     /// \[C-152\] Why `path` isn't in the map, when it isn't: a binary built from it can't narrow.
@@ -1622,6 +1640,7 @@ impl<'g, 'i> Linker<'g, 'i> {
                 crates.insert(f as u32);
             }
         }
+        self.g.crates_of = crates_of.clone();
         self.crates_of = crates_of;
         self.by_file = self
             .g

@@ -996,3 +996,33 @@ fn an_impl_another_crate_writes_for_its_own_type_is_reached_only_from_where_it_i
     let reached = build(None).reach("t", &own, &all).unwrap().files;
     assert!(reached.contains("upper/src/f.rs"), "{reached:?}");
 }
+
+// covers: C-147
+#[test]
+fn a_crates_files_are_its_root_and_the_modules_it_declares() {
+    let files: &[(&str, &str)] = &[
+        (
+            "tests/a.rs",
+            "#[path = \"common/x.rs\"]\nmod fixtures;\nmod inner;\n",
+        ),
+        ("tests/inner.rs", "pub fn i() {}\n"),
+        ("tests/common/x.rs", "pub fn x() {}\n"),
+        ("tests/common/y.rs", "pub fn y() {}\n"),
+        ("tests/b.rs", "#[path = \"common/y.rs\"]\nmod fixtures;\n"),
+    ];
+    let fake = Fake {
+        files,
+        symbols: &[("path", "")],
+        at: &[],
+    };
+    let g = fake.graph(&|_, _, _| None);
+    assert_eq!(
+        g.crate_files("tests/a.rs"),
+        set(&["tests/a.rs", "tests/common/x.rs", "tests/inner.rs"])
+    );
+    assert_eq!(
+        g.crate_files("tests/b.rs"),
+        set(&["tests/b.rs", "tests/common/y.rs"])
+    );
+    assert!(g.crate_files("tests/missing.rs").is_empty());
+}

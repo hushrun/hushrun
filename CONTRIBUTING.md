@@ -189,6 +189,22 @@ fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &gradle::Reco
   Keep it that way: a test that needs a variable gives it to COMMAND (`Repo::give`, or the
   `env` of a run).
 
+To see what each test of a file reaches, measure it with the map's `reach` example, from this
+checkout. It takes about 3 minutes to index, and the index must be of the exact tree you measure:
+
+```sh
+rust-analyzer scip . --output /tmp/x.scip
+cargo test -p hushrun --test units_gradle -- --list --format terse | sed 's/: test$//' > /tmp/ids
+cargo run --release -p hushrun-graph --example reach -- --root . --index /tmp/x.scip \
+  --tests /tmp/ids --own crates/hushrun/tests/units_gradle.rs \
+  --show crates/hushrun/src/units/ --why crates/hushrun/src/units/cargo.rs
+```
+
+`--own` is the test file, the root of its crate; the modules it declares (`#[path]` included)
+come with it. What the test is taken to link is that crate and the workspace's libraries, as the
+build's dep-info gives it. The last line says `tests 34, fallback 0, median reach 82 of 416 linked
+files`; `--why` names the chain of items that brings in a file you don't expect.
+
 #### When a test is end to end
 
 A test starts the binary only for what the CLI alone does, which no in-process test sees: its
