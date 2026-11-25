@@ -318,7 +318,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Observed, String> {
                 test.not_kept.get_or_insert_with(|| UNOWNED.to_string());
             }
         }
-        reads.extend(super::gotest::under(tree, &dirs));
+        reads.extend(super::shared::under(tree, &dirs));
         reads.retain(|p| tree.contains(p));
         out.dirs.insert(unit.clone(), dirs);
         out.units.insert(

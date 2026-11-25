@@ -632,7 +632,7 @@ pub fn observe(
         if type_aware.contains(&unit) {
             reads.extend(code.iter().cloned());
         }
-        reads.extend(super::gotest::under(tree, &dirs));
+        reads.extend(super::shared::under(tree, &dirs));
         reads.retain(|p| tree.contains(p));
         out.dirs.insert(unit.clone(), dirs);
         out.units.insert(
