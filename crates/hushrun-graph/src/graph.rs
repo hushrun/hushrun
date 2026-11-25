@@ -442,6 +442,11 @@ struct Linker<'g, 'i> {
     defs: HashMap<u32, Vec<u32>>,
     /// Each macro's item-level invocations, by its name.
     invocations: HashMap<String, Vec<u32>>,
+    /// \[C-147\] Each macro name's invocations anywhere: the file, and whether it is inside a
+    /// `macro_rules!` body.
+    macro_sites: HashMap<String, Vec<(u32, bool)>>,
+    /// \[C-147\] The names a `use` imports under another name (`use m::name as other;`).
+    renamed: HashSet<String>,
     /// Each symbol's id.
     symbol_ids: HashMap<&'g str, u32>,
     /// Each node's own symbol, when a definition names it.
@@ -478,6 +483,8 @@ impl<'g, 'i> Linker<'g, 'i> {
             symbols,
             inputs,
             invocations: HashMap::new(),
+            macro_sites: HashMap::new(),
+            renamed: HashSet::new(),
             symbol_ids: symbols
                 .iter()
                 .enumerate()
@@ -664,6 +671,40 @@ impl<'g, 'i> Linker<'g, 'i> {
             self.by_name.entry(name).or_default().push(n);
         }
         self.invocations = invocations;
+        let mut macro_sites: HashMap<String, Vec<(u32, bool)>> = HashMap::new();
+        let mut renamed: HashSet<String> = HashSet::new();
+        for (f, entry) in self.g.files.iter().enumerate() {
+            let bodies: Vec<&Range<usize>> = entry
+                .split
+                .items
+                .iter()
+                .filter(|it| it.kind == Kind::MacroRules)
+                .map(|it| &it.range)
+                .collect();
+            for m in &entry.split.macros {
+                let in_macro = bodies
+                    .iter()
+                    .any(|b| b.start <= m.range.start && m.range.end <= b.end);
+                macro_sites
+                    .entry(m.name.clone())
+                    .or_default()
+                    .push((f as u32, in_macro));
+            }
+            let source = &self.inputs.sources[&entry.path];
+            for it in entry.split.items.iter().filter(|it| it.kind == Kind::Use) {
+                let words: Vec<&str> = source[it.range.clone()]
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|w| !w.is_empty())
+                    .collect();
+                for pair in words.windows(2) {
+                    if pair[1] == "as" {
+                        renamed.insert(pair[0].to_string());
+                    }
+                }
+            }
+        }
+        self.macro_sites = macro_sites;
+        self.renamed = renamed;
         for v in self.by_name.values_mut() {
             v.sort_unstable();
             v.dedup();
@@ -783,31 +824,97 @@ impl<'g, 'i> Linker<'g, 'i> {
     }
 
     /// Every item of a name; for `.name`, every method of it, an `impl`'s or a trait's.
-    fn by_name_edges(&mut self, from: u32, name: &str) -> bool {
+    fn by_name_edges(&mut self, from: u32, name: &str, at: Option<&Range<usize>>) -> bool {
+        // `name!`: a macro of that name, or what a macro made.
+        if let Some(name) = name.strip_suffix('!') {
+            let mut found = false;
+            for t in self.by_name.get(name).cloned().unwrap_or_default() {
+                if matches!(self.kind_of(t), Kind::MacroRules | Kind::MacroCall)
+                    && self.can_name(from, t)
+                {
+                    found = true;
+                    self.edge(from, t);
+                }
+            }
+            return found;
+        }
+        // A name with no path before it is never a method; `.name` is one.
         match name.strip_prefix('.') {
-            Some(name) => self.by_name_class(from, name, Class::Method),
-            None => self.by_name_class(from, name, Class::Tail),
+            Some(name) => self.by_name_class(from, name, Class::Method, at),
+            None => self.by_name_class(from, name, Class::Bare, at),
         }
     }
 
     /// \[C-150\] Every item of a name that an identifier of `class` can name.
-    fn by_name_class(&mut self, from: u32, name: &str, class: Class) -> bool {
-        self.by_path(from, name, class, None)
+    fn by_name_class(
+        &mut self,
+        from: u32,
+        name: &str,
+        class: Class,
+        at: Option<&Range<usize>>,
+    ) -> bool {
+        self.by_path(from, name, class, None, at)
     }
 
     /// \[C-150\] [`Linker::by_name_class`] for a path's last segment after `head` (`String` of
     /// `String::from`): an associated item of a type, trait or enum of that name, a method of an
     /// `impl` that names it, an item of a module of that name, or what a macro made. A head that is
     /// `Self`, `self`, `super`, `crate` or a fragment narrows nothing.
-    fn by_path(&mut self, from: u32, name: &str, class: Class, head: Option<&str>) -> bool {
+    ///
+    /// A name with no path before it, written at `at` in `from`'s own code (or expanded there by a
+    /// macro that keeps names where it expands), is resolved in `from`'s module first: an item
+    /// that module defines in a namespace shadows every item of that name it could import.
+    fn by_path(
+        &mut self,
+        from: u32,
+        name: &str,
+        class: Class,
+        head: Option<&str>,
+        at: Option<&Range<usize>>,
+    ) -> bool {
+        // Only a name with no path at all before it: never `super::name`, `crate::name`,
+        // `Self::name` nor `::name`.
+        let lexical = head.is_none()
+            && matches!(class, Class::Bare | Class::Value | Class::Head)
+            && self.kind_of(from) != Kind::MacroRules
+            && at.is_some_and(|r| self.plain_at(self.g.nodes[from as usize].file as usize, r));
         let head = head.filter(|h| {
             !matches!(*h, "Self" | "self" | "super" | "crate" | "") && !h.starts_with('$')
         });
         let to = self.by_name.get(name).cloned().unwrap_or_default();
+        let (mut types_here, mut values_here) = (false, false);
+        if lexical {
+            for t in to.iter().filter(|t| self.local_to(from, **t)) {
+                match self.kind_of(*t) {
+                    Kind::Struct
+                    | Kind::Enum
+                    | Kind::Union
+                    | Kind::TypeAlias
+                    | Kind::Trait
+                    | Kind::Mod => types_here = true,
+                    Kind::Fn | Kind::Const | Kind::Static => values_here = true,
+                    _ => {}
+                }
+            }
+        }
         let mut found = false;
         for t in to {
             if !self.can_name(from, t) {
                 continue;
+            }
+            if (types_here || values_here) && !self.local_to(from, t) {
+                let shadowed = match self.kind_of(t) {
+                    Kind::Enum | Kind::Union | Kind::TypeAlias | Kind::Trait | Kind::Mod => {
+                        types_here
+                    }
+                    Kind::Fn | Kind::Const | Kind::Static => values_here,
+                    // A tuple or unit struct is a value too.
+                    Kind::Struct => types_here && values_here,
+                    _ => false,
+                };
+                if shadowed && !self.is_method(t) {
+                    continue;
+                }
             }
             let method = self.is_method(t);
             let kind = self.kind_of(t);
@@ -904,6 +1011,50 @@ impl<'g, 'i> Linker<'g, 'i> {
         false
     }
 
+    /// \[C-150\] Whether `t` is an item of `from`'s own module, which a name with no path before it
+    /// in `from` names before any item the module imports.
+    fn local_to(&self, from: u32, t: u32) -> bool {
+        let (a, b) = (self.g.nodes[from as usize], self.g.nodes[t as usize]);
+        a.file == b.file
+            && self.item(from).module == self.item(t).module
+            && !self.is_method(t)
+            && !matches!(
+                self.kind_of(t),
+                Kind::Use
+                    | Kind::Impl
+                    | Kind::MacroCall
+                    | Kind::MacroRules
+                    | Kind::ExternCrate
+                    | Kind::ForeignMod
+            )
+    }
+
+    /// \[C-150\] Whether a name at `range` of `file` is resolved where it is written: it is in no
+    /// macro invocation, or in those of the standard library and of the crates
+    /// [`HYGIENIC`] and [`OWN_METHODS`] name alone, whose expansions keep their input and their
+    /// own names in the module they expand in.
+    fn plain_at(&self, file: usize, range: &Range<usize>) -> bool {
+        let entry = &self.g.files[file];
+        entry
+            .split
+            .macros
+            .iter()
+            .filter(|m| m.range.start <= range.start && range.end <= m.range.end)
+            .all(|m| {
+                let name_at = m.path.end.saturating_sub(m.name.len());
+                entry
+                    .occurrences
+                    .iter()
+                    .find(|(r, s, _)| r.start == name_at && *s != u32::MAX)
+                    .and_then(|(_, s, _)| Symbol::parse(&self.symbols[*s as usize]))
+                    .is_some_and(|p| {
+                        p.is_std()
+                            || HYGIENIC.contains(&p.package)
+                            || OWN_METHODS.contains(&p.package)
+                    })
+            })
+    }
+
     /// Whether a node is an item of an `impl` or a trait (a method, an associated const or type),
     /// which only a path or a method call names; or what a macro made, which may be one.
     fn is_method(&self, n: u32) -> bool {
@@ -961,7 +1112,7 @@ impl<'g, 'i> Linker<'g, 'i> {
         // couldn't read, whose expansion can name anything its module can.
         let derives = it.attrs.iter().any(|a| a == "derive");
         let mut unknown_attribute = false;
-        let unresolved: Vec<(String, Class, Option<String>)> =
+        let unresolved: Vec<(String, Class, Option<String>, Range<usize>)> =
             in_ranges(&entry.split.idents, &own, |i| &i.range)
                 .filter(|i| {
                     !starts.contains(&i.range.start) && !i.defines && !i.label && i.text != "Self"
@@ -972,7 +1123,7 @@ impl<'g, 'i> Linker<'g, 'i> {
                     unknown_attribute |= path && !derives;
                     !path
                 })
-                .map(|i| (i.text.clone(), i.class, i.head.clone()))
+                .map(|i| (i.text.clone(), i.class, i.head.clone(), i.range.clone()))
                 .collect();
         if unknown_attribute {
             self.scope_edges(n);
@@ -993,13 +1144,13 @@ impl<'g, 'i> Linker<'g, 'i> {
                 })
                 .collect()
         });
-        for (name, class, head) in unresolved {
+        for (name, class, head, at) in unresolved {
             match (&self_types, head.as_deref()) {
                 (Some(types), Some("Self")) => {
                     self.by_self(n, &name, types);
                 }
                 _ => {
-                    self.by_path(n, &name, class, head.as_deref());
+                    self.by_path(n, &name, class, head.as_deref(), Some(&at));
                 }
             }
         }
@@ -1035,13 +1186,18 @@ impl<'g, 'i> Linker<'g, 'i> {
                 let mut head: Option<&str> = None;
                 let last = segments.len() - 1;
                 for (i, segment) in segments.iter().enumerate() {
-                    let class = if i == last { Class::Tail } else { Class::Head };
-                    self.by_path(n, segment, class, head);
+                    let class = match (i == last, segments.len()) {
+                        // `"summary"`: a function's name alone, never a method.
+                        (true, 1) => Class::Bare,
+                        (true, _) => Class::Tail,
+                        _ => Class::Head,
+                    };
+                    self.by_path(n, segment, class, head, Some(&s.range));
                     head = Some(segment);
                 }
             } else if s.in_attr || s.in_macro {
                 for capture in captures(&s.text) {
-                    self.by_name_class(n, capture, Class::Value);
+                    self.by_name_class(n, capture, Class::Value, Some(&s.range));
                 }
             }
         }
@@ -1062,7 +1218,7 @@ impl<'g, 'i> Linker<'g, 'i> {
                 None => {
                     // A macro the index doesn't resolve: by its name, and everything its module can
                     // name.
-                    self.by_name_edges(n, &m.name);
+                    self.by_name_edges(n, &format!("{}!", m.name), None);
                     self.scope_edges(n);
                     if item_level {
                         self.g.roots.push(n);
@@ -1093,7 +1249,7 @@ impl<'g, 'i> Linker<'g, 'i> {
                                 if own_methods && name.starts_with('.') {
                                     continue;
                                 }
-                                self.by_name_edges(n, name);
+                                self.by_name_edges(n, name, Some(&m.range));
                             }
                             if item_level && found.registers {
                                 self.g.roots.push(n);
@@ -1192,10 +1348,10 @@ impl<'g, 'i> Linker<'g, 'i> {
                     found = true;
                     self.edge(n, call);
                 }
-                found |= self.by_name_class(n, name, Class::Head);
+                found |= self.by_name_class(n, name, Class::Head, None);
             }
             if !found && let Some(last) = names.last() {
-                found = self.by_name_class(n, last, Class::Tail);
+                found = self.by_name_class(n, last, Class::Tail, None);
             }
             // What a standard derive made (`impl#[T][Clone]clone().`): the standard library's
             // code, which reaches what the type holds through the type.
@@ -1241,6 +1397,11 @@ impl<'g, 'i> Linker<'g, 'i> {
             // \[C-148\] A type: the `impl` blocks that name it, whole for a trait from outside.
             if last == Last::Type && kind.is_type() && own {
                 for (imp, external) in self.impls_naming.get(&sym).cloned().unwrap_or_default() {
+                    // An `impl` in a crate this code can't see (`impl From<ThisType> for Theirs`)
+                    // is reached only by code that sees it.
+                    if !self.can_name(n, imp) {
+                        continue;
+                    }
                     self.edge(n, imp);
                     if external {
                         let children = self.item(imp).children.clone();
@@ -1297,14 +1458,36 @@ impl<'g, 'i> Linker<'g, 'i> {
     /// is of a crate `from`'s file is a module of, of its package's library (from another of the
     /// package's crates), or of the library of a package its package depends on.
     fn can_name(&self, from: u32, to: u32) -> bool {
+        if self.inputs.layout.is_none() {
+            return true;
+        }
+        let file_to = self.g.nodes[to as usize].file as usize;
+        // A `macro_rules!` body's names are resolved where it expands: what a file that invokes
+        // it can name. One invoked from another macro's body, or imported under another name, can
+        // expand anywhere.
+        if self.kind_of(from) == Kind::MacroRules {
+            let name = &self.item(from).name;
+            return match self.macro_sites.get(name) {
+                None => true,
+                Some(sites) => {
+                    sites.iter().any(|(_, in_macro)| *in_macro)
+                        || self.renamed.contains(name)
+                        || sites
+                            .iter()
+                            .any(|(file, _)| self.file_can_name(*file as usize, file_to))
+                }
+            };
+        }
+        let file_from = self.g.nodes[from as usize].file as usize;
+        self.file_can_name(file_from, file_to)
+    }
+
+    /// \[C-147\] Whether code of `file_from` can name an item of `file_to`: the same crate, or a
+    /// library of a package it depends on.
+    fn file_can_name(&self, file_from: usize, file_to: usize) -> bool {
         let Some(layout) = self.inputs.layout else {
             return true;
         };
-        if self.kind_of(from) == Kind::MacroRules {
-            return true;
-        }
-        let file_from = self.g.nodes[from as usize].file as usize;
-        let file_to = self.g.nodes[to as usize].file as usize;
         if !self.crates_of[file_from].is_disjoint(&self.crates_of[file_to]) {
             return true;
         }

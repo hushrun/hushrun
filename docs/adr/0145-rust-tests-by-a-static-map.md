@@ -97,16 +97,21 @@ narrower than can be shown.
 - **The map** is built in about 10 seconds (release build), and each test's walk takes about a
   millisecond.
 - What it saves is the test time of every test the change doesn't reach. A change to one adapter
-  of `crates/hushrun/src` runs about 40% of the binary's unit tests instead of all of them. The
-  integration tests in `crates/hushrun/tests/` start the binary, so they all still run.
+  of `crates/hushrun/src` runs about 7% of the binary's unit tests instead of all of them (52 of
+  751 for `units/gradle.rs`, the 19 that fall back included), and one to `units/mod.rs` about
+  21%. The integration tests in `crates/hushrun/tests/` start the binary, so they all still run.
 
 ## Consequences
 
 - A change in one module of a crate runs the tests that reach it, not every test of every binary
   that links the crate. On this repository, the unit tests of `hushrun-core` reach 7 of its
-  37 source files on average. Of the 751 unit tests of the `hushrun` binary, about a quarter reach
-  fewer than 25 of its 394 sources. A quarter reach more than 250, mostly through the command
-  line's types, whose derives reach most of the binary.
+  37 source files on average. Of the 732 unit tests of the `hushrun` binary that narrow (of 751),
+  three quarters reach 20 or fewer of the 396 files the binary is built from, and the widest
+  reaches 73.
+- The map was checked at run time: with a `panic!` at the head of every function of seven files
+  (`units/gradle.rs`, `units/cargo.rs`, `units/mod.rs`, `units/store.rs`, `results.rs`,
+  `hushrun-core`'s `glob.rs` and `names.rs`), in two builds, each of the 824 unit tests the map
+  said reach none of that build's files passed, and 213 of those that reach them failed.
 - Binary-spawning integration tests never narrow, by C-151; nor does a test of a binary built from
   a source the index lacks.
 - rust-analyzer's index of this workspace takes about 2 minutes 20 seconds and 70 MB, against a
@@ -133,8 +138,6 @@ narrower than can be shown.
 - **Receivers' types.** A call to a trait's default method on a concrete type resolves to the
   trait, so it counts every `impl` that overrides the method. rust-analyzer's index says no
   receiver's type; one that did would let such a call count the one `impl`.
-- **The command line's types.** Derives on `cli.rs`'s types reach most of the `hushrun` binary.
-  A closer reading of clap's derive would narrow the tests that build a command line.
 
 ## Alternatives considered
 

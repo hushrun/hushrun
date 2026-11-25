@@ -179,9 +179,10 @@ fn matcher_words(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<S
 }
 
 /// The names a token tree binds itself, not those of the trees in it: each `use` declaration's
-/// last segment or its `as` name, and each name after `fn`, `struct`, `enum`, `union`, `trait`,
-/// `type`, `const`, `static`, `mod` or `let`. In that tree and those in it, they are the
-/// expansion's own, wherever it expands.
+/// last segment or its `as` name (each of a group's, `use a::{b, C as D};`), and each name after
+/// `fn`, `struct`, `enum`, `union`, `trait`, `type`, `const`, `static`, `mod` or `let` (and
+/// their `mut` or `ref`). In that tree and those in it, they are the expansion's own, wherever it
+/// expands.
 fn bound(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<String>) {
     let mut cursor = tree.walk();
     let tokens: Vec<tree_sitter::Node<'_>> = tree.children(&mut cursor).collect();
@@ -191,6 +192,10 @@ fn bound(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<String>) 
     for (i, token) in tokens.iter().enumerate() {
         let word = text(token);
         if matches!(token.kind(), "token_tree" | "token_repetition") {
+            if in_use && i > 0 && text(&tokens[i - 1]) == "::" {
+                use_group(*token, source, out);
+                last = None;
+            }
             continue;
         }
         if word == "use" {
@@ -209,10 +214,15 @@ fn bound(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<String>) 
             }
             continue;
         }
+        // The keyword before it, past `mut` and `ref`.
+        let mut k = i;
+        while k > 0 && matches!(text(&tokens[k - 1]), "mut" | "ref") {
+            k -= 1;
+        }
         if token.kind() == "identifier"
-            && i > 0
+            && k > 0
             && matches!(
-                text(&tokens[i - 1]),
+                text(&tokens[k - 1]),
                 "fn" | "struct"
                     | "enum"
                     | "union"
@@ -227,6 +237,30 @@ fn bound(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<String>) 
             out.insert(word.to_string());
         }
     }
+}
+
+/// The names a `use` group binds (`{b, c::D, E as F, g::{h}}`): each element's last segment or
+/// its `as` name, and those of the groups in it.
+fn use_group(group: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<String>) {
+    let mut cursor = group.walk();
+    let tokens: Vec<tree_sitter::Node<'_>> = group.children(&mut cursor).collect();
+    let mut last: Option<String> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        let word = &source[token.byte_range()];
+        if matches!(token.kind(), "token_tree" | "token_repetition") {
+            if i > 0 && &source[tokens[i - 1].byte_range()] == "::" {
+                use_group(*token, source, out);
+                last = None;
+            }
+            continue;
+        }
+        match word {
+            "," | "}" => out.extend(last.take()),
+            _ if token.kind() == "identifier" && word != "self" => last = Some(word.to_string()),
+            _ => {}
+        }
+    }
+    out.extend(last);
 }
 
 /// The free names under a transcriber, and the macros it invokes. Inside the input of a macro it
@@ -249,6 +283,10 @@ fn free(
     for (i, token) in tokens.iter().enumerate() {
         match token.kind() {
             "token_tree" | "token_repetition" => {
+                // `a::{b, c}`: a group of a path, whose names the path resolves.
+                if i > 0 && text(&tokens[i - 1]) == "::" {
+                    continue;
+                }
                 // `name!(…)`: the tree is that macro's input.
                 let macro_name = (i >= 2 && text(&tokens[i - 1]) == "!")
                     .then(|| text(&tokens[i - 2]))
@@ -267,8 +305,19 @@ fn free(
                 let word = text(token);
                 let before = i.checked_sub(1).map(|b| text(&tokens[b]));
                 let after = tokens.get(i + 1).map(&text);
+                // `name!`: a macro, which only a macro of that name is; written `name!`.
                 if after == Some("!") {
                     invoked.insert(word.to_string());
+                    if before != Some("::") && before != Some("$") {
+                        let name = format!("{word}!");
+                        match inside {
+                            Some(to) => handed.push((name, to.to_string())),
+                            None => {
+                                names.insert(name);
+                            }
+                        }
+                    }
+                    continue;
                 }
                 // Inside a path: what the path's head names is resolved, not this.
                 if before == Some("::") || before == Some("$") {
@@ -334,6 +383,11 @@ mod tests {
         m.read("macro_rules! event { (target: $t:expr, $($a:tt)*) => { helper2($t) }; } macro_rules! debug { ($($a:tt)*) => { $crate::event!(target: module_path!(), named_arg) }; }");
         let debug = m.free_names("debug").unwrap().names;
         assert!(!debug.contains("target"), "{debug:?}");
+        // A macro's name is a macro's alone: `module_path!`, never a function `module_path`.
+        assert!(
+            debug.contains("module_path!") && !debug.contains("module_path"),
+            "{debug:?}"
+        );
         assert!(
             debug.contains("named_arg") && debug.contains("helper2"),
             "{debug:?}"
@@ -345,5 +399,17 @@ mod tests {
             "{meta:?}"
         );
         assert!(m.free_names("submit").unwrap().registers);
+        // What the expansion binds itself: `let mut`, and each name of a `use` group.
+        m.read("macro_rules! object { () => {{ let mut object = new_map(); fill!(object); use $crate::field::{debug, Value as V}; object } } }");
+        let object = m.free_names("object").unwrap().names;
+        assert!(object.contains("new_map"), "{object:?}");
+        assert!(
+            !object.contains("object") && !object.contains("debug") && !object.contains("V"),
+            "{object:?}"
+        );
+        assert!(
+            !object.contains("Value") && !object.contains("field"),
+            "{object:?}"
+        );
     }
 }

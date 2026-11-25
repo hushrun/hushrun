@@ -799,3 +799,197 @@ fn what_a_derive_made_reaches_its_own_type_not_every_type_of_its_name() {
     let fake = Fake { files, symbols, at };
     assert_eq!(fake.reach("t").unwrap(), set(&["src/lib.rs"]));
 }
+
+// covers: C-150
+#[test]
+fn a_name_with_no_path_is_its_own_modules_item_first() {
+    let fake = Fake {
+        files: &[
+            (
+                "src/lib.rs",
+                "const LIMIT: u8 = 1;\nstruct Shape {}\n#[test]\nfn t() {\n    let _ = format!(\"{LIMIT}\");\n    #[cfg(feature = \"x\")]\n    Shape();\n}\nmod inner {\n    #[test]\n    fn u() {\n        let _ = format!(\"{LIMIT}\");\n    }\n}\n",
+            ),
+            // Another module's constant of that name, which the local one shadows.
+            ("src/c.rs", "pub const LIMIT: u8 = 2;\n"),
+            // A function of the name of a local braced struct, which shadows no value.
+            ("src/s.rs", "pub fn Shape() {}\n"),
+        ],
+        symbols: &[
+            ("t", "t()."),
+            ("u", "inner/u()."),
+            ("format", "rust-analyzer cargo alloc 1.0 macros/format!"),
+            ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+            ("cfg", "rust-analyzer cargo core 1.0 cfg:"),
+        ],
+        at: &[],
+    };
+    assert_eq!(fake.reach("t").unwrap(), set(&["src/lib.rs", "src/s.rs"]));
+    // In a module that defines none, every constant of the name counts.
+    let reached = fake.reach("inner::u").unwrap();
+    assert!(reached.contains("src/c.rs"), "{reached:?}");
+    // A path before the name (`super::`) resolves it elsewhere: the local item shadows nothing.
+    let fake = Fake {
+        files: &[
+            ("src/lib.rs", "mod inner;
+pub fn gated() {}
+"),
+            (
+                "src/inner.rs",
+                "fn gated() {}
+#[test]
+fn u() {
+    #[cfg(feature = \"x\")]
+    super::gated();
+}
+",
+            ),
+        ],
+        symbols: &[
+            ("u", "inner/u()."),
+            ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+            ("cfg", "rust-analyzer cargo core 1.0 cfg:"),
+        ],
+        at: &[],
+    };
+    let reached = fake.reach("inner::u").unwrap();
+    assert!(reached.contains("src/lib.rs"), "{reached:?}");
+}
+
+// covers: C-150
+#[test]
+fn a_macro_rules_body_names_what_the_crates_invoking_it_can_see() {
+    let run = |upper_invokes: bool| {
+        let upper = if upper_invokes {
+            "mod r;\nlower::name_type!(Other);\n"
+        } else {
+            "mod r;\npub fn unrelated() {}\n"
+        };
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "lower/src/lib.rs",
+                "mod o;\n#[macro_export]\nmacro_rules! name_type {\n    ($t:ident) => {\n        pub struct $t;\n        impl $t {\n            pub fn ok() -> Outcome { Outcome::new() }\n        }\n    };\n}\n#[test]\nfn t() {\n    name_type!(Name);\n}\n",
+            ),
+            ("lower/src/o.rs", "pub struct Outcome;\n"),
+            ("upper/src/lib.rs", upper),
+            ("upper/src/r.rs", "pub struct Outcome;\n"),
+        ];
+        let symbols: &[(&str, &str)] = &[
+            ("t", "t()."),
+            ("name_type", "name_type!"),
+            ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+        ];
+        let fake = Fake {
+            files: &files,
+            symbols,
+            at: &[],
+        };
+        let sources: BTreeMap<String, String> = files
+            .iter()
+            .map(|(p, t)| (p.to_string(), t.to_string()))
+            .collect();
+        let index = fake.index();
+        let layout = Layout {
+            folders: vec![
+                ("lower/".into(), "lower".into()),
+                ("upper/".into(), "upper".into()),
+            ],
+            libraries: BTreeMap::from([
+                ("lower".to_string(), "lower/src/lib.rs".to_string()),
+                ("upper".to_string(), "upper/src/lib.rs".to_string()),
+            ]),
+            sees: BTreeMap::from([
+                ("lower".to_string(), BTreeSet::new()),
+                ("upper".to_string(), BTreeSet::from(["lower".to_string()])),
+            ]),
+        };
+        let g = Graph::build(&Inputs {
+            sources: &sources,
+            index: &index,
+            prefix: "",
+            packages: &BTreeSet::from(["w".to_string()]),
+            proc_macros: &BTreeSet::new(),
+            binaries: &BTreeSet::new(),
+            external: &|_, _, _| None,
+            layout: Some(&layout),
+        });
+        let all: BTreeSet<String> = sources.keys().cloned().collect();
+        g.reach("t", &set(&["lower/src/lib.rs"]), &all)
+            .unwrap()
+            .files
+    };
+    // Invoked in `lower` alone, its `Outcome` is `lower`'s.
+    let reached = run(false);
+    assert!(reached.contains("lower/src/o.rs"), "{reached:?}");
+    assert!(!reached.contains("upper/src/r.rs"), "{reached:?}");
+    // Invoked in `upper` too, it can be `upper`'s.
+    let reached = run(true);
+    assert!(reached.contains("upper/src/r.rs"), "{reached:?}");
+}
+
+// covers: C-148
+#[test]
+fn an_impl_another_crate_writes_for_its_own_type_is_reached_only_from_where_it_is_seen() {
+    let files: &[(&str, &str)] = &[
+        (
+            "lower/src/lib.rs",
+            "pub struct Error;\n#[test]\nfn t() {\n    let _ = Error;\n}\n",
+        ),
+        ("upper/src/lib.rs", "mod f;\npub struct Theirs;\n"),
+        (
+            "upper/src/f.rs",
+            "impl From<lower::Error> for Theirs {\n    fn from(_: lower::Error) -> Self {\n        Theirs\n    }\n}\n",
+        ),
+    ];
+    let symbols: &[(&str, &str)] = &[
+        ("t", "t()."),
+        ("Error", "Error#"),
+        ("Theirs", "Theirs#"),
+        ("From", "rust-analyzer cargo core 1.0 convert/From#"),
+        ("from", "rust-analyzer cargo core 1.0 convert/From#from()."),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+    ];
+    let fake = Fake {
+        files,
+        symbols,
+        at: &[],
+    };
+    let sources: BTreeMap<String, String> = files
+        .iter()
+        .map(|(p, t)| (p.to_string(), t.to_string()))
+        .collect();
+    let index = fake.index();
+    let layout = Layout {
+        folders: vec![
+            ("lower/".into(), "lower".into()),
+            ("upper/".into(), "upper".into()),
+        ],
+        libraries: BTreeMap::from([
+            ("lower".to_string(), "lower/src/lib.rs".to_string()),
+            ("upper".to_string(), "upper/src/lib.rs".to_string()),
+        ]),
+        sees: BTreeMap::from([
+            ("lower".to_string(), BTreeSet::new()),
+            ("upper".to_string(), BTreeSet::from(["lower".to_string()])),
+        ]),
+    };
+    let build = |layout: Option<&Layout>| {
+        Graph::build(&Inputs {
+            sources: &sources,
+            index: &index,
+            prefix: "",
+            packages: &BTreeSet::from(["w".to_string()]),
+            proc_macros: &BTreeSet::new(),
+            binaries: &BTreeSet::new(),
+            external: &|_, _, _| None,
+            layout,
+        })
+    };
+    let all: BTreeSet<String> = sources.keys().cloned().collect();
+    let own = set(&["lower/src/lib.rs"]);
+    // `lower` can't see `upper`, so its code never converts into `Theirs`.
+    let reached = build(Some(&layout)).reach("t", &own, &all).unwrap().files;
+    assert!(!reached.contains("upper/src/f.rs"), "{reached:?}");
+    // Without the packages' layout, every `impl` naming the type counts.
+    let reached = build(None).reach("t", &own, &all).unwrap().files;
+    assert!(reached.contains("upper/src/f.rs"), "{reached:?}");
+}
