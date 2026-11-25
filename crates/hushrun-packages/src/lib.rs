@@ -15,6 +15,7 @@
 //!
 //! Nothing here opens a network connection or decides by a clock.
 
+pub mod state;
 pub mod store;
 pub mod write;
 

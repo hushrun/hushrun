@@ -552,6 +552,12 @@ pub fn check_contents(
     Ok(all)
 }
 
+/// K-8: the part `name`'s folder under the store `folder` holds exactly `rows`, every file by its
+/// SHA-256. `Err` names the first file that differs.
+pub fn verify_part(folder: &Path, name: &str, rows: &[Row]) -> Result<(), Invalid> {
+    check_part(&part_dir(folder, name), name, rows, Depth::Bytes)
+}
+
 /// K-1: the folder of the part `name` holds exactly `rows`.
 fn check_part(dir: &Path, name: &str, rows: &[Row], depth: Depth) -> Result<(), Invalid> {
     let mut found = BTreeMap::new();

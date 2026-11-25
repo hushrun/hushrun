@@ -103,3 +103,49 @@ Nothing else: a file the bake can't class is left out and counted in what the ba
 on:* a released version's bytes never changing at its registry. *Breaks if:* a registry served
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
+
+**K-7 Trust and evidence.** What `packages.json` says is a claim. A run reads a part on evidence:
+
+| Part | Evidence | Who may read it |
+|---|---|---|
+| `verified_by: lockfile` | none needed: hushrun checks each file against its row's `locked` hash and the lockfile in the checkout before a tool gets it, or the tool checks it itself against the lockfile | any run |
+| `verified_by: signature`, class `download` | a signature by a signer `hushrun.yaml` names under `build: baked: signers:`, over these very `packages.json` bytes, passing `not_before` (B-67's check) | any run |
+| the same, no such signature | the person's say-so, `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1` | only a run that writes nothing others trust: not CI, not a run whose backend lets it write the trusted scope (B-63's one definition) |
+
+`packages.json` names every rows file by its SHA-256 and every rows file names every file by its
+own, so a signature over `packages.json` covers every byte a tool reads. Evidence for other
+`packages.json` bytes is none. A store whose parts all need a signature, with no evidence, is
+untrusted and read not at all; a store with parts of both kinds and no evidence is read for its
+`lockfile` parts alone, with one line. `hushrun.yaml` gains no key: the signers are the baked
+store's. *Rests on:* B-67's signers, and a signer signing only stores it baked. *Breaks if:* a
+signer's job baked what a pull request wrote: the same holds of compiled code, and B-67 says what
+a signing job may run.
+
+**K-8 Checking bytes.** Before a tool reads a part in place, the run checks the part's folder by
+names, kinds and sizes against its rows (K-1). A run that may write what others trust also hashes
+every file of each part it reads, once per process, before any tool reads it, and leaves the part
+out on the first difference, with a line. No time limit ends the hash. `hushrun packages verify`
+hashes every file of every part, anywhere. *Rests on:* a file that changed size or kind being
+found by its name and size, and a file changed in place being found only by its bytes. *Breaks
+if:* a person's machine or a sandbox held a store someone changed in place with the same size: the
+run reads it. A sandbox's store is as trustworthy as its image; the docs say so, and `hushrun
+packages verify` finds it.
+
+**K-11 Where a run finds the store.** `HUSHRUN_PACKAGES_LOWER` names it (set and empty: none; it
+must be an absolute path). Unset, `/hushrun-packages` does when it holds a `packages.json`, and
+only when it, its `packages.json`, `rows/`, `parts/` and every folder under `parts/` belong to root
+or the run's user, none is a link, and neither its group nor anyone else may write them; a
+read-only mount needs neither. A named folder is the person's choice and is read whoever owns it.
+`HUSHRUN_PACKAGES=off` turns every reader off. The store is never written, dated or swept by a
+run. *Rests on:* a folder only root or the run's user may write being theirs. *Breaks if:* another
+process of the same user wrote it: it could as well have written the tool's own cache.
+
+**K-12 Its state** is one function's answer (`hushrun_packages::state::state`), which a run and
+every `hushrun packages` command call: **absent** (none named, or readers off: no line, no
+variable); **invalid** (it can't be read or holds what a store never does: ignored, one line);
+**wrong repository** (`packages.json` names a repository and the run another); **wrong platform**;
+**untrusted** (K-7); **behind** (a part's `inputs` isn't the checkout's now: it is still read,
+since what it holds is still what the lockfile hashes or the signer signed, and the tool downloads
+what it lacks, one line per part); **current**. *Rests on:* a part's `inputs` being computed the
+same way by the bake and the run. *Breaks if:* a run read another tool version than the bake did:
+the part is called behind, and is still read.
