@@ -265,6 +265,25 @@ jobs:
           dotnet --info | head -n 20
           echo "HUSHRUN_TEST_DOTNET=$(command -v dotnet)" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_DOTNET_PACKAGES=$RUNNER_TEMP/nuget" >> "$GITHUB_ENV"
+      # PHP: PHPUnit 10, 11 and 12 and Pest 3 and 4 for the tests of the PHPUnit adapter (ADR
+      # 0116), pinned, each in a Composer project of its own outside the repository, run by the
+      # runner's own PHP 8.3 and Composer.
+      - name: Install PHPUnit and Pest for the test-file tests
+        run: |
+          set -euo pipefail
+          for v in 10.5.67 11.5.58 12.5.45; do
+            d="$RUNNER_TEMP/phpunit${v%%.*}"
+            mkdir -p "$d"
+            composer require --working-dir "$d" --no-interaction --no-progress --quiet --dev "phpunit/phpunit:$v"
+            echo "HUSHRUN_TEST_PHPUNIT${v%%.*}=$d/vendor" >> "$GITHUB_ENV"
+          done
+          for v in 3.8.7 4.7.8; do
+            d="$RUNNER_TEMP/pest${v%%.*}"
+            mkdir -p "$d"
+            echo '{"config": {"allow-plugins": {"pestphp/pest-plugin": true}}}' > "$d/composer.json"
+            composer require --working-dir "$d" --no-interaction --no-progress --quiet --dev "pestphp/pest:$v"
+            echo "HUSHRUN_TEST_PEST${v%%.*}=$d/vendor" >> "$GITHUB_ENV"
+          done
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -481,6 +500,10 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/bats110" --no-audit --no-fund --ignore-scripts bats@1.10.0
           npm install --prefix "$RUNNER_TEMP/bats113" --no-audit --no-fund --ignore-scripts bats@1.13.0
           echo "HUSHRUN_TEST_BATS=$RUNNER_TEMP/bats110/node_modules/.bin:$RUNNER_TEMP/bats113/node_modules/.bin" >> "$GITHUB_ENV"
+      # PHP: the PHPUnit adapter's tests (ADR 0116) run on Linux, whose runner has PHP and
+      # Composer; this job opts out of them by name, since under `required` they fail without PHP.
+      - name: Skip the PHPUnit and Pest tests here
+        run: echo "HUSHRUN_TEST_PHP=skip" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
