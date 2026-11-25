@@ -144,12 +144,13 @@ jobs:
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
       # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
-      # offline against a local repository: filled by running those tests online, then kept in
-      # Actions' cache under what decides what they download (their fixtures, the adapter, the JVM
-      # jars, Maven's version, the runner). A hit skips the online run, which otherwise ran the
-      # whole test binary outside hushrun on every run, a docs-only pull request's too (5 to 6
-      # minutes). Only a fill whose tests all passed online is kept. A Maven test that fails
-      # offline for want of an artifact means the key misses a file that decides it: add it below.
+      # offline against a local repository, as the Maven build-block tests do (ADR 0113): filled by
+      # running those tests online, then kept in Actions' cache under what decides what they
+      # download (their fixtures, the adapter and build blocks, the JVM jars, Maven's version, the
+      # runner). A hit skips the online runs, which otherwise ran both test binaries outside
+      # hushrun on every run, a docs-only pull request's too (5 to 6 minutes). Only a fill whose
+      # tests all passed online is kept. A Maven test that fails offline for want of an artifact
+      # means the key misses a file that decides it: add it below.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
@@ -167,16 +168,22 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/m2
-          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
+          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/build_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun-build/src/maven/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
       - name: Fill Maven's repository for the test-class tests
         id: maven-fill
         if: steps.maven-repo.outputs.cache-hit != 'true'
         run: |
-          if HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast; then
-            echo "filled=true" >> "$GITHUB_OUTPUT"
-          else
+          filled=true
+          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || {
+            filled=false
             echo "filling Maven's repository failed: the test run says what is missing, and the cache keeps none of it"
-          fi
+          }
+          # Java (ADR 0113): and the build cache extension and plugins of the Maven build-block tests.
+          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test build_maven --locked --no-fail-fast || {
+            filled=false
+            echo "filling Maven's repository for build_maven failed: the test run says what is missing, and the cache keeps none of it"
+          }
+          echo "filled=$filled" >> "$GITHUB_OUTPUT"
       - name: Keep Maven's repository for the next runs
         if: steps.maven-fill.outputs.filled == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -455,12 +462,13 @@ jobs:
       - name: Name Xcode for the xcodebuild test-target tests
         run: echo "HUSHRUN_TEST_XCODEBUILD=$(command -v xcodebuild)" >> "$GITHUB_ENV"
       # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
-      # offline against a local repository: filled by running those tests online, then kept in
-      # Actions' cache under what decides what they download (their fixtures, the adapter, the JVM
-      # jars, Maven's version, the runner). A hit skips the online run, which otherwise ran the
-      # whole test binary outside hushrun on every run, a docs-only pull request's too (5 to 6
-      # minutes). Only a fill whose tests all passed online is kept. A Maven test that fails
-      # offline for want of an artifact means the key misses a file that decides it: add it below.
+      # offline against a local repository, as the Maven build-block tests do (ADR 0113): filled by
+      # running those tests online, then kept in Actions' cache under what decides what they
+      # download (their fixtures, the adapter and build blocks, the JVM jars, Maven's version, the
+      # runner). A hit skips the online runs, which otherwise ran both test binaries outside
+      # hushrun on every run, a docs-only pull request's too (5 to 6 minutes). Only a fill whose
+      # tests all passed online is kept. A Maven test that fails offline for want of an artifact
+      # means the key misses a file that decides it: add it below.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
@@ -478,16 +486,22 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/m2
-          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
+          key: maven-repo-v1-${{ runner.os }}-${{ runner.arch }}-maven-3.9.16-jdk-21.0.11-${{ hashFiles('crates/hushrun/tests/units_maven.rs', 'crates/hushrun/tests/build_maven.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun-build/src/maven/**', 'crates/hushrun/src/units/maven.rs', 'crates/hushrun/src/units/maven/**', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/maven/**') }}
       - name: Fill Maven's repository for the test-class tests
         id: maven-fill
         if: steps.maven-repo.outputs.cache-hit != 'true'
         run: |
-          if HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast; then
-            echo "filled=true" >> "$GITHUB_OUTPUT"
-          else
+          filled=true
+          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || {
+            filled=false
             echo "filling Maven's repository failed: the test run says what is missing, and the cache keeps none of it"
-          fi
+          }
+          # Java (ADR 0113): and the build cache extension and plugins of the Maven build-block tests.
+          HUSHRUN_TEST_MAVEN_ONLINE=1 cargo nextest run -p hushrun --test build_maven --locked --no-fail-fast || {
+            filled=false
+            echo "filling Maven's repository for build_maven failed: the test run says what is missing, and the cache keeps none of it"
+          }
+          echo "filled=$filled" >> "$GITHUB_OUTPUT"
       - name: Keep Maven's repository for the next runs
         if: steps.maven-fill.outputs.filled == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

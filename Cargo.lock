@@ -1954,6 +1954,7 @@ dependencies = [
  "hushrun-core",
  "hushrun-digest",
  "memchr",
+ "quick-xml",
  "rustix",
  "serde",
  "serde_json",
