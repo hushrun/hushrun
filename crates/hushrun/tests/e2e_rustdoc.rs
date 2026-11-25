@@ -5,8 +5,9 @@
 //!
 //! These run the `hushrun` binary (`common/cli.rs`): Cargo starts hushrun's rustdoc, which is the
 //! binary itself (`units::program`), so a flow that observes doctests reads all of hushrun
-//! (CONTRIBUTING.md, "Which tests CI runs again"). What needs no stand-in, the ways of running
-//! Cargo's tests hushrun can't read, is in `units_rustdoc.rs`, in-process.
+//! (CONTRIBUTING.md, "Which tests CI runs again"). So does a rustdoc of COMMAND's own, which the
+//! adapter's variables refuse, and asking them reads where hushrun is. What needs neither, the
+//! ways of running Cargo's tests hushrun can't read, is in `units_rustdoc.rs`, in-process.
 //!
 //! The workspaces are tiny and need only Cargo, offline (`common/rustdoc.rs`). hushrun's rustdoc
 //! builds with a rustdoc that runs nothing, `true`: Unix only.
@@ -20,6 +21,8 @@ mod repo;
 mod rustdoc;
 #[path = "common/store.rs"]
 mod store;
+
+use std::process::Command;
 
 use hushrun_testkit::git;
 
@@ -125,4 +128,31 @@ fn a_doctest_that_fails_runs_again_until_it_passes() {
     let again = r.run(DOCTEST, &[]);
     assert_ne!(again.code, 0, "{}\n{}", again.stdout, again.stderr);
     assert!(ran(&again.stdout, "two"), "{}", again.stdout);
+}
+
+// covers: C-74, C-77
+#[test]
+fn a_rustdoc_of_commands_own_says_why_it_isnt_observed_and_runs_as_it_was() {
+    let r = rustdoc::repo(&workspace());
+    // A rustdoc of the person's own: hushrun doesn't stand in front of it.
+    let rustdoc = String::from_utf8(
+        Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .current_dir(&r.repo)
+            .output()
+            .expect("rustc")
+            .stdout,
+    )
+    .expect("utf-8");
+    let rustdoc = format!("{}/bin/rustdoc", rustdoc.trim());
+    let theirs = r.run(DOCTEST, &[("RUSTDOC", &rustdoc)]);
+    assert_eq!(theirs.code, 0, "{}\n{}", theirs.stdout, theirs.stderr);
+    assert!(
+        theirs.stderr.contains(
+            "hushrun: doctest: test files aren't observed: COMMAND's environment sets RUSTDOC"
+        ),
+        "{}",
+        theirs.stderr
+    );
+    assert!(ran(&theirs.stdout, "one"), "{}", theirs.stdout);
 }
