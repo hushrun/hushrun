@@ -44,6 +44,16 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Maven's modules shared through Apache's build cache extension, kind `maven/1`** (B-170 to
+  B-177, ADR 0113, a draft). In a run with a relay, in a Maven build whose `.mvn/extensions.xml`
+  loads `maven-build-cache-extension`, `hushrun run` serves the extension's remote cache on the
+  loopback, under a token made for the run, and gives Maven its URL in `MAVEN_OPTS` (merged with
+  the Maven test adapter's). A module's `buildinfo.xml` and the files it names are one block,
+  checked whole, `buildinfo.xml` kept in a canonical form; it is searched for the machine's folders
+  before it may leave, fetched only where the check's `maven/1` manifest names it, and never
+  audited or compared. A run whose Maven skips tests shares nothing it builds. The summary says
+  `build: maven: N modules: …`. A build without the extension, or with a remote of its own, is
+  said in one line. Not yet in baked stores or `hushrun build fetch`.
 - **Svelte's tests reuse** (C-62 to C-65, ADR 0109). With Vitest, `.svelte` components are
   sources, vite-plugin-svelte's, SvelteKit's and Testing Library's `svelteTesting()` plugins are
   known, what a Svelte preprocessor reads (its `dependencies`) is read by whoever runs the

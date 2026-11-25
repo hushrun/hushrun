@@ -1551,6 +1551,7 @@ fn go_entry(outcome: Outcome, key: &Digest) -> Entry {
         xcode: None,
         cc: None,
         gradle: None,
+        maven: None,
         tsc: None,
     }
 }

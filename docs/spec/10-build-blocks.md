@@ -3382,6 +3382,120 @@ tasks they are of, by Gradle's name, each once, in the order first seen, three a
 checkout's folder): :kapt:kaptGenerateStubsKotlin`. hushrun changes no byte of an entry to let it
 leave.
 
+## Maven (draft)
+
+> Draft, from [ADR 0113](../adr/0113-maven-build-blocks.md) (proposed). Built: sharing through
+> the relay. Not built: Maven blocks in baked stores (B-63) and in `hushrun build fetch` (B-36).
+
+Apache's build cache extension keys each module of a Maven reactor by a **checksum** of its inputs,
+keeps entries in a local cache of its own, and asks a **remote** cache over HTTP: `GET
+{url}/v1.1/<group>/<artifact>/<checksum>/buildinfo.xml`, then each file that names; after it built a
+module, `PUT` of each file, then of `buildinfo.xml`. hushrun is that remote in a run that shares:
+a module's entry is one block of kind `maven/1` in the same store, through the same relay, records
+and outbox as the other kinds (B-13, B-14, B-26 to B-34). The extension's local cache stays its
+own. hushrun computes none of the checksum, and a jar keeps its files' dates: every check below is
+the only guard there is, and none of them proves an entry's files are what its inputs make.
+
+**B-170 Hushrun's cache for Maven.** In a run that has a relay (B-26), `hushrun run` serves a
+cache to Maven when the nearest folder at or above the one COMMAND runs in, up to the checkout's,
+that holds `.mvn` (else `pom.xml`) has a `.mvn/extensions.xml` or a `pom.xml` holding the text
+`maven-build-cache-extension`; a build without it is said once, `build: Maven's modules aren't
+shared in this run: the build doesn't load Apache's build cache extension; add
+maven-build-cache-extension to .mvn/extensions.xml`, and nothing more is done. A build whose
+`MAVEN_OPTS`, `MAVEN_ARGS`, `.mvn/maven.config` or `.mvn/jvm.config` holds
+`maven.build.cache.remote.url`, or whose `.mvn/maven-build-cache-config.xml` holds `<remote` and
+`<url>`, keeps its own remote, with the line `build: maven: the build names a remote cache of its
+own, which stays: Maven's modules aren't shared through hushrun`. Windows and an isolated check get
+nothing. The cache listens on `127.0.0.1` at a port the system picks, for the run alone, and
+answers paths whose first part is a token of 64 hex characters made for the run from
+`/dev/urandom` (compared in constant time; any other is 401): `GET`, `HEAD` and `PUT`, HTTP/1.1 with
+`Content-Length` or chunked bodies, `Expect: 100-continue` and kept connections, 64 at once, idle
+ones closed after 120 seconds, a peer that isn't the loopback refused. COMMAND gets `MAVEN_OPTS`:
+the run's own, then `-Dmaven.build.cache.remote.enabled=true
+-Dmaven.build.cache.remote.url=http://127.0.0.1:<port>/<token>
+-Dmaven.build.cache.remote.save.enabled=true`; where the Maven test adapter (ADR 0088) sets
+`MAVEN_OPTS`, its value gains those three words it doesn't hold. *Rests on:* the `mvn` scripts and
+the Maven Wrapper passing `MAVEN_OPTS` to the JVM, and the extension reading its properties from
+system properties over its configuration file; `-o` leaving the remote on (seen with Maven 3.9.11
+and the extension 1.2.0).
+
+**B-171 Paths and keys.** A path is the token, then `v1.1`, a group and an artifact (1 to 255 of
+letters, digits, `.`, `-` and `_`, neither `.` nor `..`), a checksum (16 to 128 lowercase hex
+characters) and a file name (1 to 255 of letters, digits, `.`, `-`, `_` and `+`, neither `.` nor
+`..`); empty parts are read past. Any other path is 404, except a `PUT` of
+`build-cache-report.xml`, answered 200 and dropped. A block's key is the SHA-256 of
+`hushrun.maven-key/v1\nv1.1\n<group>\n<artifact>\n<checksum>`, and its first key is itself.
+
+**B-172 The block.** A block holds `buildinfo.xml` first, in its **canonical form**: the bytes
+Maven sent, with the contents of `buildTime` set to `1970-01-01T00:00:00.000` and of `buildServer`
+to `hushrun`; then each file it names, in its order, as Maven sent it. Its record holds the group,
+artifact and checksum, the module (`group:artifact`), the extension's `hashFunction` (`hash`) and
+the module's cost (`rustc_ms`). A `buildinfo.xml` is refused unless it is UTF-8, at most 16 MiB,
+parses to its end with every element closed and no DTD, has one `build` root, its
+`cacheImplementationVersion` `v1.1`, its `projectsInputInfo/checksum`, `artifact/groupId` and
+`artifact/artifactId` those of its path, and each `fileName` of `artifact` and of
+`attachedArtifacts/attachedArtifact` plain text, a file name of B-171's form other than
+`buildinfo.xml`, named once, with a `fileSize`; at most 64 files. An artifact with no `fileName` is
+no file. A block is served only when its record names `maven/1` and the module asked, its first
+file is a canonical `buildinfo.xml` of that module, its other files are exactly those it names, of
+the sizes it gives, and every file is of the size and SHA-256 its record holds. *Rests on:* the
+extension reading `buildTime` and `buildServer` for its report alone (seen with the extension
+1.2.0).
+
+**B-173 What may leave.** An entry whose canonical `buildinfo.xml` or files hold, as bytes
+anywhere, the checkout's folder (as given and resolved), Maven's local repository (`$HOME/.m2`),
+the store's folder or the home folder, tried in that order, is not stored: it stays in the
+extension's own cache, and its line says which (`checkout`, `repository`, `store`, `home`). A
+folder of one character is never searched for. *Rests on:* the same search as B-10's; a jar's
+compressed entries hide what they hold, as B-24 says of every kind.
+
+**B-174 A `GET`.** Of `buildinfo.xml`: for a key whose block is suspended (B-15), 404. A block in
+the store is served as B-172 says once `Current::may_reuse` allows it (B-34), the question to the
+relay being `maven_vouch`. Else, in a run whose mode is `on`, the cache asks the relay
+`maven_fetch`, which answers only while sharing is on and the check's `maven/1` manifest (B-176)
+names the key, as a Gradle fetch is answered (B-80). Every other answer is 404, and Maven builds the
+module. A download that fails B-172's checks is reported `rejected` to the scope it came from, its
+key suspended for the kept days, and removed. A served block's use is dated (B-14), and a
+download's first reuse here is recorded (B-32). Of another file: served from the block of a module
+whose `buildinfo.xml` this run served, when the block holds it with its size and SHA-256, else 404.
+A `HEAD` is 200 when the store holds a block of the module that isn't suspended and holds the file,
+else 404, with no body: it downloads nothing and logs nothing. A relay that doesn't answer once is
+asked nothing more by the cache for the rest of the run.
+
+**B-175 A `PUT`.** Answered 200 whatever becomes of the file. The files of a module are held in
+memory, at most 512 MiB for every module at once (beyond, the module's are dropped and its line says
+so), until its `buildinfo.xml` and every file that names have come, in any order; then the entry is
+whole: one whose `buildinfo.xml` fails B-172's checks, or a file of another size than it gives, is
+not kept, and its line says why. A body over 512 MiB drops the module's files. The module's cost is
+the time from this run's first missed `GET` of its `buildinfo.xml` to the entry being whole, else
+0. A run whose Maven skips tests keeps no entry: `skipTests` or `maven.test.skip` set (`-Dname`,
+`-Dname=true` in any case, `-D name`, `--define`, the last of each winning) in COMMAND's words,
+`MAVEN_OPTS`, `MAVEN_ARGS`, `.mvn/maven.config` or `.mvn/jvm.config`, said once: `build: maven:
+<place> sets <property>, so the modules this run builds aren't shared: another build would skip
+tests that never ran`. A whole entry B-173 doesn't keep here is stored as a block built by this run
+(B-32) and told to the relay (`maven_built`, with its cost), which uploads it where the run may
+write, as for every kind (B-29). Not stored: a key suspended, a store below B-22's floor. A block
+there already that was only downloaded gives way to this build, which is then told to the relay;
+one built here stays. Maven's entries are never audited (B-16) and never compared in shared
+`observe` (B-33): a jar keeps its files' dates; a difference is logged (`differed`) and nothing
+else. *Rests on:* the extension restoring an entry built with tests skipped into a build that runs
+them, and skipping them, unless the build reconciles the property (seen with the extension 1.2.0).
+
+**B-176 Manifest and close.** A check whose run serves the cache asks `open` of kind `maven/1` and
+platform `jvm` once the cache serves, for its manifest alone, as Gradle's does (B-82), and, when it
+logged a Maven line, sends `close` of kind `maven/1`, platform `jvm`, under a run that is the
+SHA-256 of the check's run followed by `maven/1\n`, with a manifest of its entries' pairs in the
+order logged, leaving out those B-173 kept here and those whose upload hasn't gone. Maven's blocks
+are in no saved manifest, and `hushrun build bake` leaves them out. *Rests on:* the server taking
+any kind and keeping manifests per kind (no server change); the extension's checksum holding the
+effective POM, profiles activated by the operating system included.
+
+**B-177 What a run says (Maven).** The cache's lines go into the run's log beside the other kinds',
+the module as `group:artifact` in `crate_name`, and the summary counts them apart: `build: maven: N
+modules: X from hushrun's cache (Y from the shared store), Z built and stored`, with `saving about
+T` from the served modules' costs; and, when some stay, `build: maven: N modules built here stay on
+this machine (…)`, by B-173's reason. Maven's own output is unchanged.
+
 ## Xcode (draft)
 
 > Draft, from [ADR 0105](../adr/0105-xcode-compilation-cache.md) (proposed). Built, and not yet
