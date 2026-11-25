@@ -1,5 +1,7 @@
 [toolchain]
 # Pinned stable. Bump it in its own PR, with the full test suite.
 channel = "1.94.0"
-components = ["rustfmt", "clippy"]
+# rust-analyzer: its index is the static map by which `unit: test` reuses a Rust test on its own
+# (ADR 0145). Without it, hushrun reuses whole test binaries and says how to add it.
+components = ["rustfmt", "clippy", "rust-analyzer"]
 profile = "minimal"
