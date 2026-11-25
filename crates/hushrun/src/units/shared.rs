@@ -288,7 +288,7 @@ pub fn lists(
                 from: From| {
         let mut files = compiled.cloned().unwrap_or_default();
         files.extend(reads.iter().cloned());
-        files.extend(gotest::under(tree, dirs));
+        files.extend(super::store::under(tree, dirs));
         List {
             files,
             reads: reads.clone(),

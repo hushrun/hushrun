@@ -1008,6 +1008,58 @@ pub fn sweep(cache: &Path, now: std::time::SystemTime) {
     }
 }
 
+// What the code every adapter shares calls of what two adapters had first, here so that the
+// static test map follows a call of it to the store, never to Go's or Gradle's file (ADR 0145).
+
+/// Every file of `tree` in one of `dirs` or below it: what listing a directory read.
+pub fn under(tree: &hushrun_core::units::Tree, dirs: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for dir in dirs {
+        if dir.is_empty() || dir == "." {
+            out.extend(tree.paths().map(str::to_string));
+            continue;
+        }
+        let prefix = format!("{dir}/");
+        out.extend(
+            tree.paths()
+                .filter(|p| p.starts_with(&prefix))
+                .map(str::to_string),
+        );
+    }
+    out
+}
+
+/// \[C-46\] Of the tests a plan lists one by one (`listed`, each by name with its unit and id),
+/// those a JUnit 4 task of `groups` would not leave out, which run: as the script's filter takes
+/// them, per task, in the order of their ids as strings, the first `most`, and of those none whose
+/// class is in the default package or a package whose name starts with a capital letter (Gradle
+/// reads such a pattern as a simple class name). The class is the id up to its last `.`: a JUnit 4
+/// method's name has none. The script mirrors this; the plan lists only what it leaves out.
+pub fn left_in<'a>(
+    groups: &[LeaveOutAtMost],
+    listed: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
+) -> BTreeSet<String> {
+    let listed: Vec<(&str, &str, &str)> = listed.collect();
+    let mut out = BTreeSet::new();
+    for group in groups {
+        let mut of_group: Vec<(&str, &str)> = listed
+            .iter()
+            .filter(|(_, unit, _)| group.units.contains(*unit))
+            .map(|(name, _, id)| (*id, *name))
+            .collect();
+        of_group.sort_unstable();
+        for (at, (id, name)) in of_group.into_iter().enumerate() {
+            let class = id.rsplit_once('.').map_or("", |(class, _)| class);
+            let named_alone =
+                !class.contains('.') || class.chars().next().is_some_and(char::is_uppercase);
+            if at >= group.most || named_alone {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

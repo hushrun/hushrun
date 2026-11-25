@@ -953,23 +953,9 @@ pub fn observe(
     Ok(out)
 }
 
-/// Every file of `tree` in one of `dirs` or below it: what listing a directory read.
-pub fn under(tree: &Tree, dirs: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for dir in dirs {
-        if dir.is_empty() || dir == "." {
-            out.extend(tree.paths().map(str::to_string));
-            continue;
-        }
-        let prefix = format!("{dir}/");
-        out.extend(
-            tree.paths()
-                .filter(|p| p.starts_with(&prefix))
-                .map(str::to_string),
-        );
-    }
-    out
-}
+/// \[ADR 0145\] [`super::store::under`], where every adapter and the code they share name it, and
+/// the static test map doesn't follow a call of it to this file.
+pub use super::store::under;
 
 /// What a test log says a package's tests did.
 #[derive(Debug, Default, PartialEq, Eq)]
