@@ -229,12 +229,12 @@ jobs:
           path: |
             ${{ runner.temp }}/gradle-home
             !${{ runner.temp }}/gradle-home/daemon
-          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
+          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/e2e_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
       - name: Fill Gradle's user home for the test-class tests
         id: gradle-fill
         if: steps.gradle-home.outputs.cache-hit != 'true'
         run: |
-          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast; then
+          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --test e2e_gradle --locked --no-fail-fast; then
             echo "filled=true" >> "$GITHUB_OUTPUT"
           else
             echo "filling Gradle's user home failed: the test run says what is missing, and the cache keeps none of it"
@@ -542,12 +542,12 @@ jobs:
           path: |
             ${{ runner.temp }}/gradle-home
             !${{ runner.temp }}/gradle-home/daemon
-          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
+          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/e2e_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
       - name: Fill Gradle's user home for the test-class tests
         id: gradle-fill
         if: steps.gradle-home.outputs.cache-hit != 'true'
         run: |
-          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast; then
+          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --test e2e_gradle --locked --no-fail-fast; then
             echo "filled=true" >> "$GITHUB_OUTPUT"
           else
             echo "filling Gradle's user home failed: the test run says what is missing, and the cache keeps none of it"
