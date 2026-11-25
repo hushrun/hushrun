@@ -124,6 +124,26 @@ enum Fallback {
     Close,
 }
 
+/// What the watchdog and `close` read the time from: the wall clock, or a test's, which moves only
+/// when the test moves it, so that whether a request is late is decided by the test's events and
+/// never by how fast the machine ran.
+#[derive(Clone)]
+pub(crate) enum Clock {
+    Wall,
+    #[cfg(test)]
+    Manual(Arc<Mutex<Instant>>),
+}
+
+impl Clock {
+    fn now(&self) -> Instant {
+        match self {
+            Clock::Wall => Instant::now(),
+            #[cfg(test)]
+            Clock::Manual(at) => *lock(at),
+        }
+    }
+}
+
 /// One request: open, then answered once (rule 1).
 struct Slot {
     id: i64,
@@ -135,22 +155,22 @@ struct Slot {
 }
 
 impl Slot {
-    fn new(id: i64, fallback: Fallback) -> Slot {
+    fn new(id: i64, fallback: Fallback, now: Instant) -> Slot {
         Slot {
             id,
             answered: AtomicBool::new(false),
-            alive: Mutex::new(Instant::now()),
+            alive: Mutex::new(now),
             fallback,
         }
     }
 
-    /// How long it has shown no sign of life.
-    fn silent_for(&self) -> Duration {
-        lock(&self.alive).elapsed()
+    /// How long, at `now`, it has shown no sign of life.
+    fn silent_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(*lock(&self.alive))
     }
 
-    fn touch(&self) {
-        *lock(&self.alive) = Instant::now();
+    fn touch(&self, now: Instant) {
+        *lock(&self.alive) = now;
     }
 }
 
@@ -261,6 +281,8 @@ struct Program {
     env: HashMap<String, OsString>,
     /// `close` was answered, or the input ended: the watchdog stops.
     done: AtomicBool,
+    /// What the watchdog and `close` read the time from ([`Clock`]).
+    clock: Clock,
     parent: Parent,
     /// What opens a baked store's packs (B-64): the binary's, when it installed one.
     unseal: Option<&'static dyn crate::baked::Unseal>,
@@ -356,6 +378,17 @@ pub(crate) fn serve_with(
     env: HashMap<String, OsString>,
     parent: Parent,
 ) {
+    serve_clocked(input, output, env, parent, Clock::Wall);
+}
+
+/// [`serve_with`], its watchdog and `close` reading the time from `clock`.
+pub(crate) fn serve_clocked(
+    input: impl BufRead,
+    output: Box<dyn Write + Send>,
+    env: HashMap<String, OsString>,
+    parent: Parent,
+    clock: Clock,
+) {
     // A panic while starting (a session's file that can't be read as expected, say) must not
     // end the process before `close`, which fails the whole `go` command: the program starts
     // again with no session, Go's own cache only (B-47).
@@ -381,7 +414,7 @@ pub(crate) fn serve_with(
             )
         }
     };
-    let program = Arc::new(program);
+    let program = Arc::new(Program { clock, ..program });
     program.write(&json!({"ID": 0, "KnownCommands": ["get", "put", "close"]}));
     program.start_background();
     let watchdog = {
@@ -480,6 +513,7 @@ impl Program {
             faults,
             env,
             done: AtomicBool::new(false),
+            clock: Clock::Wall,
             parent,
         }
     }
@@ -609,7 +643,7 @@ impl Program {
                 Ok(Next::Closed) => return,
                 Ok(Next::End) => break,
                 Err(_) => {
-                    let slot = Slot::new(id, Fallback::Miss);
+                    let slot = Slot::new(id, Fallback::Miss, self.clock.now());
                     let _ = self.answer(&slot, json!({"Err": "the program failed to read it"}));
                 }
             }
@@ -678,7 +712,7 @@ impl Program {
                 Asked::Close => Fallback::Close,
                 Asked::Get { .. } | Asked::Bad(_) => Fallback::Miss,
             };
-            let slot = Arc::new(Slot::new(wire.id, fallback));
+            let slot = Arc::new(Slot::new(wire.id, fallback, self.clock.now()));
             if closing {
                 self.close(&slot);
                 return Next::Closed;
@@ -689,7 +723,7 @@ impl Program {
             let nth = self.nth(&asked);
             lock(&self.open).insert(slot.id, slot.clone());
             self.busy.fetch_add(1, Ordering::AcqRel);
-            *lock(&self.alive) = Instant::now();
+            *lock(&self.alive) = self.clock.now();
             let program = self.clone();
             let handler_slot = slot.clone();
             let spawned = std::thread::Builder::new()
@@ -703,7 +737,7 @@ impl Program {
                     if handled.is_err() {
                         program.fall_back(&handler_slot);
                     }
-                    *lock(&program.alive) = Instant::now();
+                    *lock(&program.alive) = program.clock.now();
                     program.busy.fetch_sub(1, Ordering::AcqRel);
                 });
             if spawned.is_err() {
@@ -720,7 +754,11 @@ impl Program {
     /// Handlers silent past it are hung; the watchdog answers what they left open.
     fn drain(&self) {
         while self.busy.load(Ordering::Acquire) > 0
-            && lock(&self.alive).elapsed() < self.waits.budget + TICK * 4
+            && self
+                .clock
+                .now()
+                .saturating_duration_since(*lock(&self.alive))
+                < self.waits.budget + TICK * 4
         {
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -749,7 +787,7 @@ impl Program {
             std::thread::sleep(TICK);
             let late: Vec<Arc<Slot>> = lock(&self.open)
                 .values()
-                .filter(|slot| slot.silent_for() >= self.waits.budget)
+                .filter(|slot| slot.silent_for(self.clock.now()) >= self.waits.budget)
                 .cloned()
                 .collect();
             for slot in late {
@@ -761,7 +799,7 @@ impl Program {
     fn handle(&self, slot: &Slot, asked: Asked, nth: u64) {
         match asked {
             Asked::Get { action } => {
-                self.fault_get(nth);
+                self.fault_get(nth, slot);
                 let (value, served) = self.get(&action);
                 // What serving from the store records happens only when Go got that answer.
                 if self.answer(slot, value)
@@ -803,22 +841,28 @@ impl Program {
         0
     }
 
+    /// A test's faults, keyed to events, never to time: a hung handler holds until the program
+    /// is done; a slow one goes on only once the watchdog has answered its request, then answers
+    /// too, an answer that must never be written.
     #[cfg(debug_assertions)]
-    fn fault_get(&self, n: u64) {
+    fn fault_get(&self, n: u64, slot: &Slot) {
         if self.faults.panic_get == Some(n) {
             panic!("the test's panic: a get");
         }
         if self.faults.hang_get == Some(n) {
-            std::thread::sleep(Duration::from_secs(3600));
+            while !self.done.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
         }
-        // Slower than the budget, then answering: the watchdog has answered it already.
         if self.faults.slow_get == Some(n) {
-            std::thread::sleep(self.waits.budget * 2);
+            while !slot.answered.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
         }
     }
 
     #[cfg(not(debug_assertions))]
-    fn fault_get(&self, _: u64) {
+    fn fault_get(&self, _: u64, _: &Slot) {
         let _ = &self.faults;
     }
 
@@ -1375,10 +1419,11 @@ impl Program {
         let share = self.current.as_ref()?.share.relay()?;
         // Each heartbeat of a relay still working on the answer is this request's life.
         let answer = relay::ask_alive(&share.socket, request, wait, &mut || {
-            *lock(&self.alive) = Instant::now();
+            let now = self.clock.now();
+            *lock(&self.alive) = now;
             WORKING.with(|working| {
                 if let Some(slot) = working.borrow().as_ref() {
-                    slot.touch();
+                    slot.touch(now);
                 }
             });
         });

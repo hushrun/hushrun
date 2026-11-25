@@ -39,8 +39,12 @@ impl Read for Steps {
             let Some((lines, text)) = self.steps.pop_front() else {
                 return Ok(0);
             };
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while self.out.count() < lines && Instant::now() < deadline {
+            // Each step waits for the lines it follows, however long they take: a step fed
+            // early would change what the program sees. Five minutes with none is a hang, and
+            // fails the test rather than going on.
+            let hung = Instant::now() + Duration::from_secs(300);
+            while self.out.count() < lines {
+                assert!(Instant::now() < hung, "never got {lines} lines");
                 std::thread::sleep(Duration::from_millis(2));
             }
             self.now = text.into_bytes();
@@ -365,19 +369,17 @@ fn a_panic_while_starting_or_reading_never_ends_the_program_before_close() {
 // covers: B-40
 #[test]
 fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
-    // Long enough that a panic's handler, printing a backtrace on a loaded machine, answers well
-    // before the watchdog would (CI has seen 938 ms); every wait below is in budgets.
-    const BUDGET_MS: u64 = 3000;
-    let budget = Duration::from_millis(BUDGET_MS);
+    // The watchdog reads a clock that moves only when this test moves it, and the faults wait
+    // for events, not time: whatever the machine's speed, a panic is answered by its handler
+    // (the clock hasn't moved, so the watchdog can't have), and a hung or slow handler by the
+    // watchdog once the clock passes the budget, once.
     let mut m = Machine::new();
-    m.env
-        .insert(BUDGET_VAR.into(), BUDGET_MS.to_string().into());
     // Counted by command: the gets are requests 1, 2 and 4.
     m.env.insert(
         FAULT_VAR.into(),
         "hang-get=1,panic-get=2,panic-put=1,slow-get=3".into(),
     );
-    let started = Instant::now();
+    let clock = Arc::new(Mutex::new(Instant::now()));
     // The body a panicking put leaves, read before `close`, after which Go reads nothing.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let out = Out::default();
@@ -387,8 +389,6 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
             (1, get(1, &[1u8; 32])),
             (1, get(2, &[2u8; 32])),
             (1, put(3, &[3u8; 32], b"the body")),
-            // Slower than the budget: the watchdog answers it, and its own answer, later, is
-            // never written.
             (1, get(4, &[4u8; 32])),
             (5, String::new()),
             (5, close(5)),
@@ -397,52 +397,59 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
         .collect(),
         now: Vec::new(),
     };
-    let reader = {
-        let out = out.clone();
-        let seen = seen.clone();
+    let served = Arc::new(AtomicBool::new(false));
+    let mover = {
+        let (out, seen, clock, served) = (out.clone(), seen.clone(), clock.clone(), served.clone());
         std::thread::spawn(move || {
-            let deadline = Instant::now() + budget * 3;
-            let mut panicked_at = None;
-            while Instant::now() < deadline {
-                let lines = out.lines();
-                if panicked_at.is_none() && lines.iter().any(|l| l["ID"] == 2) {
-                    panicked_at = Some(started.elapsed());
-                }
-                if let Some(line) = lines.into_iter().find(|l| l["ID"] == 3) {
-                    if let Some(path) = line["DiskPath"].as_str() {
-                        *lock(&seen) = std::fs::read(path).unwrap_or_default();
-                    }
-                    return panicked_at.unwrap_or(started.elapsed());
-                }
+            let ids = |lines: &[Value]| -> Vec<i64> {
+                let mut ids: Vec<i64> = lines.iter().filter_map(|l| l["ID"].as_i64()).collect();
+                ids.sort_unstable();
+                ids
+            };
+            // The handlers' own answers first: the panicking get and put.
+            while !(ids(&out.lines()).contains(&2) && ids(&out.lines()).contains(&3)) {
                 std::thread::sleep(Duration::from_millis(2));
             }
-            Duration::MAX
+            let lines = out.lines();
+            if let Some(line) = lines.iter().find(|l| l["ID"] == 3)
+                && let Some(path) = line["DiskPath"].as_str()
+            {
+                *lock(&seen) = std::fs::read(path).unwrap_or_default();
+            }
+            // Before the clock moves, nothing but the handlers has answered: not the hung get,
+            // not the slow one.
+            let before = ids(&lines);
+            // Then past the budget, again whenever `close` still waits, until it is answered.
+            while !served.load(Ordering::Acquire) {
+                *lock(&clock) += Duration::from_secs(41);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            before
         })
     };
-    serve_with(
+    serve_clocked(
         BufReader::new(input),
         Box::new(out.clone()),
         m.env.clone(),
         Box::new(|_| Ok("go build".into())),
+        Clock::Manual(clock),
     );
-    // A panic is answered by its handler, not by the watchdog at the budget (never before a
-    // tick past it): a loaded machine may take a while to print the panic.
-    let panicked_at = reader.join().unwrap();
-    assert!(panicked_at < budget - TICK * 2, "{panicked_at:?}");
-    // The slow handler answers two budgets in, after `close`'s wait of one: given its time, it
-    // writes nothing.
-    std::thread::sleep(budget * 3 / 2);
+    served.store(true, Ordering::Release);
+    let before = mover.join().unwrap();
+    assert_eq!(before, vec![0, 2, 3], "answered before the clock moved");
     let lines = out.lines();
+    // One answer each: the slow handler's own answer, which came after the watchdog's, was
+    // never written.
+    assert_eq!(lines.len(), 6, "{lines:?}");
     let answers = by_id(&lines);
     assert_eq!(answers.len(), 6, "{lines:?}");
-    // Hung: the watchdog's miss, within the budget and a few ticks.
+    // Hung and slow: the watchdog's miss.
     assert_eq!(answers[&1]["Miss"], true);
-    assert!(started.elapsed() < budget * 5);
+    assert_eq!(answers[&4]["Miss"], true);
     // Panicked: a miss, and for a put the body in a file of the program's own.
     assert_eq!(answers[&2]["Miss"], true);
     assert!(answers[&3]["DiskPath"].is_string());
     assert_eq!(*lock(&seen), b"the body".to_vec());
-    assert_eq!(answers[&4]["Miss"], true);
     assert_eq!(answers[&5], json!({"ID": 5}));
 }
 
@@ -761,8 +768,8 @@ fn a_store_hit_the_watchdog_answered_first_records_no_reuse() {
     m.env.insert(FAULT_VAR.into(), "slow-get=1".into());
     let lines = m.serve(&[get(1, &action), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
-    // The handler finishes after the watchdog's miss: give it its time.
-    std::thread::sleep(Duration::from_millis(900));
+    // The handler goes on once the watchdog answered, and `close` waited for it: what it
+    // recorded is all there is.
     assert!(
         m.current()
             .entries()

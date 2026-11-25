@@ -99,8 +99,8 @@ On a 4-CPU container:
 | End to end: build_go 18 (+1 ignored), build_cc 11 (+1), build_tsc 4, build_gradle 2, build_share 71, two_machines 24, reuse 32, build 13, build_bake 6, build_bake_deps 6, build_bake_go_cc 3, build_bake_image 11, build_cc_make 6 | all pass |
 | main's waits (measured with the first prototype's switch off, which kept them), 8 busy loops on 4 CPUs (load ≈ 16), 12 iterations of the Go two-machine tests | 12 of 12 iterations failed (`23 reused, 1 built; 1 block to upload waits for the next run`) |
 | This branch, same load, same 12 iterations of the Go tests, then build_cc's whole suite each time | 12 of 12 passed (Go 3/3, cc 11/11 each) |
-| This branch, same load, build_share's whole suite 3 times | BUILD_SHARE_UNDER_LOAD |
-| An 8 s stall injected on A's first upload over 1.5 MB (not committed), the original Go test | main's waits: 3 of 3 failed as CI did; this branch: STALL_RESULT |
+| This branch, same load, build_share's whole suite 3 times | 3 of 3 runs passed, 71/71 each |
+| An 8 s stall injected on A's first upload over 1.5 MB (not committed), the original Go test | main's waits: 3 of 3 failed as CI did; this branch: 3 of 3 passed (13 s each: the end waits the stall out) |
 
 `every_package_is_reused_on_the_other_machine_however_slowly_the_backend_answers` is the
 regression guard. It holds A's PUTs, B's `open` and B's downloads past every old bound and
@@ -141,9 +141,10 @@ waiting on the answer. Nothing sleeps.
 
 | Test | Cause | Class | Fix | Effort |
 |---|---|---|---|---|
-| hushrun-build go/program/tests.rs `a_handler_that_hangs_or_panics_still_gets_one_answer` (PR #53: order plus 3 s) | the watchdog polls each slot's last sign of life every 50 ms (ADR 0144 made it liveness, not age) | a | The watchdog reads a `Clock`. `slow-get` blocks until its slot was answered by the watchdog (an event) instead of sleeping `budget*2`. `hang-get` blocks until `close`. The test advances the clock past the budget and receives the answer. | M |
+| hushrun-build go/program/tests.rs `a_handler_that_hangs_or_panics_still_gets_one_answer` (PR #53: order plus 3 s; failed on main at 3.006 s) | the watchdog's budget against a panic's backtrace | a | **Done**: the watchdog and `close` read a `Clock` (the wall clock, or a test's manual one). `slow-get` waits until the watchdog answered its request, `hang-get` until the program is done. The test moves the clock only after the handlers answered, and asserts the order: before it moves, only the panics are answered. | – |
 | same file: `after_one_relay_call_times_out…`, `a_fetch_that_outlasts_its_wait…` | elapsed-time asserts | a | **Done**: they assert what the relay heard (one request; a heartbeating relay asked twice) | – |
-| same file: `a_store_hit_the_watchdog_answered_first…` (sleeps 900 ms, so it passes vacuously when slow) | same | a | the clock above | (same) |
+| same file: `a_store_hit_the_watchdog_answered_first…` (slept 900 ms, so it passed vacuously when slow) | same | a | **Done**: the slow handler goes on once the watchdog answered, and `close` waits for it; no sleep | – |
+| same file: `Steps` (fed the next input after 10 s whatever the output) | a deadline that changed the order under load | a | **Done**: each step waits for its lines; five minutes with none fails as a hang | – |
 | hushrun units/program.rs `output_that_never_stops_is_handed_over…` (`took < MOST_AFTER*4`), `a_program_that_keeps_output_open_past_its_end…` (`< MOST_AFTER*2`) | `run_copying_stdout`'s held decision is `QUIET`/`MOST_AFTER` on `Instant` | a, **and b** | Pass a clock into the read loop. Assert `held`, `cut` and the bytes, never elapsed time. Product: what a program prints after `QUIET` is forwarded but **not kept**, so a slow child's last result lines can miss the parser (units_go `what_a_program…left_running…` relies on it). Decide in C-48 whether "kept" may depend on QUIET. | M |
 | build_relay/tests.rs: the bound tests (`a_server_that_sleeps_on_open…`, `a_block_whose_stated_cost_is_absurd…`, `a_ci_job_s_end_sends…`, `only_a_job_writing…`, `a_stalled_begin_or_commit…`, `a_stale_vouch…`, `a_slow_id_token_endpoint…`, `a_ci_job_waits_for_open…`, `on_a_slow_link…`, the two panicking runs) | wall-clock asserts on the relay's old budgets | a | **Done**: rewritten to the new rules, asserting outcomes and order | – |
 | build_relay/tests.rs: what is left with ms asserts (`a_cold_build_s_questions_wait…` 48 asks <100 ms each, `a_cc_open_that_answers_after_its_check_ended…`, `three_failures_rest…` <200 ms) | wall-clock asserts | a | The relay takes `tokio::time` everywhere already. Run these tests under `#[tokio::test(start_paused = true)]` or on a runtime with paused time. Tokio's auto-advance then makes every `sleep` and `timeout` instant and exact, and the bounds become exact equalities. Needs the relay's runtime to be built in the test, and `Instant::now()` replaced by `tokio::time::Instant::now()` in the relay. | L (many tests, mechanical) |
@@ -202,8 +203,8 @@ waiting on the answer. Nothing sleeps.
 2. CI: drop `|| echo`, add caches for jars, m2, gradle-home and node, and add the jars mirror
    (one PR, no Rust).
 3. macOS: skip tool installs when checks will skip, then the split or merge-queue decision.
-4. Injected clocks: Go cache-program watchdog, `run_copying_stdout`, then the relay's remaining
-   ms-bound unit tests on paused tokio time.
+4. Injected clocks: `run_copying_stdout`, then the relay's remaining ms-bound unit tests on
+   paused tokio time. (The Go cache program's watchdog is done.)
 5. Frozen-relay tests become "a backend that never answers" (no SIGSTOP).
 6. .NET counts from TRX; pin CMake; the other mtime tests.
 7. Product ADRs: manifest amendments; C-48; B-31's end-of-run mint.
