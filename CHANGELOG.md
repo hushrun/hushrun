@@ -44,6 +44,23 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
+  `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
+  nothing it can reach changed, by a static map of the workspace's sources made with
+  rust-analyzer's index (C-146 to C-152). No coverage and no tracing are used.
+  - What the map can't show counts on the safe side. A call to a trait method counts every
+    implementation, a type counts the `impl` blocks that name it, and a macro counts its
+    definition and every name its body can resolve to. A procedural macro of the workspace makes
+    the test keep its binary's reads.
+  - A test that can start a binary of the workspace (`CARGO_BIN_EXE_…`, `Command::new` of a path)
+    keeps its binary's reads, as does every test when rust-analyzer is missing or fails. The run
+    says why once, with `rustup component add rust-analyzer` for a missing one.
+  - rust-analyzer's index is kept in hushrun's cache by the files it was made from.
+  - The target runner leaves the reused tests out of the list it passes on to nextest. The plan
+    names their binaries in `hushrun.json`'s `testBinaries`, and the runner's facts name the tests
+    left out in `leftOut`.
+  - `cargo test` keeps reusing whole test binaries, and a check with `unit: test` says why once.
+
 - **Maven's modules shared through Apache's build cache extension, kind `maven/1`** (B-170 to
   B-177, ADR 0113, a draft). In a run with a relay, in a Maven build whose `.mvn/extensions.xml`
   loads `maven-build-cache-extension`, `hushrun run` serves the extension's remote cache on the
