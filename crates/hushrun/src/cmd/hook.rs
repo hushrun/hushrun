@@ -337,7 +337,7 @@ fn create(path: &Path, mode: Mode) -> anyhow::Result<bool> {
 
 /// \[ADR 0043\] Puts the hook in this clone, when `hushrun ready` or `hushrun run` finds none and
 /// nobody chose that. It never fails a command, and says one line when it does something.
-pub(crate) fn ensure(global: &GlobalOpts) {
+pub fn ensure(global: &GlobalOpts) {
     if in_ci() {
         return;
     }

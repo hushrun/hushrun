@@ -16,6 +16,7 @@ pub mod lines;
 pub mod scenario;
 pub mod schema;
 pub mod sigstore;
+pub mod tool;
 pub mod vectors;
 pub mod world;
 

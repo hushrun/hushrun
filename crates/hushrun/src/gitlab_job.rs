@@ -77,7 +77,7 @@ pub(crate) enum Token {
 
 /// A GitLab job that may share (B-48, B-49): its ID token and its key.
 #[derive(Clone, Debug)]
-pub(crate) struct Job {
+pub struct Job {
     pub(crate) token: IdToken,
     pub(crate) key: Arc<JobKey>,
 }

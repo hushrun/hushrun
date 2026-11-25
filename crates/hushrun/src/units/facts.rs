@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 
 use hushrun_core::units::NotFollowed;
 
+/// The variable that names a run's directory (C-32), where every adapter writes its facts. Here,
+/// beside the facts, rather than in `runner.rs`: what every adapter shares reaches no adapter's
+/// file (CONTRIBUTING.md, "Which tests CI runs again").
+pub const UNITS_VAR: &str = "HUSHRUN_UNITS";
+
 /// The schema of `hushrun.json`.
 pub const RUN_SCHEMA: &str = "hushrun.units/v0";
 /// The schema of an adapter's file.
@@ -804,6 +809,10 @@ pub fn left_out(files: &[FactsFile]) -> Option<String> {
 
 /// What a file says of a runner setting, as a list of strings, when every file that says it
 /// agrees; `Err(())` when two disagree.
+#[allow(
+    clippy::result_unit_err,
+    reason = "the library is for hushrun's own tests: its callers only ask whether two disagree"
+)]
 pub fn setting(files: &[FactsFile], adapter: &str, key: &str) -> Result<Option<Vec<String>>, ()> {
     let mut found: Option<Vec<String>> = None;
     for file in files.iter().filter(|f| f.adapter == adapter) {

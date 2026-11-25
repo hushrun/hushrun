@@ -411,18 +411,8 @@ fn utc(time: &str) -> String {
     }
 }
 
-/// `1,234,567`.
-pub(crate) fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, digit) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(digit);
-    }
-    out
-}
+/// `1,234,567`: [`crate::units::words::thousands`], which a run's lines share.
+pub(crate) use crate::units::words::thousands;
 
 /// Cents as dollars, the currency of hushrun's plans: `$7.04`, `$1,500.00`.
 fn dollars(cents: u64) -> String {
