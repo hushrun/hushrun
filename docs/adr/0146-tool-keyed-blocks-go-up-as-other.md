@@ -32,7 +32,11 @@ Neither kind is released; the newest release is 0.19.1.
 2. **`differs` for such a block leaves the block built here as it is.** It is neither discarded
    (a library's answer) nor kept to this machine with B-34's line (a linked output's answer,
    whose words are about link environments). The marker is done.
-3. **A manifest of such a kind is prefetched whole, in its order.** The prefetch took only
+3. **No report about such a block says it differs.** The server's report route suspends a key
+   on a trusted job's `differs` report whatever the block's class. Gradle's and Maven's caches
+   report only a rejected download today; the relay drops a `differs` or `link_differs` report
+   for these kinds wherever it comes from, so a later caller can't send one either.
+4. **A manifest of such a kind is prefetched whole, in its order.** The prefetch took only
    libraries, proc macros and build scripts from a manifest; a block of class `other` waited to
    be asked for. Gradle and Maven ask for each entry as they reach its task or module, so each
    would wait for its own download.

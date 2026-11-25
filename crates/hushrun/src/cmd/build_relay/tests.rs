@@ -5396,3 +5396,63 @@ fn a_gradle_or_maven_manifest_s_other_blocks_are_all_downloaded_once_one_is_aske
         relay.end_check(&[]);
     }
 }
+
+// covers: B-81, B-175
+#[test]
+fn no_differs_report_is_ever_sent_about_a_gradle_or_maven_block() {
+    // A trusted job's `differs` report suspends the key and deletes the copy, whatever the
+    // block's class. A tool-keyed block's bytes needn't repeat: such a report is never sent,
+    // through the relay's requests or any other way, and every other problem still is.
+    for kind in [Kind::Gradle, Kind::Maven] {
+        for problem in [blocks::Problem::Differs, blocks::Problem::LinkDiffers] {
+            assert!(!super::reported(kind, problem), "{kind:?} {problem:?}");
+        }
+        for problem in [
+            blocks::Problem::Unreadable,
+            blocks::Problem::Missing,
+            blocks::Problem::Rejected,
+        ] {
+            assert!(super::reported(kind, problem), "{kind:?} {problem:?}");
+        }
+    }
+    for kind in [Kind::Rustc, Kind::Go, Kind::Cc, Kind::Xcode, Kind::Tsc] {
+        assert!(super::reported(kind, blocks::Problem::Differs), "{kind:?}");
+    }
+    // End to end: a block downloaded from another machine, then reported as differing through
+    // the tool's own request, reaches the backend as no report; a rejection does.
+    for kind in [Kind::Gradle, Kind::Maven] {
+        let fake = FakeBuild::start();
+        let a = machine();
+        let key = tool_block(&a.store, kind, 31, Some(me(&fake)));
+        let address = blocks::address(kind.word(), key.as_bytes());
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            address,
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Other,
+        );
+        fake.set_manifest(vec![Pair(address, address)]);
+        let b = machine();
+        let relay = start(&fake, &b, |_| {});
+        begin_tool(&relay, &b, kind);
+        until("open", || answering(&relay));
+        assert_eq!(
+            ask(&relay, tool_fetch(kind, key)),
+            Answer::Ready { key },
+            "{kind:?}"
+        );
+        let report = |problem| match kind {
+            Kind::Gradle => Request::GradleReport { key, problem },
+            _ => Request::MavenReport { key, problem },
+        };
+        ask(&relay, report(hushrun_build::relay::Problem::Differs));
+        ask(&relay, report(hushrun_build::relay::Problem::LinkDiffers));
+        ask(&relay, report(hushrun_build::relay::Problem::Rejected));
+        until("the rejection reported", || fake.count(route::REPORT) >= 1);
+        relay.end_check(&[]);
+        assert_eq!(fake.count(route::REPORT), 1, "{kind:?}");
+    }
+}

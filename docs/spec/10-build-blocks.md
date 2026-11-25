@@ -3364,7 +3364,10 @@ shared `observe` (B-33): a difference is no sign of a forged entry when a task m
 each time (a test report's dates, a jar's file dates); it is logged (`differed`) and nothing else.
 A Gradle block goes up as class `other`, whatever its record says, since the server suspends a key
 whose trusted `library` copies differ and deletes the trusted one; `begin`'s `differs` for it
-leaves the block built here as it is, its key neither kept here (B-34) nor discarded.
+leaves the block built here as it is, its key neither kept here (B-34) nor discarded. No report
+about a Gradle block says it differs: the server suspends a key on a trusted job's `differs`
+report whatever the class; one that couldn't be read, was missing or was rejected is reported as
+for every kind.
 
 **B-82 Manifest and close.** A check whose run serves the cache asks `open` of kind `gradle/1` and
 platform `jvm` beside its own `open`, for its manifest alone, as a Go command's does (B-45), and,
@@ -3487,7 +3490,7 @@ there already that was only downloaded gives way to this build, which is then to
 one built here stays. Maven's entries are never audited (B-16) and never compared in shared
 `observe` (B-33): a jar keeps its files' dates; a difference is logged (`differed`) and nothing
 else. A Maven block goes up as class `other`, as Gradle's does (B-81), and `begin`'s `differs` for
-it leaves the block built here as it is. *Rests on:* the extension restoring an entry built with tests skipped into a build that runs
+it leaves the block built here as it is, and no report about it says it differs. *Rests on:* the extension restoring an entry built with tests skipped into a build that runs
 them, and skipping them, unless the build reconciles the property (seen with the extension 1.2.0).
 
 **B-176 Manifest and close.** A check whose run serves the cache asks `open` of kind `maven/1` and

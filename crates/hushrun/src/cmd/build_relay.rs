@@ -2791,7 +2791,7 @@ impl Relay {
     }
 
     async fn report(&self, kind: Kind, address: Hex32, scope: &str, problem: blocks::Problem) {
-        if self.saved || !self.state().answering(Instant::now()) {
+        if self.saved || !self.state().answering(Instant::now()) || !reported(kind, problem) {
             return;
         }
         let body = ReportRequest {
@@ -3397,6 +3397,19 @@ fn prefetch_order<T>(
         first.extend(rest);
     }
     first
+}
+
+/// Whether a report of `problem` about a block of `kind` is sent at all. A block a build tool
+/// keyed itself (Gradle's, Maven's) is never reported as differing: its bytes needn't repeat,
+/// and a trusted job's `differs` report suspends a key and deletes the copy whatever its class
+/// (B-81, B-175). That it couldn't be read, was missing or was rejected is reported as for
+/// every kind.
+fn reported(kind: Kind, problem: blocks::Problem) -> bool {
+    !(kind.tool_keyed()
+        && matches!(
+            problem,
+            blocks::Problem::Differs | blocks::Problem::LinkDiffers
+        ))
 }
 
 /// Whether a block of `class` is fetched from a manifest without being asked for (B-30):
