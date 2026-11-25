@@ -179,6 +179,8 @@ fn kept_here(kind: Kind, description: &serde_json::Value) -> Option<String> {
             .map(str::to_string),
         // Gradle's entries aren't baked yet (B-82).
         Kind::Gradle => Some("Gradle entries aren't baked".into()),
+        // Nor are Maven's (B-176).
+        Kind::Maven => Some("Maven entries aren't baked".into()),
         Kind::Tsc => Some("TypeScript blocks aren't baked".into()),
     }
 }

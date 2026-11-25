@@ -162,6 +162,7 @@ fn entry(outcome: Outcome, tsc: TscEntry) -> Entry {
         xcode: None,
         cc: None,
         gradle: None,
+        maven: None,
         tsc: Some(tsc),
     }
 }
