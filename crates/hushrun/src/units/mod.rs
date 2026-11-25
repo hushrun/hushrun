@@ -25,6 +25,7 @@
 //! on every outcome.
 
 pub mod adapter;
+pub mod bats;
 pub mod cargo;
 pub mod command;
 pub mod ctest;
@@ -37,10 +38,12 @@ pub mod gradle;
 pub mod jest;
 pub mod jvm;
 pub mod maven;
+pub mod mesontest;
 pub mod mocha;
 pub mod node_test;
 pub mod program;
 pub mod pytest;
+pub mod ruby;
 pub mod runner;
 pub mod rustdoc;
 pub mod shared;
@@ -50,6 +53,7 @@ pub mod testprogram;
 pub mod unittest;
 pub mod vitest;
 pub mod why;
+pub mod xcodebuild;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};

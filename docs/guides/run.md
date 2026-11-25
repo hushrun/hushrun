@@ -349,6 +349,34 @@ command's exit code, or 0 when it skips.
   same check in CI, and the other way round. Environment variables and the OS aren't part of it
   either: when a check depends on them, give each variant its own name, such as `unit-node22`.
 
+### Shell tests with Bats
+
+With `tests: reuse` (or `{mode: reuse, unit: test, reads: test}` for one test at a time), a Bats
+check skips the `.bats` files, or the tests, that already passed on the files they read. hushrun
+sees what each test read through bash itself: the helpers it `load`ed, the libraries it
+`source`d, the scripts it ran and what those sourced. A test it reuses shows in bats' own output
+as a skip, so the count and the exit code stay bats':
+
+```text
+$ hushrun run unit -- bats test
+hushrun: unit: 3 of 4 tests run, in 2 of 2 test files; 1 already passed on the files it read
+1..4
+ok 1 says hello
+ok 2 plain
+ok 3 adds # skip reused by hushrun
+ok 4 adds zero
+```
+
+- **bats-core 1.10 or later**, started as `bats`, by a path (`./test/bats/bin/bats`), or through
+  `npx`, `pnpm`, `yarn` or `bun`. A shell script or Makefile that runs bats isn't observed: run
+  bats itself after `--`.
+- **A file bash doesn't run runs every test when it changes**: a `#!/bin/sh` script, a Python
+  helper, a fixture. bash-run files are `.bash` and `.sh` files whose `#!` line names bash (or
+  that have none and aren't executable) and scripts like `bin/tool` with a bash `#!` line.
+- **What hushrun can't see**: a file read as data (`cat`, `grep`, `shellcheck`), a program that
+  isn't bash, and a process started without the environment (`env -i`, `sudo`). Put a test file
+  that depends on those in `tests.always`, so it always runs.
+
 ## Where results go
 
 hushrun takes the first of these:
@@ -1012,12 +1040,43 @@ hushrun leaves tests out through the framework's own variables (`GTEST_FILTER`, 
 wrote it; GoogleTest or Catch2 says it is filtering. A `--gtest_filter` of your own, or sharding,
 keeps every test running and records each. doctest and Catch2 2 read nothing from the
 environment: run them through `ctest` with `doctest_discover_tests` or `catch_discover_tests`.
+
+### C and C++ without CMake
+
+Make, autotools, Meson and a handwritten `build.ninja` get the same launcher as CMake, with nothing
+to set ([ADR 0119](../adr/0119-c-without-cmake-and-meson-test.md)):
+
+```text
+$ hushrun run build -- make -j8                          # in a second worktree
+hushrun: build: c/c++: 41 objects: 40 reused, 1 built
+```
+
+- **Make and autotools.** Inside `hushrun run`, GNU Make's commands find hushrun's `cc`, `gcc`,
+  `clang` (and their C++ names) first on `PATH`, through `MAKEFILES`; each starts the next compiler
+  of its name through the launcher. A Makefile that names its compiler by a path, or sets `PATH`
+  itself, compiles as before. `./configure` writes the compiler's name, not a path, so a plain
+  `make` afterwards is the compiler's own, and has nothing to do. BSD make reads no `MAKEFILES` and
+  gets nothing.
+- **Meson.** In a repository with a `meson.build`, a `meson setup` inside `hushrun run` names its
+  compilers through the same one-line indirection CMake keeps in its cache: outside a run it is the
+  compiler. A build folder set up before keeps its compilers, and the run says so: set it up again
+  inside `hushrun run` with `meson setup --wipe <folder>`. Its `compile_commands.json` then starts
+  with `/bin/sh`, which some editors' language servers can't follow.
+- **Ninja.** `hushrun run … -- ninja` on a `build.ninja` you wrote gets the compilers it names on
+  `PATH`; `build.ninja` isn't touched, so `ninja -n` has no work after.
+- **Configure checks** (autoconf's `conftest.c`, Meson's in `meson-private`) compile as asked and
+  are never stored.
+- **`meson test`.** With `tests: reuse`, `hushrun run test -- meson test -C build` reuses each test
+  program whose files didn't change, as with CTest: hushrun's `meson` on `PATH` names the tests that
+  still need to run, after checking that their programs are built from what the plan keyed.
+
 ### Python
 
 Pure Python compiles nothing to reuse, and a C extension a package builds as it installs
 (setuptools, meson-python) doesn't go through hushrun's C and C++ launcher: setuptools takes its
 compiler only from `CC`, which hushrun never sets because CMake, Meson and the Rust `cc` crate read
-it too; Meson has no launcher; and pip's isolated builds compile against headers in a new
+it too; meson-python starts its own Meson, not the `meson setup` on COMMAND's `PATH` that
+hushrun gives the launcher (ADR 0119); and pip's isolated builds compile against headers in a new
 temporary folder each time. pip's wheel cache keeps what it built already
 ([ADR 0110](../adr/0110-unittest.md)). Python's tests are reused one by one under `tests: reuse`,
 with pytest, unittest (`python -m unittest`) and Django's `manage.py test`.
@@ -1202,6 +1261,34 @@ on the files it and the projects it references compile, unbuilt, and with `unit:
 that passed of one that didn't ([ADR 0118](../adr/0118-dotnet-test.md)). A project on
 Microsoft.Testing.Platform runs every time, and the run says so. Add `TestResults/` to `.gitignore`
 when COMMAND writes TRX files there: a run that leaves new files in the checkout isn't recorded.
+
+### Ruby's tests
+
+With `tests: reuse` on a check that runs RSpec or Minitest, a spec or test file that already passed
+on the files it read doesn't run again:
+
+```yaml
+checks:
+  test:
+    tests: reuse
+```
+
+```text
+$ hushrun run test -- bundle exec rspec
+hushrun: test: 2 of 40 test files run; 38 already passed on the files they read
+Run options: exclude {:hushrun_reused=>"already passed on the files it read"}
+```
+
+`rspec`, `bin/rails test`, `rake test`, `rake spec` and `ruby -Itest …`, alone or after
+`bundle exec`, load hushrun's adapter through `RUBYLIB` and `RUBYOPT`; no file of the repository
+changes, and a script that sets `RUBYOPT` should add to what it had (`RUBYOPT="$RUBYOPT -W0"`).
+A test file read the repository's code that ran for it, what that code requires, `require_relative`s
+and opens, and what spec_helper or test_helper loaded. In a Rails app, what Zeitwerk, an
+initializer or a fixture loaded while one test file ran is read by every later one, since the app
+keeps it; with `config.eager_load` on in the test environment (Rails' default when `CI` is set)
+every file of `app/` is, and only changes to test files skip anything. `tests: {mode: reuse, unit:
+test}` reuses each RSpec example and Minitest test on its own. Ruby 3.1 or later; Spring and
+`rspec --only-failures` aren't observed, and say so.
 
 ## When hushrun runs anyway
 

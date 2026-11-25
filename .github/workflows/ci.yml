@@ -132,6 +132,14 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends libgtest-dev catch2 doctest-dev clang clang-tools
           echo "HUSHRUN_TEST_CXX_TESTS=1" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_CXX_MODULES=1" >> "$GITHUB_ENV"
+      # C without CMake (ADR 0119): autoconf and automake for the autotools build test, and Meson,
+      # pinned, for the Meson build and `meson test` adapter tests.
+      - name: Install autotools and Meson for the C tests
+        run: |
+          if command -v apt-get >/dev/null; then sudo apt-get install -y --no-install-recommends autoconf automake; else brew install autoconf automake; fi
+          "$RUNNER_TEMP/py/bin/pip" install --quiet meson==1.3.2
+          echo "HUSHRUN_TEST_MESON=$RUNNER_TEMP/py/bin/meson" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_AUTOTOOLS=$(dirname "$(command -v autoreconf)")" >> "$GITHUB_ENV"
       # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
@@ -224,11 +232,31 @@ jobs:
           elixir-version: "1.18.4"
       - name: Name mix for the ExUnit tests
         run: echo "HUSHRUN_TEST_MIX=$(command -v mix)" >> "$GITHUB_ENV"
+      # Ruby: RSpec, Minitest 6 and Minitest 5 for the tests of the Ruby adapter (ADR 0114), each
+      # in a gem directory of its own, pinned.
+      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
+        with:
+          ruby-version: "3.3"
+      - name: Install RSpec and Minitest for the test-file tests
+        run: |
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems" rspec:3.13.2 minitest:6.1.0 rake:13.4.2
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems5" minitest:5.20.0 rake:13.4.2
+          {
+            echo "HUSHRUN_TEST_RUBY=$(command -v ruby)"
+            echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems"
+            echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5"
+          } >> "$GITHUB_ENV"
       # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
       - name: Install TypeScript for the tsc build-block tests
         run: |
           npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
           echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
+      # Shell: bats-core 1.10 and 1.13 for the tests of the Bats adapter (ADR 0115), pinned.
+      - name: Install Bats for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/bats110" --no-audit --no-fund --ignore-scripts bats@1.10.0
+          npm install --prefix "$RUNNER_TEMP/bats113" --no-audit --no-fund --ignore-scripts bats@1.13.0
+          echo "HUSHRUN_TEST_BATS=$RUNNER_TEMP/bats110/node_modules/.bin:$RUNNER_TEMP/bats113/node_modules/.bin" >> "$GITHUB_ENV"
       # C# (.NET): the runner's own .NET SDK for the tests of the dotnet test adapter (ADR 0118),
       # whose fixtures target its major version and restore their pinned NuGet packages from
       # nuget.org into a folder of their own.
@@ -338,9 +366,20 @@ jobs:
       # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0090).
       - name: Name CMake for the test-program tests
         run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
+      # C without CMake (ADR 0119): autoconf and automake for the autotools build test, and Meson,
+      # pinned, for the Meson build and `meson test` adapter tests.
+      - name: Install autotools and Meson for the C tests
+        run: |
+          if command -v apt-get >/dev/null; then sudo apt-get install -y --no-install-recommends autoconf automake; else brew install autoconf automake; fi
+          "$RUNNER_TEMP/py/bin/pip" install --quiet meson==1.3.2
+          echo "HUSHRUN_TEST_MESON=$RUNNER_TEMP/py/bin/meson" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_AUTOTOOLS=$(dirname "$(command -v autoreconf)")" >> "$GITHUB_ENV"
       # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
+      # Swift (ADR 0121): the runner's own Xcode for the tests of the xcodebuild test adapter.
+      - name: Name Xcode for the xcodebuild test-target tests
+        run: echo "HUSHRUN_TEST_XCODEBUILD=$(command -v xcodebuild)" >> "$GITHUB_ENV"
       # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
       # offline against a local repository: filled here once by running those tests online.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
@@ -417,11 +456,31 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/mocha11" --no-audit --no-fund --ignore-scripts mocha@11.7.5
           echo "HUSHRUN_TEST_MOCHA10=$RUNNER_TEMP/mocha10/node_modules" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_MOCHA11=$RUNNER_TEMP/mocha11/node_modules" >> "$GITHUB_ENV"
+      # Ruby: RSpec, Minitest 6 and Minitest 5 for the tests of the Ruby adapter (ADR 0114), each
+      # in a gem directory of its own, pinned.
+      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
+        with:
+          ruby-version: "3.3"
+      - name: Install RSpec and Minitest for the test-file tests
+        run: |
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems" rspec:3.13.2 minitest:6.1.0 rake:13.4.2
+          gem install --no-document --install-dir "$RUNNER_TEMP/rubygems5" minitest:5.20.0 rake:13.4.2
+          {
+            echo "HUSHRUN_TEST_RUBY=$(command -v ruby)"
+            echo "HUSHRUN_TEST_RUBY_GEMS=$RUNNER_TEMP/rubygems"
+            echo "HUSHRUN_TEST_RUBY_GEMS5=$RUNNER_TEMP/rubygems5"
+          } >> "$GITHUB_ENV"
       # TypeScript: TypeScript 6 for the tests of tsc's build blocks (ADR 0106), pinned.
       - name: Install TypeScript for the tsc build-block tests
         run: |
           npm install --prefix "$RUNNER_TEMP/tsc" --no-audit --no-fund --ignore-scripts typescript@6.0.3
           echo "HUSHRUN_TEST_TSC=$RUNNER_TEMP/tsc/node_modules" >> "$GITHUB_ENV"
+      # Shell: bats-core 1.10 and 1.13 for the tests of the Bats adapter (ADR 0115), pinned.
+      - name: Install Bats for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/bats110" --no-audit --no-fund --ignore-scripts bats@1.10.0
+          npm install --prefix "$RUNNER_TEMP/bats113" --no-audit --no-fund --ignore-scripts bats@1.13.0
+          echo "HUSHRUN_TEST_BATS=$RUNNER_TEMP/bats110/node_modules/.bin:$RUNNER_TEMP/bats113/node_modules/.bin" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
