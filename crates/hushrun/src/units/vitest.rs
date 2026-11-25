@@ -666,7 +666,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             }
             None => {}
         }
-        reads.extend(super::gotest::under(tree, &dirs));
+        reads.extend(super::shared::under(tree, &dirs));
         out.dirs.insert(unit.clone(), dirs);
         out.units.insert(
             unit,

@@ -842,7 +842,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                     why: LOCAL_REPOSITORY.into(),
                     detail: coordinates_of(rest).unwrap_or_else(|| path.clone()),
                 });
-            } else if super::gotest::under(tree, &BTreeSet::from([path.clone()])).is_empty() {
+            } else if super::shared::under(tree, &BTreeSet::from([path.clone()])).is_empty() {
                 not_followed.insert(NotFollowed {
                     why: "classpath".into(),
                     detail: path.clone(),
@@ -851,7 +851,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                 dirs.insert(path.clone());
             }
         }
-        reads.extend(super::gotest::under(tree, &dirs));
+        reads.extend(super::shared::under(tree, &dirs));
         let not_followed = one_local_repository_reason(not_followed);
         if unit.contains("::") {
             out.own.insert(unit.clone(), Vec::new());
