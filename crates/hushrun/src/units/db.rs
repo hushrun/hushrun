@@ -102,6 +102,18 @@ macro_rules! unit_getenv {
     };
 }
 
+/// \[C-151\] The functions marked `hushrun::starts_no_workspace_binary` whose programs the static
+/// map took a Cargo test to start, as it last ran here, for `hushrun why`: one row a test that
+/// started any, none for any other. Added in place as `unit_env` is.
+macro_rules! test_trusted {
+    () => {
+        "CREATE TABLE test_trusted (
+    test_ref INTEGER PRIMARY KEY REFERENCES test (id) ON DELETE CASCADE,
+    marked   TEXT NOT NULL CHECK (marked <> '')
+) STRICT;"
+    };
+}
+
 /// The tables, in a fresh store. `STRICT`: a value of another type is refused.
 const TABLES: &str = concat!(
     "
@@ -278,7 +290,8 @@ CREATE TABLE disagreement (
     run_key   TEXT NOT NULL CHECK (length(run_key) = 64),
     at        TEXT NOT NULL
 ) STRICT;
-"
+",
+    test_trusted!(),
 );
 
 /// Where a repository's store is: `<cache dir>/units/<id>.v2.sqlite`, the id the SHA-256 of the
@@ -458,6 +471,7 @@ const ADDED: &[(&str, &str)] = &[
     ("unit_env", unit_env!()),
     ("unit_scripts", unit_scripts!()),
     ("unit_getenv", unit_getenv!()),
+    ("test_trusted", test_trusted!()),
 ];
 
 /// \[ADR 0095, 0096\] `conn`, a store of this schema opened to write, with every table of
@@ -1000,6 +1014,7 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
                     not_followed: BTreeSet::new(),
                     not_kept: not_kept.filter(|_| matches!(state, State::NotRun | State::Passed)),
                     list: None,
+                    trusted: None,
                 },
             );
             test_names.insert(id, (unit, test));
@@ -1021,6 +1036,24 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
                 .and_then(|m| m.tests.get_mut(id))
         {
             row.not_followed.insert(NotFollowed { why, detail });
+        }
+    }
+    if has_table(conn, "test_trusted")? {
+        let mut trusted = conn.prepare(
+            "SELECT m.test_ref, m.marked FROM test_trusted m
+             JOIN test t ON t.id = m.test_ref JOIN unit u ON u.id = t.unit_ref
+             WHERE u.check_ref = ?1",
+        )?;
+        for row in trusted.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (test, marked): (i64, String) = row?;
+            if let Some((unit, id)) = test_names.get(&test)
+                && let Some(row) = names
+                    .get(unit)
+                    .and_then(|n| map.units.get_mut(n))
+                    .and_then(|m| m.tests.get_mut(id))
+            {
+                row.trusted = Some(marked);
+            }
         }
     }
     // \[ADR 0081\] Each test's own list, a set tests share.
@@ -1427,6 +1460,12 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 ],
             )?;
             let test = tx.last_insert_rowid();
+            if let Some(marked) = row.trusted.as_deref().filter(|m| !m.is_empty()) {
+                tx.execute(
+                    "INSERT INTO test_trusted (test_ref, marked) VALUES (?1, ?2)",
+                    params![test, marked],
+                )?;
+            }
             for n in &row.not_followed {
                 tx.execute(
                     "INSERT OR IGNORE INTO test_not_followed (test_ref, why, detail)
