@@ -28,7 +28,8 @@ use serde::Deserialize;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources, Tree};
 
 use super::adapter::{
-    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, Hints, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt,
+    WhyAt,
 };
 use super::facts::{FactsFile, MergedTest, Unfollowed};
 use super::jvm::{self, JvmEvents};
@@ -308,37 +309,6 @@ pub struct ReportReads {
     pub paths: Vec<String>,
     /// File-based Maven repositories inside the repository the build resolves from, from its root.
     pub repositories: Vec<String>,
-}
-
-/// \[C-46\] Of the tests a plan lists one by one (`listed`, each by name with its unit and id),
-/// those a JUnit 4 task of `groups` would not leave out, which run: as the script's filter takes
-/// them, per task, in the order of their ids as strings, the first `most`, and of those none whose
-/// class is in the default package or a package whose name starts with a capital letter (Gradle
-/// reads such a pattern as a simple class name). The class is the id up to its last `.`: a JUnit 4
-/// method's name has none. The script mirrors this; the plan lists only what it leaves out.
-pub fn left_in<'a>(
-    groups: &[super::store::LeaveOutAtMost],
-    listed: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
-) -> BTreeSet<String> {
-    let listed: Vec<(&str, &str, &str)> = listed.collect();
-    let mut out = BTreeSet::new();
-    for group in groups {
-        let mut of_group: Vec<(&str, &str)> = listed
-            .iter()
-            .filter(|(_, unit, _)| group.units.contains(*unit))
-            .map(|(name, _, id)| (*id, *name))
-            .collect();
-        of_group.sort_unstable();
-        for (at, (id, name)) in of_group.into_iter().enumerate() {
-            let class = id.rsplit_once('.').map_or("", |(class, _)| class);
-            let named_alone =
-                !class.contains('.') || class.chars().next().is_some_and(char::is_uppercase);
-            if at >= group.most || named_alone {
-                out.insert(name.to_string());
-            }
-        }
-    }
-    out
 }
 
 /// A class's outer class: its binary name up to the first `$`.
@@ -867,7 +837,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                     why: LOCAL_REPOSITORY.into(),
                     detail: coordinates_of(rest).unwrap_or_else(|| path.clone()),
                 });
-            } else if super::gotest::under(tree, &BTreeSet::from([path.clone()])).is_empty() {
+            } else if super::shared::under(tree, &BTreeSet::from([path.clone()])).is_empty() {
                 not_followed.insert(NotFollowed {
                     why: "classpath".into(),
                     detail: path.clone(),
@@ -876,7 +846,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                 dirs.insert(path.clone());
             }
         }
-        reads.extend(super::gotest::under(tree, &dirs));
+        reads.extend(super::shared::under(tree, &dirs));
         let not_followed = one_local_repository_reason(not_followed);
         if unit.contains("::") {
             out.own.insert(unit.clone(), Vec::new());
@@ -1112,6 +1082,22 @@ impl Adapter for Recognized {
 
     fn hints(&self) -> Hints {
         Hints::Kinds(SOURCE_KINDS)
+    }
+
+    // `binds`, `keys` and `start_variables` are the trait's defaults, written out: a call on this
+    // type then names this impl's own method, which the static test map follows to it alone,
+    // where the trait's would count every adapter that overrides it (CONTRIBUTING.md, "Which
+    // tests CI runs again").
+    fn binds(&self) -> bool {
+        false
+    }
+
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::None
+    }
+
+    fn start_variables(&self, _: &Path) -> Vec<(String, Option<OsString>)> {
+        Vec::new()
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

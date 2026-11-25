@@ -2,6 +2,12 @@
 //! by its source file, a test is one of its methods, and what a class read is every source file
 //! below its project and each project its classpath is built from.
 //!
+//! In-process (CONTRIBUTING.md, "Which tests CI runs again"): each test runs a check as `hushrun
+//! run unit -- gradle …` would, through Gradle's adapter's own type, `gradle::Recognized`, and the
+//! code every adapter shares, and never starts the `hushrun` binary (`common/in_process.rs`).
+//! Gradle itself runs as COMMAND, for real. What only the CLI shows of Gradle (its lines, the
+//! audit's second run, `hushrun why`) is in `e2e_gradle.rs`.
+//!
 //! The fixtures are generated builds (JUnit 5, JUnit 4, TestNG, Spock, Kotest), run by the Gradle
 //! that `HUSHRUN_TEST_GRADLE` names (a `gradle` program) with `--offline`, against the Gradle user
 //! home `HUSHRUN_TEST_GRADLE_USER_HOME` names, which must hold every library and plugin they use.
@@ -15,393 +21,133 @@
 //! Without the SDK it fails under `HUSHRUN_TEST_TOOLS=required`, as every tool does, unless the run
 //! opts out of it by name with `HUSHRUN_TEST_ANDROID=skip`.
 
+#[path = "common/gradle.rs"]
+mod fixtures;
+#[path = "common/in_process.rs"]
+mod in_process;
+#[path = "common/repo.rs"]
+mod repo;
 #[path = "common/store.rs"]
 mod store;
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
-use hushrun_testkit::git;
+use hushrun::units::adapter::Adapter as _;
+use hushrun::units::{Profile, gradle};
 use serde_json::{Value, json};
 
-/// Environment variables a test must never inherit.
-const CLEARED: &[&str] = &[
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "BUILDKITE",
-    "CIRCLECI",
-    "ACTIONS_ID_TOKEN_REQUEST_URL",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "HUSHRUN_AGENT",
-    "HUSHRUN_BACKEND",
-    "HUSHRUN_TOKEN",
-    "HUSHRUN_CONFIG",
-    "HUSHRUN_FORMAT",
-    "HUSHRUN_PROVIDER",
-    "HUSHRUN_INSIDE_RUN",
-    "HUSHRUN_UNITS",
-    "HUSHRUN_GRADLE",
-    "HUSHRUN_GRADLE_HOOK",
-    "HUSHRUN_TESTS_LEAVE_OUT",
-    "HUSHRUN_TESTS_EVENTS",
-    "HUSHRUN_INVOKED_BY",
-    "HUSHRUN_REPORTS_READ",
-    "GRADLE_OPTS",
-    "JAVA_TOOL_OPTIONS",
-    "JAVA_OPTS",
-    "npm_lifecycle_event",
-    "AI_AGENT",
-    "CLAUDECODE",
-    "CLAUDE_CODE",
-    "CODEX_SANDBOX",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "OPENCODE",
-    "OPENCODE_CLIENT",
-    "CURSOR_AGENT",
-    "CURSOR_EXTENSION_HOST_ROLE",
-    "GEMINI_CLI",
-    "AUGMENT_AGENT",
-    "ANTIGRAVITY_AGENT",
-    "COPILOT_MODEL",
-    "COPILOT_ALLOW_ALL",
-    "COPILOT_GITHUB_TOKEN",
-    "CLAUDE_CODE_REMOTE",
-    "CURSOR_AGENT_SOCKET",
-    "COPILOT_AGENT_SESSION_ID",
-    "CODEX_PROXY_CERT",
-    "HUSHRUN_SANDBOX",
-    "HUSHRUN_BUILD",
-    "HUSHRUN_BUILD_KEEP_DAYS",
-    "HUSHRUN_BUILD_DIR",
-    "HUSHRUN_BUILD_SESSION",
-    "HUSHRUN_CC",
-    "CMAKE_C_COMPILER_LAUNCHER",
-    "CMAKE_CXX_COMPILER_LAUNCHER",
-    "RUSTC_WRAPPER",
-];
+use fixtures::*;
+use in_process::{Ran, Repo};
 
-const NO_HOST: &str = "http://127.0.0.1:9";
-const LINE: &str =
-    r#"if (System.getenv("HUSHRUN_GRADLE")) apply from: System.getenv("HUSHRUN_GRADLE")"#;
-
-struct Repo {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    repo: PathBuf,
-    cache: PathBuf,
+/// What Gradle's adapter answers that never changes in a run, for the code every adapter shares.
+fn profile(adapter: &gradle::Recognized) -> Profile {
+    Profile {
+        word: adapter.word(),
+        runner: adapter.runner(),
+        test_file: adapter.test_file(),
+        tests: adapter.tests(),
+        hints: adapter.hints(),
+        binds: adapter.binds(),
+        keys: adapter.keys(),
+        // Gradle's adapter says nothing of its own here; calling the trait's defaults would reach
+        // every adapter that overrides them.
+        not_by_test: None,
+        not_watched: None,
+    }
 }
 
-impl Repo {
-    fn new(files: &[(String, String)]) -> Repo {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("real path");
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("mkdir");
-        git::init(&repo, "sha1");
-        let r = Repo {
-            _dir: dir,
-            cache: root.join("cache"),
-            root,
-            repo,
+/// `hushrun run unit -- ARGS`, with `env` besides, in-process, through Gradle's adapter alone.
+fn run(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
+    let command: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // As `units::adapter::choose_kept` comes to Gradle's adapter (`gradle::recognized`), with no
+    // trait object: what COMMAND is, and whether its settings file loads the adapter.
+    let adapter = match gradle::recognize(hushrun::units::command::without_env(&command)) {
+        Some(Ok(adapter)) => adapter,
+        Some(Err(why)) => return in_process::Run::new(r, "unit", args, env).unobserved(&why),
+        None => panic!("{args:?} doesn't start Gradle"),
+    };
+    if let Some(why) = gradle::unloadable(&adapter, &r.repo) {
+        return in_process::Run::new(r, "unit", args, env).unobserved(&why);
+    }
+    observe(r, args, env, &adapter)
+}
+
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order. Every call is on `gradle::Recognized` itself, which the static map resolves to its
+/// own `impl Adapter`; through a trait object or a generic it would reach every adapter
+/// (CONTRIBUTING.md, "Which tests CI runs again"). Another adapter's test file copies this
+/// function and changes the type.
+fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &gradle::Recognized) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // Gradle's adapter keeps the trait's `plan`, which is its `plan_from_files`.
+            Ok(context) => {
+                let planning = adapter.plan_from_files(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
         };
-        for (path, text) in files {
-            r.write(path, text);
-        }
-        git::commit_all(&r.repo, "init");
-        r
+        drop(input);
+        run.planned(&observer, planned);
     }
-
-    fn write(&self, path: &str, text: &str) {
-        let path = self.repo.join(path);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, text).expect("write");
-    }
-
-    fn hushrun(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
-        cmd.current_dir(&self.repo)
-            .env("HUSHRUN_CACHE_DIR", &self.cache)
-            .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
-            .env("HUSHRUN_HOST", NO_HOST)
-            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
-            .env("HOME", self.root.join("home"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            );
-        if let Some(home) = gradle_user_home() {
-            cmd.env("GRADLE_USER_HOME", home);
-        }
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        // What the developer's shell exports never reaches a runner a test starts.
-        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("NEXTEST")
-                || (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("CLAUDE")
-            {
-                cmd.env_remove(name.as_ref());
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
             }
         }
-        cmd
-    }
-
-    fn run(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
-        let mut cmd = self.hushrun();
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-        let output = cmd.args(args).output().expect("hushrun");
-        Ran {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
-    }
-
-    fn map(&self) -> Value {
-        store::map(&self.cache)
-    }
-
-    fn newest_result(&self) -> Value {
-        let mut files = Vec::new();
-        collect(&self.cache.join("results/results/v0"), &mut files);
-        files.sort_by_key(|p| p.file_name().map(|n| n.to_owned()));
-        let newest = files.last().expect("a result");
-        serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
-    }
-
-    /// Every unit result this machine recorded, `pass` or `fail`, by count.
-    fn unit_results(&self) -> std::collections::BTreeMap<String, usize> {
-        let mut files = Vec::new();
-        collect(&self.cache.join("results/units/v0"), &mut files);
-        let mut out = std::collections::BTreeMap::new();
-        for f in files {
-            let v: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
-            let result = v["result"].as_str().unwrap_or("?").to_string();
-            *out.entry(result).or_default() += 1;
-        }
-        out
-    }
-
-    /// The test cases of a class Gradle's XML report says ran, by name.
-    fn xml_cases(&self, project: &str, class: &str) -> Vec<String> {
-        let path = self
-            .repo
-            .join(project)
-            .join(format!("build/test-results/test/TEST-{class}.xml"));
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Vec::new();
+        break (code, observed);
+    };
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
+            }
+            None => in_process::Run::not_again(&wanted),
         };
-        text.split("<testcase name=\"")
-            .skip(1)
-            .filter_map(|rest| rest.split('"').next().map(str::to_string))
-            .collect()
+        run.disagreements(o, ended);
     }
-
-    /// Removes the builds' outputs, which the tests are done with.
-    fn clean(&self) {
-        for entry in std::fs::read_dir(&self.repo)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let _ = std::fs::remove_dir_all(entry.path().join("build"));
-        }
-        let _ = std::fs::remove_dir_all(self.repo.join("build"));
-    }
+    run.record(code, observed)
 }
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        self.clean();
-    }
-}
-
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect(&path, out);
-        } else if path.extension().is_some_and(|e| e == "json") {
-            out.push(path);
-        }
-    }
-}
-
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-fn line<'a>(ran: &'a Ran, start: &str) -> &'a str {
-    ran.stderr
-        .lines()
-        .find(|l| l.starts_with(start))
-        .unwrap_or_else(|| {
-            panic!(
-                "no line starting {start:?} in:\n{}\n{}",
-                ran.stderr, ran.stdout
-            )
-        })
-}
-
-fn tools(what: &str, here: bool) -> bool {
-    if here {
-        return true;
-    }
-    if std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required") {
-        panic!("{what} is missing, and HUSHRUN_TEST_TOOLS=required");
-    }
-    eprintln!("note: skipping: {what} is missing (HUSHRUN_TEST_TOOLS=required makes this fail)");
-    false
-}
-
-/// `--offline`, the tests' Gradle option, but with `HUSHRUN_TEST_GRADLE_ONLINE=1`: then Gradle runs
-/// online and fills the Gradle user home with what the tests' builds need, which is how CI fills
-/// it once before its test run (a system property nothing reads stands in).
-fn offline() -> &'static str {
-    if std::env::var("HUSHRUN_TEST_GRADLE_ONLINE").as_deref() == Ok("1") {
-        "-Dhushrun.tests.online=true"
-    } else {
-        "--offline"
-    }
-}
-
-/// The Gradle the tests run.
-fn gradle() -> String {
-    std::env::var("HUSHRUN_TEST_GRADLE").unwrap_or_else(|_| "gradle".into())
-}
-
-/// The Gradle user home the tests run offline against.
-fn gradle_user_home() -> Option<String> {
-    std::env::var("HUSHRUN_TEST_GRADLE_USER_HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-}
-
-fn has_gradle() -> bool {
-    static HERE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *HERE.get_or_init(|| {
-        gradle_user_home().is_some()
-            && Command::new(gradle())
-                .arg("--version")
-                .env_remove("GRADLE_OPTS")
-                .output()
-                .is_ok_and(|o| o.status.success())
-    })
-}
-
-const NEEDS: &str = "Gradle (HUSHRUN_TEST_GRADLE) and a Gradle user home with JUnit (HUSHRUN_TEST_GRADLE_USER_HOME)";
-
-fn file(path: &str, text: &str) -> (String, String) {
-    (path.to_string(), text.to_string())
-}
-
-fn yaml(tests: &str) -> String {
-    format!("version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: {tests}\n")
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Framework {
-    Junit5,
-    Junit4,
-}
-
-/// The build's root files: the settings file with its line, and every project a Java project.
-fn build(framework: Framework, projects: &[&str], tests: &str) -> Vec<(String, String)> {
-    let includes = projects
-        .iter()
-        .map(|p| format!("'{p}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let deps = match framework {
-        Framework::Junit5 => {
-            "    testImplementation platform('org.junit:junit-bom:5.11.4')\n    testImplementation 'org.junit.jupiter:junit-jupiter'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n"
-        }
-        Framework::Junit4 => "    testImplementation 'junit:junit:4.13.2'\n",
-    };
-    let runner = match framework {
-        Framework::Junit5 => "useJUnitPlatform()",
-        Framework::Junit4 => "useJUnit()",
-    };
-    vec![
-        file("hushrun.yaml", &yaml(tests)),
-        file(".gitignore", "build/\n.gradle/\n.kotlin/\n"),
-        file(
-            "settings.gradle",
-            &format!("rootProject.name = 'shop'\ninclude {includes}\n{LINE}\n"),
-        ),
-        file(
-            "build.gradle",
-            &format!(
-                "subprojects {{\n  apply plugin: 'java'\n  repositories {{ mavenCentral() }}\n  dependencies {{\n{deps}  }}\n  tasks.withType(Test).configureEach {{ {runner} }}\n}}\n"
-            ),
-        ),
-    ]
-}
-
-/// A shop: `lib` prices, `app` has a cart that uses them, `other` stands alone, each with tests.
-fn shop(tests: &str) -> Vec<(String, String)> {
-    let mut files = build(Framework::Junit5, &["app", "lib", "other"], tests);
-    files.extend([
-        file("app/build.gradle", "dependencies { implementation project(':lib') }\n"),
-        file(
-            "lib/src/main/java/shop/lib/Price.java",
-            "package shop.lib;\npublic class Price { public static int of(int x) { return x * 2; } }\n",
-        ),
-        file(
-            "lib/src/test/java/shop/lib/PriceTest.java",
-            "package shop.lib;\nimport org.junit.jupiter.api.*;\nclass PriceTest { @Test void doubles() { Assertions.assertEquals(6, Price.of(3)); } }\n",
-        ),
-        file(
-            "app/src/main/java/shop/app/Cart.java",
-            "package shop.app;\npublic class Cart { public static int total(int... xs) { int n = 0; for (int x : xs) n += shop.lib.Price.of(x); return n; } }\n",
-        ),
-        file(
-            "app/src/test/java/shop/app/CartTest.java",
-            "package shop.app;\nimport org.junit.jupiter.api.*;\nclass CartTest {\n  @Test void total() { Assertions.assertEquals(6, Cart.total(1, 2)); }\n  @Test void flips() { Assertions.assertNull(System.getenv(\"FAIL\")); }\n  @Nested class Inner {\n    @Test void a() {}\n    @Test void b() {}\n  }\n}\n",
-        ),
-        file("README.md", "A shop.\n"),
-    ]);
-    for name in ["A", "B", "C"] {
-        files.push(file(
-            &format!("other/src/test/java/shop/other/{name}Test.java"),
-            &format!("package shop.other;\nimport org.junit.jupiter.api.*;\nclass {name}Test {{ @Test void works() {{}} }}\n"),
-        ));
-    }
-    files
-}
-
-/// COMMAND: the tests, offline, each failing task reported, with `extra`.
-fn command<'a>(gradle: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
-    let mut args = vec![
-        "run",
-        "unit",
-        "--",
-        gradle,
-        offline(),
-        "--console=plain",
-        "test",
-        "--continue",
-    ];
-    args.extend_from_slice(extra);
-    args
-}
-
-const CART: &str = "app/src/test/java/shop/app/CartTest.java";
-const PRICE: &str = "lib/src/test/java/shop/lib/PriceTest.java";
 
 // covers: C-30, C-31, C-32, C-34, C-46
 #[test]
@@ -410,15 +156,12 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&shop("reuse"));
-    let first = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
-    assert!(
-        first
-            .stderr
-            .contains("every test class runs: no run here has listed Gradle's test classes yet"),
-        "{}",
-        first.stderr
+    let r = repo(&shop("reuse"));
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
+    assert_eq!(
+        first.line("unit: every"),
+        "unit: every test class runs: no run here has listed Gradle's test classes yet",
     );
     let map = r.map();
     // A class read every file below its project's directory and below each project its
@@ -472,45 +215,31 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
             .contains(&json!("lib/src/main/java/shop/lib/Price.java"))
     );
     assert_eq!(map["unitFiles"].as_array().unwrap().len(), 5, "{map:#}");
-    assert_eq!(
-        r.newest_result()["units"],
-        json!({"total": 5, "ran": 5, "reused": 0})
-    );
+    assert_eq!(first.units, json!({"total": 5, "ran": 5, "reused": 0}));
 
     // lib changes: lib's and app's classes run, other's were reused but the one audited.
     r.write(
         "lib/src/main/java/shop/lib/Price.java",
         "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
     );
-    let changed = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    let changed = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(changed.code, 0, "{}", changed.said());
     assert_eq!(
-        line(&changed, "hushrun: unit: "),
-        "hushrun: unit: 3 of 5 test classes run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        changed.line("unit: "),
+        "unit: 3 of 5 test classes run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
-    let result = r.newest_result();
-    let saved = result["units"]["savedMs"].clone();
+    let saved = changed.units["savedMs"].clone();
     assert_eq!(
-        result["units"],
+        changed.units,
         json!({"total": 5, "ran": 3, "reused": 2, "savedMs": saved})
     );
     // Gradle didn't run the reused classes: two of other's three wrote no report.
     let ran_in_other = ["A", "B", "C"]
         .iter()
-        .filter(|n| {
-            !r.xml_cases("other", &format!("shop.other.{n}Test"))
-                .is_empty()
-        })
+        .filter(|n| !xml_cases(&r.repo, "other", &format!("shop.other.{n}Test")).is_empty())
         .count();
     assert_eq!(ran_in_other, 1, "{}", changed.stdout);
-    // \[C-37\] `hushrun why` knows a class by the name the store keeps, the reused ones too.
-    let why = r
-        .hushrun()
-        .args(["why", "unit", "other/src/test/java/shop/other/BTest.java"])
-        .output()
-        .expect("hushrun");
-    let said = String::from_utf8_lossy(&why.stdout);
-    assert!(said.contains("BTest.java would be reused"), "{said}");
+    // \[C-37\] What `hushrun why` says of a class is end to end: e2e_gradle.rs.
 }
 
 // covers: C-39, C-46, C-32
@@ -528,10 +257,10 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
         "app/src/test/java/shop/app/SetupTest.java",
         "package shop.app;\nimport org.junit.jupiter.api.*;\nclass SetupTest {\n  @BeforeAll static void up() { Assertions.assertNull(System.getenv(\"FAIL\")); }\n  @Test void works() {}\n}\n",
     ));
-    let r = Repo::new(&files);
+    let r = repo(&files);
     let cc = ["--configuration-cache"];
-    let first = r.run(&command(&gradle, &cc), &[("FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let first = run(&r, &command(&gradle, &cc), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}", first.said());
     let map = r.map();
     assert_eq!(
         map["units"][CART]["tests"],
@@ -549,29 +278,28 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
 
     // The same files, the flip fixed: CartTest's own key failed, so its tests are asked one by
     // one; of the three that passed, one runs as a check. SetupTest's tests aren't known: it runs.
-    let second = r.run(&command(&gradle, &cc), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &command(&gradle, &cc), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
     assert!(
         second.stdout.contains("Reusing configuration cache"),
         "{}",
         second.stdout
     );
     assert_eq!(
-        hushrun_testkit::lines::drawn(line(&second, "hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(second.line("unit: ")),
         hushrun_testkit::lines::drawn(
-            "hushrun: unit: 2 of 5 test classes run; 3 already passed on the files they read, and so did 2 tests of the others, and 1 more test that already passed runs anyway, as a check"
+            "unit: 2 of 5 test classes run; 3 already passed on the files they read, and so did 2 tests of the others, and 1 more test that already passed runs anyway, as a check"
         )
     );
     // \[C-39\] Tests are counted where Gradle named them, and a class reused whole, which Gradle
     // named none of, by the tests this machine knows of it: every one reused.
-    let result = r.newest_result();
     assert_eq!(
-        result["units"]["tests"],
+        second.units["tests"],
         json!({"total": 8, "ran": 3, "reused": 5})
     );
     // A nested class's method was left out too (Gradle 9's filter can't do it; the hook can):
     // of Inner's two, at most the audited one ran.
-    let inner = r.xml_cases("app", "shop.app.CartTest$Inner");
+    let inner = xml_cases(&r.repo, "app", "shop.app.CartTest$Inner");
     assert!(inner.len() <= 1, "{inner:?}");
     assert_eq!(
         r.map()["units"]["app/src/test/java/shop/app/SetupTest.java"]["tests"],
@@ -601,27 +329,26 @@ fn junit4_tests_are_reused_one_by_one_through_gradles_filter() {
             "package shop.app;\nimport org.junit.*;\npublic class PlainTest { @Test public void works() {} }\n",
         ),
     ]);
-    let r = Repo::new(&files);
-    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&files);
+    let first = run(&r, &command(&gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}", first.said());
     assert_eq!(
         r.map()["units"]["app/src/test/java/shop/app/ParamTest.java"]["tests"],
         json!({"shop.app.ParamTest.flips": "failed", "shop.app.ParamTest.small": "passed"})
     );
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
     // total and small passed, and PlainTest passed whole: of their three tests, the audit runs one,
     // wherever the draw finds it.
     assert_eq!(
-        hushrun_testkit::lines::drawn(line(&second, "hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(second.line("unit: ")),
         hushrun_testkit::lines::drawn(
-            "hushrun: unit: 3 of 5 tests run, in 2 of 3 test classes; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+            "unit: 3 of 5 tests run, in 2 of 3 test classes; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
     // Gradle's patterns left out either `total`, or every invocation of `small`.
-    let total = r.xml_cases("app", "shop.app.CartTest");
-    let small: Vec<String> = r
-        .xml_cases("app", "shop.app.ParamTest")
+    let total = xml_cases(&r.repo, "app", "shop.app.CartTest");
+    let small: Vec<String> = xml_cases(&r.repo, "app", "shop.app.ParamTest")
         .into_iter()
         .filter(|c| c.starts_with("small"))
         .collect();
@@ -639,14 +366,14 @@ fn a_task_gradle_didnt_execute_records_nothing() {
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&shop("observe"));
-    let first = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&shop("observe"));
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
     let before = r.map();
     // A file no test reads changes: the check misses, and Gradle finds every test task up to date.
     r.write("README.md", "A shop, again.\n");
-    let again = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(again.code, 0, "{}\n{}", again.stdout, again.stderr);
+    let again = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(again.code, 0, "{}", again.said());
     assert!(
         again.stdout.contains("> Task :app:test UP-TO-DATE"),
         "{}",
@@ -654,13 +381,10 @@ fn a_task_gradle_didnt_execute_records_nothing() {
     );
     // \[C-32\] One true line: no test ran, why, and what makes Gradle run them.
     assert_eq!(
-        line(&again, "hushrun: unit: Gradle ran no test"),
-        "hushrun: unit: Gradle ran no test: :app:test, :lib:test and :other:test were up to date, which it does when they passed before on the same inputs, so this run learned nothing new of their test classes; a change to what they read makes Gradle run them"
+        again.line("unit: Gradle ran no test"),
+        "unit: Gradle ran no test: :app:test, :lib:test and :other:test were up to date, which it does when they passed before on the same inputs, so this run learned nothing new of their test classes; a change to what they read makes Gradle run them"
     );
-    assert_eq!(
-        r.newest_result()["units"],
-        json!({"total": 5, "ran": 0, "reused": 0})
-    );
+    assert_eq!(again.units, json!({"total": 5, "ran": 0, "reused": 0}));
     assert_eq!(r.map()["units"], before["units"]);
 }
 
@@ -671,56 +395,50 @@ fn a_run_in_which_gradle_ran_no_test_never_says_tests_ran() {
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&shop("reuse"));
-    let first = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&shop("reuse"));
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
     // A file no test reads changes: every test class's key with it, and Gradle finds every test
     // task up to date, so nothing runs.
     r.write("README.md", "A shop, again.\n");
-    let idle = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(idle.code, 0, "{}\n{}", idle.stdout, idle.stderr);
+    let idle = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(idle.code, 0, "{}", idle.said());
     assert!(
         idle.stdout.contains("> Task :app:test UP-TO-DATE"),
         "{}",
         idle.stdout
     );
-    // The adapter's note, once; the last line says no count of tests, since none ran, and the
-    // reports the tasks left aren't this run's.
+    // The adapter's note, once. (That the run's last line then says no count of tests, since
+    // none ran, is the CLI's: e2e_gradle.rs.)
     assert_eq!(
-        idle.stderr
-            .lines()
-            .filter(|l| l.starts_with("hushrun: unit: Gradle ran no test: "))
-            .count(),
+        idle.count("unit: Gradle ran no test: "),
         1,
         "{}",
-        idle.stderr
+        idle.said()
     );
-    let last = line(&idle, "hushrun: unit passed in ");
-    assert!(!last.contains("test"), "{last}");
-    assert_eq!(
-        r.newest_result()["units"],
-        json!({"total": 5, "ran": 0, "reused": 0})
-    );
+    assert_eq!(idle.units, json!({"total": 5, "ran": 0, "reused": 0}));
     // The next plan knows that run executed nothing: it claims no class runs, only that none is
     // left out, and says why none kept a pass.
     r.write(
         "lib/src/main/java/shop/lib/Price.java",
         "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
     );
-    let next = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(next.code, 0, "{}\n{}", next.stdout, next.stderr);
+    let next = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(next.code, 0, "{}", next.said());
     assert_eq!(
-        line(&next, "hushrun: unit: "),
-        "hushrun: unit: none of its 5 test classes is left out: its last run here executed none of them, so none kept a pass on the files it read"
+        next.line("unit: "),
+        "unit: none of its 5 test classes is left out: its last run here executed none of them, so none kept a pass on the files it read"
     );
     // Gradle ran lib's and app's tasks: the store forgets that a run executed nothing.
     r.write("README.md", "A shop, once more.\n");
-    let after = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(after.code, 0, "{}\n{}", after.stdout, after.stderr);
+    let after = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(after.code, 0, "{}", after.said());
     assert!(
-        line(&after, "hushrun: unit: ").starts_with("hushrun: unit: all 5 test classes run: "),
+        after
+            .line("unit: ")
+            .starts_with("unit: all 5 test classes run: "),
         "{}",
-        after.stderr
+        after.said()
     );
 }
 
@@ -730,7 +448,7 @@ fn a_run_in_which_gradle_ran_no_test_never_says_tests_ran() {
 fn a_settings_file_without_the_line_observes_nothing_and_says_so() {
     use std::os::unix::fs::PermissionsExt as _;
     // No Gradle is needed: the run stops at the settings file.
-    let r = Repo::new(&[
+    let r = repo(&[
         file("hushrun.yaml", &yaml("observe")),
         file("settings.gradle", "rootProject.name = 'shop'\n"),
         file("gradlew", "#!/bin/sh\necho \"gradlew $*\"\n"),
@@ -740,81 +458,15 @@ fn a_settings_file_without_the_line_observes_nothing_and_says_so() {
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
-    let ran = r.run(&["run", "unit", "--", "./gradlew", "test"], &[]);
-    assert_eq!(ran.code, 0, "{}", ran.stderr);
-    assert!(
-        ran.stderr.contains(&format!(
-            "hushrun: unit: test files aren't observed: Gradle loads hushrun's adapter from one line in settings.gradle, which `hushrun init` proposes: `{LINE}`"
-        )),
-        "{}",
-        ran.stderr
+    let ran = run(&r, &["./gradlew", "test"], &[]);
+    assert_eq!(ran.code, 0, "{}", ran.said());
+    assert_eq!(
+        ran.line("unit: test files"),
+        format!(
+            "unit: test files aren't observed: Gradle loads hushrun's adapter from one line in settings.gradle, which `hushrun init` proposes: `{LINE}`"
+        ),
     );
     assert!(ran.stdout.contains("gradlew test"), "{}", ran.stdout);
-}
-
-// covers: C-34, C-39, C-46
-#[test]
-fn an_audited_test_runs_again_alone_under_a_warm_daemon_and_the_configuration_cache() {
-    if !tools(NEEDS, has_gradle()) {
-        return;
-    }
-    let gradle = gradle();
-    let counts = tempfile::tempdir().unwrap();
-    let count_dir = counts.path().to_string_lossy().into_owned();
-    // One class, two tests: one fails while FAIL is set, the other while HIDDEN is, which no file
-    // says, as a missed dependency would. Each counts its runs in a file outside the repository.
-    let mut files = build(Framework::Junit5, &["app"], "{mode: reuse, unit: test}");
-    files.push(file(
-        "app/src/test/java/shop/app/TwoTest.java",
-        "package shop.app;\nimport org.junit.jupiter.api.*;\nimport java.nio.file.*;\nclass TwoTest {\n  static void count(String name) throws Exception { Files.write(Paths.get(System.getenv(\"COUNTS\"), name), \"x\".getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND); }\n  @Test void ok() throws Exception { count(\"ok\"); Assertions.assertNull(System.getenv(\"HIDDEN\")); }\n  @Test void flips() throws Exception { count(\"flips\"); Assertions.assertNull(System.getenv(\"FAIL\")); }\n}\n",
-    ));
-    let r = Repo::new(&files);
-    let cc = ["--configuration-cache"];
-    let first = r.run(
-        &command(&gradle, &cc),
-        &[("FAIL", "1"), ("COUNTS", &count_dir)],
-    );
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
-    // ok passed on these files, and is the one test that could be reused: it runs as a check, and
-    // fails. It runs once more, alone, from the second run's own list, and fails again.
-    let caught = r.run(
-        &command(&gradle, &cc),
-        &[("HIDDEN", "1"), ("COUNTS", &count_dir)],
-    );
-    assert_eq!(caught.code, 1, "{}\n{}", caught.stdout, caught.stderr);
-    assert_eq!(
-        line(&caught, "hushrun: unit: all"),
-        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
-    );
-    let name = "app/src/test/java/shop/app/TwoTest.java::shop.app.TwoTest.ok";
-    assert!(
-        caught.stderr.contains(&format!(
-            "hushrun: unit: {name} failed, though it passed before on the same files it read: running it once more"
-        )),
-        "{}",
-        caught.stderr
-    );
-    assert!(
-        caught.stderr.contains(&format!(
-            "hushrun: unit: {name} failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"
-        )),
-        "{}",
-        caught.stderr
-    );
-    // Both starts of COMMAND reused the configuration cache, and the second ran ok alone.
-    assert_eq!(
-        caught.stdout.matches("Reusing configuration cache").count(),
-        2,
-        "{}",
-        caught.stdout
-    );
-    let count = |name: &str| {
-        std::fs::read_to_string(counts.path().join(name))
-            .unwrap_or_default()
-            .len()
-    };
-    assert_eq!((count("ok"), count("flips")), (3, 2));
-    assert_eq!(store::disagreements(&r.cache), [name]);
 }
 
 // covers: C-46
@@ -825,7 +477,7 @@ fn with_isolated_projects_on_nothing_is_observed_and_the_build_is_as_it_was() {
     }
     let gradle = gradle();
     // A build Isolated Projects takes: each project configures itself.
-    let r = Repo::new(&[
+    let r = repo(&[
         file("hushrun.yaml", &yaml("observe")),
         file(".gitignore", "build/\n.gradle/\n"),
         file(
@@ -841,11 +493,12 @@ fn with_isolated_projects_on_nothing_is_observed_and_the_build_is_as_it_was() {
             "package shop.app;\nimport org.junit.jupiter.api.*;\nclass OneTest { @Test void works() {} }\n",
         ),
     ]);
-    let ran = r.run(
+    let ran = run(
+        &r,
         &command(&gradle, &["-Dorg.gradle.unsafe.isolated-projects=true"]),
         &[],
     );
-    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(ran.code, 0, "{}", ran.said());
     assert!(
         ran.stdout.contains(
             "hushrun: Isolated Projects is on, so hushrun looks at no test class of this build"
@@ -853,7 +506,7 @@ fn with_isolated_projects_on_nothing_is_observed_and_the_build_is_as_it_was() {
         "{}",
         ran.stdout
     );
-    assert!(r.newest_result().get("units").is_none(), "{}", ran.stderr);
+    assert!(ran.units.is_null(), "{}", ran.said());
 }
 
 /// The Android SDK and a Gradle user home that holds Android's Gradle plugin.
@@ -884,7 +537,7 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
     }
     let gradle = gradle();
     let plugin = std::env::var("HUSHRUN_TEST_ANDROID_PLUGIN").unwrap_or_else(|_| "9.1.1".into());
-    let r = Repo::new(&[
+    let r = repo(&[
         file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
         file(
             ".gitignore",
@@ -916,27 +569,24 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
         ),
     ]);
     let args = [
-        "run",
-        "unit",
-        "--",
         gradle.as_str(),
         offline(),
         "--console=plain",
         ":core:testDebugUnitTest",
     ];
     let env = [("ANDROID_HOME", sdk.as_str())];
-    let first = r.run(&args, &[env[0], ("FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let first = run(&r, &args, &[env[0], ("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}", first.said());
     assert_eq!(
         r.map()["units"]["core/src/test/java/shop/core/CoreTest.java"]["tests"],
         json!({"shop.core.CoreTest.again": "passed", "shop.core.CoreTest.flips": "failed",
                "shop.core.CoreTest.twice": "passed"})
     );
-    let second = r.run(&args, &env);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &args, &env);
+    assert_eq!(second.code, 0, "{}", second.said());
     assert_eq!(
-        line(&second, "hushrun: unit: "),
-        "hushrun: unit: 2 of 3 tests run, in 1 of 1 test class; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
+        second.line("unit: "),
+        "unit: 2 of 3 tests run, in 1 of 1 test class; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
     );
 }
 
@@ -979,21 +629,20 @@ fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&testng_build("reuse"));
+    let r = repo(&testng_build("reuse"));
     // The suite's setup fails: TestNG skips every test, OrderTest's failing one among them.
-    let first = r.run(&command(&gradle, &[]), &[("NO_DB", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let first = run(&r, &command(&gradle, &[]), &[("NO_DB", "1")]);
+    assert_eq!(first.code, 1, "{}", first.said());
     // Only the setup's failure is recorded: no skipped class passed.
     assert_eq!(
         r.unit_results(),
         std::collections::BTreeMap::from([("fail".into(), 1)]),
-        "{}\n{}",
-        first.stdout,
-        first.stderr
+        "{}",
+        first.said()
     );
     // The database is back: OrderTest runs, and fails, as plain Gradle says.
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}", second.said());
     assert!(
         second.stdout.contains("OrderTest > total FAILED"),
         "{}",
@@ -1072,9 +721,9 @@ fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_i
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&processor_build(1));
-    let first = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&processor_build(1));
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
     // app's classes read proc, whose processor app's compiler runs.
     let map = r.map();
     assert_eq!(
@@ -1093,8 +742,8 @@ fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_i
     );
     let (path, text) = processor_values(2);
     r.write(&path, &text);
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}", second.said());
     assert!(
         second.stdout.contains("AppTest > generated() FAILED"),
         "{}",
@@ -1127,22 +776,21 @@ fn a_test_jvm_that_died_records_no_pass_for_the_class_it_was_in() {
     }
     let gradle = gradle();
     for (round, place) in ["after", "test"].into_iter().enumerate() {
-        let r = Repo::new(&crash_build());
+        let r = repo(&crash_build());
         // The test JVM dies: Gradle fails the task, and no test of it failed.
-        let ran = r.run(&command(&gradle, &[]), &[("CRASH", place)]);
-        assert_eq!(ran.code, 1, "{place}: {}\n{}", ran.stdout, ran.stderr);
+        let ran = run(&r, &command(&gradle, &[]), &[("CRASH", place)]);
+        assert_eq!(ran.code, 1, "{place}: {}", ran.said());
         assert!(
             ran.stderr.contains("finished with non-zero exit value 3"),
             "{place}: {}",
-            ran.stderr
+            ran.said()
         );
         // other's classes passed; CrashTest recorded nothing.
         assert_eq!(
             r.unit_results(),
             std::collections::BTreeMap::from([("pass".into(), 9)]),
-            "{place} ({round}): {}\n{}",
-            ran.stdout,
-            ran.stderr
+            "{place} ({round}): {}",
+            ran.said()
         );
     }
 }
@@ -1154,7 +802,7 @@ fn spock_features_whose_names_differ_after_a_bracket_are_left_out_one_by_one() {
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&[
+    let r = repo(&[
         file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
         file(".gitignore", "build/\n.gradle/\n"),
         file(
@@ -1170,18 +818,17 @@ fn spock_features_whose_names_differ_after_a_bracket_are_left_out_one_by_one() {
             "package ex\nimport spock.lang.*\nclass ParseSpec extends Specification {\n  def \"parses [a]\"() { expect: true }\n  def \"parses [c]\"() { expect: true }\n  def \"parses [b]\"() { expect: 1 == 2 }\n}\n",
         ),
     ]);
-    let first = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 1, "{}", first.said());
     // Nothing changed: one of the two that passed is left out, the other runs as a check, and
     // the one that failed runs, and fails again.
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
-    let cases = r.xml_cases(".", "ex.ParseSpec");
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}", second.said());
+    let cases = xml_cases(&r.repo, ".", "ex.ParseSpec");
     assert!(
         cases.contains(&"parses [b]".to_string()),
-        "{cases:?}\n{}\n{}",
-        second.stdout,
-        second.stderr
+        "{cases:?}\n{}",
+        second.said()
     );
     assert_eq!(cases.len(), 2, "{cases:?}");
 }
@@ -1213,14 +860,18 @@ fn junit4_tests_of_a_class_in_the_default_package_leave_out_nothing_of_a_class_n
             &format!("package p;\nimport org.junit.*;\npublic class CalcTest {{\n{}}}\n", adds("P_FAIL")),
         ),
     ]);
-    let r = Repo::new(&files);
-    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1"), ("P_FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&files);
+    let first = run(
+        &r,
+        &command(&gradle, &[]),
+        &[("FAIL", "1"), ("P_FAIL", "1")],
+    );
+    assert_eq!(first.code, 1, "{}", first.said());
     // The default package's add tests passed and may be left out; p.CalcTest's failed, and run.
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
-    let cases = r.xml_cases("app", "p.CalcTest");
-    assert_eq!(cases.len(), 9, "{cases:?}\n{}", second.stderr);
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
+    let cases = xml_cases(&r.repo, "app", "p.CalcTest");
+    assert_eq!(cases.len(), 9, "{cases:?}\n{}", second.said());
 }
 
 // covers: C-32, C-46
@@ -1246,17 +897,15 @@ fn a_gradle_wrapper_that_starts_gradle_again_keeps_what_the_first_start_failed()
             "package shop.app;\nimport org.junit.jupiter.api.*;\nimport java.nio.file.*;\nclass FlakyTest {\n  @Test void flaky() throws Exception { Path p = Paths.get(System.getenv(\"COUNTS\"), \"ran\"); boolean again = Files.exists(p); Files.write(p, new byte[0]); Assertions.assertTrue(again); }\n  @Test void steady() {}\n}\n",
         ),
     ]);
-    let r = Repo::new(&files);
+    let r = repo(&files);
     std::fs::set_permissions(
         r.repo.join("gradlew"),
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
-    let ran = r.run(
+    let ran = run(
+        &r,
         &[
-            "run",
-            "unit",
-            "--",
             "./gradlew",
             offline(),
             "--console=plain",
@@ -1265,7 +914,7 @@ fn a_gradle_wrapper_that_starts_gradle_again_keeps_what_the_first_start_failed()
         ],
         &[("REAL_GRADLE", &gradle), ("COUNTS", &count_dir)],
     );
-    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(ran.code, 0, "{}", ran.said());
     assert_eq!(
         ran.stdout.matches("FlakyTest > flaky() FAILED").count(),
         1,
@@ -1277,7 +926,7 @@ fn a_gradle_wrapper_that_starts_gradle_again_keeps_what_the_first_start_failed()
         r.map()["units"]["app/src/test/java/shop/app/FlakyTest.java"]["tests"],
         json!({"shop.app.FlakyTest.flaky": "failed", "shop.app.FlakyTest.steady": "passed"}),
         "{}",
-        ran.stderr
+        ran.said()
     );
 }
 
@@ -1329,14 +978,14 @@ fn junit5_tests_that_look_alike_in_subclasses_and_nested_classes_are_left_out_on
     for (path, text) in LOOK_ALIKE_J5 {
         files.push(file(&format!("app/src/test/java/{path}"), text));
     }
-    let r = Repo::new(&files);
-    let first = r.run(&command(&gradle, &[]), LOOK_ALIKE_FIRST);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
-    let second = r.run(&command(&gradle, &[]), LOOK_ALIKE_SECOND);
-    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    let r = repo(&files);
+    let first = run(&r, &command(&gradle, &[]), LOOK_ALIKE_FIRST);
+    assert_eq!(first.code, 1, "{}", first.said());
+    let second = run(&r, &command(&gradle, &[]), LOOK_ALIKE_SECOND);
+    assert_eq!(second.code, 1, "{}", second.said());
     // The look-alikes that passed were listed, and left out: all 13 that passed but the audit's.
-    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
-    assert_eq!(reused, 12, "{}", second.stderr);
+    let reused = second.units["tests"]["reused"].clone();
+    assert_eq!(reused, 12, "{}", second.said());
     let failed = |class: &str, test: &str| {
         let path = r
             .repo
@@ -1413,13 +1062,13 @@ fn junit4_tests_that_look_alike_in_subclasses_are_left_out_one_by_one_through_pa
     for (path, text) in LOOK_ALIKE_J4 {
         files.push(file(&format!("app/src/test/java/{path}"), text));
     }
-    let r = Repo::new(&files);
-    let first = r.run(&command(&gradle, &[]), LOOK_ALIKE_J4_FIRST);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
-    let second = r.run(&command(&gradle, &[]), LOOK_ALIKE_J4_SECOND);
-    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
-    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
-    assert_eq!(reused, 12, "{}", second.stderr);
+    let r = repo(&files);
+    let first = run(&r, &command(&gradle, &[]), LOOK_ALIKE_J4_FIRST);
+    assert_eq!(first.code, 1, "{}", first.said());
+    let second = run(&r, &command(&gradle, &[]), LOOK_ALIKE_J4_SECOND);
+    assert_eq!(second.code, 1, "{}", second.said());
+    let reused = second.units["tests"]["reused"].clone();
+    assert_eq!(reused, 12, "{}", second.said());
     for class in ["shop.BTest", "shop.SubTest", "shop.Base2Test"] {
         let path = r
             .repo
@@ -1446,7 +1095,7 @@ fn spock_features_specs_inherit_are_left_out_one_by_one() {
     let others: String = (1..=9)
         .map(|n| format!("  def \"o{n}\"() {{ expect: true }}\n"))
         .collect();
-    let r = Repo::new(&[
+    let r = repo(&[
         file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
         file(".gitignore", "build/\n.gradle/\n"),
         file(
@@ -1483,19 +1132,21 @@ fn spock_features_specs_inherit_are_left_out_one_by_one() {
             "package ex\nclass Sub2Spec extends Base2Spec {}\n",
         ),
     ]);
-    let first = r.run(
+    let first = run(
+        &r,
         &command(&gradle, &[]),
         &[("FLIP", "1"), ("BSpec_FAIL", "1"), ("Sub2Spec_FAIL", "1")],
     );
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
-    let second = r.run(
+    assert_eq!(first.code, 1, "{}", first.said());
+    let second = run(
+        &r,
         &command(&gradle, &[]),
         &[("BSpec_FAIL", "1"), ("Sub2Spec_FAIL", "1")],
     );
-    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(second.code, 1, "{}", second.said());
     // ASpec's ten and BSpec's own, and Base2Spec's inherited: all 12 but the audit's.
-    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
-    assert_eq!(reused, 11, "{}\n{}", second.stderr, second.stdout);
+    let reused = second.units["tests"]["reused"].clone();
+    assert_eq!(reused, 11, "{}", second.said());
     for class in ["ex.BSpec", "ex.Sub2Spec"] {
         let path = r
             .repo
@@ -1538,9 +1189,9 @@ fn a_jvm_file_no_project_of_the_build_owns_is_the_rest() {
             "package plugin;\npublic class P {}\n",
         ),
     ]);
-    let r = Repo::new(&files);
-    let first = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&files);
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
     let map = r.map();
     for path in [
         "app/tools/Gen.java",
@@ -1555,11 +1206,11 @@ fn a_jvm_file_no_project_of_the_build_owns_is_the_rest() {
         "app/tools/Gen.java",
         "package tools;\npublic class Gen { public static int v() { return 2; } }\n",
     );
-    let changed = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    let changed = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(changed.code, 0, "{}", changed.said());
     assert_eq!(
-        line(&changed, "hushrun: unit: "),
-        "hushrun: unit: all 5 test classes run: app/tools/Gen.java changed, and any test may read it"
+        changed.line("unit: "),
+        "unit: all 5 test classes run: app/tools/Gen.java changed, and any test may read it"
     );
 }
 
@@ -1570,16 +1221,16 @@ fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list()
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&shop("reuse"));
-    let only = |args: &[&'static str]| -> Vec<&'static str> {
-        let mut out = vec!["run", "unit", "--"];
-        out.extend_from_slice(args);
-        out
-    };
+    let r = repo(&shop("reuse"));
+    let only = |args: &[&'static str]| -> Vec<&'static str> { args.to_vec() };
     let g: &'static str = Box::leak(gradle.into_boxed_str());
     // Only app's tests: lib's sources, which app's classes read, are on their list.
-    let first = r.run(&only(&[g, offline(), "--console=plain", ":app:test"]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let first = run(
+        &r,
+        &only(&[g, offline(), "--console=plain", ":app:test"]),
+        &[],
+    );
+    assert_eq!(first.code, 0, "{}", first.said());
     let map = r.map();
     let reads = map["units"][CART]["reads"].as_array().unwrap().clone();
     assert!(
@@ -1591,19 +1242,19 @@ fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list()
         "lib/src/main/java/shop/lib/Price.java",
         "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
     );
-    let second = r.run(&only(&[g, offline(), "--console=plain", ":app:test"]), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let second = run(
+        &r,
+        &only(&[g, offline(), "--console=plain", ":app:test"]),
+        &[],
+    );
+    assert_eq!(second.code, 0, "{}", second.said());
     assert!(
-        second.stdout.contains("CartTest") || r.xml_cases("app", "shop.app.CartTest").len() >= 2,
+        second.stdout.contains("CartTest")
+            || xml_cases(&r.repo, "app", "shop.app.CartTest").len() >= 2,
         "{}",
         second.stdout
     );
-    assert_eq!(
-        r.newest_result()["units"]["reused"],
-        json!(0),
-        "{}",
-        second.stderr
-    );
+    assert_eq!(second.units["reused"], json!(0), "{}", second.said());
 }
 
 // covers: C-32, C-46
@@ -1634,16 +1285,15 @@ fn a_junit4_test_jvm_that_died_beside_a_genuine_failure_records_no_pass_for_its_
             &format!("package shop.other;\nimport org.junit.*;\npublic class Green{n}Test {{ @Test public void green() {{}} }}\n"),
         ));
     }
-    let r = Repo::new(&files);
-    let ran = r.run(&command(&gradle, &[]), &[("CRASH", "1")]);
-    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let r = repo(&files);
+    let ran = run(&r, &command(&gradle, &[]), &[("CRASH", "1")]);
+    assert_eq!(ran.code, 1, "{}", ran.said());
     // AFailTest failed; other's passed; CrashTest recorded nothing.
     assert_eq!(
         r.unit_results(),
         std::collections::BTreeMap::from([("fail".into(), 1), ("pass".into(), 9)]),
-        "{}\n{}",
-        ran.stdout,
-        ran.stderr
+        "{}",
+        ran.said()
     );
 }
 
@@ -1657,7 +1307,7 @@ fn a_test_that_ends_its_jvm_records_no_pass_under_gradles_own_runners() {
     // JUnit 4 and TestNG on Gradle's own runners, which load no listener of the hook: `b` ends
     // the test JVM with `System.exit(0)` when `EXIT` is set, and `c`, which always fails, never
     // runs. Gradle calls the task successful. A JVM a class, so that the green ones run.
-    let r = Repo::new(&[
+    let r = repo(&[
         file("hushrun.yaml", &yaml("reuse")),
         file(".gitignore", "build/\n.gradle/\n"),
         file(
@@ -1685,15 +1335,14 @@ fn a_test_that_ends_its_jvm_records_no_pass_under_gradles_own_runners() {
             "package q;\nimport org.testng.annotations.*;\npublic class GreenTest { @Test public void g() {} }\n",
         ),
     ]);
-    let ran = r.run(&command(&gradle, &[]), &[("EXIT", "1")]);
-    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    let ran = run(&r, &command(&gradle, &[]), &[("EXIT", "1")]);
+    assert_eq!(ran.code, 0, "{}", ran.said());
     // The green classes passed; neither ExitTest did.
     assert_eq!(
         r.unit_results(),
         std::collections::BTreeMap::from([("pass".into(), 2)]),
-        "{}\n{}",
-        ran.stdout,
-        ran.stderr
+        "{}",
+        ran.said()
     );
 }
 
@@ -1758,31 +1407,24 @@ fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followe
             &format!("package app;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
         ));
     }
-    let r = Repo::new(&files);
+    let r = repo(&files);
     let repo_local = format!("-Dmaven.repo.local={}", m2.display());
     let args = |extra: &[&'static str]| -> Vec<String> {
-        let mut out: Vec<String> = [
-            "run",
-            "unit",
-            "--",
-            gradle.as_str(),
-            offline(),
-            "--console=plain",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let mut out: Vec<String> = [gradle.as_str(), offline(), "--console=plain"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         out.push(repo_local.clone());
         out.extend(extra.iter().map(|s| s.to_string()));
         out
     };
     let run = |extra: &[&'static str], env: &[(&str, &str)]| {
         let a = args(extra);
-        r.run(&a.iter().map(String::as_str).collect::<Vec<_>>(), env)
+        run(&r, &a.iter().map(String::as_str).collect::<Vec<_>>(), env)
     };
     let tasks = [":lib:publishToMavenLocal", "test", "--continue"];
     let first = run(&tasks, &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(first.code, 0, "{}", first.said());
     // app's classes read lib's sources: lib built the jar they took from the local repository.
     // The jar Maven downloaded is followed as Gradle's own cache is.
     let map = r.map();
@@ -1804,7 +1446,7 @@ fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followe
         "package lib;\npublic class Lib { public static int v() { return 2; } }\n",
     );
     let second = run(&tasks, &[]);
-    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(second.code, 1, "{}", second.said());
     assert!(
         second.stdout.contains("AppTest > v() FAILED"),
         "{}",
@@ -1813,7 +1455,7 @@ fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followe
     // A jar of the local repository no project of the build makes: the class that ran (AppTest,
     // which failed and runs again) isn't followed, and says why.
     let third = run(&tasks, &[("THING", "1")]);
-    assert_eq!(third.code, 1, "{}\n{}", third.stdout, third.stderr);
+    assert_eq!(third.code, 1, "{}", third.said());
     let map = r.map();
     assert_eq!(
         map["units"]["app/src/test/java/app/AppTest.java"]["notFollowed"],
@@ -1829,7 +1471,7 @@ fn kotest_tests_which_cant_be_left_out_are_never_counted_as_reused() {
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&[
+    let r = repo(&[
         file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
         file(".gitignore", "build/\n.gradle/\n.kotlin/\n"),
         file(
@@ -1847,14 +1489,14 @@ fn kotest_tests_which_cant_be_left_out_are_never_counted_as_reused() {
             "package p\nimport io.kotest.core.spec.style.FunSpec\nclass NamesSpec : FunSpec({\n  test(\"one\") { }\n  test(\"two\") { check(System.getenv(\"FAIL\") == null) }\n  test(\"three\") { }\n})\n",
         ),
     ]);
-    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let first = run(&r, &command(&gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}", first.said());
     // Kotest's tests can't be left out one by one: none is listed, and the line says they run.
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
-    let line = line(&second, "hushrun: unit: ");
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
+    let line = second.line("unit: ");
     assert!(!line.contains("already passed"), "{line}");
-    assert_eq!(r.xml_cases(".", "p.NamesSpec").len(), 3);
+    assert_eq!(xml_cases(&r.repo, ".", "p.NamesSpec").len(), 3);
 }
 
 // covers: C-32, C-46
@@ -1885,20 +1527,14 @@ fn a_test_jvm_killed_timed_out_or_out_of_memory_records_no_pass_for_its_class() 
                 &format!("package shop.other;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
             ));
         }
-        let r = Repo::new(&files);
-        let ran = r.run(&command(&gradle, &[]), &[("WHAT", case)]);
-        assert_eq!(ran.code, 1, "{case}: {}\n{}", ran.stdout, ran.stderr);
+        let r = repo(&files);
+        let ran = run(&r, &command(&gradle, &[]), &[("WHAT", case)]);
+        assert_eq!(ran.code, 1, "{case}: {}", ran.said());
         let expected: std::collections::BTreeMap<String, usize> = expected
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
-        assert_eq!(
-            r.unit_results(),
-            expected,
-            "{case}: {}\n{}",
-            ran.stdout,
-            ran.stderr
-        );
+        assert_eq!(r.unit_results(), expected, "{case}: {}", ran.said());
     }
 }
 
@@ -1909,27 +1545,27 @@ fn a_test_task_gradle_restores_from_its_build_cache_records_and_leaves_out_nothi
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&shop("reuse"));
+    let r = repo(&shop("reuse"));
     let cache = ["clean", "--build-cache"];
-    let first = r.run(&command(&gradle, &cache), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let first = run(&r, &command(&gradle, &cache), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
     // \[C-46\] The first run's tasks, of which the check knew nothing, executed and weren't cached;
     // the second's, which it knows, are.
     r.write("README.md", "A shop, too.\n");
-    let second = r.run(&command(&gradle, &cache), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &command(&gradle, &cache), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
     let before = r.map();
     // A file of the rest changes: every class runs as far as hushrun goes, the tasks' inputs are
     // those of the second run, and Gradle takes their outputs from its build cache.
     r.write("README.md", "A shop, again.\n");
-    let again = r.run(&command(&gradle, &cache), &[]);
-    assert_eq!(again.code, 0, "{}\n{}", again.stdout, again.stderr);
+    let again = run(&r, &command(&gradle, &cache), &[]);
+    assert_eq!(again.code, 0, "{}", again.said());
     assert!(again.stdout.contains("FROM-CACHE"), "{}", again.stdout);
     assert_eq!(
-        r.newest_result()["units"],
+        again.units,
         json!({"total": 5, "ran": 0, "reused": 0}),
         "{}",
-        again.stderr
+        again.said()
     );
     assert_eq!(r.map()["units"], before["units"]);
 }
@@ -1950,16 +1586,16 @@ fn a_test_the_build_excludes_by_tag_is_neither_run_nor_listed() {
         "app/src/test/java/shop/app/TagTest.java",
         "package shop.app;\nimport org.junit.jupiter.api.*;\nclass TagTest {\n  @Test void fast() {}\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FAIL\")); }\n  @Test @Tag(\"slow\") void slow() { Assertions.fail(\"never runs\"); }\n  @Test void more() {}\n}\n",
     ));
-    let r = Repo::new(&files);
-    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let r = repo(&files);
+    let first = run(&r, &command(&gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}", first.said());
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
     // `fast` or `more` was left out, the other audited, `flip` ran; `slow` never.
-    let cases = r.xml_cases("app", "shop.app.TagTest");
+    let cases = xml_cases(&r.repo, "app", "shop.app.TagTest");
     assert!(cases.contains(&"flip()".to_string()), "{cases:?}");
     assert!(!cases.contains(&"slow()".to_string()), "{cases:?}");
-    assert_eq!(cases.len(), 2, "{cases:?}\n{}", second.stderr);
+    assert_eq!(cases.len(), 2, "{cases:?}\n{}", second.said());
 }
 
 // covers: C-30, C-46
@@ -1986,9 +1622,9 @@ fn a_jar_from_a_file_repository_in_the_checkout_is_read_by_the_project_that_publ
             "package app;\nimport org.junit.jupiter.api.*;\nclass AppTest { @Test void v() { Assertions.assertEquals(1, lib.Lib.v()); } }\n",
         ),
     ]);
-    let r = Repo::new(&files);
-    let first = r.run(&command(&gradle, &[":lib:publish"]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&files);
+    let first = run(&r, &command(&gradle, &[":lib:publish"]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
     let map = r.map();
     let app = &map["units"]["app/src/test/java/app/AppTest.java"];
     assert!(app.get("notFollowed").is_none(), "{map:#}");
@@ -2001,46 +1637,6 @@ fn a_jar_from_a_file_repository_in_the_checkout_is_read_by_the_project_that_publ
     );
 }
 
-/// Projects `testlib`, `core` and `other` under JUnit 4: `core`'s `MapSuiteTest` has a static
-/// `suite()`, run by `AllTests` (Gradle runs no class with a `suite()` alone), that runs `testlib`'s cases, as Guava's testlib does, one of a class no test file is
-/// (`testlib.Checks`) and one whose class doesn't load (`testlib.Gone`). The suite's `testTwo` and
-/// `check` fail when `SHOP_OTHER` asks; `AskTest` when `FAIL` does.
-fn suites(tests: &str) -> Vec<(String, String)> {
-    let mut files = build(Framework::Junit4, &["testlib", "core", "other"], tests);
-    let calc = |project: &str, a: u32| {
-        format!(
-            "package shop.{project};\nimport org.junit.*;\npublic class CalcTest {{ @Test public void adds() {{ Assert.assertEquals({}, {a} + 1); }} }}\n",
-            a + 1
-        )
-    };
-    files.extend([
-        file("testlib/build.gradle", "dependencies { implementation 'junit:junit:4.13.2' }\n"),
-        file(
-            "testlib/src/main/java/testlib/Checks.java",
-            "package testlib;\nimport junit.framework.TestCase;\npublic class Checks extends TestCase {\n  private final String subject;\n  public Checks(String method, String subject) { super(method); this.subject = subject; }\n  @Override public String getName() { return super.getName() + \"[\" + subject + \"]\"; }\n  public void testOne() { assertTrue(subject.length() > 0); }\n  public void testTwo() { assertNull(System.getenv(\"SHOP_OTHER\")); }\n}\n",
-        ),
-        file(
-            "testlib/src/main/java/testlib/Described.java",
-            "package testlib;\nimport junit.framework.*;\nimport org.junit.runner.Describable;\nimport org.junit.runner.Description;\npublic class Described implements Test, Describable {\n  public int countTestCases() { return 1; }\n  public Description getDescription() { return Description.createTestDescription(\"testlib.Gone\", \"check\"); }\n  public void run(TestResult result) {\n    result.startTest(this);\n    if (System.getenv(\"SHOP_OTHER\") != null) result.addFailure(this, new AssertionFailedError(\"asked\"));\n    result.endTest(this);\n  }\n}\n",
-        ),
-        file("core/build.gradle", "dependencies { testImplementation project(':testlib') }\n"),
-        file(
-            "core/src/test/java/shop/core/MapSuiteTest.java",
-            "package shop.core;\nimport junit.framework.Test;\nimport junit.framework.TestSuite;\nimport testlib.*;\n@org.junit.runner.RunWith(org.junit.runners.AllTests.class)\npublic class MapSuiteTest {\n  public static Test suite() {\n    TestSuite suite = new TestSuite(\"maps\");\n    suite.addTest(new Checks(\"testOne\", \"maps\"));\n    suite.addTest(new Checks(\"testTwo\", \"maps\"));\n    suite.addTest(new Described());\n    return suite;\n  }\n}\n",
-        ),
-        file("core/src/test/java/shop/core/CalcTest.java", &calc("core", 1)),
-        file(
-            "core/src/test/java/shop/core/AskTest.java",
-            "package shop.core;\nimport org.junit.*;\npublic class AskTest { @Test public void failsWhenAsked() { Assert.assertNull(System.getenv(\"FAIL\")); } }\n",
-        ),
-        file("other/src/test/java/shop/other/CalcTest.java", &calc("other", 1)),
-    ]);
-    files
-}
-
-const G_SUITE: &str = "core/src/test/java/shop/core/MapSuiteTest.java";
-const G_CORE_CALC: &str = "core/src/test/java/shop/core/CalcTest.java";
-
 // covers: C-39, C-46
 #[test]
 fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_counted_as_reused() {
@@ -2048,9 +1644,9 @@ fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_cou
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&suites("{mode: reuse, unit: test}"));
-    let first = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    let r = repo(&suites("{mode: reuse, unit: test}"));
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
     // The suite's cases are the suite class's tests, by the class each names.
     let map = r.map();
     let suite_tests: Vec<&String> = map["units"][G_SUITE]["tests"]
@@ -2074,8 +1670,8 @@ fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_cou
         "other/src/test/java/shop/other/CalcTest.java",
         "package shop.other;\nimport org.junit.*;\npublic class CalcTest { @Test public void adds() { Assert.assertEquals(3, 2 + 1); } }\n",
     );
-    let second = r.run(&command(&gradle, &[]), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stderr, second.stdout);
+    let second = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
     // The suite ran: Gradle 9 files its cases under the suite class, Gradle 8 under theirs.
     let reports: String = std::fs::read_dir(r.repo.join("core/build/test-results/test"))
         .into_iter()
@@ -2089,12 +1685,10 @@ fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_cou
         second.stdout
     );
     assert_eq!(
-        line(&second, "hushrun: unit: "),
-        "hushrun: unit: 5 of 6 tests run, in 3 of 4 test classes; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
+        second.line("unit: "),
+        "unit: 5 of 6 tests run, in 3 of 4 test classes; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
     );
-    let why = r.run(&["why", "unit", G_SUITE], &[]);
-    assert!(!why.stdout.contains("would be reused"), "{}", why.stdout);
-    assert!(why.stdout.contains("can't leave it out"), "{}", why.stdout);
+    // (What `hushrun why` says of the suite class is end to end: e2e_gradle.rs.)
 
     // The suite's cases fail: the suite class failed, and core's plain classes, which ran, keep
     // their passes.
@@ -2102,8 +1696,8 @@ fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_cou
         G_CORE_CALC,
         "package shop.core;\nimport org.junit.*;\npublic class CalcTest { @Test public void adds() { Assert.assertEquals(2, 0 + 2); } }\n",
     );
-    let failed = r.run(&command(&gradle, &[]), &[("SHOP_OTHER", "1")]);
-    assert_eq!(failed.code, 1, "{}\n{}", failed.stderr, failed.stdout);
+    let failed = run(&r, &command(&gradle, &[]), &[("SHOP_OTHER", "1")]);
+    assert_eq!(failed.code, 1, "{}", failed.said());
     let map = r.map();
     assert_eq!(
         map["units"][G_CORE_CALC]["tests"]["shop.core.CalcTest.adds"], "passed",
@@ -2128,9 +1722,9 @@ fn many_junit4(gradle: &str) -> Repo {
     body.push_str("}\n");
     let mut files = build(Framework::Junit4, &["app"], "{mode: reuse, unit: test}");
     files.push(file("app/src/test/java/shop/app/ManyTest.java", &body));
-    let r = Repo::new(&files);
-    let first = r.run(&command(gradle, &[]), &[("FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&files);
+    let first = run(&r, &command(gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}", first.said());
     r
 }
 
@@ -2160,12 +1754,12 @@ fn a_junit4_task_leaves_out_every_test_the_plan_counts_as_reused() {
         return;
     }
     let r = many_junit4(&gradle());
-    let second = r.run(&command(&gradle(), &[]), &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &command(&gradle(), &[]), &[]);
+    assert_eq!(second.code, 0, "{}", second.said());
     // What the plan said would run is what ran.
-    let said = line(&second, "hushrun: unit: ");
-    let ran = r.xml_cases("app", "shop.app.ManyTest");
-    let counted: usize = said["hushrun: unit: ".len()..]
+    let said = second.line("unit: ");
+    let ran = xml_cases(&r.repo, "app", "shop.app.ManyTest");
+    let counted: usize = said["unit: ".len()..]
         .split(' ')
         .next()
         .and_then(|n| n.replace(',', "").parse().ok())
@@ -2185,9 +1779,9 @@ fn a_test_task_nothing_was_learned_of_under_the_check_executes_in_its_first_run(
         ("observe", &[][..]),
         ("reuse", &["--configuration-cache"][..]),
     ] {
-        let r = Repo::new(&shop(mode));
-        let first = r.run(&command(&gradle, extra), &[]);
-        assert_eq!(first.code, 0, "{mode}: {}\n{}", first.stdout, first.stderr);
+        let r = repo(&shop(mode));
+        let first = run(&r, &command(&gradle, extra), &[]);
+        assert_eq!(first.code, 0, "{mode}: {}", first.said());
         // The check's store is lost (another machine's build directory, a cache restored without
         // it): Gradle would find every test task up to date, and the check would learn nothing.
         for entry in std::fs::read_dir(r.cache.join("units")).unwrap().flatten() {
@@ -2196,8 +1790,8 @@ fn a_test_task_nothing_was_learned_of_under_the_check_executes_in_its_first_run(
             }
         }
         r.write("README.md", "A shop, again.\n");
-        let again = r.run(&command(&gradle, extra), &[]);
-        assert_eq!(again.code, 0, "{mode}: {}\n{}", again.stdout, again.stderr);
+        let again = run(&r, &command(&gradle, extra), &[]);
+        assert_eq!(again.code, 0, "{mode}: {}", again.said());
         for task in [":app:test", ":lib:test", ":other:test"] {
             assert!(
                 again.stdout.lines().any(|l| l == format!("> Task {task}")),
@@ -2206,9 +1800,9 @@ fn a_test_task_nothing_was_learned_of_under_the_check_executes_in_its_first_run(
             );
         }
         assert!(
-            !again.stderr.contains("Gradle ran no test"),
+            !again.said().contains("Gradle ran no test"),
             "{mode}: {}",
-            again.stderr
+            again.said()
         );
         assert_eq!(
             r.map()["units"].as_object().map_or(0, |u| u.len()),
@@ -2223,8 +1817,8 @@ fn a_test_task_nothing_was_learned_of_under_the_check_executes_in_its_first_run(
             continue;
         }
         r.write("README.md", "A shop, once more.\n");
-        let third = r.run(&command(&gradle, extra), &[]);
-        assert_eq!(third.code, 0, "{mode}: {}\n{}", third.stdout, third.stderr);
+        let third = run(&r, &command(&gradle, extra), &[]);
+        assert_eq!(third.code, 0, "{mode}: {}", third.said());
         assert!(
             third.stdout.contains("> Task :other:test UP-TO-DATE"),
             "{mode}: {}",
@@ -2249,75 +1843,6 @@ fn task_cases(r: &Repo, project: &str, task: &str, report: &str) -> Vec<String> 
         .skip(1)
         .filter_map(|rest| rest.split('"').next().map(str::to_string))
         .collect()
-}
-
-/// A Kotlin Multiplatform build of two projects, `lib` and `other`, each with a JVM and a
-/// Kotlin/JS (Node.js) target and tests in `commonTest`, and `targets` added to each (a Kotlin/
-/// Native one). `other`'s `flips` fails while `FAIL` is set; an `env` of each platform reads it.
-fn kmp_build(tests: &str, targets: &str, natives: &[&str]) -> Vec<(String, String)> {
-    let mut files = vec![
-        file("hushrun.yaml", &yaml(tests)),
-        file(
-            ".gitignore",
-            "build/\n.gradle/\n.kotlin/\nkotlin-js-store/\n",
-        ),
-        file(
-            "settings.gradle.kts",
-            "pluginManagement { repositories { gradlePluginPortal(); mavenCentral() } }\ndependencyResolutionManagement { repositories { mavenCentral() } }\nrootProject.name = \"kmp\"\ninclude(\"lib\", \"other\")\nSystem.getenv(\"HUSHRUN_GRADLE\")?.let { apply(from = it) }\n",
-        ),
-        file(
-            "build.gradle.kts",
-            "plugins { kotlin(\"multiplatform\") version \"2.3.21\" apply false }\n",
-        ),
-    ];
-    for project in ["lib", "other"] {
-        files.push(file(
-            &format!("{project}/build.gradle.kts"),
-            &format!(
-                "plugins {{ kotlin(\"multiplatform\") }}\nkotlin {{\n  jvm()\n  js {{ nodejs() }}\n{targets}  sourceSets {{ commonTest.dependencies {{ implementation(kotlin(\"test\")) }} }}\n}}\n"
-            ),
-        ));
-        files.push(file(
-            &format!("{project}/src/commonTest/kotlin/p/{project}/Env.kt"),
-            &format!("package p.{project}\nexpect fun env(name: String): String?\n"),
-        ));
-        files.push(file(
-            &format!("{project}/src/jvmTest/kotlin/p/{project}/Env.jvm.kt"),
-            &format!(
-                "package p.{project}\nactual fun env(name: String): String? = System.getenv(name)\n"
-            ),
-        ));
-        files.push(file(
-            &format!("{project}/src/jsTest/kotlin/p/{project}/Env.js.kt"),
-            &format!("package p.{project}\nactual fun env(name: String): String? = js(\"process.env[name]\") as String?\n"),
-        ));
-        for native in natives {
-            files.push(file(
-                &format!("{project}/src/{native}Test/kotlin/p/{project}/Env.{native}.kt"),
-                &format!("package p.{project}\nimport kotlinx.cinterop.toKString\n@OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)\nactual fun env(name: String): String? = platform.posix.getenv(name)?.toKString()\n"),
-            ));
-        }
-    }
-    files.extend([
-        file(
-            "lib/src/commonMain/kotlin/p/lib/Price.kt",
-            "package p.lib\nobject Price { fun of(n: Int) = n * 2 }\n",
-        ),
-        // Two classes in one file are one unit: the file that declares them.
-        file(
-            "lib/src/commonTest/kotlin/p/lib/PriceTest.kt",
-            "package p.lib\nimport kotlin.test.*\nclass PriceTest { @Test fun doubles() { assertEquals(6, Price.of(3)) } }\nclass ZeroTest { @Test fun zero() { assertEquals(0, Price.of(0)) } }\n",
-        ),
-        file(
-            "other/src/commonTest/kotlin/p/other/OtherTest.kt",
-            "package p.other\nimport kotlin.test.*\nclass OtherTest {\n  @Test fun works() { assertTrue(true) }\n  @Test fun flips() { assertNull(env(\"FAIL\")) }\n}\n",
-        ),
-        file(
-            "other/src/commonTest/kotlin/p/other/MoreTest.kt",
-            "package p.other\nimport kotlin.test.*\nclass MoreTest { @Test fun more() { assertEquals(2, 1 + 1) } }\n",
-        ),
-    ]);
-    files
 }
 
 /// Every test a task's XML reports say ran, in `lib` and `other`, as `<class>.<method>`: a
@@ -2355,10 +1880,6 @@ fn task_ran(r: &Repo, task: &str) -> BTreeSet<String> {
     out
 }
 
-const OTHER: &str = "other/src/commonTest/kotlin/p/other/OtherTest.kt";
-const MORE: &str = "other/src/commonTest/kotlin/p/other/MoreTest.kt";
-const LIB_PRICE: &str = "lib/src/commonTest/kotlin/p/lib/PriceTest.kt";
-
 // covers: C-94, C-95, C-96
 #[test]
 fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside_the_jvms() {
@@ -2366,19 +1887,12 @@ fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&kmp_build("{mode: reuse, unit: test}", "", &[]));
+    let r = repo(&kmp_build("{mode: reuse, unit: test}", "", &[]));
     let args = |extra: &[&'static str]| -> Vec<String> {
-        let mut a: Vec<String> = [
-            "run",
-            "unit",
-            "--",
-            gradle.as_str(),
-            offline(),
-            "--console=plain",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let mut a: Vec<String> = [gradle.as_str(), offline(), "--console=plain"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         a.extend(
             [
                 "jvmTest",
@@ -2400,10 +1914,10 @@ fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside
         let a = args(&[]);
         let mut env = env.to_vec();
         env.push(("YARN_CACHE_FOLDER", yarn.as_str()));
-        r.run(&a.iter().map(String::as_str).collect::<Vec<_>>(), &env)
+        run(&r, &a.iter().map(String::as_str).collect::<Vec<_>>(), &env)
     };
     let first = run(&[("FAIL", "1")]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(first.code, 1, "{}", first.said());
     let map = r.map();
     // A Kotlin/JS class is named by the file that declares it, as its JVM twin is by its class
     // file: one unit for both tasks, whose tests are one test each.
@@ -2418,14 +1932,14 @@ fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside
         "{map:#}"
     );
     assert!(
-        !first.stderr.contains("isn't a JVM Test task"),
+        !first.said().contains("isn't a JVM Test task"),
         "{}",
-        first.stderr
+        first.said()
     );
 
     // The failed test runs again on both platforms, the one that passed doesn't.
     let second = run(&[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(second.code, 0, "{}", second.said());
     // What each platform ran, by test: the same on both, the failed test and at most one more
     // that already passed, which the audit runs as a check.
     let js = task_ran(&r, "jsNodeTest");
@@ -2439,8 +1953,8 @@ fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside
         "package p.lib\nobject Price { fun of(n: Int) = n + n }\n",
     );
     let third = run(&[]);
-    assert_eq!(third.code, 0, "{}\n{}", third.stdout, third.stderr);
-    let said = line(&third, "hushrun: unit: ");
+    assert_eq!(third.code, 0, "{}", third.said());
+    let said = third.line("unit: ");
     assert!(
         said.contains("of 5 tests run") && said.contains("already passed on the files they read"),
         "{said}"
@@ -2465,14 +1979,7 @@ fn kotlin_js_test_classes_are_units_and_their_tests_are_reused_one_by_one_beside
         "{}",
         third.stdout
     );
-    // \[C-37\] `hushrun why` knows a class by its file.
-    let why = r
-        .hushrun()
-        .args(["why", "unit", MORE])
-        .output()
-        .expect("hushrun");
-    let said = String::from_utf8_lossy(&why.stdout);
-    assert!(said.contains("MoreTest.kt would be reused"), "{said}");
+    // \[C-37\] That `hushrun why` knows a class by its file is end to end: e2e_gradle.rs.
 }
 
 // covers: C-94, C-95, C-96
@@ -2493,15 +2000,12 @@ fn kotlin_native_test_classes_are_units_and_their_tests_are_reused_one_by_one() 
         return;
     }
     let gradle = gradle();
-    let r = Repo::new(&kmp_build(
+    let r = repo(&kmp_build(
         "{mode: reuse, unit: test}",
         "  linuxX64()\n",
         &["linuxX64"],
     ));
     let args = [
-        "run",
-        "unit",
-        "--",
         gradle.as_str(),
         offline(),
         "--console=plain",
@@ -2516,8 +2020,8 @@ fn kotlin_native_test_classes_are_units_and_their_tests_are_reused_one_by_one() 
         .or_else(|| gradle_user_home().map(|home| format!("{home}/hushrun-konan")))
         .unwrap_or_default();
     let konan = ("KONAN_DATA_DIR", konan.as_str());
-    let first = r.run(&args, &[("FAIL", "1"), konan]);
-    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let first = run(&r, &args, &[("FAIL", "1"), konan]);
+    assert_eq!(first.code, 1, "{}", first.said());
     let map = r.map();
     assert_eq!(
         map["units"][OTHER]["tests"],
@@ -2525,12 +2029,12 @@ fn kotlin_native_test_classes_are_units_and_their_tests_are_reused_one_by_one() 
         "{map:#}"
     );
     assert!(
-        !first.stderr.contains("isn't a JVM Test task"),
+        !first.said().contains("isn't a JVM Test task"),
         "{}",
-        first.stderr
+        first.said()
     );
-    let second = r.run(&args, &[konan]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let second = run(&r, &args, &[konan]);
+    assert_eq!(second.code, 0, "{}", second.said());
     let ran = task_ran(&r, "linuxX64Test");
     assert!(ran.contains("p.other.OtherTest.flips"), "{ran:?}");
     assert!(ran.len() <= 2, "{ran:?}\n{}", second.stdout);
@@ -2577,32 +2081,32 @@ fn kotest_specs_are_left_out_whole_when_what_they_read_is_unchanged() {
     }
     let gradle = gradle();
     for tests in ["reuse", "{mode: reuse, unit: test}"] {
-        let r = Repo::new(&kotest_build(tests));
-        let first = r.run(&command(&gradle, &[]), &[]);
-        assert_eq!(first.code, 0, "{tests}: {}\n{}", first.stdout, first.stderr);
+        let r = repo(&kotest_build(tests));
+        let first = run(&r, &command(&gradle, &[]), &[]);
+        assert_eq!(first.code, 0, "{tests}: {}", first.said());
         r.write(
             "a/src/main/kotlin/p/a/Price.kt",
             "package p.a\nobject Price { fun of(n: Int) = n + n }\n",
         );
-        let second = r.run(&command(&gradle, &[]), &[]);
-        assert_eq!(
-            second.code, 0,
-            "{tests}: {}\n{}",
-            second.stdout, second.stderr
-        );
+        let second = run(&r, &command(&gradle, &[]), &[]);
+        assert_eq!(second.code, 0, "{tests}: {}", second.said());
         // a's spec runs; b's are left out whole by Gradle's class exclusion, which Kotest's
         // engine honours, but one an audit may run.
-        assert_eq!(r.xml_cases("a", "p.a.PriceSpec"), ["doubles"], "{tests}");
+        assert_eq!(
+            xml_cases(&r.repo, "a", "p.a.PriceSpec"),
+            ["doubles"],
+            "{tests}"
+        );
         let ran = ["One", "Two", "Three"]
             .iter()
-            .filter(|n| !r.xml_cases("b", &format!("p.b.{n}Spec")).is_empty())
+            .filter(|n| !xml_cases(&r.repo, "b", &format!("p.b.{n}Spec")).is_empty())
             .count();
         assert!(
             ran <= 1,
             "{tests}: {ran} of b's specs ran\n{}",
             second.stdout
         );
-        let said = line(&second, "hushrun: unit: ");
+        let said = second.line("unit: ");
         assert!(
             said.contains("already passed on the files"),
             "{tests}: {said}"

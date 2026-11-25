@@ -320,7 +320,10 @@ fn on_this_machine(app: &App<'_>, window: &Window) -> CmdResult {
             );
             line("run keys", results.keys.len().to_string());
             line("by check", listed(results.by_check.clone().into_iter()));
-            line("saved by skips", crate::cmd::wrap::took(results.saved_ms));
+            line(
+                "saved by skips",
+                crate::units::words::took(results.saved_ms),
+            );
             if results.test_file_runs > 0 {
                 line(
                     "test files",
@@ -338,7 +341,7 @@ fn on_this_machine(app: &App<'_>, window: &Window) -> CmdResult {
                 );
                 line(
                     "saved by reuse",
-                    crate::cmd::wrap::took(results.reuse_saved_ms),
+                    crate::units::words::took(results.reuse_saved_ms),
                 );
             }
             output::print(&text)?;

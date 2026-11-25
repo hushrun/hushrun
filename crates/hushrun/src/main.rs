@@ -1,39 +1,13 @@
 //! The hushrun command-line interface.
 #![forbid(unsafe_code)]
 
-mod app;
-mod ci;
-mod cli;
-mod cmd;
-mod coding_agent;
-mod context;
-mod credentials;
-mod environment;
-mod events;
-mod exit;
-mod gitlab_job;
-mod hosted;
-mod isolated;
-mod lifecycle;
-mod machine;
-mod measure;
-mod notice;
-mod outbox;
-mod output;
-mod planfile;
-mod reach;
-mod releases;
-mod results;
-mod session;
-mod signing;
-mod skill;
-mod units;
-
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+use hushrun::{app, cli, cmd, environment, exit, notice, units};
 
 use cli::{Cli, ColorWhen, Command, GlobalOpts};
 use exit::{Exit, Failure};

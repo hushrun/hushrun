@@ -145,7 +145,8 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     let map = loaded.map;
     // \[C-39\] `UNIT::TEST`: a test, when tests are the unit; else its test file, said so. A
     // name without `::` is a test file's, whatever its runner calls its items.
-    let (unit_mode, reads_mode, notes) = what_it_reuses(tests, adapter.as_ref());
+    let (unit_mode, reads_mode, notes) =
+        what_it_reuses(tests, &super::Profile::of(adapter.as_ref()));
     let (asked, test) = split_asked(asked, &map, input.tree, adapter.as_ref());
     let test = match test {
         Some(_) if unit_mode == Unit::File => {
@@ -304,7 +305,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     // assignments over this environment, as a run's would.
     let assigned = super::command::assignments(&input.base.command);
     let getenv = (adapter.keys() == super::adapter::KeysOutside::Getenv)
-        .then(|| super::gotest::Getenv::of_command(input.root, &assigned));
+        .then(|| super::getenv::Getenv::of_command(input.root, &assigned));
     let lists =
         shared::lists(&unit, own, &shared, input.tree, None, getenv.as_ref()).unwrap_or_default();
     if lists.is_empty() {
@@ -770,7 +771,7 @@ fn explain_test(
         Some(list) => {
             let files: BTreeSet<String> = list.reads.keys().cloned().collect();
             let mut files_now = files.clone();
-            files_now.extend(super::gotest::under(input.tree, &list.dirs));
+            files_now.extend(super::shared::under(input.tree, &list.dirs));
             changes_of(Some(&list.reads), at.map, at.sets, input.tree, &files_now)
         }
         None => {

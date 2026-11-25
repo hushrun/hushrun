@@ -30,8 +30,8 @@ use super::facts::{self, FactsFile, Invocation};
 
 /// The hidden subcommand: never shown, never typed.
 pub const SUBCOMMAND: &str = "__hushrun-test-runner";
-/// The variable that names a run's directory (C-32).
-pub const UNITS_VAR: &str = "HUSHRUN_UNITS";
+/// The variable that names a run's directory (C-32), which every adapter shares.
+pub use super::facts::UNITS_VAR;
 
 /// Runs as the target runner when `args` (the process's, program first) say so; `None` for any
 /// other command line, which hushrun parses as usual.

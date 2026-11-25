@@ -280,7 +280,8 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
         .unwrap();
     // Test files, as asked: nothing to say, whatever the adapter.
     for adapter in [&cargo as &dyn Adapter, &go, &vitest, &pytest::Pytest] {
-        let (unit, reads, notes) = what_it_reuses(&tests(Unit::File, Reads::File), adapter);
+        let (unit, reads, notes) =
+            what_it_reuses(&tests(Unit::File, Reads::File), &Profile::of(adapter));
         assert_eq!((unit, reads), (Unit::File, Reads::File));
         assert!(notes.is_empty(), "{notes:?}");
     }
@@ -288,7 +289,8 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
     // covers: C-146
     // \[C-146\] `cargo test` starts a binary once: by test binary, said once, and why.
     let cargo_test = cargo::recognize(&words("cargo test --workspace")).unwrap();
-    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &cargo_test);
+    let (unit, _, notes) =
+        what_it_reuses(&tests(Unit::Test, Reads::File), &Profile::of(&cargo_test));
     assert_eq!(unit, Unit::File);
     assert_eq!(notes.len(), 1);
     assert!(
@@ -297,7 +299,8 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
     );
     // `cargo nextest run` starts each test on its own: one by one, each taken to have read
     // what the static map gives, never watched.
-    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &cargo);
+    let (unit, reads, notes) =
+        what_it_reuses(&tests(Unit::Test, Reads::Test), &Profile::of(&cargo));
     assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert_eq!(
         notes,
@@ -306,7 +309,7 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
         ]
     );
     // \[ADR 0086\] Go knows tests, unless COMMAND chooses its own.
-    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &go);
+    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &Profile::of(&go));
     assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert_eq!(
         notes,
@@ -317,21 +320,28 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
     let run = gotest::recognize(&words("go test -run TestX ./..."))
         .unwrap()
         .unwrap();
-    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &run);
+    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &Profile::of(&run));
     assert_eq!(unit, Unit::File);
     assert_eq!(
         notes,
         ["its tests are reused by package: go test -run's tests can't be reused one by one yet"]
     );
     // \[ADR 0084\] Vitest knows tests and watches each: nothing to say.
-    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &vitest);
+    let (unit, reads, notes) =
+        what_it_reuses(&tests(Unit::Test, Reads::Test), &Profile::of(&vitest));
     assert_eq!((unit, reads), (Unit::Test, Reads::Test));
     assert!(notes.is_empty(), "{notes:?}");
     // pytest knows tests, and \[ADR 0083\] watches each one: it says itself where it can't.
-    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &pytest::Pytest);
+    let (unit, reads, notes) = what_it_reuses(
+        &tests(Unit::Test, Reads::File),
+        &Profile::of(&pytest::Pytest),
+    );
     assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert!(notes.is_empty());
-    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &pytest::Pytest);
+    let (unit, reads, notes) = what_it_reuses(
+        &tests(Unit::Test, Reads::Test),
+        &Profile::of(&pytest::Pytest),
+    );
     assert_eq!((unit, reads), (Unit::Test, Reads::Test));
     assert!(notes.is_empty());
 }

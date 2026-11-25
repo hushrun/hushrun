@@ -370,14 +370,14 @@ pub trait Adapter: std::fmt::Debug {
 
     /// \[C-146\] Why it doesn't know tests one by one, when [`Adapter::tests`] says so, in words
     /// people read after `its tests are reused by <test file>: `; `None` for the general words.
-    fn not_by_test(&self) -> Option<String> {
+    fn not_by_test(&self) -> Option<&'static str> {
         None
     }
 
     /// \[C-146\] What a test is taken to have read when the check asks `reads: test` and
     /// [`Adapter::tests`] says it can't watch tests, in words people read after `each test is
     /// taken to have read `; `None` for the general words.
-    fn not_watched(&self) -> Option<String> {
+    fn not_watched(&self) -> Option<&'static str> {
         None
     }
 

@@ -2105,10 +2105,10 @@ impl Adapter for Recognized {
     }
 
     /// \[C-146\] `cargo test` starts a binary once, for all its tests.
-    fn not_by_test(&self) -> Option<String> {
-        (!self.nextest && !self.doc).then(|| {
-            "`cargo test` runs each test binary's tests in one start, which can't leave one out; `cargo nextest run` starts each test on its own, and reuses them one by one".to_string()
-        })
+    fn not_by_test(&self) -> Option<&'static str> {
+        (!self.nextest && !self.doc).then_some(
+            "`cargo test` runs each test binary's tests in one start, which can't leave one out; `cargo nextest run` starts each test on its own, and reuses them one by one",
+        )
     }
 
     /// \[C-146\] With nextest, a test's row keeps the static map's list of its last run here.
@@ -2117,10 +2117,10 @@ impl Adapter for Recognized {
     }
 
     /// \[C-146\] With nextest, the static map stands in for what a test was watched to read.
-    fn not_watched(&self) -> Option<String> {
-        self.nextest.then(|| {
-            "what the static map of its sources says it reaches, with what its test binary read besides: cargo nextest's tests aren't watched one by one".to_string()
-        })
+    fn not_watched(&self) -> Option<&'static str> {
+        self.nextest.then_some(
+            "what the static map of its sources says it reaches, with what its test binary read besides: cargo nextest's tests aren't watched one by one",
+        )
     }
 
     fn binds(&self) -> bool {

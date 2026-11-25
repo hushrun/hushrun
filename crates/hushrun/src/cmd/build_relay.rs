@@ -23,7 +23,7 @@
 
 pub(crate) mod bake_archive;
 pub(crate) mod bake_image;
-pub(crate) mod baked;
+pub mod baked;
 mod credential;
 pub(crate) mod hosted;
 mod http;

@@ -11,6 +11,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The code, as a library, so that the integration tests can call it in-process
+# (CONTRIBUTING.md, "Which tests CI runs again"); the binary is a thin `main` over it. CI's
+# rustdoc documents it with its private items, as cargo documented the binary before.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "hushrun"
 path = "src/main.rs"

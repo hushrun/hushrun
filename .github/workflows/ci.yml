@@ -229,12 +229,12 @@ jobs:
           path: |
             ${{ runner.temp }}/gradle-home
             !${{ runner.temp }}/gradle-home/daemon
-          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
+          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/e2e_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
       - name: Fill Gradle's user home for the test-class tests
         id: gradle-fill
         if: steps.gradle-home.outputs.cache-hit != 'true'
         run: |
-          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast; then
+          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --test e2e_gradle --locked --no-fail-fast; then
             echo "filled=true" >> "$GITHUB_OUTPUT"
           else
             echo "filling Gradle's user home failed: the test run says what is missing, and the cache keeps none of it"
@@ -542,12 +542,12 @@ jobs:
           path: |
             ${{ runner.temp }}/gradle-home
             !${{ runner.temp }}/gradle-home/daemon
-          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
+          key: gradle-home-v1-${{ runner.os }}-${{ runner.arch }}-gradle-9.3.1-jdk-21.0.11-${{ steps.gradle.outputs.android }}-${{ hashFiles('crates/hushrun/tests/units_gradle.rs', 'crates/hushrun/tests/e2e_gradle.rs', 'crates/hushrun/tests/common/**', 'crates/hushrun/src/units/gradle.rs', 'crates/hushrun/src/units/gradle/**', 'crates/hushrun/src/units/hushrun_gradle.gradle', 'crates/hushrun/src/units/jvm.rs', 'crates/hushrun/jvm/**', 'testdata/gradle/**') }}
       - name: Fill Gradle's user home for the test-class tests
         id: gradle-fill
         if: steps.gradle-home.outputs.cache-hit != 'true'
         run: |
-          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast; then
+          if HUSHRUN_TEST_GRADLE_ONLINE=1 cargo nextest run -p hushrun --test units_gradle --test e2e_gradle --locked --no-fail-fast; then
             echo "filled=true" >> "$GITHUB_OUTPUT"
           else
             echo "filling Gradle's user home failed: the test run says what is missing, and the cache keeps none of it"
@@ -822,8 +822,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       # RUSTDOCFLAGS is part of the command, so of what a pass is for: rustdoc without -D warnings
-      # passes on a broken link, and such a pass must never skip this one.
-      - run: hushrun run rustdoc -- env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --locked
+      # passes on a broken link, and such a pass must never skip this one. hushrun's own crate is
+      # a library its binary is a thin `main` over: it is documented with its private items, as
+      # cargo documents a binary, so that every item's docs and links stay checked.
+      - run: hushrun run rustdoc -- env RUSTDOCFLAGS=-Dwarnings sh -c 'cargo doc --workspace --exclude hushrun --no-deps --locked && cargo doc -p hushrun --no-deps --locked --document-private-items'
 
   trace:
     name: traceability
