@@ -90,7 +90,9 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
     }))
 }
 
-fn recognize(command: &[String], cwd: &Path) -> Option<Result<(), String>> {
+/// What `command` in `cwd` is for the `dotnet test` adapter, without the adapter itself: `None`
+/// when it isn't `dotnet test`, `Some(Err(why))` when it runs no MSBuild, which the run says.
+pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<(), String>> {
     let first = command.first()?;
     if program_name(first) != "dotnet" || command.get(1).map(String::as_str) != Some("test") {
         return None;
