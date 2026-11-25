@@ -3,325 +3,167 @@
 //! hushrun's observer saw through the `sitecustomize.py` it puts first on `PYTHONPATH`, and the
 //! tests of what already passed are removed from the suite before it runs.
 //!
-//! The fixtures need Python 3.10 or later: `HUSHRUN_TEST_PYTHON` names it, `python3` by default;
-//! the one that watches each test, 3.12 or later, and it skips below, as `reads_test`'s do. The
-//! Django one needs a Python with Django: `HUSHRUN_TEST_DJANGO` names it. They say so and pass where
-//! those are missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI sets. No fixture needs the
-//! network.
+//! In-process (CONTRIBUTING.md, "Which tests CI runs again"): each test runs a check as `hushrun
+//! run unit -- python -m unittest …` would, through unittest's adapter's own type,
+//! `unittest::Unittest`, and the code every adapter shares, and never starts the `hushrun` binary
+//! (`common/in_process.rs`). Python runs as COMMAND, for real. What only the CLI shows of unittest
+//! (`hushrun why`) is in `e2e_unittest.rs`. The fixtures, and the tools they need, are in
+//! `common/unittest.rs`.
 
 #![cfg(unix)]
 
+#[path = "common/unittest.rs"]
+mod fixtures;
+#[path = "common/in_process.rs"]
+mod in_process;
+#[path = "common/repo.rs"]
+mod repo;
 #[path = "common/store.rs"]
 mod store;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::process::Command;
 
-use hushrun_testkit::git;
+use hushrun::units::adapter::Adapter as _;
+use hushrun::units::{Profile, unittest};
 use serde_json::Value;
 
-/// Environment variables a test must never inherit.
-const CLEARED: &[&str] = &[
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "BUILDKITE",
-    "CIRCLECI",
-    "ACTIONS_ID_TOKEN_REQUEST_URL",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "HUSHRUN_AGENT",
-    "HUSHRUN_BACKEND",
-    "HUSHRUN_TOKEN",
-    "HUSHRUN_CONFIG",
-    "HUSHRUN_FORMAT",
-    "HUSHRUN_PROVIDER",
-    "HUSHRUN_INSIDE_RUN",
-    "HUSHRUN_UNITS",
-    "HUSHRUN_UNITTEST_SESSION",
-    "PYTEST_ADDOPTS",
-    "PYTHONPATH",
-    "DJANGO_SETTINGS_MODULE",
-    "npm_lifecycle_event",
-    "AI_AGENT",
-    "CLAUDECODE",
-    "CLAUDE_CODE",
-    "CODEX_SANDBOX",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "OPENCODE",
-    "OPENCODE_CLIENT",
-    "CURSOR_AGENT",
-    "CURSOR_EXTENSION_HOST_ROLE",
-    "GEMINI_CLI",
-    "AUGMENT_AGENT",
-    "ANTIGRAVITY_AGENT",
-    "COPILOT_MODEL",
-    "COPILOT_ALLOW_ALL",
-    "COPILOT_GITHUB_TOKEN",
-    "HUSHRUN_BUILD",
-    "HUSHRUN_BUILD_KEEP_DAYS",
-    "HUSHRUN_BUILD_DIR",
-    "HUSHRUN_BUILD_SESSION",
-    "HUSHRUN_CC",
-    "CMAKE_C_COMPILER_LAUNCHER",
-    "CMAKE_CXX_COMPILER_LAUNCHER",
-    "RUSTC_WRAPPER",
-];
+use fixtures::*;
+use in_process::{Ran, Repo};
 
-const NO_HOST: &str = "http://127.0.0.1:9";
-
-struct Repo {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    repo: PathBuf,
-    cache: PathBuf,
-}
-
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-impl Ran {
-    /// The line that says what the plan reuses, or why every test module runs.
-    fn plan_line(&self) -> &str {
-        self.stderr
-            .lines()
-            .find(|l| {
-                l.starts_with("hushrun: ")
-                    && (l.contains("test modules run")
-                        || l.contains("tests run")
-                        || l.contains("test module runs"))
-            })
-            .unwrap_or_else(|| panic!("no plan line in:\n{}", self.stderr))
+/// What unittest's adapter answers that never changes in a run, for the code every adapter shares.
+fn profile(adapter: &unittest::Unittest) -> Profile {
+    Profile {
+        word: adapter.word(),
+        runner: adapter.runner(),
+        test_file: adapter.test_file(),
+        tests: adapter.tests(),
+        hints: adapter.hints(),
+        binds: adapter.binds(),
+        keys: adapter.keys(),
     }
 }
 
-impl Repo {
-    fn new(files: &[(&str, String)]) -> Repo {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("real path");
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("mkdir");
-        git::init(&repo, "sha1");
-        let r = Repo {
-            _dir: dir,
-            cache: root.join("cache"),
-            root,
-            repo,
+/// `hushrun run unit -- ARGS`, in-process, through unittest's adapter alone.
+fn run(r: &Repo, args: &[&str]) -> Ran {
+    run_with(r, args, &[])
+}
+
+/// `hushrun run unit -- ARGS`, with `env` besides, in-process, through unittest's adapter alone.
+fn run_with(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
+    let command: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // As `units::adapter::choose_kept` comes to unittest's adapter (`unittest::recognized`), with
+    // no trait object: what COMMAND is, and whether the adapter can load safely for it.
+    let adapter = match unittest::recognize(hushrun::units::command::without_env(&command)) {
+        Some(Ok(adapter)) => adapter,
+        Some(Err(why)) => return in_process::Run::new(r, "unit", args, env).unobserved(&why),
+        None => panic!("{args:?} doesn't start unittest"),
+    };
+    observe(r, args, env, &adapter)
+}
+
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order, on `unittest::Unittest` itself (`units_gradle.rs`'s `observe`, with the type changed).
+fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &unittest::Unittest) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    // \[C-32\] An adapter that can't load observes nothing: COMMAND runs as it is.
+    if let Err(why) = &variables {
+        return run.unobserved(why);
+    }
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // unittest's adapter keeps the trait's `plan`, which is its `plan_from_files`.
+            Ok(context) => {
+                let planning = adapter.plan_from_files(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
         };
-        for (path, text) in files {
-            r.write(path, text);
-        }
-        git::commit_all(&r.repo, "init");
-        r
+        drop(input);
+        run.planned(&observer, planned);
     }
-
-    fn write(&self, path: &str, text: &str) {
-        let path = self.repo.join(path);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, text).expect("write");
-    }
-
-    fn hushrun(&self) -> assert_cmd::Command {
-        let mut cmd = assert_cmd::Command::cargo_bin("hushrun").expect("binary");
-        cmd.current_dir(&self.repo)
-            .env("HUSHRUN_CACHE_DIR", &self.cache)
-            .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
-            .env("HUSHRUN_HOST", NO_HOST)
-            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
-            .env("HOME", self.root.join("home"))
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            );
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("NEXTEST")
-                || (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("RUSTC_WORKSPACE_WRAPPER")
-                || name.starts_with("CLAUDE")
-            {
-                cmd.env_remove(name.as_ref());
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
             }
         }
-        cmd
+        break (code, observed);
+    };
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
+            }
+            None => in_process::Run::not_again(&wanted),
+        };
+        run.disagreements(o, ended);
     }
-
-    fn run(&self, args: &[&str]) -> Ran {
-        self.run_with(args, &[])
-    }
-
-    fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
-        let mut cmd = self.hushrun();
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-        let output = cmd.args(args).output().expect("hushrun");
-        Ran {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
-    }
-
-    /// The check's map, as this cache's store holds it (ADR 0072).
-    fn reads(&self, unit: &str) -> Vec<String> {
-        store::map(&self.cache)["units"][unit]["reads"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{unit} has no reads"))
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect()
-    }
-
-    /// The adapter's directory hushrun wrote in this cache.
-    fn adapter(&self) -> PathBuf {
-        std::fs::read_dir(self.cache.join("adapters"))
-            .expect("adapters")
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("unittest-")
-            })
-            .expect("the unittest adapter")
-    }
+    run.record(code, observed)
 }
 
-fn tools(what: &str, here: bool) -> bool {
-    if here {
-        return true;
-    }
-    if std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required") {
-        panic!("{what} is missing, and HUSHRUN_TEST_TOOLS=required");
-    }
-    eprintln!("note: skipping: {what} is missing (HUSHRUN_TEST_TOOLS=required makes this fail)");
-    false
+/// The line that says what the plan reuses, or why every test module runs.
+fn plan_line(ran: &Ran) -> &str {
+    ran.lines
+        .iter()
+        .find(|l| {
+            l.contains("test modules run")
+                || l.contains("tests run")
+                || l.contains("test module runs")
+        })
+        .unwrap_or_else(|| panic!("no plan line in:\n{}", ran.said()))
 }
 
-fn python() -> String {
-    std::env::var("HUSHRUN_TEST_PYTHON").unwrap_or_else(|_| "python3".into())
-}
-
-fn runs(python: &str, check: &str) -> bool {
-    Command::new(python)
-        .args(["-c", check])
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-/// A Python 3.10 or later, said when missing. An older Python isn't a missing tool: the adapter
-/// starts in none (it needs `sys.orig_argv`), and these skip.
-fn with_python() -> Option<String> {
-    let python = python();
-    if !tools("Python (HUSHRUN_TEST_PYTHON)", runs(&python, "pass")) {
-        return None;
-    }
-    if !runs(
-        &python,
-        "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)",
-    ) {
-        eprintln!(
-            "note: skipping: this Python is older than 3.10, where the adapter starts in none"
-        );
-        return None;
-    }
-    Some(python)
-}
-
-/// Whether `python` is 3.12 or later: it has `sys.monitoring`, and unittest's "no tests ran" is 5.
-fn is_312(python: &str) -> bool {
-    runs(
-        python,
-        "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)",
-    )
-}
-
-/// A Python with Django, said when missing.
-fn with_django() -> Option<String> {
-    let python = std::env::var("HUSHRUN_TEST_DJANGO").unwrap_or_else(|_| "python3".into());
-    let here = runs(
-        &python,
-        "import sys, django; sys.exit(0 if sys.version_info >= (3, 10) else 1)",
-    );
-    tools(
-        "a Python 3.10 or later with Django (HUSHRUN_TEST_DJANGO)",
-        here,
-    )
-    .then_some(python)
-}
-
-fn yaml(tests: &str) -> String {
-    format!("version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: {tests}\n")
-}
-
-/// A shop of unittest test modules: two modules each read by one test module, a greeting read by
-/// five, one that starts a process, a module two imports away that only one test calls, and a
-/// lockfile in the rest set.
-fn shop(tests: &str) -> Vec<(&'static str, String)> {
-    let mut files = vec![
-        ("hushrun.yaml", yaml(tests)),
-        (".gitignore", "__pycache__/\n".to_string()),
-        ("requirements.txt", "nothing==1.0\n".to_string()),
-        ("app/__init__.py", String::new()),
-        ("app/pricing.py", "def price(x):\n    return x * 2\n".into()),
-        (
-            "app/cart.py",
-            "from app.pricing import price\n\ndef total(xs):\n    return sum(price(x) for x in xs)\n"
-                .into(),
-        ),
-        ("app/greet.py", "def hello():\n    return 'hi'\n".into()),
-        ("app/deep.py", "def h():\n    return 1\n".into()),
-        (
-            "app/near.py",
-            "from app import deep\n\ndef f():\n    return deep.h()\n".into(),
-        ),
-        ("app/other.py", "def g():\n    return 2\n".into()),
-        (
-            "app/facade.py",
-            "from app import near, other\n\ndef fx():\n    return near.f()\n\ndef fy():\n    return other.g()\n".into(),
-        ),
-        ("tests/__init__.py", String::new()),
-        (
-            "tests/test_cart.py",
-            "import unittest\nfrom app.cart import total\n\nclass CartTest(unittest.TestCase):\n    def test_total(self):\n        self.assertEqual(total([1, 2]), 6)\n".into(),
-        ),
-        (
-            "tests/test_pricing.py",
-            "import unittest\nfrom app.pricing import price\n\nclass PriceTest(unittest.TestCase):\n    def test_price(self):\n        self.assertEqual(price(3), 6)\n".into(),
-        ),
-        (
-            "tests/test_child.py",
-            "import subprocess, sys, unittest\n\nclass ChildTest(unittest.TestCase):\n    def test_child(self):\n        self.assertEqual(subprocess.run([sys.executable, '-c', 'pass']).returncode, 0)\n".into(),
-        ),
-        (
-            "tests/test_split.py",
-            "import unittest\nfrom app import facade\n\nclass Split(unittest.TestCase):\n    def test_near(self):\n        self.assertEqual(facade.fx(), 1)\n\n    def test_other(self):\n        self.assertEqual(facade.fy(), 2)\n".into(),
-        ),
-    ];
-    for name in [
-        "tests/test_greet_1.py",
-        "tests/test_greet_2.py",
-        "tests/test_greet_3.py",
-        "tests/test_greet_4.py",
-        "tests/test_greet_5.py",
-    ] {
-        files.push((
-            name,
-            "import unittest\nfrom app.greet import hello\n\nclass GreetTest(unittest.TestCase):\n    def test_hello(self):\n        self.assertEqual(hello(), 'hi')\n".into(),
-        ));
-    }
-    files
+/// The adapter's directory hushrun wrote in this cache.
+fn adapter_dir(r: &Repo) -> PathBuf {
+    std::fs::read_dir(r.cache.join("adapters"))
+        .expect("adapters")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("unittest-")
+        })
+        .expect("the unittest adapter")
 }
 
 // covers: C-66, C-67, C-30, C-34
@@ -330,19 +172,19 @@ fn unittest_reuses_the_test_modules_that_passed_on_the_files_they_read() {
     let Some(python) = with_python() else {
         return;
     };
-    let r = Repo::new(&shop("reuse"));
-    let unittest = || r.run(&["run", "unit", "--", &python, "-m", "unittest", "-v"]);
+    let r = repo(&shop("reuse"));
+    let unittest = || run(&r, &[&python, "-m", "unittest", "-v"]);
 
     let first = unittest();
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(first.code, 0, "{}", first.said());
     assert!(
-        !first.stderr.contains("test modules run"),
+        !first.said().contains("test modules run"),
         "{}",
-        first.stderr
+        first.said()
     );
     // What each module read: its imports, followed, and the package above it; not another's.
     assert_eq!(
-        r.reads("tests/test_cart.py"),
+        reads(&r, "tests/test_cart.py"),
         [
             "app/__init__.py",
             "app/cart.py",
@@ -352,7 +194,7 @@ fn unittest_reuses_the_test_modules_that_passed_on_the_files_they_read() {
         ]
     );
     assert_eq!(
-        store::map(&r.cache)["units"]["tests/test_child.py"]["notFollowed"],
+        r.map()["units"]["tests/test_child.py"]["notFollowed"],
         serde_json::json!(["subprocess"])
     );
 
@@ -363,10 +205,10 @@ fn unittest_reuses_the_test_modules_that_passed_on_the_files_they_read() {
         "from app.pricing import price\n\ndef total(xs):\n    return sum(price(x) for x in xs)  # changed\n",
     );
     let changed = unittest();
-    assert_eq!(changed.code, 0, "{}", changed.stderr);
+    assert_eq!(changed.code, 0, "{}", changed.said());
     assert_eq!(
-        changed.plan_line(),
-        "hushrun: unit: 3 of 9 test modules run; 6 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        plan_line(&changed),
+        "unit: 3 of 9 test modules run; 6 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(
         changed
@@ -386,8 +228,8 @@ fn unittest_reuses_the_test_modules_that_passed_on_the_files_they_read() {
     r.write("requirements.txt", "nothing==2.0\n");
     let rest = unittest();
     assert_eq!(
-        rest.plan_line(),
-        "hushrun: unit: all 9 test modules run: requirements.txt changed, and any test may read it"
+        plan_line(&rest),
+        "unit: all 9 test modules run: requirements.txt changed, and any test may read it"
     );
 }
 
@@ -401,34 +243,20 @@ fn each_test_reads_what_it_ran_and_one_only_another_test_calls_reuses_it() {
         eprintln!("note: skipping: this Python has no sys.monitoring, so no test is watched");
         return;
     }
-    let r = Repo::new(&shop("{mode: reuse, unit: test, reads: test}"));
-    let args = ["run", "unit", "--", &python, "-m", "unittest", "-v"];
-    let first = r.run(&args);
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let r = repo(&shop("{mode: reuse, unit: test, reads: test}"));
+    let args = [python.as_str(), "-m", "unittest", "-v"];
+    let first = run(&r, &args);
+    assert_eq!(first.code, 0, "{}", first.said());
 
     // A module two imports away that only Split.test_near called changes: Split.test_other
-    // didn't read it.
+    // didn't read it, which `hushrun why` says of each (e2e_unittest.rs).
     r.write("app/deep.py", "def h():\n    return 1  # changed\n");
-    let why = |test: &str| {
-        let unit = format!("tests/test_split.py::{test}");
-        r.run(&["why", "unit", &unit, "--", &python, "-m", "unittest", "-v"])
-            .stdout
-    };
-    let near = why("Split.test_near");
+    let changed = run(&r, &args);
+    assert_eq!(changed.code, 0, "{}", changed.said());
     assert!(
-        near.contains("runs: it read app/deep.py, which changed"),
-        "{near}"
-    );
-    let other = why("Split.test_other");
-    assert!(other.contains("would be reused"), "{other}");
-    let changed = r.run(&args);
-    assert_eq!(changed.code, 0, "{}", changed.stderr);
-    assert!(
-        changed
-            .plan_line()
-            .starts_with("hushrun: unit: 3 of 10 tests run, in "),
+        plan_line(&changed).starts_with("unit: 3 of 10 tests run, in "),
         "{}",
-        changed.stderr
+        changed.said()
     );
     assert!(
         changed
@@ -445,12 +273,12 @@ fn plugin(r: &Repo, python: &str, run: Value, args: &[&str]) -> (i32, String, Ve
     let _ = std::fs::remove_dir_all(&units);
     std::fs::create_dir_all(&units).unwrap();
     std::fs::write(units.join("hushrun.json"), run.to_string()).unwrap();
-    let out = Command::new(python)
+    let out = hushrun_testkit::tool::command(python)
         .args(["-m", "unittest"])
         .args(args)
         .current_dir(&r.repo)
         .env("HUSHRUN_UNITS", &units)
-        .env("PYTHONPATH", r.adapter())
+        .env("PYTHONPATH", adapter_dir(r))
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .env_remove("HUSHRUN_UNITTEST_SESSION")
         .output()
@@ -499,10 +327,10 @@ fn the_adapter_removes_what_it_is_told_and_no_tests_ran_stays_unittests_own() {
     let Some(python) = with_python() else {
         return;
     };
-    let r = Repo::new(&shop("reuse"));
+    let r = repo(&shop("reuse"));
     // hushrun writes its adapter on a run.
-    let first = r.run(&["run", "unit", "--", &python, "-m", "unittest"]);
-    assert_eq!(first.code, 0, "{}", first.stderr);
+    let first = run(&r, &[&python, "-m", "unittest"]);
+    assert_eq!(first.code, 0, "{}", first.said());
     let all = [
         "tests/test_cart.py",
         "tests/test_pricing.py",
@@ -538,11 +366,11 @@ fn the_adapter_removes_what_it_is_told_and_no_tests_ran_stays_unittests_own() {
     // A second unittest of the same run, which didn't claim the run's directory, removes nothing.
     let units = r.root.join("units");
     std::fs::write(units.join("claim"), "1").unwrap();
-    let out = Command::new(&python)
+    let out = hushrun_testkit::tool::command(&python)
         .args(["-m", "unittest"])
         .current_dir(&r.repo)
         .env("HUSHRUN_UNITS", &units)
-        .env("PYTHONPATH", r.adapter())
+        .env("PYTHONPATH", adapter_dir(&r))
         .env_remove("HUSHRUN_UNITTEST_SESSION")
         .output()
         .unwrap();
@@ -559,22 +387,9 @@ fn a_class_whose_end_fails_keeps_no_pass_for_its_tests_and_a_module_that_fails_t
     let Some(python) = with_python() else {
         return;
     };
-    let mut files = shop("{mode: reuse, unit: test}");
-    files.push((
-        "tests/test_teardown.py",
-        "import unittest\n\nclass Leaks(unittest.TestCase):\n    @classmethod\n    def tearDownClass(cls):\n        raise RuntimeError('leaked')\n\n    def test_a(self):\n        pass\n\nclass Clean(unittest.TestCase):\n    def test_b(self):\n        pass\n".into(),
-    ));
-    files.push((
-        "tests/test_broken.py",
-        "import no_such_module_here\n".into(),
-    ));
-    files.push((
-        "tests/test_skipped.py",
-        "import unittest\nraise unittest.SkipTest('not here')\n".into(),
-    ));
-    let r = Repo::new(&files);
-    let ran = r.run(&["run", "unit", "--", &python, "-m", "unittest"]);
-    assert_ne!(ran.code, 0, "{}", ran.stderr);
+    let r = repo(&teardown_shop());
+    let ran = run(&r, &[&python, "-m", "unittest"]);
+    assert_ne!(ran.code, 0, "{}", ran.said());
     let (code, _, facts) = plugin(&r, &python, run_file(&r, "test", &[]), &[]);
     assert_eq!(code, 1);
     let teardown = unit(&facts, "tests/test_teardown.py");
@@ -598,17 +413,8 @@ fn a_class_whose_end_fails_keeps_no_pass_for_its_tests_and_a_module_that_fails_t
         (&false.into(), &1.into())
     );
     assert_eq!(facts[0]["failuresByUnit"], true);
-    // `hushrun why` says why the test kept no pass.
-    let why = r.run(&[
-        "why",
-        "unit",
-        "tests/test_teardown.py::Leaks.test_a",
-        "--",
-        &python,
-        "-m",
-        "unittest",
-    ]);
-    assert!(why.stdout.contains("runs"), "{}", why.stdout);
+    // \[C-37\] What `hushrun why` says of the test that kept no pass is end to end:
+    // e2e_unittest.rs.
 }
 
 // covers: C-66
@@ -626,79 +432,27 @@ fn the_sitecustomize_hushrun_hides_still_runs_and_a_python_a_test_starts_observe
         "tests/test_site.py",
         "import os, unittest\n\nclass SiteTest(unittest.TestCase):\n    def test_hidden_ran(self):\n        self.assertEqual(os.environ.get('FROM_THE_HIDDEN_SITECUSTOMIZE'), '1')\n".into(),
     ));
-    let r = Repo::new(&files);
+    let r = repo(&files);
     let site = r.repo.join("site");
     let site = site.to_str().unwrap();
-    let ran = r.run_with(
-        &["run", "unit", "--", &python, "-m", "unittest"],
-        &[("PYTHONPATH", site)],
-    );
-    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    let ran = run_with(&r, &[&python, "-m", "unittest"], &[("PYTHONPATH", site)]);
+    assert_eq!(ran.code, 0, "{}", ran.said());
     // COMMAND's own `env PYTHONPATH=…` would replace the one that loads the adapter: said.
     r.write("app/greet.py", "def hello():\n    return 'hi'  # changed\n");
     let assign = format!("PYTHONPATH={site}");
-    let assigned = r.run(&[
-        "run", "unit", "--", "env", &assign, &python, "-m", "unittest",
-    ]);
+    let assigned = run(&r, &["env", &assign, &python, "-m", "unittest"]);
     assert!(
-        assigned.stderr.contains("COMMAND sets PYTHONPATH itself"),
+        assigned.said().contains("COMMAND sets PYTHONPATH itself"),
         "{}",
-        assigned.stderr
+        assigned.said()
     );
     // The test that starts a Python of its own: that Python is the test's, which isn't followed,
     // and wrote no facts of its own.
     assert_eq!(
-        store::map(&r.cache)["units"]["tests/test_child.py"]["notFollowed"],
+        r.map()["units"]["tests/test_child.py"]["notFollowed"],
         serde_json::json!(["subprocess"])
     );
-    assert!(
-        r.reads("tests/test_site.py")
-            .contains(&"tests/test_site.py".to_string())
-    );
-}
-
-/// A Django project of three apps: a shop with a model, a fixture, a template and a module only
-/// it imports; a blog and news that import nothing of the shop's.
-fn django_project() -> Vec<(&'static str, String)> {
-    let settings = "SECRET_KEY = 'x'\nINSTALLED_APPS = ['django.contrib.contenttypes', 'django.contrib.auth', 'shop', 'blog', 'news']\nDATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': 'db.sqlite3'}}\nTEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates', 'APP_DIRS': True}]\nUSE_TZ = True\nDEFAULT_AUTO_FIELD = 'django.db.models.AutoField'\n";
-    let manage = "import os, sys\n\nif __name__ == '__main__':\n    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'proj.settings')\n    from django.core.management import execute_from_command_line\n    execute_from_command_line(sys.argv)\n";
-    let simple = |class: &str| {
-        format!(
-            "from django.test import SimpleTestCase\n\nclass {class}(SimpleTestCase):\n    def test_it(self):\n        self.assertTrue(True)\n"
-        )
-    };
-    vec![
-        ("hushrun.yaml", yaml("reuse")),
-        (".gitignore", "__pycache__/\ndb.sqlite3\n".into()),
-        ("manage.py", manage.into()),
-        ("proj/__init__.py", String::new()),
-        ("proj/settings.py", settings.into()),
-        ("shop/__init__.py", String::new()),
-        (
-            "shop/models.py",
-            "from django.db import models\n\nclass Item(models.Model):\n    name = models.CharField(max_length=20)\n    price = models.IntegerField()\n".into(),
-        ),
-        ("shop/pricing.py", "def with_tax(p):\n    return p * 2\n".into()),
-        ("shop/migrations/__init__.py", String::new()),
-        (
-            "shop/migrations/0001_initial.py",
-            "from django.db import migrations, models\n\nclass Migration(migrations.Migration):\n    initial = True\n    dependencies = []\n    operations = [migrations.CreateModel(name='Item', fields=[('id', models.AutoField(primary_key=True)), ('name', models.CharField(max_length=20)), ('price', models.IntegerField())])]\n".into(),
-        ),
-        (
-            "shop/fixtures/items.json",
-            "[{\"model\": \"shop.item\", \"pk\": 1, \"fields\": {\"name\": \"a\", \"price\": 3}}]\n"
-                .into(),
-        ),
-        ("shop/templates/shop/item.txt", "Item {{ item.name }}\n".into()),
-        (
-            "shop/tests.py",
-            "from django.template.loader import render_to_string\nfrom django.test import TestCase\nfrom shop.models import Item\nfrom shop import pricing\n\nclass ItemTest(TestCase):\n    fixtures = ['items.json']\n\n    def test_fixture(self):\n        self.assertEqual(pricing.with_tax(Item.objects.get(pk=1).price), 6)\n\n    def test_render(self):\n        self.assertEqual(render_to_string('shop/item.txt', {'item': Item.objects.get(pk=1)}).strip(), 'Item a')\n".into(),
-        ),
-        ("blog/__init__.py", String::new()),
-        ("blog/tests.py", simple("BlogTest")),
-        ("news/__init__.py", String::new()),
-        ("news/tests.py", simple("NewsTest")),
-    ]
+    assert!(reads(&r, "tests/test_site.py").contains(&"tests/test_site.py".to_string()));
 }
 
 // covers: C-66, C-67
@@ -707,15 +461,15 @@ fn djangos_manage_py_test_reuses_the_apps_whose_files_didnt_change() {
     let Some(python) = with_django() else {
         return;
     };
-    let r = Repo::new(&django_project());
-    let manage = || r.run(&["run", "unit", "--", &python, "manage.py", "test", "-v", "2"]);
+    let r = repo(&django_project());
+    let manage = || run(&r, &[&python, "manage.py", "test", "-v", "2"]);
     let first = manage();
-    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(first.code, 0, "{}", first.said());
     // The shop's module read what it imports; the blog's read none of it, though manage.py,
     // under every frame of the run, is read by both, and so are the settings, the models and the
     // migrations, which Django loads for every test. (The fixture and the template are the rest
     // set's, which every test may read.)
-    let shop = r.reads("shop/tests.py");
+    let shop = reads(&r, "shop/tests.py");
     for file in [
         "manage.py",
         "proj/settings.py",
@@ -725,7 +479,7 @@ fn djangos_manage_py_test_reuses_the_apps_whose_files_didnt_change() {
     ] {
         assert!(shop.contains(&file.to_string()), "{file} in {shop:?}");
     }
-    let blog = r.reads("blog/tests.py");
+    let blog = reads(&r, "blog/tests.py");
     for file in ["manage.py", "proj/settings.py", "shop/models.py"] {
         assert!(blog.contains(&file.to_string()), "{file} in {blog:?}");
     }
@@ -740,10 +494,10 @@ fn djangos_manage_py_test_reuses_the_apps_whose_files_didnt_change() {
         "def with_tax(p):\n    return p * 2  # changed\n",
     );
     let changed = manage();
-    assert_eq!(changed.code, 0, "{}", changed.stderr);
+    assert_eq!(changed.code, 0, "{}", changed.said());
     assert_eq!(
-        changed.plan_line(),
-        "hushrun: unit: 2 of 3 test modules run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
+        plan_line(&changed),
+        "unit: 2 of 3 test modules run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
     );
 
     // Django's parallel runner is said, and everything runs.
@@ -751,21 +505,12 @@ fn djangos_manage_py_test_reuses_the_apps_whose_files_didnt_change() {
         "shop/pricing.py",
         "def with_tax(p):\n    return p * 2  # again\n",
     );
-    let parallel = r.run(&[
-        "run",
-        "unit",
-        "--",
-        &python,
-        "manage.py",
-        "test",
-        "--parallel",
-        "2",
-    ]);
+    let parallel = run(&r, &[&python, "manage.py", "test", "--parallel", "2"]);
     assert!(
         parallel
-            .stderr
+            .said()
             .contains("Django's --parallel runs the tests in worker processes"),
         "{}",
-        parallel.stderr
+        parallel.said()
     );
 }
