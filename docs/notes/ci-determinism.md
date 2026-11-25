@@ -102,6 +102,9 @@ On a 4-CPU container:
 | This branch, same load, build_share's whole suite 3 times | 3 of 3 runs passed, 71/71 each |
 | An 8 s stall injected on A's first upload over 1.5 MB (not committed), the original Go test | main's waits: 3 of 3 failed as CI did; this branch: 3 of 3 passed (13 s each: the end waits the stall out) |
 
+| Gradle 8.14 for real, its socket timeout set to 1.5 s, B's downloads held 3 s | passes; with the cache's `102 Processing` heartbeats switched off (not committed) it fails: "Read timed out … The remote build cache was disabled during the build" |
+| Maven 3.9.11 for real, B's downloads held 3 s | both modules from the shared store |
+
 `every_package_is_reused_on_the_other_machine_however_slowly_the_backend_answers` is the
 regression guard. It holds A's PUTs, B's `open` and B's downloads past every old bound and
 expects every package reused, so a time-bounded wait that comes back fails it on any machine.
@@ -129,7 +132,7 @@ Effort: S is under half a day, M is 1–2 days, L is more. "Shared helper" rows 
 | build_tsc.rs `run` (`&& sleep 1`, `MANIFEST_WAIT_MS=15000`) | same | b | **Done** | – |
 | build_share.rs `Machine::build`, `ci_build`, `greet` and about 24 inline `&& sleep 2` | G1 (CI drain bounded by cost/4) | b | **Done**: sleeps removed (the SIGTERM test's `sleep 20` stays, it is the command being stopped) | – |
 | build_share.rs `a_merge_whose_ci_skipped_is_built_by_the_bake_before_it_bakes`, `a_gitlab_bake_that_builds_keeps_its_store` | G1 (bounded CI drain) | b | **Done** by the product fix; under load in the table above | – |
-| build_gradle.rs | G2–G4 for `gradle/1`, and Gradle's own 30 s socket timeout | b | **Done**: event waits, `102 Processing` heartbeats | – |
+| build_gradle.rs, build_maven.rs | G2–G4 for `gradle/1` and `maven/1`, and the clients' own socket timeouts | b | **Done**: event waits, `102 Processing` heartbeats; a test each holds downloads past the timeout | – |
 | build_bake_*.rs | fetches raced G2–G4 | b | **Done** | – |
 
 ### Tests of a bound: replace wall-clock asserts with an injected clock

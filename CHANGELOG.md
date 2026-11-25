@@ -28,9 +28,9 @@ project's new branch starts from what main's CI already ran.
   - **CI's `open` and other checks:** a CI job waits for `open` however long it takes, and so do
     vouches, a baked store's check, a sandbox's check of what cargo can't see (B-23) and
     `hushrun build fetch`.
-  - **Only silence ends a wait:** the relay writes a heartbeat while it works, Gradle's cache an
-    interim `102 Processing`, and every wait ends only on 30 seconds of silence: a frozen relay or
-    a backend that stopped answering.
+  - **Only silence ends a wait:** the relay writes a heartbeat while it works, Gradle's and
+    Maven's caches an interim `102 Processing`, and every wait ends only on 30 seconds of silence:
+    a frozen relay or a backend that stopped answering.
   - The line for a CI job whose backend fails is now `build reuse is off for this run: the
     backend didn't answer`.
 - **`hushrun.whoami/v1`'s `credential`** adds `session`, `bearer` and `proxy`.

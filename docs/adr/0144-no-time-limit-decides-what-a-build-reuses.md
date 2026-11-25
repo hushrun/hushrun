@@ -2,7 +2,7 @@
 
 - **Status:** proposed; built
 - **Date:** 2026-11-25
-- **Rules:** B-2, B-23, B-26, B-29, B-31, B-34, B-40, B-45, B-60, B-63, B-75 and B-80 changed
+- **Rules:** B-2, B-23, B-26, B-29, B-31, B-34, B-40, B-45, B-60, B-63, B-75, B-80 and B-174 changed
 
 ## Context
 
@@ -60,15 +60,16 @@ leave the same behaviour in front of every client.
      (`relay::HEARTBEAT`). JSON reads leading spaces as nothing, so the wire format is unchanged.
      A panicking answer stops its heartbeats, and the wrapper gets the connection's end, a miss.
    - **Every client of the relay** waits on 30 s of silence (`relay::WAIT`), whatever the compile
-     cost: the rustc wrapper, its notices, the Go cache program, Gradle's cache, the C/C++
-     launcher, tsc and Xcode. A frozen relay still costs a run one wait (B-40). The extra question
-     that told a slow relay from a frozen one is gone, since the heartbeats tell them apart.
+     cost: the rustc wrapper, its notices, the Go cache program, Gradle's and Maven's caches, the
+     C/C++ launcher, tsc and Xcode. A frozen relay still costs a run one wait (B-40). The extra
+     question that told a slow relay from a frozen one is gone, since the heartbeats tell them
+     apart.
    - **The Go cache program's watchdog** answers a request after 40 s with no sign of life. Each
      heartbeat of the relay its handler waits on counts as life. Its end waits for busy handlers
      while any shows life.
-   - **Gradle's cache** writes `HTTP/1.1 102 Processing` each heartbeat while a `GET` is worked
-     on. Gradle's HTTP client reads past interim responses, and its socket timeout resets on
-     them. No Gradle setting is changed.
+   - **Gradle's and Maven's caches** write `HTTP/1.1 102 Processing` each heartbeat while a `GET`
+     is worked on (`http::answer_alive`). Their HTTP clients read past interim responses, and the
+     socket timeout resets on them. No Gradle or Maven setting is changed.
    - **Backend and object-store requests** wait on silence, 30 s by default (`http::SILENCE`, the
      three `Tuning` silences): the head, then each piece of the body. A PUT's body is streamed a
      piece at a time and fails when it stops moving for the silence. A `Retry-After` within the

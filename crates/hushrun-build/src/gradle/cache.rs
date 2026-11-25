@@ -146,7 +146,8 @@ impl Cache {
                     return;
                 }
             };
-            let (status, body) = self.answer_alive(&request, &stream);
+            // ADR 0144: `102 Processing` each heartbeat while a `GET` is worked on.
+            let (status, body) = http::answer_alive(&request, &stream, || self.answer(&request));
             let head = request.method == "HEAD";
             if http::write(&mut output, status, &body, head, request.close).is_err()
                 || request.close
@@ -154,34 +155,6 @@ impl Cache {
                 return;
             }
         }
-    }
-
-    /// [`Cache::answer`], with a `102 Processing` written to `stream` each heartbeat until it is
-    /// known, for a `GET` from an HTTP/1.1 client (ADR 0144): Gradle's socket timeout then ends
-    /// only a cache that is frozen or gone, never one whose download is only slow, and Gradle
-    /// never turns its remote cache off for the build because the machine was busy.
-    fn answer_alive(&self, request: &http::Request, stream: &TcpStream) -> (u16, Vec<u8>) {
-        use std::io::Write as _;
-        if request.method != "GET" || !request.interim {
-            return self.answer(request);
-        }
-        let done = std::sync::Mutex::new(false);
-        std::thread::scope(|scope| {
-            let heartbeats = scope.spawn(|| {
-                loop {
-                    std::thread::park_timeout(relay::HEARTBEAT);
-                    let done = done.lock().unwrap_or_else(|p| p.into_inner());
-                    if *done || (&*stream).write_all(http::PROCESSING).is_err() {
-                        return;
-                    }
-                }
-            });
-            let answer = self.answer(request);
-            // No interim response after this: the answer follows on the same stream.
-            *done.lock().unwrap_or_else(|p| p.into_inner()) = true;
-            heartbeats.thread().unpark();
-            answer
-        })
     }
 
     /// One request's status and body.

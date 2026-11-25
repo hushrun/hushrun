@@ -3453,13 +3453,16 @@ compressed entries hide what they hold, as B-24 says of every kind.
 the store is served as B-172 says once `Current::may_reuse` allows it (B-34), the question to the
 relay being `maven_vouch`. Else, in a run whose mode is `on`, the cache asks the relay
 `maven_fetch`, which answers only while sharing is on and the check's `maven/1` manifest (B-176)
-names the key, as a Gradle fetch is answered (B-80). Every other answer is 404, and Maven builds the
-module. A download that fails B-172's checks is reported `rejected` to the scope it came from, its
+names the key, as a Gradle fetch is answered (B-80), and the download is waited for to its end
+(B-26, ADR 0144). While a `GET` is worked on, the cache writes `HTTP/1.1 102 Processing` each
+heartbeat, as Gradle's does: the extension's client reads past it, and its socket timeout ends
+only a cache that stopped answering. Every other answer is 404, and Maven builds the module. A download that fails B-172's checks is reported `rejected` to the scope it came from, its
 key suspended for the kept days, and removed. A served block's use is dated (B-14), and a
 download's first reuse here is recorded (B-32). Of another file: served from the block of a module
 whose `buildinfo.xml` this run served, when the block holds it with its size and SHA-256, else 404.
 A `HEAD` is 200 when the store holds a block of the module that isn't suspended and holds the file,
-else 404, with no body: it downloads nothing and logs nothing. A relay that doesn't answer once is
+else 404, with no body: it downloads nothing and logs nothing. Every question to the relay waits
+on its silence alone (B-26), whatever the module's cost; a relay silent for the whole wait once is
 asked nothing more by the cache for the rest of the run.
 
 **B-175 A `PUT`.** Answered 200 whatever becomes of the file. The files of a module are held in
