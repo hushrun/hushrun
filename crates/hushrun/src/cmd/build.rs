@@ -753,6 +753,23 @@ fn bake(global: &GlobalOpts, place: &Place, args: &BuildBakeArgs) -> CmdResult {
             output::print(text)
         }
     };
+    // B-66: on GitHub Actions, the step's outputs, for a later step to pull or deploy by.
+    let image = published.as_ref().filter(|p| p.skipped.is_none()).map(|p| {
+        (
+            p.digest.to_string(),
+            p.reference.as_str(),
+            p.tags.as_slice(),
+        )
+    });
+    let outputs = bake_outputs(
+        &baked.manifest.to_string(),
+        &baked.platform,
+        baked.packs.len(),
+        image.as_ref().map(|(d, r, t)| (d.as_str(), *r, *t)),
+    );
+    crate::ci::Ci::from_process(global)
+        .outputs(&outputs)
+        .map_err(|e| failed(format!("writing the GitHub step outputs: {e}")))?;
     if global.format == Format::Json {
         say(&serde_json::to_string(&json!({
             "out": out,
@@ -1793,6 +1810,26 @@ fn current_branch(folder: &std::path::Path) -> Option<String> {
 }
 
 /// The image a bake published, as `--format json` writes it.
+/// B-66: a bake's step outputs: the store's `manifest`, `platform` and `blocks`, and, for an
+/// image it published (`digest`, reference, tags), `digest`, `ref` and `tags`.
+fn bake_outputs(
+    manifest: &str,
+    platform: &str,
+    blocks: usize,
+    image: Option<(&str, &str, &[String])>,
+) -> output::Outputs {
+    let mut outputs = output::Outputs::new();
+    outputs.set("manifest", manifest);
+    outputs.set("platform", platform);
+    outputs.set("blocks", blocks.to_string());
+    if let Some((digest, reference, tags)) = image {
+        outputs.set("digest", digest);
+        outputs.set("ref", reference);
+        outputs.set("tags", tags.join(" "));
+    }
+    outputs
+}
+
 fn image_json(published: &crate::cmd::build_relay::bake_image::Published) -> Value {
     let uploaded = |digest: &str| {
         published
@@ -3036,6 +3073,40 @@ pub(crate) fn size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{SystemTime, baked_at, blocks, resolved, size};
+
+    // covers: B-66
+    #[test]
+    fn a_bakes_step_outputs_name_the_image_by_its_whole_digest() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let tags = vec![
+            "hushrun-linux-x64-0123456789abcdef".to_string(),
+            "hushrun-linux-x64-latest".to_string(),
+        ];
+        let reference = format!("r.example.com/acme/app@{digest}");
+        let outputs = super::bake_outputs("m", "linux-x64", 3, Some((&digest, &reference, &tags)));
+        let got: Vec<(&str, &str)> = outputs.iter().collect();
+        assert_eq!(
+            got,
+            [
+                ("manifest", "m"),
+                ("platform", "linux-x64"),
+                ("blocks", "3"),
+                ("digest", digest.as_str()),
+                ("ref", reference.as_str()),
+                (
+                    "tags",
+                    "hushrun-linux-x64-0123456789abcdef hushrun-linux-x64-latest"
+                ),
+            ]
+        );
+        // A store written as a folder only, or an image a bake skipped: no image outputs.
+        assert_eq!(
+            super::bake_outputs("m", "linux-x64", 3, None)
+                .iter()
+                .count(),
+            3
+        );
+    }
 
     // covers: B-70
     #[test]

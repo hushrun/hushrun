@@ -112,6 +112,9 @@ project's new branch starts from what main's CI already ran.
   its tag names already downloads nothing ([ADR 0146](docs/adr/0146-a-pull-streams-its-layers-and-skips-a-store-it-has.md)).
   `--resolve` prints `<image>@<digest>` only, `--format json` gives `hushrun.build-pull/v1`, and
   the line names the whole digest.
+- **`hushrun build bake`'s step outputs** (B-66): on GitHub Actions, `manifest`, `platform` and
+  `blocks`, and for an image it published `digest`, `ref` and `tags`, for a later step to pull or
+  deploy by digest.
 - **Recipes per agent cloud** in `recipes/agent-clouds/`, and a Dev Container Feature in
   `features/src/hushrun`, to publish as `ghcr.io/hushrun/features/hushrun`.
 - **A results outbox** (C-143, [ADR 0142](docs/adr/0142-results-that-wait-and-what-a-sandbox-fetches.md)):

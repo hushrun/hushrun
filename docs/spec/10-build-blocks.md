@@ -2097,7 +2097,11 @@ image without a fixed tag, moves its moving tags, and says so loudly, on stderr 
 and in `--format json`'s `image.warnings`: anyone who can push to the repository can put an image
 at a fixed tag first, since `hushrun build manifest` predicts it. A program that needs the store's
 own image reads the moving tag, or checks the fixed tag's signature as a run does. An image
-whose signatures can't be read at that moment is said in a note.
+whose signatures can't be read at that moment is said in a note. On GitHub Actions (without
+`--no-ci-output`) a bake also writes the step's outputs: `manifest`, `platform` and `blocks`, and,
+for an image it published, `digest` (the manifest's whole digest), `ref` (`<repository>@<digest>`,
+or `<folder>@<digest>` for `--oci-dir`) and `tags` (the tags it moved or set, separated by
+spaces), for a later step to pull or deploy by digest.
 
 `<platform>` is `baked.json`'s `platform`: the baking machine's Rust compiler's target in a tag's
 words (`linux-x64`, `linux-arm64`, `macos-arm64`), or a target triple with no short words. A store
