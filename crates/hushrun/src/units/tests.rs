@@ -1363,3 +1363,35 @@ fn an_adapter_s_node_options_go_after_the_build_s_hook() {
         os("--require /c/jest.cjs")
     );
 }
+
+// covers: C-146
+#[test]
+fn a_mapped_test_is_keyed_by_its_map_with_its_test_files_outside() {
+    let outside = units::Outside {
+        env: Some(Digest::of(b"env")),
+        scripts: Some(Digest::of(b"scripts")),
+    };
+    let file = built_list(
+        &["src/lib.rs", "src/a.rs", "src/b.rs", "Cargo.toml"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        outside,
+    );
+    let reads: BTreeSet<String> = ["src/lib.rs", "src/a.rs", "Cargo.toml"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let lists = mapped_lists(Some(&Ok(reads.clone())), std::slice::from_ref(&file));
+    assert_eq!(lists.len(), 1);
+    assert!(lists[0].own);
+    assert_eq!(lists[0].list.files, reads);
+    assert_eq!(lists[0].list.outside, outside);
+    // One the map can't narrow, or has nothing of: its test file's.
+    for mapped in [Some(&Err("why".to_string())), None] {
+        let lists = mapped_lists(mapped, std::slice::from_ref(&file));
+        assert_eq!(lists.len(), 1);
+        assert!(!lists[0].own);
+        assert_eq!(lists[0].list, file);
+    }
+}

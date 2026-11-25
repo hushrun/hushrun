@@ -1142,6 +1142,35 @@ hushrun says why and runs the command as it was when it can't tell what a comman
 built elsewhere), and `--partition count:M/N`, which a binary left out would shift between jobs.
 `--partition hash:M/N` gives each test its job by name, and works.
 
+### Rust's tests one by one
+
+With `tests: {mode: reuse, unit: test}` and `cargo nextest run`, hushrun reuses each Rust test on
+its own ([ADR 0145](../adr/0145-rust-tests-by-a-static-map.md)), not only whole test binaries. A
+test is left out when nothing it can reach changed. What it can reach comes from a static map of
+the workspace's sources, made with rust-analyzer's index: the functions it calls, the types it
+uses and their `impl` blocks, every implementation of a trait method it calls, and what its macros
+expand to. No coverage and no tracing are used. Where the map can't be sure (a procedural macro of
+your own, a test that starts one of your binaries), the test keeps its test binary's reads, and the
+run says why once.
+
+```yaml
+checks:
+  test:
+    tests: {mode: reuse, unit: test}
+```
+
+```text
+$ hushrun run test -- cargo nextest run --workspace
+hushrun: test: 3 of 3 test binaries run; 0 already passed on the files they read, and so did 5 tests of the others, and 1 more test that already passed runs anyway, as a check
+```
+
+Try `mode: observe` first: every test runs, and the last line says how many tests reuse would have
+left out. rust-analyzer is optional (`rustup component add rust-analyzer`). Without it, every test
+keeps its binary's reads and the run says so. Its index takes a few minutes on a large workspace.
+hushrun keeps it in its cache, so a run on files already indexed doesn't start rust-analyzer again.
+Plain `cargo test` starts each binary once for all its tests, so it keeps reusing whole test
+binaries.
+
 ### Xcode
 
 Xcode apps (iOS, iPadOS, macOS) reuse compiles through Xcode's own compilation cache, which hushrun

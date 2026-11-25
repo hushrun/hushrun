@@ -3479,4 +3479,37 @@ mod tests {
         assert!(!deselected(&[]));
         assert_eq!(ended(&[&reused_list], &plain, false), (false, false, 0));
     }
+
+    // covers: C-146
+    #[test]
+    fn each_test_is_its_own_start_and_a_test_left_out_is_deselected() {
+        let mut list = start("--list --format terse", Some(&["x"]), 0);
+        list.left_out = vec!["y".into()];
+        let x = start("--exact x --nocapture", None, 0);
+        let z_first = start("--exact z --nocapture", None, 101);
+        let z_retry = start("--exact z --nocapture", None, 0);
+        let mut killed = start("--exact k --nocapture", None, 0);
+        (killed.exit, killed.signal) = (None, Some(9));
+        let tests = tests_of(&[&list, &x, &z_first, &z_retry, &killed]).unwrap();
+        assert!(tests["x"].finished && !tests["x"].failed && !tests["x"].deselected);
+        assert!(tests["y"].deselected && !tests["y"].finished);
+        // A retry that passed doesn't hide the start that failed.
+        assert!(tests["z"].failed && tests["z"].finished);
+        assert_eq!(tests["z"].duration_ms, 10);
+        assert!(tests["k"].failed);
+        // A binary reused whole, or started once by `cargo test`, tells no test.
+        let mut reused = start("--list --format terse", Some(&[]), 0);
+        reused.reused = true;
+        assert_eq!(tests_of(&[&reused]), None);
+        assert_eq!(tests_of(&[&start("", None, 0)]), None);
+        // Only nextest knows tests one by one.
+        assert!(recognize(&words("cargo nextest run")).unwrap().tests().unit);
+        assert!(!recognize(&words("cargo test")).unwrap().tests().unit);
+        assert!(
+            !recognize(&words("cargo nextest run"))
+                .unwrap()
+                .tests()
+                .reads
+        );
+    }
 }

@@ -861,4 +861,52 @@ mod tests {
             ["tests::a", "tests::b"]
         );
     }
+
+    // covers: C-146
+    #[test]
+    fn a_list_is_passed_on_without_the_tests_left_out_of_that_binary_alone() {
+        let leave = BTreeSet::from(["tests::b".to_string()]);
+        assert_eq!(
+            without(
+                b"tests::a: test\ntests::b: test\nbench_b: benchmark\n",
+                &leave
+            ),
+            b"tests::a: test\nbench_b: benchmark\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("a-1");
+        std::fs::write(&binary, b"the binary").unwrap();
+        let other = dir.path().join("b-1");
+        std::fs::write(&other, b"another").unwrap();
+        let run = |sha256: String| facts::RunFile {
+            schema: facts::RUN_SCHEMA.into(),
+            root: dir.path().to_path_buf(),
+            reuse: Vec::new(),
+            python_files: None,
+            binaries: Vec::new(),
+            test_binaries: vec![facts::Binary {
+                unit: "src/lib.rs".into(),
+                path: binary.clone(),
+                sha256,
+            }],
+            test_files: None,
+            unit: Some("test".into()),
+            reads: Some("file".into()),
+            reuse_tests: BTreeMap::from([("src/lib.rs".to_string(), vec!["tests::b".to_string()])]),
+            known: None,
+        };
+        let write = |r: &facts::RunFile| {
+            std::fs::write(
+                dir.path().join(facts::RUN_FILE),
+                serde_json::to_vec(r).unwrap(),
+            )
+            .unwrap()
+        };
+        write(&run(hushrun_core::Digest::of(b"the binary").hex()));
+        assert_eq!(tests_left_out(dir.path(), &binary), leave);
+        assert!(tests_left_out(dir.path(), &other).is_empty());
+        // Other bytes than the plan's: nothing left out.
+        write(&run(hushrun_core::Digest::of(b"older bytes").hex()));
+        assert!(tests_left_out(dir.path(), &binary).is_empty());
+    }
 }
