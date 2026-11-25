@@ -70,10 +70,7 @@ pub fn repo(jest: &Jest, files: &[(String, String)]) -> Repo {
         "JEST_WORKER_ID",
         "NODE_OPTIONS",
     ]);
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&jest.modules, r.repo.join("node_modules")).expect("symlink");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&jest.modules, r.repo.join("node_modules")).expect("link");
+    r.link_dir(&jest.modules, "node_modules");
     r
 }
 

@@ -122,6 +122,15 @@ impl Repo {
         std::fs::write(path, text).expect("write");
     }
 
+    /// Links `at`, from the repository's root, to the directory `target` outside it: a runner's
+    /// tools, as installed once (`node_modules`), which the repository's `.gitignore` leaves out.
+    pub fn link_dir(&self, target: &Path, at: &str) {
+        let link = self.repo.join(at);
+        if let Err(err) = symlink_dir(target, &link) {
+            panic!("{} -> {}: {err}", link.display(), target.display());
+        }
+    }
+
     /// Removes the file at `path`, from the repository's root.
     pub fn remove(&self, path: &str) {
         std::fs::remove_file(self.repo.join(path)).expect("remove");
@@ -251,4 +260,18 @@ pub fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// A link at `link` to the directory `target`. One function per system, rather than a `cfg` inside
+/// one: the static map reads code a `cfg` leaves out by its names alone, and none of this one's
+/// calls is left out where it runs.
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// A link at `link` to the directory `target`.
+#[cfg(windows)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
 }

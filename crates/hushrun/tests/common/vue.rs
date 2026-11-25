@@ -58,10 +58,7 @@ pub fn repo(files: &[(&str, &str)], modules: &Path) -> Repo {
         "VITEST_POOL_ID",
         "VITEST_WORKER_ID",
     ]);
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(modules, r.repo.join("node_modules")).expect("symlink");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(modules, r.repo.join("node_modules")).expect("link");
+    r.link_dir(modules, "node_modules");
     r
 }
 

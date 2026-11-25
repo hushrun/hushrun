@@ -120,10 +120,7 @@ pub fn repo(tools: &Tools, files: &[(String, String)]) -> Repo {
         ])
         .give("PATH", path);
     if let Some(modules) = &tools.modules {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(modules, r.repo.join("node_modules")).expect("symlink");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(modules, r.repo.join("node_modules")).expect("link");
+        r.link_dir(modules, "node_modules");
     }
     r
 }

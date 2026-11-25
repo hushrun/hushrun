@@ -60,10 +60,7 @@ pub fn repo(files: &[(String, String)]) -> Repo {
         "VITEST_WORKER_ID",
     ]);
     let modules = vitest_modules().expect("vitest");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&modules, r.repo.join("node_modules")).expect("symlink");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&modules, r.repo.join("node_modules")).expect("link");
+    r.link_dir(&modules, "node_modules");
     r
 }
 
