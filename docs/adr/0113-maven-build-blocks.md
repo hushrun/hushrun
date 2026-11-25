@@ -96,7 +96,9 @@ give Maven: no token in a header without editing `settings.xml`.
   Maven's local repository, the store or the home folder stays with the extension's own cache.
 - **The rest is Gradle's** (B-174 to B-177): fetched only for a module the check's `maven/1`
   manifest names, under one platform, `jvm`; never audited or compared, since a jar keeps dates;
-  not baked; the summary counts modules apart.
+  uploaded as class `other`, which the server never compares, since for a `library` it would
+  suspend the key and delete the trusted copy (ADR 0146); not baked; the summary counts modules
+  apart.
 
 ## Consequences
 

@@ -68,7 +68,9 @@ project's new branch starts from what main's CI already ran.
   the Maven test adapter's). A module's `buildinfo.xml` and the files it names are one block,
   checked whole, `buildinfo.xml` kept in a canonical form; it is searched for the machine's folders
   before it may leave, fetched only where the check's `maven/1` manifest names it, and never
-  audited or compared. A run whose Maven skips tests shares nothing it builds. The summary says
+  audited or compared. Its blocks go up as class `other`, so two builds whose jars differ in a
+  date never suspend the module's key ([ADR 0146](docs/adr/0146-tool-keyed-blocks-go-up-as-other.md)).
+  A run whose Maven skips tests shares nothing it builds. The summary says
   `build: maven: N modules: …`. A build without the extension, or with a remote of its own, is
   said in one line. Not yet in baked stores or `hushrun build fetch`.
 - **Svelte's tests reuse** (C-62 to C-65, ADR 0109). With Vitest, `.svelte` components are
@@ -222,7 +224,9 @@ project's new branch starts from what main's CI already ran.
   gives the build that remote unless the build set one. Entries are kept in a canonical form, so
   the same outputs have the same digest on every machine; they are checked whole, searched for the
   machine's folders before they may leave, fetched only where the check's `gradle/1` manifest
-  names them, and never audited or compared, since Gradle's outputs needn't repeat. The summary
+  names them, and never audited or compared, since Gradle's outputs needn't repeat. Its blocks go up
+  as class `other`, so two executions whose outputs differ never suspend the task's key
+  ([ADR 0146](docs/adr/0146-tool-keyed-blocks-go-up-as-other.md)). The summary
   says `build: gradle: N tasks: …`. A settings file without the line, a build whose build cache is
   off, and a port another run holds are each said in one line. Not yet in baked stores or `hushrun
   build fetch`.
