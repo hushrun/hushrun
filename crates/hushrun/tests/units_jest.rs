@@ -2,334 +2,199 @@
 //! what it read is what Jest compiled and opened while it ran, with the files every test file
 //! reads; each test is told on its own; and reuse never misses a failure.
 //!
+//! In-process (CONTRIBUTING.md, "Which tests CI runs again"): each test runs a check as `hushrun
+//! run unit -- node node_modules/jest/bin/jest.js` would, through Jest's adapter's own type,
+//! `jest::Recognized`, and the code every adapter shares, and never starts the `hushrun` binary
+//! (`common/in_process.rs`). Jest itself runs as COMMAND, for real, and some tests run it alone
+//! with hushrun's adapter, as a plan would. What only the CLI shows of Jest (a run's last line,
+//! the check's result and skip, the audit's second run and its suspension, `hushrun why`) is in
+//! `e2e_jest.rs`.
+//!
 //! The fixtures need Node and Jest, installed from npm outside the repository: Jest 29.7.0 with
 //! ts-jest and TypeScript in the `node_modules` `HUSHRUN_TEST_JEST29` names, and Jest 30 in the
 //! one `HUSHRUN_TEST_JEST30` names (CI: `npm install --prefix <dir> jest@29.7.0 ts-jest@29.4.15
 //! typescript@5.9.3`, and the same with `jest@30.5.2`). Each runs on every Jest it finds, says so
 //! and passes where both are missing, unless `HUSHRUN_TEST_TOOLS=required`, which needs both.
 
+#[path = "common/jest.rs"]
+mod fixtures;
+#[path = "common/in_process.rs"]
+mod in_process;
+#[path = "common/repo.rs"]
+mod repo;
 #[path = "common/store.rs"]
 mod store;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use hushrun_testkit::git;
+use hushrun::units::adapter::Adapter as _;
+use hushrun::units::{Profile, jest};
 use serde_json::{Value, json};
 
-const CLEARED: &[&str] = &[
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "BUILDKITE",
-    "CIRCLECI",
-    "ACTIONS_ID_TOKEN_REQUEST_URL",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "HUSHRUN_AGENT",
-    "HUSHRUN_BACKEND",
-    "HUSHRUN_TOKEN",
-    "HUSHRUN_CONFIG",
-    "HUSHRUN_FORMAT",
-    "HUSHRUN_PROVIDER",
-    "HUSHRUN_INSIDE_RUN",
-    "HUSHRUN_UNITS",
-    "HUSHRUN_JEST",
-    "HUSHRUN_JEST_RUN",
-    "HUSHRUN_JEST_DESELECT",
-    "HUSHRUN_JEST_WATCH",
-    "HUSHRUN_JEST_START",
-    "HUSHRUN_INVOKED_BY",
-    "HUSHRUN_REPORTS_READ",
-    "NODE_OPTIONS",
-    "JEST_WORKER_ID",
-    "npm_lifecycle_event",
-    "AI_AGENT",
-    "CLAUDECODE",
-    "CLAUDE_CODE",
-    "CODEX_SANDBOX",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "OPENCODE",
-    "OPENCODE_CLIENT",
-    "CURSOR_AGENT",
-    "CURSOR_EXTENSION_HOST_ROLE",
-    "GEMINI_CLI",
-    "AUGMENT_AGENT",
-    "ANTIGRAVITY_AGENT",
-    "COPILOT_MODEL",
-    "COPILOT_ALLOW_ALL",
-    "COPILOT_GITHUB_TOKEN",
-    "CLAUDE_CODE_REMOTE",
-    "CURSOR_AGENT_SOCKET",
-    "COPILOT_AGENT_SESSION_ID",
-    "CODEX_PROXY_CERT",
-    "HUSHRUN_SANDBOX",
-    "HUSHRUN_BUILD",
-    "HUSHRUN_BUILD_KEEP_DAYS",
-    "HUSHRUN_BUILD_DIR",
-    "HUSHRUN_BUILD_SESSION",
-    "HUSHRUN_CC",
-    "CMAKE_C_COMPILER_LAUNCHER",
-    "CMAKE_CXX_COMPILER_LAUNCHER",
-    "RUSTC_WRAPPER",
-];
+use fixtures::*;
+use in_process::{Ran, Repo};
 
-const NO_HOST: &str = "http://127.0.0.1:9";
-
-/// One Jest these tests run on: its major and its `node_modules`.
-#[derive(Clone)]
-struct Jest {
-    major: u32,
-    modules: PathBuf,
-}
-
-/// The `node_modules` a variable names, when it holds a Jest of `major`.
-fn jest_in(variable: &str, major: u32) -> Option<Jest> {
-    let dir = PathBuf::from(std::env::var_os(variable)?);
-    let package = std::fs::read(dir.join("jest/package.json")).ok()?;
-    let package: Value = serde_json::from_slice(&package).ok()?;
-    let version = package["version"].as_str()?;
-    version.starts_with(&format!("{major}.")).then_some(Jest {
-        major,
-        modules: dir,
-    })
-}
-
-fn has_node() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-/// Every Jest this machine has for these tests; none, said, where it has neither, and a failure
-/// with `HUSHRUN_TEST_TOOLS=required` where it lacks one.
-fn jests() -> Vec<Jest> {
-    let found: Vec<Jest> = [("HUSHRUN_TEST_JEST29", 29), ("HUSHRUN_TEST_JEST30", 30)]
-        .iter()
-        .filter_map(|(v, major)| jest_in(v, *major))
-        .filter(|_| has_node())
-        .collect();
-    let required = std::env::var("HUSHRUN_TEST_TOOLS").as_deref() == Ok("required");
-    if required && found.len() < 2 {
-        panic!(
-            "Node with Jest 29 (HUSHRUN_TEST_JEST29) and Jest 30 (HUSHRUN_TEST_JEST30) is missing, and HUSHRUN_TEST_TOOLS=required"
-        );
+/// What Jest's adapter answers that never changes in a run, for the code every adapter shares.
+fn profile(adapter: &jest::Recognized) -> Profile {
+    Profile {
+        word: adapter.word(),
+        runner: adapter.runner(),
+        test_file: adapter.test_file(),
+        tests: adapter.tests(),
+        hints: adapter.hints(),
+        binds: adapter.binds(),
+        keys: adapter.keys(),
     }
-    if found.is_empty() {
-        eprintln!(
-            "note: skipping: Node with Jest 29 or 30 is missing (HUSHRUN_TEST_TOOLS=required makes this fail)"
-        );
-    }
-    found
 }
 
-struct Repo {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    repo: PathBuf,
-    cache: PathBuf,
-    #[allow(dead_code, reason = "the Jest a repository runs on, for messages")]
-    jest: Jest,
+/// `hushrun ARGS`, which are `run unit -- COMMAND`, in-process, through Jest's adapter alone.
+fn run(r: &Repo, args: &[&str]) -> Ran {
+    run_env(r, args, &[])
 }
 
-impl Repo {
-    fn new(jest: &Jest, files: &[(String, String)]) -> Repo {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("real path");
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("mkdir");
-        git::init(&repo, "sha1");
-        let r = Repo {
-            _dir: dir,
-            cache: root.join("cache"),
-            root,
-            repo,
-            jest: jest.clone(),
+/// `hushrun ARGS`, which are `run unit -- COMMAND`, with `env` besides, in-process, through Jest's
+/// adapter alone.
+fn run_env(r: &Repo, args: &[&str], env: &[(&str, &str)]) -> Ran {
+    let Some(args) = args.strip_prefix(&["run", "unit", "--"][..]) else {
+        panic!("{args:?} isn't `run unit -- COMMAND`");
+    };
+    let command: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // As `units::adapter::choose_kept` comes to Jest's adapter (`jest::recognized`), with no trait
+    // object: what COMMAND is, and which Jest the repository has.
+    let adapter = match jest::recognize_in(hushrun::units::command::without_env(&command), &r.repo)
+    {
+        Some(Ok(adapter)) => adapter,
+        Some(Err(why)) => return in_process::Run::new(r, "unit", args, env).unobserved(&why),
+        None => panic!("{args:?} doesn't start Jest"),
+    };
+    observe(r, args, env, &adapter)
+}
+
+/// One run of the check, as `hushrun run` makes it, with `adapter`: each step of the code every
+/// adapter shares (`units::Observer`), and around it each call `hushrun run` makes of the adapter,
+/// in order, on `jest::Recognized` itself (`units_gradle.rs`'s, with Jest's type).
+fn observe(r: &Repo, args: &[&str], env: &[(&str, &str)], adapter: &jest::Recognized) -> Ran {
+    let mut run = in_process::Run::new(r, "unit", args, env);
+    let Some(mut observer) = run.open(profile(adapter)) else {
+        return run.plain();
+    };
+    let at_env = run.env();
+    let variables = adapter.variables(&observer.start_at(&at_env));
+    drop(at_env);
+    run.started(&mut observer, variables);
+    if let Some(input) = run.plan_input() {
+        let planned = match observer.plan_context(&input) {
+            // Jest's adapter keeps the trait's `plan`, which is its `plan_from_files`.
+            Ok(context) => {
+                let planning = adapter.plan_from_files(&observer.plan_at(&input, &context));
+                observer.planned(&input, context, planning)
+            }
+            Err(planned) => planned,
         };
-        for (path, text) in files {
-            r.write(path, text);
-        }
-        // Jest as installed outside the repository, which git ignores.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&jest.modules, r.repo.join("node_modules")).expect("symlink");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&jest.modules, r.repo.join("node_modules"))
-            .expect("link");
-        git::commit_all(&r.repo, "init");
-        r
+        drop(input);
+        run.planned(&observer, planned);
     }
-
-    fn write(&self, path: &str, text: &str) {
-        let path = self.repo.join(path);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(path, text).expect("write");
-    }
-
-    fn remove(&self, path: &str) {
-        std::fs::remove_file(self.repo.join(path)).expect("remove");
-    }
-
-    fn clean(cmd: &mut Command) {
-        for var in CLEARED {
-            cmd.env_remove(var);
-        }
-        // What the developer's shell exports never reaches a runner a test starts.
-        hushrun_testkit::env::Hermetic::hermetic(cmd);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            if name.starts_with("NEXTEST")
-                || (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("CLAUDE")
-            {
-                cmd.env_remove(name.as_ref());
+    // COMMAND, once, or \[C-32\] once more with nothing left out when the adapter left out what
+    // the plan didn't list.
+    let mut starts = 0;
+    let (code, mut observed) = loop {
+        starts += 1;
+        let start = adapter.start_variables(observer.run_dir());
+        let (code, passed) = run.start_command(&observer, &start);
+        let end = run.finish_input(passed);
+        let observed = match observer.read_context(&end) {
+            Ok(context) => {
+                let read = adapter.read(&observer.read_at(&end, &context));
+                observer.finished(&end, context, read)
+            }
+            Err(observed) => observed.map(|observed| *observed),
+        };
+        drop(end);
+        if starts == 1 && observed.as_ref().is_some_and(|o| o.left_out.is_some()) {
+            let extras = adapter.again(observer.root(), observer.cwd(), &BTreeSet::new());
+            if observer.whole_again(extras).is_ok() {
+                continue;
             }
         }
-    }
-
-    fn run(&self, args: &[&str]) -> Ran {
-        self.run_env(args, &[])
-    }
-
-    fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> Ran {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
-        cmd.current_dir(&self.repo)
-            .env("HUSHRUN_CACHE_DIR", &self.cache)
-            .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
-            .env("HUSHRUN_HOST", NO_HOST)
-            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
-            .env("HOME", self.root.join("home"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            );
-        Repo::clean(&mut cmd);
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-        let output = cmd.args(args).output().expect("hushrun");
-        Ran {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
-    }
-
-    /// Jest with everything run, outside hushrun: the test files that fail.
-    fn truth(&self) -> Vec<String> {
-        let report = self.root.join("truth.json");
-        let _ = std::fs::remove_file(&report);
-        let mut cmd = Command::new("node");
-        cmd.current_dir(&self.repo);
-        Repo::clean(&mut cmd);
-        cmd.arg("node_modules/jest/bin/jest.js")
-            .args(["--ci", "--json", "--outputFile"])
-            .arg(&report)
-            .output()
-            .expect("jest");
-        let Ok(bytes) = std::fs::read(&report) else {
-            return Vec::new();
+        break (code, observed);
+    };
+    // \[C-34\] An audited unit that failed runs once more, alone.
+    if let Some(o) = observed.as_mut().filter(|o| !o.again.is_empty()) {
+        let wanted: BTreeSet<String> = o.again.keys().cloned().collect();
+        let extras = adapter.again(observer.root(), o.cwd(), o.unit_files());
+        let ended = match observer.again(o, &wanted, extras) {
+            Some(again) => {
+                let start = adapter.start_variables(again.dir());
+                let again = again.with_start(start);
+                let first = adapter.start_variables(observer.run_dir());
+                let passed = run.start_again(&observer, &first, &again);
+                let files = again.files();
+                let map = in_process::no_map();
+                let read = adapter
+                    .read(&observer.again_read_at(&files, o, &run.tree, passed, &map))
+                    .ok()
+                    .flatten();
+                observer.again_ended(&again, o, passed, read)
+            }
+            None => in_process::Run::not_again(&wanted),
         };
-        let report: Value = serde_json::from_slice(&bytes).unwrap_or_default();
-        report["testResults"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|r| r["status"] != "passed")
-            .filter_map(|r| r["name"].as_str().map(str::to_string))
-            .collect()
+        run.disagreements(o, ended);
     }
+    run.record(code, observed)
+}
 
-    fn map(&self) -> Value {
-        store::map(&self.cache)
-    }
+/// What a run's lines say, as the tests ask it: each is a line `hushrun run` writes after
+/// `hushrun: `.
+trait Said {
+    /// Whether the lines, one after another, hold `text`.
+    fn says(&self, text: &str) -> bool;
+}
 
-    fn reads(&self, unit: &str) -> Vec<String> {
-        let map = self.map();
-        map["units"][unit]["reads"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{unit} isn't in the map: {map:#}"))
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect()
-    }
-
-    /// The adapter's directory in this cache, once a run wrote it.
-    fn adapter(&self) -> PathBuf {
-        std::fs::read_dir(self.cache.join("adapters"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("jest-")
-            })
-            .expect("the Jest adapter was written")
+impl Said for Ran {
+    fn says(&self, text: &str) -> bool {
+        let mut lines = self.lines.join("\n");
+        lines.push('\n');
+        lines.contains(text)
     }
 }
 
-struct Ran {
-    code: i32,
-    stdout: String,
-    stderr: String,
+/// Jest with everything run, outside hushrun: the test files that fail.
+fn truth(r: &Repo) -> Vec<String> {
+    let report = r.root.join("truth.json");
+    let _ = std::fs::remove_file(&report);
+    r.command("node")
+        .arg("node_modules/jest/bin/jest.js")
+        .args(["--ci", "--json", "--outputFile"])
+        .arg(&report)
+        .output()
+        .expect("jest");
+    let Ok(bytes) = std::fs::read(&report) else {
+        return Vec::new();
+    };
+    let report: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    report["testResults"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["status"] != "passed")
+        .filter_map(|r| r["name"].as_str().map(str::to_string))
+        .collect()
 }
 
-impl Ran {
-    fn line(&self, start: &str) -> &str {
-        self.stderr
-            .lines()
-            .find(|l| l.starts_with(start))
-            .unwrap_or_else(|| panic!("no line starting {start:?} in:\n{}", self.stderr))
-    }
-
-    fn out(&self) -> String {
-        format!("{}\n{}", self.stdout, self.stderr)
-    }
-}
-
-fn file(path: &str, text: &str) -> (String, String) {
-    (path.to_string(), text.to_string())
-}
-
-fn yaml(tests: &str) -> String {
-    format!("version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: {tests}\n")
-}
-
-const CONFIG: &str = "module.exports = { testEnvironment: 'node', transform: {} };\n";
-
-/// A shop: a cart that requires pricing, each with a test file; a greeting; and five test files
-/// that read only the greeting, so that a plan has something to reuse.
-fn shop(tests: &str) -> Vec<(String, String)> {
-    let mut files = vec![
-        file("hushrun.yaml", &yaml(tests)),
-        file(".gitignore", "node_modules\ncoverage\n"),
-        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-        file("jest.config.js", CONFIG),
-        file("src/pricing.js", "exports.price = (x) => x * 2;\n"),
-        file(
-            "src/cart.js",
-            "const { price } = require('./pricing');\nexports.total = (xs) => xs.reduce((n, x) => n + price(x), 0);\n",
-        ),
-        file("src/greet.js", "exports.hello = () => 'hi';\n"),
-        file(
-            "test/cart.test.js",
-            "const { total } = require('../src/cart');\ntest('total', () => { expect(total([1, 2])).toBe(6); });\n",
-        ),
-        file(
-            "test/pricing.test.js",
-            "const { price } = require('../src/pricing');\ntest('price', () => { expect(price(3)).toBe(6); });\n",
-        ),
-    ];
-    for n in 1..=5 {
-        files.push(file(
-            &format!("test/greet{n}.test.js"),
-            "const { hello } = require('../src/greet');\ntest('hello', () => { expect(hello()).toBe('hi'); });\n",
-        ));
-    }
-    files
+/// The adapter's directory in this cache, once a run wrote it.
+fn adapter_dir(r: &Repo) -> PathBuf {
+    std::fs::read_dir(r.cache.join("adapters"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("jest-")
+        })
+        .expect("the Jest adapter was written")
 }
 
 const JEST_RUN: &[&str] = &[
@@ -352,19 +217,19 @@ fn jest_test_files_are_observed_from_what_jest_compiled_and_opened() {
             "test/dyn.test.js",
             "const fs = require('fs');\ntest('dyn', () => {\n  const name = 'dyn';\n  expect(require(`../src/${name}`).dyn()).toBe(7);\n  expect(fs.readFileSync('src/data.js', 'utf8')).toContain('= 1');\n});\n",
         ));
-        let r = Repo::new(&jest, &files);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 0, "Jest {}: {}", jest.major, first.out());
+        let r = repo(&jest, &files);
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 0, "Jest {}: {}", jest.major, first.said());
         assert_eq!(
-            first.line("hushrun: unit: with"),
-            "hushrun: unit: with `tests: reuse`, all 8 test files would have run: none had passed here yet on the files it read",
+            first.line("unit: with"),
+            "unit: with `tests: reuse`, all 8 test files would have run: none had passed here yet on the files it read",
             "Jest {}",
             jest.major
         );
         // What Jest compiled for it, the module a computed require named included, what it
         // opened, and Jest's config, which every test file reads.
         assert_eq!(
-            r.reads("test/cart.test.js"),
+            reads(&r, "test/cart.test.js"),
             [
                 "jest.config.js",
                 "src/cart.js",
@@ -375,7 +240,7 @@ fn jest_test_files_are_observed_from_what_jest_compiled_and_opened() {
             jest.major
         );
         assert_eq!(
-            r.reads("test/dyn.test.js"),
+            reads(&r, "test/dyn.test.js"),
             [
                 "jest.config.js",
                 "src/data.js",
@@ -389,15 +254,15 @@ fn jest_test_files_are_observed_from_what_jest_compiled_and_opened() {
         assert_eq!(map["unitFiles"].as_array().unwrap().len(), 8, "{map:#}");
         // One source changes: what read it would run, and the rest would be reused.
         r.write("src/pricing.js", "exports.price = (x) => x + x;\n");
-        let changed = r.run(JEST_RUN);
-        assert_eq!(changed.code, 0, "{}", changed.out());
+        let changed = run(&r, JEST_RUN);
+        assert_eq!(changed.code, 0, "{}", changed.said());
         assert!(
-            hushrun_testkit::lines::without_saving(changed.line("hushrun: unit: with")).starts_with(
-                "hushrun: unit: with `tests: reuse`, 2 of 8 test files would have run; 6 already passed on the files they read"
+            hushrun_testkit::lines::without_saving(changed.line("unit: with")).starts_with(
+                "unit: with `tests: reuse`, 2 of 8 test files would have run; 6 already passed on the files they read"
             ),
             "Jest {}: {}",
             jest.major,
-            changed.stderr
+            changed.said()
         );
     }
 }
@@ -406,19 +271,19 @@ fn jest_test_files_are_observed_from_what_jest_compiled_and_opened() {
 #[test]
 fn jest_reuses_test_files_that_already_passed() {
     for jest in jests() {
-        let r = Repo::new(&jest, &shop("reuse"));
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 0, "{}", first.out());
+        let r = repo(&jest, &shop("reuse"));
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 0, "{}", first.said());
         assert_eq!(
-            first.line("hushrun: unit: every"),
-            "hushrun: unit: every test file runs: no run here has listed Jest's test files yet"
+            first.line("unit: every"),
+            "unit: every test file runs: no run here has listed Jest's test files yet"
         );
         r.write("src/pricing.js", "exports.price = (x) => x + x;\n");
-        let second = r.run(JEST_RUN);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run(&r, JEST_RUN);
+        assert_eq!(second.code, 0, "{}", second.said());
         assert_eq!(
-            second.line("hushrun: unit: 3"),
-            "hushrun: unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+            second.line("unit: 3"),
+            "unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
             "Jest {}",
             jest.major
         );
@@ -426,67 +291,37 @@ fn jest_reuses_test_files_that_already_passed() {
             second.stderr.contains("Test Suites: 3 passed, 3 total"),
             "Jest {}: {}",
             jest.major,
-            second.stderr
+            second.said()
         );
-        // Its saving, or under a second, the count.
-        assert!(
-            hushrun_testkit::lines::says_reused(&second.stderr, 4, "test files"),
-            "{}",
-            second.stderr
-        );
-        // Why, with the imports the adapter saw.
-        r.write("src/pricing.js", "exports.price = (x) => 2 * x;\n");
-        let why = r.run(&["why", "unit", "test/cart.test.js"]);
-        assert_eq!(why.code, 0, "{}", why.stderr);
-        assert!(
-            why.stdout.starts_with(
-                "test/cart.test.js runs: it read src/pricing.js, which changed\n  test/cart.test.js imports src/cart.js imports src/pricing.js\n  as far as this machine knows: Jest's list"
-            ),
-            "{}",
-            why.stdout
-        );
+        // What the run's last line says, its saving or `4 test files reused` (e2e_jest.rs), is
+        // the result's count.
+        assert_eq!(second.units["reused"], 4, "{}", second.said());
+        // Why, with the imports the adapter saw, is end to end: e2e_jest.rs.
         // Every test file left after Jest's own choice already passed: the run passes, as the
         // run of those files did, where Jest would say it found no test.
-        let only = r.run(&[
-            "run",
-            "unit",
-            "--",
-            "node",
-            "node_modules/jest/bin/jest.js",
-            "--ci",
-            "greet",
-        ]);
-        assert_eq!(only.code, 0, "{}", only.out());
+        let only = run(
+            &r,
+            &[
+                "run",
+                "unit",
+                "--",
+                "node",
+                "node_modules/jest/bin/jest.js",
+                "--ci",
+                "greet",
+            ],
+        );
+        assert_eq!(only.code, 0, "{}", only.said());
     }
-}
-
-/// A test file whose tests fail while FAIL is set, and one whose `ok` fails while HIDDEN is,
-/// which no file says, as a missed dependency would.
-fn flips() -> Vec<(String, String)> {
-    vec![
-        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
-        file(".gitignore", "node_modules\n"),
-        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-        file("jest.config.js", CONFIG),
-        file("src/price.js", "exports.price = (x) => x * 2;\n"),
-        file(
-            "test/cart.test.js",
-            "const { price } = require('../src/price');\ndescribe('cart', () => {\n  test('one', () => { expect(price(1)).toBe(2); });\n  test('two', () => { expect(price(2)).toBe(4); });\n  test('flips', () => { expect(process.env.FAIL).toBeUndefined(); });\n  test('same', () => { expect(1).toBe(1); });\n  test('same', () => { expect(2).toBe(2); });\n});\ntest.skip('skipped', () => { throw new Error('never'); });\n",
-        ),
-        file(
-            "test/two.test.js",
-            "test('ok', () => { expect(process.env.HIDDEN).toBeUndefined(); });\ntest('also', () => { expect(process.env.FAIL).toBeUndefined(); });\n",
-        ),
-    ]
 }
 
 // covers: C-39, C-44
 #[test]
 fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     for jest in jests() {
-        let r = Repo::new(&jest, &flips());
-        let first = r.run_env(JEST_RUN, &[("FAIL", "1")]);
-        assert_eq!(first.code, 1, "{}", first.out());
+        let r = repo(&jest, &flips());
+        let first = run_env(&r, JEST_RUN, &[("FAIL", "1")]);
+        assert_eq!(first.code, 1, "{}", first.said());
         let map = r.map();
         assert_eq!(
             map["units"]["test/cart.test.js"]["tests"],
@@ -498,11 +333,11 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
         // The flip fixed: each file's own key failed, so their tests are asked one by one; of the
         // six that passed, one runs as a check; the skipped test, which a run that failed recorded
         // no pass for (C-32), is asked again.
-        let second = r.run(JEST_RUN);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run(&r, JEST_RUN);
+        assert_eq!(second.code, 0, "{}", second.said());
         assert_eq!(
-            second.line("hushrun: unit: "),
-            "hushrun: unit: 4 of 8 tests run, in 2 of 2 test files; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+            second.line("unit: "),
+            "unit: 4 of 8 tests run, in 2 of 2 test files; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
             "Jest {}",
             jest.major
         );
@@ -515,7 +350,7 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
             second.stderr.contains("5 skipped"),
             "Jest {}: {}",
             jest.major,
-            second.stderr
+            second.said()
         );
         assert_eq!(
             r.map()["units"]["test/cart.test.js"]["tests"]["skipped"],
@@ -523,11 +358,8 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
             "Jest {}: the skipped test ran again",
             jest.major
         );
-        let result = store_result(&r);
-        assert_eq!(result["units"]["tests"]["reused"], 4, "{result:#}");
-        // The same code again: the check skips whole.
-        let again = r.run(JEST_RUN);
-        assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
+        // The result the CLI records, and its skip of the same code again: e2e_jest.rs.
+        assert_eq!(second.units["tests"]["reused"], 4, "{}", second.said());
     }
 }
 
@@ -566,9 +398,9 @@ fn a_failing_after_all_or_an_error_no_test_owns_leaves_no_test_of_its_file_passe
     ];
     files.push(file("test/fine.test.js", "test('fine', () => {});\n"));
     for jest in jests() {
-        let r = Repo::new(&jest, &files);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 1, "{}", first.out());
+        let r = repo(&jest, &files);
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.said());
         let failed = |id: &str| (id.to_string(), json!("failed"));
         assert_eq!(
             tests_of(&r, "test/hooks.test.js"),
@@ -594,14 +426,14 @@ fn a_failing_after_all_or_an_error_no_test_owns_leaves_no_test_of_its_file_passe
             jest.major
         );
         // The same code again: every one of them runs, and the teardowns and the timer fail again.
-        let second = r.run(JEST_RUN);
-        assert_eq!(second.code, 1, "{}", second.out());
+        let second = run(&r, JEST_RUN);
+        assert_eq!(second.code, 1, "{}", second.said());
         for said in ["block teardown", "root teardown", "late timer"] {
             assert!(
-                second.out().contains(said),
+                second.said().contains(said),
                 "Jest {}: {said}:\n{}",
                 jest.major,
-                second.out()
+                second.said()
             );
         }
         assert_eq!(
@@ -629,9 +461,9 @@ fn a_skip_in_a_jest_run_that_failed_records_nothing() {
         ),
     ];
     for jest in jests() {
-        let r = Repo::new(&jest, &files);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 1, "{}", first.out());
+        let r = repo(&jest, &files);
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.said());
         assert_eq!(
             Value::Object(tests_of(&r, "test/a.test.js")),
             json!({"skipped": "not-run", "box > inner": "not-run", "later": "not-run",
@@ -639,45 +471,14 @@ fn a_skip_in_a_jest_run_that_failed_records_nothing() {
             "Jest {}",
             jest.major
         );
-        let second = r.run_env(JEST_RUN, &[("FIXED", "1")]);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run_env(&r, JEST_RUN, &[("FIXED", "1")]);
+        assert_eq!(second.code, 0, "{}", second.said());
         assert_eq!(
             Value::Object(tests_of(&r, "test/a.test.js")),
             json!({"skipped": "passed", "box > inner": "passed", "later": "passed",
                    "ok": "passed", "bad": "passed"}),
             "Jest {}",
             jest.major
-        );
-    }
-}
-
-// covers: C-37, C-39, C-44
-#[test]
-fn why_says_a_jest_test_kept_nothing_after_an_error_no_test_owns() {
-    // A timer `leaks` left throws while `waits` runs: Jest 29 charges it to `waits`, Jest 30 to
-    // `leaks`; either way no test of the file keeps a result, and `hushrun why` says what happened.
-    let files = vec![
-        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
-        file(".gitignore", "node_modules\n"),
-        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-        file("jest.config.js", CONFIG),
-        file(
-            "test/leak.test.js",
-            "test('leaks', () => { setTimeout(() => { throw new Error('late timer'); }, 20); });\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 150)); });\ntest('after', () => {});\n",
-        ),
-    ];
-    for jest in jests() {
-        let r = Repo::new(&jest, &files);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 1, "{}", first.out());
-        let why = r.run(&["why", "unit", "test/leak.test.js::after"]);
-        assert!(
-            why.out().contains(
-                "Jest reported an error it couldn't charge to a test (late timer), so no test of its file keeps a result of that run"
-            ),
-            "Jest {}: {}",
-            jest.major,
-            why.out()
         );
     }
 }
@@ -689,7 +490,7 @@ fn tests_whose_ids_collide_are_never_left_out_after_a_change() {
     // stores them as passed; a change to what only `z` read then asks the file's tests one by
     // one, and both still run.
     for jest in jests() {
-        let r = Repo::new(
+        let r = repo(
             &jest,
             &[
                 file(
@@ -709,28 +510,19 @@ fn tests_whose_ids_collide_are_never_left_out_after_a_change() {
         );
         let log = r.root.join("ran.log");
         let log_text = log.display().to_string();
-        assert_eq!(r.run_env(JEST_RUN, &[("RAN_LOG", &log_text)]).code, 0);
+        assert_eq!(run_env(&r, JEST_RUN, &[("RAN_LOG", &log_text)]).code, 0);
         r.write("fx.js", "module.exports = 1; // touched\n");
         let _ = std::fs::remove_file(&log);
-        let second = r.run_env(JEST_RUN, &[("RAN_LOG", &log_text)]);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run_env(&r, JEST_RUN, &[("RAN_LOG", &log_text)]);
+        assert_eq!(second.code, 0, "{}", second.said());
         let ran = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(
             ran.contains("nested") && ran.contains("flat"),
             "Jest {}: {ran:?}\n{}",
             jest.major,
-            second.stderr
+            second.said()
         );
     }
-}
-
-/// The newest run result this cache holds.
-fn store_result(r: &Repo) -> Value {
-    let mut found = Vec::new();
-    collect(&r.cache.join("results/results/v0"), &mut found);
-    found.sort_by_key(|p| p.file_name().map(|n| n.to_owned()));
-    let newest = found.last().expect("a run result");
-    serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -747,93 +539,11 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-// covers: C-39, C-34, C-44
-#[test]
-fn an_audited_test_that_fails_again_alone_suspends_the_checks_reuse() {
-    for jest in jests() {
-        // test/two.test.js's `ok` is the one test that could be reused: it runs as a check, and
-        // fails. Its second run is COMMAND again with a directory of its own, `also` listed:
-        // what the adapter does there comes from that directory alone.
-        let mut files = flips();
-        files.retain(|(p, _)| p != "test/cart.test.js");
-        let r = Repo::new(&jest, &files);
-        assert_eq!(r.run_env(JEST_RUN, &[("FAIL", "1")]).code, 1);
-        let caught = r.run_env(JEST_RUN, &[("HIDDEN", "1")]);
-        assert_eq!(caught.code, 1, "{}", caught.out());
-        assert_eq!(
-            caught.line("hushrun: unit: all"),
-            "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
-        );
-        assert!(
-            caught.stderr.contains(
-                "hushrun: unit: test/two.test.js::ok failed, though it passed before on the same files it read: running it once more"
-            ),
-            "{}",
-            caught.stderr
-        );
-        // The second run ran `ok` alone: Jest left `also` out.
-        assert!(
-            caught
-                .stderr
-                .contains("Tests:       1 failed, 1 skipped, 2 total"),
-            "Jest {}: {}",
-            jest.major,
-            caught.stderr
-        );
-        assert!(
-            caught.stderr.contains(
-                "hushrun: unit: test/two.test.js::ok failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"
-            ),
-            "{}",
-            caught.stderr
-        );
-        assert_eq!(store::disagreements(&r.cache), ["test/two.test.js::ok"]);
-    }
-}
-
-// covers: C-34, C-44
-#[test]
-fn an_injected_missed_dependency_in_jest_is_caught_by_an_audit() {
-    for jest in jests() {
-        // A test file that fails when a file outside the check's files exists, named by a
-        // variable: what no adapter sees. With one other test file, it is the one an audit runs.
-        let files = vec![
-            file("hushrun.yaml", &yaml("reuse")),
-            file(".gitignore", "node_modules\n"),
-            file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-            file("jest.config.js", CONFIG),
-            file("src/other.js", "exports.other = 1;\n"),
-            file(
-                "test/hidden.test.js",
-                "const fs = require('fs');\ntest('hidden', () => {\n  let there = true;\n  try { fs.lstatSync(process.env.FLAG_FILE || ''); } catch { there = false; }\n  expect(there).toBe(false);\n});\n",
-            ),
-            file(
-                "test/other.test.js",
-                "const { other } = require('../src/other');\ntest('other', () => { expect(other).toBe(1); });\n",
-            ),
-        ];
-        let r = Repo::new(&jest, &files);
-        let flag = r.root.join("flag");
-        let flag = flag.to_str().unwrap().to_string();
-        let env = [("FLAG_FILE", flag.as_str())];
-        assert_eq!(r.run_env(JEST_RUN, &env).code, 0);
-        std::fs::write(&flag, "").unwrap();
-        r.write("src/other.js", "exports.other = 2 - 1;\n");
-        let caught = r.run_env(JEST_RUN, &env);
-        assert_eq!(caught.code, 1, "{}", caught.out());
-        assert!(
-            caught.stderr.contains("unit: test/hidden.test.js failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"),
-            "{}",
-            caught.stderr
-        );
-    }
-}
-
 // covers: C-32, C-44
 #[test]
 fn jest_commands_hushrun_doesnt_observe_run_as_written_and_say_why() {
     for jest in jests() {
-        let r = Repo::new(&jest, &shop("reuse"));
+        let r = repo(&jest, &shop("reuse"));
         for (args, why) in [
             (
                 &["--listTests"][..],
@@ -850,54 +560,57 @@ fn jest_commands_hushrun_doesnt_observe_run_as_written_and_say_why() {
         ] {
             let mut command = vec!["run", "unit", "--", "node", "node_modules/jest/bin/jest.js"];
             command.extend(args);
-            let ran = r.run(&command);
+            let ran = run(&r, &command);
             assert!(
-                ran.stderr.contains(&format!("hushrun: unit: {why}")),
+                ran.says(&format!("unit: {why}")),
                 "Jest {} {args:?}: {}",
                 jest.major,
-                ran.stderr
+                ran.said()
             );
         }
         // Coverage: everything runs and is observed, nothing is left out.
-        assert_eq!(r.run(JEST_RUN).code, 0);
-        let covered = r.run(&[
-            "run",
-            "unit",
-            "--",
-            "node",
-            "node_modules/jest/bin/jest.js",
-            "--ci",
-            "--coverage",
-        ]);
-        assert_eq!(covered.code, 0, "{}", covered.out());
+        assert_eq!(run(&r, JEST_RUN).code, 0);
+        let covered = run(
+            &r,
+            &[
+                "run",
+                "unit",
+                "--",
+                "node",
+                "node_modules/jest/bin/jest.js",
+                "--ci",
+                "--coverage",
+            ],
+        );
+        assert_eq!(covered.code, 0, "{}", covered.said());
         assert!(
-            covered.stderr.contains(
-                "hushrun: unit: every test file runs: Jest's coverage is on, and a partial run's coverage would read as a drop"
+            covered.says(
+                "unit: every test file runs: Jest's coverage is on, and a partial run's coverage would read as a drop"
             ),
             "{}",
-            covered.stderr
+            covered.said()
         );
         // Coverage from the config: the adapter leaves nothing out, and says why.
         r.write(
             "jest.config.js",
             "module.exports = { testEnvironment: 'node', transform: {}, collectCoverage: true };\n",
         );
-        assert_eq!(r.run(JEST_RUN).code, 0);
+        assert_eq!(run(&r, JEST_RUN).code, 0);
         r.write("src/pricing.js", "exports.price = (x) => x + x;\n");
-        let config = r.run(JEST_RUN);
-        assert_eq!(config.code, 0, "{}", config.out());
+        let config = run(&r, JEST_RUN);
+        assert_eq!(config.code, 0, "{}", config.said());
         assert!(
-            config.stderr.contains(
-                "hushrun: unit: no test file was reused: Jest's coverage is on, and a partial run's coverage would read as a drop"
+            config.says(
+                "unit: no test file was reused: Jest's coverage is on, and a partial run's coverage would read as a drop"
             ),
             "Jest {}: {}",
             jest.major,
-            config.stderr
+            config.said()
         );
         assert!(
             config.stderr.contains("Test Suites: 7 passed, 7 total"),
             "{}",
-            config.stderr
+            config.said()
         );
     }
 }
@@ -913,33 +626,33 @@ fn a_script_that_replaces_node_options_is_said_with_the_fix_and_the_config_line_
             "bin/jest",
             "#!/bin/sh\nNODE_OPTIONS=--no-warnings exec node node_modules/jest/bin/jest.js \"$@\"\n",
         ));
-        let r = Repo::new(&jest, &files);
+        let r = repo(&jest, &files);
         let script = r.repo.join("bin/jest");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let command = ["run", "unit", "--", "bin/jest", "--ci"];
-        let lost = r.run(&command);
-        assert_eq!(lost.code, 0, "{}", lost.out());
+        let lost = run(&r, &command);
+        assert_eq!(lost.code, 0, "{}", lost.said());
         assert!(
-            lost.stderr.contains("hushrun: unit: test files weren't observed: Jest wrote nothing for hushrun: its processes didn't load hushrun's adapter, as when a script sets NODE_OPTIONS instead of adding to it (`NODE_OPTIONS=--experimental-vm-modules jest`); keep what it had (`NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules\" jest`), or put this line first in jest.config.js: `if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);`"),
+            lost.says("unit: test files weren't observed: Jest wrote nothing for hushrun: its processes didn't load hushrun's adapter, as when a script sets NODE_OPTIONS instead of adding to it (`NODE_OPTIONS=--experimental-vm-modules jest`); keep what it had (`NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules\" jest`), or put this line first in jest.config.js: `if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);`"),
             "Jest {}: {}",
             jest.major,
-            lost.stderr
+            lost.said()
         );
         // The line, first in the config: the run is observed through it, workers included.
         r.write(
             "jest.config.js",
             &format!("if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);\n{CONFIG}"),
         );
-        let loaded = r.run(&command);
-        assert_eq!(loaded.code, 0, "{}", loaded.out());
+        let loaded = run(&r, &command);
+        assert_eq!(loaded.code, 0, "{}", loaded.said());
         assert_eq!(
-            loaded.line("hushrun: unit: with"),
-            "hushrun: unit: with `tests: reuse`, all 7 test files would have run: none had passed here yet on the files it read",
+            loaded.line("unit: with"),
+            "unit: with `tests: reuse`, all 7 test files would have run: none had passed here yet on the files it read",
             "Jest {}",
             jest.major
         );
         assert_eq!(
-            r.reads("test/cart.test.js"),
+            reads(&r, "test/cart.test.js"),
             [
                 "jest.config.js",
                 "src/cart.js",
@@ -952,13 +665,13 @@ fn a_script_that_replaces_node_options_is_said_with_the_fix_and_the_config_line_
             "jest.config.js",
             &format!("process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);\n{CONFIG}"),
         );
-        let before = r.run(&command);
-        assert_eq!(before.code, 0, "{}", before.out());
+        let before = run(&r, &command);
+        assert_eq!(before.code, 0, "{}", before.said());
         assert!(
-            !before.stderr.contains("weren't observed"),
+            !before.says("weren't observed"),
             "Jest {}: {}",
             jest.major,
-            before.stderr
+            before.said()
         );
         // An ES module config takes the other form, in band and with workers alike.
         r.write("package.json", "{\"name\": \"shop\", \"private\": true}\n");
@@ -967,13 +680,13 @@ fn a_script_that_replaces_node_options_is_said_with_the_fix_and_the_config_line_
             "jest.config.mjs",
             "import { createRequire } from 'node:module'; if (process.env.HUSHRUN_JEST) createRequire(import.meta.url)(process.env.HUSHRUN_JEST);\nexport default { testEnvironment: 'node', transform: {} };\n",
         );
-        let esm = r.run(&["run", "unit", "--", "bin/jest", "--ci", "-i"]);
-        assert_eq!(esm.code, 0, "{}", esm.out());
+        let esm = run(&r, &["run", "unit", "--", "bin/jest", "--ci", "-i"]);
+        assert_eq!(esm.code, 0, "{}", esm.said());
         assert!(
-            !esm.stderr.contains("weren't observed"),
+            !esm.says("weren't observed"),
             "Jest {}: {}",
             jest.major,
-            esm.stderr
+            esm.said()
         );
     }
 }
@@ -997,10 +710,9 @@ fn adapter_jest_env(
     run["schema"] = json!("hushrun.units/v0");
     run["root"] = json!(r.repo);
     std::fs::write(units.join("hushrun.json"), run.to_string()).unwrap();
-    let preload = r.adapter().join("hushrun-jest.cjs");
-    let mut cmd = Command::new("node");
-    Repo::clean(&mut cmd);
-    let out = cmd
+    let preload = adapter_dir(r).join("hushrun-jest.cjs");
+    let out = r
+        .command("node")
         .arg("node_modules/jest/bin/jest.js")
         .arg("--ci")
         .args(args)
@@ -1118,8 +830,8 @@ fn listed(r: &Repo) -> Vec<String> {
 #[test]
 fn the_adapter_leaves_out_what_it_is_told_and_no_tests_found_stays_jests_own() {
     for jest in jests() {
-        let r = Repo::new(&jest, &shop("observe"));
-        assert_eq!(r.run(JEST_RUN).code, 0);
+        let r = repo(&jest, &shop("observe"));
+        assert_eq!(run(&r, JEST_RUN).code, 0);
         let every = listed(&r);
         // Every test file Jest chose was reused: Jest's "no tests found" would turn a pass into a
         // fail, so the run passes; the main process says what it left out.
@@ -1219,8 +931,8 @@ test('retried', () => {
             "test/ids.test.js",
             &format!("jest.retryTimes(2);\n{source}"),
         ));
-        let r = Repo::new(&jest, &files);
-        assert_eq!(r.run(JEST_RUN).code, 0);
+        let r = repo(&jest, &files);
+        assert_eq!(run(&r, JEST_RUN).code, 0);
         let every = listed(&r);
         let (code, out, facts) = adapter_jest(&r, json!({"unit": "test", "testFiles": every}), &[]);
         assert_eq!(code, 0, "{out}");
@@ -1352,8 +1064,8 @@ fn with_reads_test_each_test_says_what_it_ran_opened_and_imported() {
                 "const db = require('../src/db');\ntest.concurrent('together', async () => { expect(db.query('y')).toBe('rows for y'); });\ntest('alone', () => { expect(1).toBe(1); });\n",
             ),
         ];
-        let r = Repo::new(&jest, &files);
-        assert_eq!(r.run(JEST_RUN).code, 0);
+        let r = repo(&jest, &files);
+        assert_eq!(run(&r, JEST_RUN).code, 0);
         let every = listed(&r);
         let run = json!({"unit": "test", "reads": "test", "testFiles": every});
         for band in [&["-i"][..], &[][..]] {
@@ -1696,45 +1408,51 @@ fn check_hazards(jest: &Jest, hazards: Vec<Hazard>, some_reused: bool) {
             files.retain(|(p, _)| p != path);
             files.push((path.clone(), text.clone()));
         }
-        let r = Repo::new(jest, &files);
+        let r = repo(jest, &files);
         let command: Vec<&str> = match hazard.command {
             Some(words) => ["run", "unit", "--"].iter().chain(words).copied().collect(),
             None => JEST_RUN.to_vec(),
         };
-        // A snapshot is written by the first run, which keeps nothing: the files changed.
+        // A snapshot is written by the first run, which keeps nothing: the files changed, so
+        // `hushrun run` observes nothing of it, and here it is COMMAND alone.
         if hazard.name == "a snapshot" {
-            let mut write = command.clone();
+            let mut write = command[3..].to_vec();
             write.retain(|w| *w != "--ci");
-            assert_eq!(r.run(&write).code, 0, "{}", hazard.name);
+            let wrote = r
+                .command(write[0])
+                .args(&write[1..])
+                .output()
+                .expect("jest");
+            assert!(wrote.status.success(), "{}", hazard.name);
         }
-        let first = r.run(&command);
+        let first = run(&r, &command);
         assert_eq!(
             first.code,
             0,
             "Jest {} {}: {}",
             jest.major,
             hazard.name,
-            first.out()
+            first.said()
         );
         (hazard.change)(&r);
-        let failing = r.truth();
+        let failing = truth(&r);
         assert!(
             !failing.is_empty(),
             "Jest {} {}: nothing fails, so it tests nothing",
             jest.major,
             hazard.name
         );
-        let ran = r.run(&command);
-        assert_ne!(ran.code, 0, "{}: {}", hazard.name, ran.stderr);
-        let missed = missed(&ran.stderr);
+        let ran = run(&r, &command);
+        assert_ne!(ran.code, 0, "{}: {}", hazard.name, ran.said());
+        let missed = missed(&ran.lines.join("\n"));
         assert!(
             missed.is_empty(),
             "Jest {} {}: the plan would have reused what fails ({failing:?}): {missed:?}\n{}",
             jest.major,
             hazard.name,
-            ran.stderr
+            ran.said()
         );
-        reused += would_reuse(&ran.stderr);
+        reused += would_reuse(&ran.lines.join("\n"));
     }
     assert!(reused > 0 || !some_reused);
 }
@@ -1794,10 +1512,10 @@ fn what_every_test_file_reads_with_jest() {
             all.retain(|(p, _)| p != path);
             all.push((path.clone(), text.clone()));
         }
-        let r = Repo::new(&jest, &all);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 0, "{}", first.out());
-        let reads = r.reads("test/cart.test.js");
+        let r = repo(&jest, &all);
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 0, "{}", first.said());
+        let reads = reads(&r, "test/cart.test.js");
         for every in [
             "env/custom.js",
             "env/level.js",
@@ -1817,8 +1535,8 @@ fn what_every_test_file_reads_with_jest() {
             "setup/global.js",
             "module.exports = async () => { require('child_process').execFileSync(process.execPath, ['-e', '1']); process.env.SEEDED = '1'; };\n",
         );
-        let started = r.run(JEST_RUN);
-        assert_eq!(started.code, 0, "{}", started.out());
+        let started = run(&r, JEST_RUN);
+        assert_eq!(started.code, 0, "{}", started.said());
         let map = r.map();
         assert_eq!(
             map["units"]["test/cart.test.js"]["notFollowed"][0], "subprocess",
@@ -1861,11 +1579,11 @@ fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
                 "import { test, expect } from '@jest/globals';\nimport { other } from '../src/other';\ntest('other', () => { expect(other).toBe(1); });\n",
             ),
         ];
-        let r = Repo::new(&jest, &files);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 0, "{}", first.out());
+        let r = repo(&jest, &files);
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 0, "{}", first.said());
         // A type-only import is erased: no run shows it. Every file of code is read instead.
-        let reads = r.reads("test/other.test.ts");
+        let reads = reads(&r, "test/other.test.ts");
         assert!(
             reads.contains(&"src/types.ts".to_string()),
             "Jest {}: {reads:?}",
@@ -1874,10 +1592,14 @@ fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
         assert!(reads.contains(&"src/price.ts".to_string()), "{reads:?}");
         // The type changes, and the test file that used it fails to compile: it would run.
         r.write("src/types.ts", "export interface P { y: number }\n");
-        assert!(!r.truth().is_empty(), "a type error fails it");
-        let changed = r.run(JEST_RUN);
+        assert!(!truth(&r).is_empty(), "a type error fails it");
+        let changed = run(&r, JEST_RUN);
         assert_ne!(changed.code, 0);
-        assert!(missed(&changed.stderr).is_empty(), "{}", changed.stderr);
+        assert!(
+            missed(&changed.lines.join("\n")).is_empty(),
+            "{}",
+            changed.said()
+        );
         // With isolatedModules, ts-jest compiles each file alone: no type checker reads every
         // file, and each test file reads what Jest compiled for it. \[C-50\] The directories
         // TypeScript lists for tsconfig.json's `include` while ts-jest resolves it are no test
@@ -1930,19 +1652,13 @@ fn jest_projects_snapshots_and_worker_threads() {
             "test/thread.test.js",
             "const { Worker } = require('worker_threads');\ntest('thread', async () => { const w = new Worker('process.exit(0)', { eval: true }); await new Promise((r) => w.on('exit', r)); });\n",
         ));
-        let r = Repo::new(&jest, &files);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 0, "{}", first.out());
+        let r = repo(&jest, &files);
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 0, "{}", first.said());
         let map = r.map();
         assert_eq!(map["unitFiles"].as_array().unwrap().len(), 8, "{map:#}");
-        assert!(
-            r.reads("test/cart.test.js")
-                .contains(&"test/b.js".to_string())
-        );
-        assert!(
-            !r.reads("test/pricing.test.js")
-                .contains(&"test/b.js".to_string())
-        );
+        assert!(reads(&r, "test/cart.test.js").contains(&"test/b.js".to_string()));
+        assert!(!reads(&r, "test/pricing.test.js").contains(&"test/b.js".to_string()));
         // A worker thread isn't followed.
         assert_eq!(
             map["units"]["test/thread.test.js"]["notFollowed"][0], "worker",
@@ -1959,8 +1675,8 @@ fn jest_projects_snapshots_and_worker_threads() {
             "jest.config.js",
             "module.exports = { testEnvironment: 'node', transform: {}, testRunner: './test/runner.js' };\n",
         );
-        let other = r.run(JEST_RUN);
-        assert_eq!(other.code, 0, "{}", other.out());
+        let other = run(&r, JEST_RUN);
+        assert_eq!(other.code, 0, "{}", other.said());
         let map = r.map();
         assert_eq!(
             map["units"]["test/cart.test.js"]["notFollowed"],
@@ -2000,19 +1716,22 @@ fn jest_in_its_es_module_mode_is_observed() {
                 "import { test, expect } from '@jest/globals';\ntest('other', () => { expect(1).toBe(1); });\n",
             ),
         ];
-        let r = Repo::new(&jest, &files);
-        let ran = r.run(&[
-            "run",
-            "unit",
-            "--",
-            "node",
-            "--experimental-vm-modules",
-            "node_modules/jest/bin/jest.js",
-            "--ci",
-        ]);
-        assert_eq!(ran.code, 0, "{}", ran.out());
+        let r = repo(&jest, &files);
+        let ran = run(
+            &r,
+            &[
+                "run",
+                "unit",
+                "--",
+                "node",
+                "--experimental-vm-modules",
+                "node_modules/jest/bin/jest.js",
+                "--ci",
+            ],
+        );
+        assert_eq!(ran.code, 0, "{}", ran.said());
         assert_eq!(
-            r.reads("test/cart.test.js"),
+            reads(&r, "test/cart.test.js"),
             [
                 "jest.config.js",
                 "src/cart.js",
@@ -2023,7 +1742,7 @@ fn jest_in_its_es_module_mode_is_observed() {
             jest.major
         );
         assert_eq!(
-            r.reads("test/other.test.js"),
+            reads(&r, "test/other.test.js"),
             ["jest.config.js", "test/other.test.js"]
         );
     }
@@ -2042,17 +1761,20 @@ fn a_test_file_that_fails_to_load_or_kills_its_worker_is_told() {
             "test/crash.test.js",
             "test('crash', () => { process.kill(process.pid, 'SIGKILL'); });\n",
         ));
-        let r = Repo::new(&jest, &files);
-        let ran = r.run(&[
-            "run",
-            "unit",
-            "--",
-            "node",
-            "node_modules/jest/bin/jest.js",
-            "--ci",
-            "--maxWorkers=2",
-        ]);
-        assert_ne!(ran.code, 0, "{}", ran.out());
+        let r = repo(&jest, &files);
+        let ran = run(
+            &r,
+            &[
+                "run",
+                "unit",
+                "--",
+                "node",
+                "node_modules/jest/bin/jest.js",
+                "--ci",
+                "--maxWorkers=2",
+            ],
+        );
+        assert_ne!(ran.code, 0, "{}", ran.said());
         let map = r.map();
         // The worker that ran it died before it said what it read: not observed.
         assert_eq!(
@@ -2093,7 +1815,7 @@ fn reads_repo(jest: &Jest, files: &[(&str, &str)], tests: &str) -> Repo {
         all.retain(|(p, _)| p != path);
         all.push(file(path, text));
     }
-    Repo::new(jest, &all)
+    repo(jest, &all)
 }
 
 /// Whether `observe`, with `reads`, would have reused `target` of `test/a.test.js` after
@@ -2109,23 +1831,23 @@ fn would_reuse_test(
         files,
         &format!("{{mode: observe, unit: test, reads: {reads}}}"),
     );
-    let first = r.run(JEST_RUN);
-    assert_eq!(first.code, 0, "Jest {}: {}", jest.major, first.out());
+    let first = run(&r, JEST_RUN);
+    assert_eq!(first.code, 0, "Jest {}: {}", jest.major, first.said());
     assert!(
-        !first.stderr.contains("each test is taken to have read"),
+        !first.says("each test is taken to have read"),
         "{}",
-        first.stderr
+        first.said()
     );
     r.write(change.0, change.1);
-    let second = r.run(JEST_RUN);
+    let second = run(&r, JEST_RUN);
     assert_eq!(
         second.code,
         1,
         "the change makes target fail:\n{}",
-        second.out()
+        second.said()
     );
-    second.stderr.contains(
-        "hushrun: unit: test/a.test.js::target failed, though it passed before on the same files it read: with `tests: reuse` it would have been reused",
+    second.says(
+        "unit: test/a.test.js::target failed, though it passed before on the same files it read: with `tests: reuse` it would have been reused",
     )
 }
 
@@ -2399,7 +2121,7 @@ fn a_known_miss_of_jest_reads_test_a_registry_another_file_filled_at_import() {
 
 /// The line `observe` says of what reusing tests would have done.
 fn observe_tests_line(ran: &Ran) -> String {
-    ran.line("hushrun: unit: with `tests: reuse`,").to_string()
+    ran.line("unit: with `tests: reuse`,").to_string()
 }
 
 // covers: C-40, C-44
@@ -2431,22 +2153,22 @@ fn a_concurrent_test_gets_its_files_list() {
                 ),
             ];
             let r = reads_repo(&jest, &files, "{mode: observe, unit: test, reads: test}");
-            let first = r.run(JEST_RUN);
-            assert_eq!(first.code, 0, "{}", first.out());
+            let first = run(&r, JEST_RUN);
+            assert_eq!(first.code, 0, "{}", first.said());
             assert_eq!(
-                first.stderr.contains("each test is taken to have read what its test file read: test.concurrent tests run at once"),
+                first.says("each test is taken to have read what its test file read: test.concurrent tests run at once"),
                 concurrent,
                 "{}",
-                first.stderr
+                first.said()
             );
             r.write("src/other.js", "exports.f = () => 1; // changed\n");
-            let second = r.run(JEST_RUN);
-            assert_eq!(second.code, 0, "{}", second.out());
+            let second = run(&r, JEST_RUN);
+            assert_eq!(second.code, 0, "{}", second.said());
             assert!(
                 observe_tests_line(&second).contains(expected),
                 "Jest {} concurrent {concurrent}: {}",
                 jest.major,
-                second.stderr
+                second.said()
             );
         }
     }
@@ -2472,35 +2194,38 @@ fn ts_jest_checking_types_and_jests_v8_coverage_watch_no_test_and_say_why() {
             ),
         ];
         let r = reads_repo(&jest, &files, "{mode: observe, unit: test, reads: test}");
-        let typed = r.run(JEST_RUN);
-        assert_eq!(typed.code, 0, "{}", typed.out());
+        let typed = run(&r, JEST_RUN);
+        assert_eq!(typed.code, 0, "{}", typed.said());
         assert!(
-            typed.stderr.contains("hushrun: unit: each test is taken to have read what its test file read: ts-jest checks types with a language service, which reads every file of code for every test file"),
+            typed.says("unit: each test is taken to have read what its test file read: ts-jest checks types with a language service, which reads every file of code for every test file"),
             "Jest {}: {}",
             jest.major,
-            typed.stderr
+            typed.said()
         );
         let r = reads_repo(
             &jest,
             &[("test/a.test.js", "test('target', () => {});\n")],
             "{mode: observe, unit: test, reads: test}",
         );
-        let covered = r.run(&[
-            "run",
-            "unit",
-            "--",
-            "node",
-            "node_modules/jest/bin/jest.js",
-            "--ci",
-            "--coverage",
-            "--coverageProvider=v8",
-        ]);
-        assert_eq!(covered.code, 0, "{}", covered.out());
+        let covered = run(
+            &r,
+            &[
+                "run",
+                "unit",
+                "--",
+                "node",
+                "node_modules/jest/bin/jest.js",
+                "--ci",
+                "--coverage",
+                "--coverageProvider=v8",
+            ],
+        );
+        assert_eq!(covered.code, 0, "{}", covered.said());
         assert!(
-            covered.stderr.contains("hushrun: unit: each test is taken to have read what its test file read: Jest's own V8 coverage is on, and it takes the counters watching a test needs"),
+            covered.says("unit: each test is taken to have read what its test file read: Jest's own V8 coverage is on, and it takes the counters watching a test needs"),
             "Jest {}: {}",
             jest.major,
-            covered.stderr
+            covered.said()
         );
     }
 }
@@ -2529,8 +2254,8 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
             ),
         ];
         let r = reads_repo(&jest, &files, "{mode: reuse, unit: test, reads: test}");
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 0, "{}", first.out());
+        let first = run(&r, JEST_RUN);
+        assert_eq!(first.code, 0, "{}", first.said());
         let map = r.map();
         assert_eq!(
             map["units"]["test/a.test.js"]["tests"]
@@ -2543,17 +2268,17 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
         collect(&r.cache.join("results/units/v0"), &mut results);
         assert_eq!(results.len(), 2 + 61 + 1, "Jest {}", jest.major);
         r.write("src/a.js", "exports.f = () => 1; // changed\n");
-        let second = r.run(JEST_RUN);
-        assert_eq!(second.code, 0, "{}", second.out());
+        let second = run(&r, JEST_RUN);
+        assert_eq!(second.code, 0, "{}", second.said());
         assert!(
-            second.stderr.lines().any(|l| hushrun_testkit::lines::drawn(l)
-                == hushrun_testkit::lines::drawn("hushrun: unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
+            second.lines.iter().any(|l| hushrun_testkit::lines::drawn(l)
+                == hushrun_testkit::lines::drawn("unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
             "Jest {}: {}",
             jest.major,
-            second.stderr
+            second.said()
         );
         assert_eq!(
-            store_result(&r)["units"]["tests"],
+            second.units["tests"],
             json!({"total": 62, "ran": 3, "reused": 59})
         );
     }
@@ -2565,7 +2290,7 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
 fn a_start_of_jest_that_runs_no_test_file_is_no_second_start() {
     use std::os::unix::fs::PermissionsExt as _;
     for jest in jests() {
-        let r = Repo::new(
+        let r = repo(
             &jest,
             &[
                 file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
@@ -2599,13 +2324,17 @@ fn a_start_of_jest_that_runs_no_test_file_is_no_second_start() {
             bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let ran = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
-        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.out());
+        let ran = run_env(
+            &r,
+            &["run", "unit", "--", "pnpm", "jest"],
+            &[("PATH", &path)],
+        );
+        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.said());
         assert!(
-            !ran.stderr.contains("records a pass"),
+            !ran.says("records a pass"),
             "Jest {}: {}",
             jest.major,
-            ran.stderr
+            ran.said()
         );
         assert_eq!(
             r.map()["units"]["test/a.test.js"]["tests"]["a1"],
@@ -2625,13 +2354,17 @@ fn a_start_of_jest_that_runs_no_test_file_is_no_second_start() {
             ),
         )
         .unwrap();
-        let after = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
-        assert_eq!(after.code, 0, "Jest {}: {}", jest.major, after.out());
+        let after = run_env(
+            &r,
+            &["run", "unit", "--", "pnpm", "jest"],
+            &[("PATH", &path)],
+        );
+        assert_eq!(after.code, 0, "Jest {}: {}", jest.major, after.said());
         assert!(
-            !after.stderr.contains("records a pass"),
+            !after.says("records a pass"),
             "Jest {}: {}",
             jest.major,
-            after.stderr
+            after.said()
         );
     }
 }
@@ -2648,7 +2381,7 @@ fn a_second_start_of_jest_in_one_command_keeps_every_pass_of_the_run_out() {
     for jest in jests() {
         // The first start runs both files, and passes; the second runs them again with FAILNOW
         // set, and f1 fails there. Only the first start is observed.
-        let r = Repo::new(
+        let r = repo(
             &jest,
             &[
                 file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
@@ -2672,9 +2405,13 @@ fn a_second_start_of_jest_in_one_command_keeps_every_pass_of_the_run_out() {
             bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let ran = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        let ran = run_env(
+            &r,
+            &["run", "unit", "--", "pnpm", "jest"],
+            &[("PATH", &path)],
+        );
         // The second start's failure is COMMAND's.
-        assert_eq!(ran.code, 1, "Jest {}: {}", jest.major, ran.out());
+        assert_eq!(ran.code, 1, "Jest {}: {}", jest.major, ran.said());
         // No pass of that run is kept: f1 failed in the second start.
         let map = r.map();
         for (unit, test) in [("test/f.test.js", "f1"), ("test/a.test.js", "a1")] {
@@ -2686,11 +2423,14 @@ fn a_second_start_of_jest_in_one_command_keeps_every_pass_of_the_run_out() {
         }
         // The run says why, once.
         assert_eq!(
-            ran.stderr.matches(SECOND_START).count(),
+            ran.lines
+                .iter()
+                .filter(|l| l.contains(SECOND_START))
+                .count(),
             1,
             "Jest {}: {}",
             jest.major,
-            ran.stderr
+            ran.said()
         );
         // The same COMMAND with one start: as before, its passes are kept and nothing is said.
         std::fs::write(
@@ -2698,13 +2438,17 @@ fn a_second_start_of_jest_in_one_command_keeps_every_pass_of_the_run_out() {
             "#!/bin/sh\nnode node_modules/jest/bin/jest.js --ci\n",
         )
         .unwrap();
-        let once = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
-        assert_eq!(once.code, 0, "Jest {}: {}", jest.major, once.out());
+        let once = run_env(
+            &r,
+            &["run", "unit", "--", "pnpm", "jest"],
+            &[("PATH", &path)],
+        );
+        assert_eq!(once.code, 0, "Jest {}: {}", jest.major, once.said());
         assert!(
-            !once.stderr.contains("records a pass"),
+            !once.says("records a pass"),
             "Jest {}: {}",
             jest.major,
-            once.stderr
+            once.said()
         );
         assert_eq!(
             r.map()["units"]["test/f.test.js"]["tests"]["f1"],
@@ -2712,103 +2456,6 @@ fn a_second_start_of_jest_in_one_command_keeps_every_pass_of_the_run_out() {
             "Jest {}",
             jest.major
         );
-    }
-}
-
-/// What `hushrun why` says, stdout and stderr, of `unit` after the runs so far.
-fn why_of(r: &Repo, unit: &str) -> String {
-    r.run(&["why", "unit", unit]).out()
-}
-
-// covers: C-37, C-44
-#[test]
-fn why_says_what_an_error_no_jest_test_owns_left_of_its_file_and_of_another() {
-    // A timer `leaks` left throws while `waits` runs: Jest 29 charges it to `waits`, Jest 30 to
-    // `leaks`. leak.test.js failed, and no test of it keeps a result; ok.test.js passed, and
-    // keeps its pass: Jest tells failures by test file.
-    let files = vec![
-        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
-        file(".gitignore", "node_modules\n"),
-        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-        file("jest.config.js", CONFIG),
-        file(
-            "test/leak.test.js",
-            "test('leaks', () => { setTimeout(() => { throw new Error('late timer'); }, 20); });\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 150)); });\ntest('after', () => {});\n",
-        ),
-        file("test/ok.test.js", "test('ok', () => {});\n"),
-    ];
-    let said = "Jest reported an error it couldn't charge to a test (late timer), so no test of its file keeps a result of that run";
-    for jest in jests() {
-        let r = Repo::new(&jest, &files);
-        let first = r.run(JEST_RUN);
-        assert_eq!(first.code, 1, "{}", first.out());
-        let after = why_of(&r, "test/leak.test.js::after");
-        assert!(after.contains(said), "Jest {}: {after}", jest.major);
-        let file = why_of(&r, "test/leak.test.js");
-        assert!(
-            file.contains(
-                "test/leak.test.js runs: its newest result on the files it reads now failed"
-            ),
-            "Jest {}: {file}",
-            jest.major
-        );
-        for unit in ["test/ok.test.js", "test/ok.test.js::ok"] {
-            let why = why_of(&r, unit);
-            assert!(
-                why.contains("would be reused") && !why.contains("couldn't charge"),
-                "Jest {}: {unit}: {why}",
-                jest.major
-            );
-        }
-    }
-}
-
-// covers: C-37, C-44
-#[cfg(unix)]
-#[test]
-fn why_says_a_second_start_of_jest_kept_every_pass_of_its_run_out() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let said = "Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told, so no pass of that run is kept";
-    for jest in jests() {
-        let r = Repo::new(
-            &jest,
-            &[
-                file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
-                file(".gitignore", "node_modules\n"),
-                file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-                file("jest.config.js", CONFIG),
-                file("test/a.test.js", "test('a1', () => {});\n"),
-                file(
-                    "test/f.test.js",
-                    "test('f1', () => { expect(process.env.FAILNOW).toBeUndefined(); });\n",
-                ),
-            ],
-        );
-        // As a package script does under `pnpm jest`: a stand-in `pnpm` that starts it twice.
-        let bin = r.root.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("pnpm"),
-            "#!/bin/sh\nnode node_modules/jest/bin/jest.js --ci && FAILNOW=1 node node_modules/jest/bin/jest.js --ci\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let ran = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
-        assert_eq!(ran.code, 1, "Jest {}: {}", jest.major, ran.out());
-        for unit in [
-            "test/f.test.js::f1",
-            "test/f.test.js",
-            "test/a.test.js::a1",
-            "test/a.test.js",
-        ] {
-            let why = why_of(&r, unit);
-            assert!(why.contains(said), "Jest {}: {unit}: {why}", jest.major);
-        }
     }
 }
 
@@ -2863,9 +2510,9 @@ fn wrapped_node_functions_keep_what_callers_see_with_jest_and_their_promisified_
         // promisified form resolves to, and `fs.realpath` and `fs.realpathSync` carry `native`;
         // `Worker`, `process.dlopen` and `vm`'s have their names and lengths. A child process a
         // promisified form starts is still one hushrun can't follow, and what it read is read.
-        let r = Repo::new(&jest, &carried_files("observe"));
-        let ran = r.run(JEST_RUN);
-        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.out());
+        let r = repo(&jest, &carried_files("observe"));
+        let ran = run(&r, JEST_RUN);
+        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.said());
         let map = r.map();
         for unit in ["test/execfile.test.js", "test/exec.test.js"] {
             assert_eq!(
@@ -2876,8 +2523,7 @@ fn wrapped_node_functions_keep_what_callers_see_with_jest_and_their_promisified_
             );
         }
         assert!(
-            r.reads("test/fs.test.js")
-                .contains(&"src/data.js".to_string()),
+            reads(&r, "test/fs.test.js").contains(&"src/data.js".to_string()),
             "Jest {}: {map:#}",
             jest.major
         );
@@ -2890,12 +2536,12 @@ fn with_tests_one_by_one_jests_wrappers_keep_what_callers_see_too() {
     for jest in jests() {
         // With tests one by one and what each read, the same: Node's functions as callers see
         // them, and a promisified child process not followed.
-        let r = Repo::new(
+        let r = repo(
             &jest,
             &carried_files("{mode: reuse, unit: test, reads: test}"),
         );
-        let ran = r.run(JEST_RUN);
-        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.out());
+        let ran = run(&r, JEST_RUN);
+        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.said());
         let map = r.map();
         for (unit, test) in [
             ("test/execfile.test.js", "execFile"),
