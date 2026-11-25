@@ -14,11 +14,12 @@ use std::time::SystemTime;
 
 use super::super::facts::{self, FactsFile, RunFile, TestFacts, Unfollowed, UnitFacts};
 use super::super::program::{self, Call};
+use super::ADAPTER;
 use super::args::{self, Mode};
 use super::build::{self, Built, Walker};
+use super::built::{PLAN_FILE, PLAN_SCHEMA, PlanFile};
 use super::junit::{self, Outcome};
 use super::select::{self, Program, SelectAt, Test};
-use super::{ADAPTER, PLAN_FILE, PlanFile};
 
 /// The program hushrun puts on `PATH` for the CTest adapter.
 pub struct Ctest;
@@ -656,7 +657,7 @@ pub(crate) fn plan_file(units: &Path) -> Option<(PlanFile, SystemTime)> {
     places.into_iter().find_map(|path| {
         let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
         let plan: PlanFile = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-        (plan.schema == super::PLAN_SCHEMA).then_some((plan, modified))
+        (plan.schema == PLAN_SCHEMA).then_some((plan, modified))
     })
 }
 

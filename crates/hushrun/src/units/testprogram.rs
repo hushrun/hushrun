@@ -492,7 +492,7 @@ impl Adapter for Recognized {
     }
 
     fn plan_from_files(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
-        Ok(Some(ctest::planning(at, None)))
+        Ok(Some(ctest::built::planning(at, None)))
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
@@ -514,7 +514,7 @@ impl Adapter for Recognized {
                 )
             })
             .collect();
-        let mut compiled = ctest::compiled_from(&programs, &walked.built, at.tree);
+        let mut compiled = ctest::built::compiled_from(&programs, &walked.built, at.tree);
         compiled.name(
             walked
                 .sources
@@ -522,9 +522,9 @@ impl Adapter for Recognized {
                 .filter(|f| at.tree.contains(f))
                 .cloned(),
         );
-        let planning = ctest::planning(at, Some(&compiled));
+        let planning = ctest::built::planning(at, Some(&compiled));
         if let Some(started) = self.started.get() {
-            ctest::write_plan(&started.dir, &planning, at.tree);
+            ctest::built::write_plan(&started.dir, &planning, at.tree);
         }
         Ok(Some(planning))
     }
@@ -618,7 +618,7 @@ impl Adapter for Recognized {
             .get("leftOut")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut read = ctest::read_built(at, std::slice::from_ref(&file), ADAPTER)?;
+        let mut read = ctest::built::read_built(at, std::slice::from_ref(&file), ADAPTER)?;
         if let Some(read) = &mut read {
             read.left_out = left_out;
             read.stale_build = file.stale_build.clone();
@@ -634,7 +634,7 @@ impl Adapter for Recognized {
         units::classify(
             at.tree.paths(),
             &|p| at.map.unit_files.contains(p),
-            Sources::Named(&at.map.sources, ctest::SOURCE_KINDS),
+            Sources::Named(&at.map.sources, build::SOURCE_KINDS),
             at.ignore,
         )
     }
