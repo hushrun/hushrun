@@ -378,6 +378,12 @@ pub trait Adapter: std::fmt::Debug {
         None
     }
 
+    /// \[C-146\] Whether `hushrun why`, which starts no tool, keys a test by the list its row
+    /// keeps from its last run here: the map the adapter made then, which it can't make now.
+    fn why_tests_by_their_rows(&self) -> bool {
+        false
+    }
+
     /// \[C-38\] How its hints are addressed and keyed.
     fn hints(&self) -> Hints {
         Hints::Sources

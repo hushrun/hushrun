@@ -2064,6 +2064,11 @@ impl Adapter for Recognized {
         })
     }
 
+    /// \[C-146\] With nextest, a test's row keeps the static map's list of its last run here.
+    fn why_tests_by_their_rows(&self) -> bool {
+        self.nextest && !self.doc
+    }
+
     /// \[C-146\] With nextest, the static map stands in for what a test was watched to read.
     fn not_watched(&self) -> Option<String> {
         self.nextest.then(|| {
