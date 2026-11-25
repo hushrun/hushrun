@@ -3,6 +3,11 @@
 //! as hushrun's hook on `BASH_ENV` noted it: the files it loaded and sourced, and the scripts it
 //! ran, and what they sourced.
 //!
+//! End to end, every one (CONTRIBUTING.md, "Which tests CI runs again"): the hook starts the
+//! `hushrun` binary itself (`HUSHRUN_BATS_EXE`) when bats starts and ends, so every run Bats'
+//! adapter observes reads all of hushrun, and none of these is in-process. Each test runs the
+//! binary, or the hook with the binary, as a person's run would.
+//!
 //! The fixtures are small shell projects, and need bats-core 1.10 or later: `HUSHRUN_TEST_BATS`
 //! names the directories holding a `bats`, separated as `PATH` is, and each runs every test here;
 //! without it, the `bats` on `PATH`. They say so and pass where bats is missing, unless
