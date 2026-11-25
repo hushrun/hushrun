@@ -1020,12 +1020,12 @@ fn write_facts(
         units,
         // \[C-32\] Each `ctest` is a start of its own, and writes one file: a program counts as
         // run whole only when each start that ran any of it ran it whole.
-        start: Some(format!("{}-{}-{}", ADAPTER, std::process::id(), nanos)),
+        start: Some(format!("{ADAPTER}-{}-{nanos}", std::process::id())),
         stale_build,
         errors,
         ..FactsFile::default()
     };
-    let path = dir.join(format!("{}-{}-{}.json", ADAPTER, std::process::id(), nanos));
+    let path = dir.join(format!("{ADAPTER}-{}-{nanos}.json", std::process::id()));
     if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
     }

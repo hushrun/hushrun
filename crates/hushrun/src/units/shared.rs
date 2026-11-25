@@ -27,10 +27,10 @@ use hushrun_core::glob::Pattern;
 use hushrun_core::hints::{self, Key, Os};
 use hushrun_core::units::{self, KeyBase, Set, Sets, Sources, Tree};
 
-use super::MOST_UNITS;
 use super::adapter::Hints;
 use super::db::{HintHow, HintKnown};
 use super::store::{Found, HintPlace, Lookup, Mapped, Origin, UnitResults};
+use super::{MOST_UNITS, gotest};
 use crate::results::RunResult;
 
 /// The most lists a test file's key is computed from.
@@ -278,7 +278,7 @@ pub fn lists(
     shared: &Shared,
     tree: &Tree,
     compiled: Option<&BTreeSet<String>>,
-    getenv: Option<&super::getenv::Getenv>,
+    getenv: Option<&gotest::Getenv>,
 ) -> Option<Vec<List>> {
     let none = BTreeSet::new();
     let make = |reads: &BTreeSet<String>,
@@ -288,7 +288,7 @@ pub fn lists(
                 from: From| {
         let mut files = compiled.cloned().unwrap_or_default();
         files.extend(reads.iter().cloned());
-        files.extend(super::store::under(tree, dirs));
+        files.extend(gotest::under(tree, dirs));
         List {
             files,
             reads: reads.clone(),
@@ -380,7 +380,7 @@ pub fn test_lists(
     }
     let own = |reads: BTreeSet<String>, dirs: &BTreeSet<String>, from: From| {
         let mut files = reads.clone();
-        files.extend(super::store::under(tree, dirs));
+        files.extend(gotest::under(tree, dirs));
         TestList {
             list: List {
                 files,
