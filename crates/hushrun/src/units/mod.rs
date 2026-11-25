@@ -41,6 +41,7 @@ pub mod maven;
 pub mod mesontest;
 pub mod mocha;
 pub mod node_test;
+pub mod phpunit;
 pub mod program;
 pub mod pytest;
 pub mod ruby;
