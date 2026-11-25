@@ -767,3 +767,35 @@ fn a_name_is_matched_only_among_what_its_crate_can_see() {
     // An unresolved `target` in `lower` can't be `upper`'s, which depends on it.
     assert!(!reached.contains("upper/src/lib.rs"), "{reached:?}");
 }
+
+// covers: C-150
+#[test]
+fn what_a_derive_made_reaches_its_own_type_not_every_type_of_its_name() {
+    let files: &[(&str, &str)] = &[
+        (
+            "src/lib.rs",
+            "#[derive(Default)]\npub struct Observed { n: u8 }\n#[test]\nfn t() { let _ = Observed::default(); }\n",
+        ),
+        (
+            "src/other.rs",
+            "#[derive(Default)]\npub struct Observed { far: Far }\npub struct Far;\n",
+        ),
+    ];
+    let symbols: &[(&str, &str)] = &[
+        ("t", "t()."),
+        ("Observed", "Observed#"),
+        ("n", "Observed#n."),
+        ("default", "impl#[Observed][Default]default()."),
+        ("far", "other/Observed#far."),
+        ("Far", "other/Far#"),
+        ("Default", "rust-analyzer cargo core 1.0 default/Default:"),
+        (
+            "derive",
+            "rust-analyzer cargo core 1.0 macros/builtin/derive:",
+        ),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+    ];
+    let at: &[(&str, &str, usize, &str)] = &[("src/other.rs", "Observed", 1, "other/Observed#")];
+    let fake = Fake { files, symbols, at };
+    assert_eq!(fake.reach("t").unwrap(), set(&["src/lib.rs"]));
+}

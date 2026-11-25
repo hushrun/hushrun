@@ -100,7 +100,15 @@ impl Macros {
                         matcher_words(left, source, literals);
                     }
                     if let Some(right) = rule.child_by_field_name("right") {
-                        free(right, source, None, &mut entry.0, &mut entry.1, handed);
+                        free(
+                            right,
+                            source,
+                            None,
+                            &BTreeSet::new(),
+                            &mut entry.0,
+                            &mut entry.1,
+                            handed,
+                        );
                         let text = &source[right.byte_range()];
                         entry.2 |= crate::graph::ROOT_ATTRS
                             .iter()
@@ -170,16 +178,71 @@ fn matcher_words(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<S
     }
 }
 
+/// The names a token tree binds itself, not those of the trees in it: each `use` declaration's
+/// last segment or its `as` name, and each name after `fn`, `struct`, `enum`, `union`, `trait`,
+/// `type`, `const`, `static`, `mod` or `let`. In that tree and those in it, they are the
+/// expansion's own, wherever it expands.
+fn bound(tree: tree_sitter::Node<'_>, source: &str, out: &mut BTreeSet<String>) {
+    let mut cursor = tree.walk();
+    let tokens: Vec<tree_sitter::Node<'_>> = tree.children(&mut cursor).collect();
+    let text = |n: &tree_sitter::Node<'_>| &source[n.byte_range()];
+    let mut in_use = false;
+    let mut last: Option<String> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        let word = text(token);
+        if matches!(token.kind(), "token_tree" | "token_repetition") {
+            continue;
+        }
+        if word == "use" {
+            in_use = true;
+            last = None;
+            continue;
+        }
+        if in_use {
+            match word {
+                ";" => {
+                    out.extend(last.take());
+                    in_use = false;
+                }
+                _ if token.kind() == "identifier" => last = Some(word.to_string()),
+                _ => {}
+            }
+            continue;
+        }
+        if token.kind() == "identifier"
+            && i > 0
+            && matches!(
+                text(&tokens[i - 1]),
+                "fn" | "struct"
+                    | "enum"
+                    | "union"
+                    | "trait"
+                    | "type"
+                    | "const"
+                    | "static"
+                    | "mod"
+                    | "let"
+            )
+        {
+            out.insert(word.to_string());
+        }
+    }
+}
+
 /// The free names under a transcriber, and the macros it invokes. Inside the input of a macro it
 /// invokes (`inside`), a name goes to `handed`, with that macro.
+#[allow(clippy::too_many_arguments)]
 fn free(
     tree: tree_sitter::Node<'_>,
     source: &str,
     inside: Option<&str>,
+    scope: &BTreeSet<String>,
     names: &mut BTreeSet<String>,
     invoked: &mut BTreeSet<String>,
     handed: &mut Vec<(String, String)>,
 ) {
+    let mut scope = scope.clone();
+    bound(tree, source, &mut scope);
     let mut cursor = tree.walk();
     let tokens: Vec<tree_sitter::Node<'_>> = tree.children(&mut cursor).collect();
     let text = |n: &tree_sitter::Node<'_>| &source[n.byte_range()];
@@ -194,6 +257,7 @@ fn free(
                     *token,
                     source,
                     macro_name.or(inside),
+                    &scope,
                     names,
                     invoked,
                     handed,
@@ -213,8 +277,9 @@ fn free(
                 if after == Some("::") && matches!(word, "std" | "core" | "alloc" | "crate") {
                     continue;
                 }
-                // `name: …`: a field, a binding or a macro's own label, never an item.
-                if after == Some(":") {
+                // `name: …`: a field, a binding or a macro's own label, never an item; and what
+                // the expansion binds itself here.
+                if after == Some(":") || scope.contains(word) {
                     continue;
                 }
                 // A method's name, `.name`, apart from a path's head.

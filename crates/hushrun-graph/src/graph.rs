@@ -1169,6 +1169,23 @@ impl<'g, 'i> Linker<'g, 'i> {
                 }
                 owner = Symbol::owner(&o);
             }
+            // An `impl`'s item (`m/impl#[T][Tr]f().`, what a derive made): its type `m/T#` in
+            // the same module, when the index defines it, before any name.
+            if !found && let Some(at) = text.find("impl#[") {
+                let module = &text[..at];
+                for name in &bracketed {
+                    let typed = format!("{module}{name}#");
+                    let held = self
+                        .symbol_ids
+                        .get(typed.as_str())
+                        .and_then(|id| self.defs.get(id))
+                        .cloned();
+                    for d in held.into_iter().flatten() {
+                        found = true;
+                        self.edge(n, d);
+                    }
+                }
+            }
             let held = found;
             for name in bracketed.iter().filter(|_| !held) {
                 for call in self.calls_naming.get(*name).cloned().unwrap_or_default() {
