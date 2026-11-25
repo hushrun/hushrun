@@ -381,7 +381,8 @@ pub enum BuildCommand {
     /// It pulls `<registry>/<org>/<name>:hushrun-<platform>-latest` with a pull token in
     /// HUSHRUN_REGISTRY_TOKEN, the backend's credential here, or nothing for a public
     /// repository; checks the store, and its signature when hushrun.yaml names signers of baked
-    /// stores; and only then replaces what was there.
+    /// stores; and only then replaces what was there. When the folder holds that store already, it
+    /// downloads nothing.
     Pull(BuildPullArgs),
     /// Write a self-contained store of one repository's compiled crates, Go packages and C and
     /// C++ objects for this machine's platforms: sealed packs, sealed hints and baked.json,
@@ -560,7 +561,7 @@ pub struct BuildPullArgs {
     /// The image, `<host>/<org>/<name>` [default: this repository's on its backend's registry].
     #[arg(long, value_name = "REPOSITORY")]
     pub image: Option<String>,
-    /// The tag, by default `hushrun-<platform>-latest`.
+    /// The tag, by default `hushrun-<platform>-latest`, or `sha256:<64 hex>` for one image.
     #[arg(long, value_name = "TAG")]
     pub tag: Option<String>,
     /// The platform, as tags name it, such as linux-x64 [default: this machine's].
@@ -815,8 +816,8 @@ pub struct InitArgs {
 
     /// The agent clouds your team uses, comma-separated: claude-code, cursor, copilot, codex,
     /// jules, devin, devcontainer, or none. init writes their files: hooks that send what a
-    /// session passed before it ends, Copilot's setup steps, a dev container's feature
-    /// [default: the ones the repository already has files for].
+    /// session passed before it ends, Copilot's setup steps, a dev container's feature. Without
+    /// it, init writes none of them, and at a terminal says which this repository has files for.
     #[arg(
         long,
         value_name = "LIST",

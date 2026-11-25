@@ -3,7 +3,7 @@
 - **Status:** proposed; built
 - **Date:** 2026-11-23
 - **Rules:** B-240 and C-145 new; B-63 to B-67 and B-70 read
-- **Amended by:** [0146](0146-a-pull-streams-its-layers-and-skips-a-store-it-has.md)
+- **Amended by:** [0148](0148-a-pull-that-says-what-it-pulled.md)
 
 ## Context
 

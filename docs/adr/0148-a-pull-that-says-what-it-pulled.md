@@ -1,4 +1,4 @@
-# 0146. A pull that says what it pulled, and downloads only what is new
+# 0148. A pull that says what it pulled, and downloads only what is new
 
 - **Status:** proposed; built
 - **Date:** 2026-11-25

@@ -108,7 +108,7 @@ project's new branch starts from what main's CI already ran.
 - **`hushrun build pull`** (B-240, [ADR 0143](docs/adr/0143-a-baked-store-pulled-into-a-fixed-sandbox.md)):
   the repository's newest baked store from the backend's registry, checked (and its signature, when
   `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`
-  ([ADR 0146](docs/adr/0146-a-pull-streams-its-layers-and-skips-a-store-it-has.md)): a pull into a
+  ([ADR 0148](docs/adr/0148-a-pull-that-says-what-it-pulled.md)): a pull into a
   folder that holds the store the image names already downloads nothing (`--force` pulls anyway);
   each layer goes to disk as it arrives, never into memory whole; `--resolve` prints
   `<image>@<digest>` only; `--format json` gives `hushrun.build-pull/v1`; `--require-signed`
