@@ -145,7 +145,8 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     let map = loaded.map;
     // \[C-39\] `UNIT::TEST`: a test, when tests are the unit; else its test file, said so. A
     // name without `::` is a test file's, whatever its runner calls its items.
-    let (unit_mode, reads_mode, notes) = what_it_reuses(tests, adapter.as_ref());
+    let (unit_mode, reads_mode, notes) =
+        what_it_reuses(tests, &super::Profile::of(adapter.as_ref()));
     let (asked, test) = split_asked(asked, &map, input.tree, adapter.as_ref());
     let test = match test {
         Some(_) if unit_mode == Unit::File => {

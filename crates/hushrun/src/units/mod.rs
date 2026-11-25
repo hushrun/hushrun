@@ -103,9 +103,58 @@ pub enum Start {
     On(Box<Session>),
 }
 
-/// One run's observing: its `HUSHRUN_UNITS` directory, removed when the session ends whatever
-/// happened, what COMMAND's environment gains, and \[ADR 0069\] the plan, when reuse made one.
+/// One run's observing, as `hushrun run` does it: the [`Observer`], and the adapter
+/// [`adapter::choose_kept`] chose, whose every step goes through the trait object. Each method is
+/// the observer's step around one call of the adapter.
 pub struct Session {
+    observer: Observer,
+    adapter: Box<dyn Adapter>,
+}
+
+/// What the code here asks of an adapter that never changes in a run, as plain data: so that the
+/// [`Observer`]'s steps call no adapter, and an in-process test that drives one adapter's steps
+/// through them reaches that adapter's code alone (CONTRIBUTING.md, "Which tests CI runs again").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Profile {
+    /// [`Adapter::word`].
+    pub word: &'static str,
+    /// [`Adapter::runner`].
+    pub runner: &'static str,
+    /// [`Adapter::test_file`].
+    pub test_file: &'static str,
+    /// [`Adapter::tests`].
+    pub tests: adapter::KnowsTests,
+    /// [`Adapter::hints`].
+    pub hints: Hints,
+    /// [`Adapter::binds`].
+    pub binds: bool,
+    /// [`Adapter::keys`].
+    pub keys: adapter::KeysOutside,
+}
+
+impl Profile {
+    /// What `adapter` answers.
+    pub fn of(adapter: &dyn Adapter) -> Profile {
+        Profile {
+            word: adapter.word(),
+            runner: adapter.runner(),
+            test_file: adapter.test_file(),
+            tests: adapter.tests(),
+            hints: adapter.hints(),
+            binds: adapter.binds(),
+            keys: adapter.keys(),
+        }
+    }
+}
+
+/// One run's observing, without its adapter: its `HUSHRUN_UNITS` directory, removed when the
+/// observer is dropped whatever happened, what COMMAND's environment gains, and \[ADR 0069\] the
+/// plan, when reuse made one. Each step that needs the adapter is split around it: the step before
+/// gives what the adapter's method takes ([`Observer::start_at`], [`Observer::plan_at`],
+/// [`Observer::read_at`]), and the step after takes what it returned ([`Observer::started`],
+/// [`Observer::planned`], [`Observer::finished`]). [`Session`] makes those calls through the trait
+/// object; a test makes them on one adapter's own type.
+pub struct Observer {
     dir: PathBuf,
     /// \[C-32\] The directory COMMAND's start writes in: `dir`, or for a start that leaves
     /// nothing out after one that left out what the plan didn't list, one of its own inside it.
@@ -122,7 +171,7 @@ pub struct Session {
     /// for it gets.
     assigned: Vec<(String, String)>,
     cache: PathBuf,
-    adapter: Box<dyn Adapter>,
+    profile: Profile,
     variables: Vec<(String, OsString)>,
     tests: Tests,
     root: PathBuf,
@@ -146,16 +195,15 @@ pub struct Session {
 /// what a test is taken to have read; with the lines that say, once, where the adapter can't do
 /// what the check asks (RFC 0004 §1.2): it then reuses by test file, or takes each test to have
 /// read what its test file read.
-fn what_it_reuses(tests: &Tests, adapter: &dyn Adapter) -> (Unit, Reads, Vec<String>) {
-    let knows = adapter.tests();
+fn what_it_reuses(tests: &Tests, profile: &Profile) -> (Unit, Reads, Vec<String>) {
+    let knows = profile.tests;
     let mut notes = Vec::new();
     let unit = match tests.unit {
         Unit::Test if knows.unit => Unit::Test,
         Unit::Test => {
             notes.push(format!(
                 "its tests are reused by {}: {}'s tests can't be reused one by one yet",
-                adapter.test_file(),
-                adapter.runner()
+                profile.test_file, profile.runner
             ));
             Unit::File
         }
@@ -166,8 +214,8 @@ fn what_it_reuses(tests: &Tests, adapter: &dyn Adapter) -> (Unit, Reads, Vec<Str
         Reads::Test if unit == Unit::Test => {
             notes.push(format!(
                 "each test is taken to have read what its {} read: {} can't be watched test by test yet",
-                adapter.test_file(),
-                adapter.runner()
+                profile.test_file,
+                profile.runner
             ));
             Reads::File
         }
@@ -176,7 +224,7 @@ fn what_it_reuses(tests: &Tests, adapter: &dyn Adapter) -> (Unit, Reads, Vec<Str
     (unit, reads, notes)
 }
 
-impl Drop for Session {
+impl Drop for Observer {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -713,34 +761,23 @@ pub enum Planned {
     Everything(String),
 }
 
-impl Session {
+impl Observer {
     /// Starts observing a run of `command` in `cwd`, in the repository at `root`, for a check
-    /// whose `tests` are `tests`: `Off` without them, and then nothing is written or set.
-    /// \[C-32\] `stored`: the adapter that last reported the check's test files here, as this
-    /// machine's store names it ([`db::adapter_of`]), which keeps a COMMAND pytest reported
-    /// pytest's ([`adapter::choose_kept`]).
-    pub fn start(
-        tests: Option<&Tests>,
+    /// whose `tests` are `tests` (on), with the adapter `profile` describes, in hushrun's cache
+    /// directory `cache`: makes the run's directory and its `hushrun.json`, removed when the
+    /// observer is dropped. The adapter's variables come next ([`Observer::start_at`],
+    /// [`Observer::started`]). \[C-32\] `kept`: pytest's adapter was chosen only because this
+    /// machine's store said pytest last reported the check. `Err` why it can't.
+    pub fn open(
+        tests: &Tests,
+        profile: Profile,
+        cache: &Path,
         command: &[String],
         root: &Path,
         cwd: &Path,
-        stored: Option<&str>,
-    ) -> Start {
-        let Some(tests) = tests.filter(|t| t.is_on()) else {
-            return Start::Off;
-        };
-        let Some(cache) = crate::context::cache_dir() else {
-            return Start::Not("there is no cache directory".into());
-        };
-        let adapter = match adapter::choose_kept(command, cwd, stored) {
-            Ok(adapter) => adapter,
-            Err(why) => return Start::Not(why),
-        };
-        // \[C-32\] Whether the stored word chose pytest where CTest or Swift would take COMMAND
-        // now: then a run in which pytest reports nothing clears it.
-        let kept = adapter.word() == pytest::WORD
-            && adapter::choose(command, cwd).is_ok_and(|fresh| fresh.word() != pytest::WORD);
-        let (unit, reads, notes) = what_it_reuses(tests, adapter.as_ref());
+        kept: bool,
+    ) -> Result<Observer, String> {
+        let (unit, reads, notes) = what_it_reuses(tests, &profile);
         let name = hushrun_ledger::new_ulid(Time::from_timestamp(jiff::Timestamp::now()).millis());
         let dir = cache.join("units").join("runs").join(name);
         let written = std::fs::create_dir_all(&dir).and_then(|()| {
@@ -753,35 +790,12 @@ impl Session {
         });
         if let Err(err) = written {
             let _ = std::fs::remove_dir_all(&dir);
-            return Start::Not(format!("can't make {}: {err}", dir.display()));
+            return Err(format!("can't make {}: {err}", dir.display()));
         }
         // \[C-32\] COMMAND's own `env NAME=value` assignments: in its environment as an adapter
         // reads it, and in every tool an adapter starts for it.
         let assigned = command::assignments(command);
-        let env = |name: &str| {
-            assigned
-                .iter()
-                .rev()
-                .find(|(n, _)| n == name)
-                .map(|(_, value)| OsString::from(value))
-                .or_else(|| std::env::var_os(name))
-        };
-        let at = StartAt {
-            cache: &cache,
-            cwd,
-            dir: &dir,
-            env: &env,
-            assigned: &assigned,
-        };
-        let mut variables = match adapter.variables(&at) {
-            Ok(variables) => variables,
-            Err(why) => {
-                let _ = std::fs::remove_dir_all(&dir);
-                return Start::Not(why);
-            }
-        };
-        variables.push((runner::UNITS_VAR.to_string(), dir.clone().into_os_string()));
-        Start::On(Box::new(Session {
+        Ok(Observer {
             unit,
             reads,
             notes,
@@ -792,14 +806,73 @@ impl Session {
             kept,
             assigned,
             dir,
-            cache,
-            adapter,
-            variables,
+            cache: cache.to_path_buf(),
+            profile,
+            variables: Vec::new(),
             tests: tests.clone(),
             root: root.to_path_buf(),
             plan: None,
             compile_env: Vec::new(),
-        }))
+        })
+    }
+
+    /// \[C-32\] A variable of COMMAND's environment, as an adapter reads it: COMMAND's own `env
+    /// NAME=value` assignment, the last of that name, else this process's.
+    pub fn env(&self, name: &str) -> Option<OsString> {
+        self.assigned
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, value)| OsString::from(value))
+            .or_else(|| std::env::var_os(name))
+    }
+
+    /// What [`Adapter::variables`] takes, with `env`, COMMAND's environment as the adapter reads
+    /// it: [`Observer::env`], or a test's own.
+    pub fn start_at<'a>(&'a self, env: &'a dyn Fn(&str) -> Option<OsString>) -> StartAt<'a> {
+        StartAt {
+            cache: &self.cache,
+            cwd: &self.cwd,
+            dir: &self.dir,
+            env,
+            assigned: &self.assigned,
+        }
+    }
+
+    /// What [`Adapter::variables`] returned, kept for every start of COMMAND, with the variable
+    /// that names the run's directory. `Err` why the adapter can't load: the observer is done.
+    pub fn started(
+        &mut self,
+        variables: Result<Vec<(String, OsString)>, String>,
+    ) -> Result<(), String> {
+        let mut variables = variables?;
+        variables.push((
+            runner::UNITS_VAR.to_string(),
+            self.dir.clone().into_os_string(),
+        ));
+        self.variables = variables;
+        Ok(())
+    }
+
+    /// The repository's root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Where COMMAND runs.
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// The directory COMMAND's next start writes in, which [`Adapter::start_variables`] reads.
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    /// What COMMAND's environment gains, in this order, for every start: the adapter's variables
+    /// and the one that names the run's directory.
+    pub fn variables(&self) -> &[(String, OsString)] {
+        &self.variables
     }
 
     /// B-2: the variables every start of COMMAND gets to compile through the build blocks'
@@ -828,13 +901,14 @@ impl Session {
     /// \[C-39\] What one of its test files is called, in its adapter's word: `test class`,
     /// `package`, `test file`.
     pub fn test_file(&self) -> &'static str {
-        self.adapter.test_file()
+        self.profile.test_file
     }
 
-    /// Gives COMMAND the variables that load the adapter.
-    pub fn apply(&self, command: &mut Command) {
+    /// Gives COMMAND the variables that load the adapter, and `start`, what
+    /// [`Adapter::start_variables`] made of [`Observer::run_dir`].
+    pub fn apply(&self, command: &mut Command, start: &[(String, Option<OsString>)]) {
         apply_variables(&self.variables, command);
-        apply_start(command, &self.adapter.start_variables(&self.run_dir));
+        apply_start(command, start);
     }
 
     /// \[C-46\] Before COMMAND, in every mode: tells the adapter, in `hushrun.json`, the test files
@@ -862,27 +936,52 @@ impl Session {
     /// each key, with the check's reuse state; the audited (C-34); and `hushrun.json`'s list.
     /// A test file the map doesn't have, one `tests.always` names, one whose last state was `not
     /// observed`, one whose newest result is a fail or none, and an audited one: runs.
-    pub fn plan(&mut self, input: &PlanInput<'_>) -> Planned {
-        let started = input.started.to_string();
+    ///
+    /// This step reads the check's map and makes what asks hints: `Err` is the plan already,
+    /// when the store there can't be read. Then [`Adapter::plan`] at [`Observer::plan_at`], and
+    /// [`Observer::planned`] with what it returned.
+    pub fn plan_context<'s>(&self, input: &PlanInput<'s>) -> Result<PlanContext<'s>, Planned> {
         let check_id = store::check_id(&input.base, input.repository);
         let loaded = db::load(&db::path(&self.cache, input.repository), &check_id);
         // \[ADR 0072\] A store there that can't be read: no map, so nothing is reused, said once.
         if let Some(unread) = &loaded.unread {
-            return Planned::Everything(unread.why());
+            return Err(Planned::Everything(unread.why()));
         }
-        let map = loaded.map;
-        let asker = self.asker(input.store, check_id, &input.base);
-        let at = PlanAt {
+        Ok(PlanContext {
+            map: loaded.map,
+            asker: self.asker(input.store, check_id, &input.base),
+        })
+    }
+
+    /// What [`Adapter::plan`] takes, for the plan of `input` whose map `context` read.
+    pub fn plan_at<'a>(
+        &'a self,
+        input: &'a PlanInput<'_>,
+        context: &'a PlanContext<'_>,
+    ) -> PlanAt<'a> {
+        PlanAt {
             tree: input.tree,
             root: input.root,
             cwd: input.cwd,
-            map: &map,
-            asker: asker.as_ref(),
+            map: &context.map,
+            asker: context.asker.as_ref(),
             ignore: &self.tests.ignore,
             compile_env: &self.compile_env,
             assigned: &self.assigned,
-        };
-        let planning = match self.adapter.plan(&at) {
+        }
+    }
+
+    /// The plan, from what [`Adapter::plan`] returned (`planning`) at [`Observer::plan_at`]:
+    /// each test file's key, one batch lookup, the audited, `hushrun.json`'s list, and its line.
+    pub fn planned(
+        &mut self,
+        input: &PlanInput<'_>,
+        context: PlanContext<'_>,
+        planning: Result<Option<adapter::Planning>, String>,
+    ) -> Planned {
+        let started = input.started.to_string();
+        let PlanContext { map, asker } = context;
+        let planning = match planning {
             Ok(Some(planning)) => planning,
             // \[ADR 0074\] No pytest ever reported here: nothing to say, nothing to reuse.
             Ok(None) => return Planned::Plan(String::new()),
@@ -895,7 +994,7 @@ impl Session {
             extras,
             bound,
         } = planning;
-        let keyer = Keyer::new(input.tree, &sets, &input.base, self.adapter.keys());
+        let keyer = Keyer::new(input.tree, &sets, &input.base, self.profile.keys);
         let total = known.len();
         if total == 0 {
             // No test file: nothing to say, and nothing to deselect.
@@ -949,7 +1048,7 @@ impl Session {
         // \[ADR 0069\] A unit bound to a file's bytes (a test binary) is reused only as the bytes
         // whose dep-info its key holds.
         let mut binaries = Vec::new();
-        if self.adapter.binds() {
+        if self.profile.binds {
             reuse.retain(|unit| {
                 let Some(path) = bound.get(unit) else {
                     return false;
@@ -1041,14 +1140,14 @@ impl Session {
                     &reuse,
                     &audited,
                     &tested,
-                    self.adapter.test_file(),
+                    self.profile.test_file,
                 )
             })
             .flatten();
         let line = if let Some(line) = tests_line {
             line
         } else if reused == 0 && audited.is_empty() {
-            let noun = self.adapter.test_file();
+            let noun = self.profile.test_file;
             // \[C-32\] The check's last run here executed no test (its runner found every task up
             // to date): hushrun leaves none out, which is all it can say of what the runner runs,
             // and the reason, after what changed, is that run.
@@ -1072,14 +1171,14 @@ impl Session {
         } else if reused == 0 {
             format!(
                 "{check}: all {} run; {}",
-                test_files(total as u64, self.adapter.test_file()),
+                test_files(total as u64, self.profile.test_file),
                 checked_only(audited.len())
             )
         } else {
             let mut line = format!(
                 "{check}: {} of {} run; {reused} already passed on the files {} read",
                 total - reused,
-                test_files(total as u64, self.adapter.test_file()),
+                test_files(total as u64, self.profile.test_file),
                 if reused == 1 { "it" } else { "they" },
             );
             line.push_str(&checked_too(audited.len()));
@@ -1112,17 +1211,24 @@ impl Session {
         base: &KeyBase,
     ) -> Option<Asker<'s>> {
         let systems = shared::systems(base);
-        if self.adapter.hints() == Hints::None || systems.is_empty() || !self.tests.is_on() {
+        if self.profile.hints == Hints::None || systems.is_empty() || !self.tests.is_on() {
             return None;
         }
-        Some(Asker::new(store, check_id, systems, self.adapter.word()))
+        Some(Asker::new(store, check_id, systems, self.profile.word))
     }
 
-    /// What the adapter saw, decided: each unit's state, what the plan would have reused, and the
-    /// lines that say so. `None` when the adapter wrote nothing, so that everything ran and no
-    /// unit is recorded.
-    pub fn finish(&self, end: &Finish<'_>) -> Option<Observed> {
-        let files = facts::read_all(&self.run_dir)?;
+    /// What the adapter wrote, before it reads it: the run's facts files, and the check's map.
+    /// `Err` is what [`Observer::finished`] would have said already: `None` when the adapter
+    /// wrote nothing, so that everything ran and no unit is recorded, or \[C-32\] a run kept
+    /// pytest's in which pytest reported nothing. Then [`Adapter::read`] at
+    /// [`Observer::read_at`], and [`Observer::finished`] with what it returned.
+    pub fn read_context<'s>(
+        &self,
+        end: &Finish<'s>,
+    ) -> Result<ReadContext<'s>, Option<Box<Observed>>> {
+        let Some(files) = facts::read_all(&self.run_dir) else {
+            return Err(None);
+        };
         // \[C-32\] What a facts file says the runner left out that the plan didn't list, and
         // whether it ran on a stale build.
         let unlisted = facts::left_out(&files);
@@ -1134,9 +1240,9 @@ impl Session {
             path: db::path(&self.cache, end.repository),
             check_id: store::check_id(&end.base, end.repository),
             base: end.base.clone(),
-            adapter: self.adapter.word(),
-            hints: self.adapter.hints(),
-            keys: self.adapter.keys(),
+            adapter: self.profile.word,
+            hints: self.profile.hints,
+            keys: self.profile.keys,
         };
         // \[C-32\] Kept pytest's by the store's word, COMMAND passed, and pytest reported nothing:
         // counted, in the write that follows the run's record, and the second such run in a row
@@ -1148,7 +1254,7 @@ impl Session {
             } else {
                 "pytest reported none this time"
             };
-            return Some(Observed {
+            return Err(Some(Box::new(Observed {
                 store: Some(at),
                 silent: true,
                 lines: vec![format!(
@@ -1156,28 +1262,69 @@ impl Session {
                     end.base.check
                 )],
                 ..Observed::default()
-            });
+            })));
         }
         let loaded = db::load(&at.path, &at.check_id);
-        let map = loaded.map;
-        let how = match (end.mode, &self.plan) {
+        // \[C-38\] In `observe`, what reuse would have done reads the hints a plan would have.
+        let asker = matches!(self.how(end.mode), How::Observe)
+            .then(|| self.asker(end.store, at.check_id, &end.base))
+            .flatten();
+        Ok(ReadContext {
+            files,
+            unlisted,
+            stale,
+            unfinished,
+            at,
+            unread: loaded.unread,
+            map: loaded.map,
+            asker,
+        })
+    }
+
+    /// How [`decide`] reads a run in `mode`, by the plan this observer made, if any.
+    fn how(&self, mode: Mode) -> How<'_> {
+        match (mode, &self.plan) {
             (Mode::Reuse, Some(plan)) => How::Plan(plan),
             (Mode::Reuse, None) => How::Quiet,
             _ => How::Observe,
-        };
-        // \[C-38\] In `observe`, what reuse would have done reads the hints a plan would have.
-        let asker = matches!(how, How::Observe)
-            .then(|| self.asker(end.store, at.check_id, &end.base))
-            .flatten();
-        let read = match self.read(
-            &files,
+        }
+    }
+
+    /// What [`Adapter::read`] takes, for the run `end` says ended, whose files `context` holds.
+    pub fn read_at<'a>(&'a self, end: &'a Finish<'_>, context: &'a ReadContext<'_>) -> ReadAt<'a> {
+        self.reading(
+            &context.files,
             end.root,
             end.cwd,
             end.tree,
             end.command_passed,
-            &map,
-            asker.as_ref(),
-        ) {
+            &context.map,
+            context.asker.as_ref(),
+        )
+    }
+
+    /// What the adapter saw, decided, from what [`Adapter::read`] returned (`read`) at
+    /// [`Observer::read_at`]: each unit's state, what the plan would have reused, and the lines
+    /// that say so. `None` when the adapter wrote nothing, so that everything ran and no unit is
+    /// recorded.
+    pub fn finished(
+        &self,
+        end: &Finish<'_>,
+        context: ReadContext<'_>,
+        read: Result<Option<Read>, String>,
+    ) -> Option<Observed> {
+        let ReadContext {
+            files,
+            unlisted,
+            stale,
+            unfinished,
+            at,
+            unread,
+            map,
+            asker,
+        } = context;
+        let how = self.how(end.mode);
+        let read = match read {
             Ok(Some(read)) => read,
             // \[C-32\] Left out what the plan didn't list: whatever else could be read, this start
             // decides nothing.
@@ -1227,7 +1374,7 @@ impl Session {
             .map(|asker| asker.fetched.borrow().clone())
             .unwrap_or_default();
         let mode = Modes {
-            noun: self.adapter.test_file(),
+            noun: self.profile.test_file,
             unit: self.unit,
             reads: self.reads,
             watches: &watches,
@@ -1281,7 +1428,7 @@ impl Session {
         }
         // \[ADR 0072\] In `observe`, what reuse would have done needs the map: say once why there
         // was none. A plan said it already.
-        if let (Some(unread), Mode::Observe) = (&loaded.unread, end.mode) {
+        if let (Some(unread), Mode::Observe) = (&unread, end.mode) {
             observed.lines.push(format!(
                 "{}: with `tests: reuse`, every test file would have run: {}",
                 end.base.check,
@@ -1291,22 +1438,21 @@ impl Session {
         Some(observed)
     }
 
-    /// What the adapter wrote in `dir`, read: each unit as seen, whether failures are reported by
-    /// unit, the four sets, the lists a plan would have keyed each unit by, with \[C-38\] the
-    /// hints `asker` fetches, and what the map keeps. `Ok(None)` when it wrote nothing; `Err` why
-    /// it couldn't be read.
+    /// What [`Adapter::read`] takes to read what the adapter wrote in `files`: each unit as seen,
+    /// whether failures are reported by unit, the four sets, the lists a plan would have keyed
+    /// each unit by, with \[C-38\] the hints `asker` fetches, and what the map keeps.
     #[allow(clippy::too_many_arguments)]
-    fn read(
-        &self,
-        files: &[facts::FactsFile],
-        root: &Path,
-        cwd: &Path,
-        tree: &Tree,
+    fn reading<'a>(
+        &'a self,
+        files: &'a [facts::FactsFile],
+        root: &'a Path,
+        cwd: &'a Path,
+        tree: &'a Tree,
         command_passed: bool,
-        map: &store::Map,
-        asker: Option<&Asker<'_>>,
-    ) -> Result<Option<Read>, String> {
-        self.adapter.read(&ReadAt {
+        map: &'a store::Map,
+        asker: Option<&'a Asker<'a>>,
+    ) -> ReadAt<'a> {
+        ReadAt {
             files,
             root,
             cwd,
@@ -1316,21 +1462,21 @@ impl Session {
             asker,
             ignore: &self.tests.ignore,
             assigned: &self.assigned,
-        })
+        }
     }
 
     /// \[C-32\] Sets up COMMAND's start once more, with nothing left out, after a start whose
     /// adapter left out what the plan didn't list (RFC 0003 principle 5: every failure of the
     /// machinery ends in "ran everything"): a directory of its own whose `hushrun.json` lists
     /// nothing, the variables pointing at it, and no plan, so that the run goes by that start
-    /// alone. `Err` why it can't be set up.
-    pub fn whole_again(&mut self) -> Result<(), String> {
+    /// alone. `extras`: what [`Adapter::again`] says of a run that listed no test file. `Err`
+    /// why it can't be set up.
+    pub fn whole_again(&mut self, extras: RunExtras) -> Result<(), String> {
         let dir = self.dir.join("whole");
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("can't make {}: {err}", dir.display()))?;
-        let unit_files = BTreeSet::new();
         let listed = Listed {
-            extras: self.adapter.again(&self.root, &self.cwd, &unit_files),
+            extras,
             unit: self.unit,
             reads: self.reads,
             ..Listed::default()
@@ -1351,8 +1497,15 @@ impl Session {
     /// \[C-34, ADR 0069\] The second run of the audit (RFC 0003 §3.7): COMMAND as written, again,
     /// with a directory of its own whose `hushrun.json` lists every test file the first run saw
     /// but `again`, so that only those run. `None` when it can't be set up, and then each of them
-    /// counts as having failed again.
-    pub fn again(&self, observed: &Observed, again: &BTreeSet<String>) -> Option<Again> {
+    /// counts as having failed again. `extras`: what [`Adapter::again`] says for the first
+    /// run's `observed.cwd` and `observed.unit_files`. Then [`Again::with_start`] with what
+    /// [`Adapter::start_variables`] makes of [`Again::dir`].
+    pub fn again(
+        &self,
+        observed: &Observed,
+        again: &BTreeSet<String>,
+        extras: RunExtras,
+    ) -> Option<Again> {
         let dir = self.run_dir.join("again");
         std::fs::create_dir_all(&dir).ok()?;
         // \[C-39\] An audited test runs alone: every other test of its file is listed one by one,
@@ -1376,11 +1529,8 @@ impl Session {
             .filter(|unit| !again.contains(*unit) && !reuse_tests.contains_key(*unit))
             .cloned()
             .collect();
-        let extras = self
-            .adapter
-            .again(&self.root, &observed.cwd, &observed.unit_files);
         let mut binaries = Vec::new();
-        if self.adapter.binds() {
+        if self.profile.binds {
             for unit in &others {
                 let path = observed.executables.get(unit)?;
                 let bytes = std::fs::read(path).ok()?;
@@ -1407,38 +1557,39 @@ impl Session {
                 *value = dir.clone().into_os_string();
             }
         }
-        let start = self.adapter.start_variables(&dir);
         Some(Again {
             dir,
             variables,
-            start,
+            start: Vec::new(),
             units: again.clone(),
         })
     }
 
+    /// What [`Adapter::read`] takes to read the second run of an audit: its `files`
+    /// ([`Again::files`]), against `tree` and an empty `map`. `passed`: the second COMMAND
+    /// exited 0.
+    pub fn again_read_at<'a>(
+        &'a self,
+        files: &'a [facts::FactsFile],
+        observed: &'a Observed,
+        tree: &'a Tree,
+        passed: bool,
+        map: &'a store::Map,
+    ) -> ReadAt<'a> {
+        self.reading(files, &self.root, &observed.cwd, tree, passed, map, None)
+    }
+
     /// \[C-34\] How each test file of `again` ended in its second run: `Passed`, or any other
-    /// state, which counts as having failed again. `passed`: the second COMMAND exited 0.
-    /// \[C-39\] And each test of it, by name, from its own facts.
+    /// state, which counts as having failed again. `passed`: the second COMMAND exited 0;
+    /// `read`, what [`Adapter::read`] returned at [`Observer::again_read_at`], `None` when it
+    /// read nothing or failed. \[C-39\] And each test of it, by name, from its own facts.
     pub fn again_ended(
         &self,
         again: &Again,
         observed: &Observed,
-        tree: &Tree,
         passed: bool,
+        read: Option<Read>,
     ) -> BTreeMap<String, State> {
-        let files = facts::read_all(&again.dir).unwrap_or_default();
-        let read = self
-            .read(
-                &files,
-                &self.root,
-                &observed.cwd,
-                tree,
-                passed,
-                &store::Map::default(),
-                None,
-            )
-            .ok()
-            .flatten();
         again
             .units
             .iter()
@@ -1464,6 +1615,164 @@ impl Session {
             })
             .collect()
     }
+}
+
+impl Session {
+    /// Starts observing a run of `command` in `cwd`, in the repository at `root`, for a check
+    /// whose `tests` are `tests`: `Off` without them, and then nothing is written or set.
+    /// \[C-32\] `stored`: the adapter that last reported the check's test files here, as this
+    /// machine's store names it ([`db::adapter_of`]), which keeps a COMMAND pytest reported
+    /// pytest's ([`adapter::choose_kept`]).
+    pub fn start(
+        tests: Option<&Tests>,
+        command: &[String],
+        root: &Path,
+        cwd: &Path,
+        stored: Option<&str>,
+    ) -> Start {
+        let Some(tests) = tests.filter(|t| t.is_on()) else {
+            return Start::Off;
+        };
+        let Some(cache) = crate::context::cache_dir() else {
+            return Start::Not("there is no cache directory".into());
+        };
+        let adapter = match adapter::choose_kept(command, cwd, stored) {
+            Ok(adapter) => adapter,
+            Err(why) => return Start::Not(why),
+        };
+        // \[C-32\] Whether the stored word chose pytest where CTest or Swift would take COMMAND
+        // now: then a run in which pytest reports nothing clears it.
+        let kept = adapter.word() == pytest::WORD
+            && adapter::choose(command, cwd).is_ok_and(|fresh| fresh.word() != pytest::WORD);
+        let profile = Profile::of(adapter.as_ref());
+        let mut observer = match Observer::open(tests, profile, &cache, command, root, cwd, kept) {
+            Ok(observer) => observer,
+            Err(why) => return Start::Not(why),
+        };
+        let env = |name: &str| observer.env(name);
+        let variables = adapter.variables(&observer.start_at(&env));
+        if let Err(why) = observer.started(variables) {
+            return Start::Not(why);
+        }
+        Start::On(Box::new(Session { observer, adapter }))
+    }
+
+    /// B-2: [`Observer::compile_with`].
+    pub fn compile_with(&mut self, env: Vec<(OsString, OsString)>) {
+        self.observer.compile_with(env);
+    }
+
+    /// \[C-39\] [`Observer::notes`].
+    pub fn notes(&self) -> &[String] {
+        self.observer.notes()
+    }
+
+    /// \[C-39\] [`Observer::test_file`].
+    pub fn test_file(&self) -> &'static str {
+        self.observer.test_file()
+    }
+
+    /// Gives COMMAND the variables that load the adapter.
+    pub fn apply(&self, command: &mut Command) {
+        let start = self.adapter.start_variables(self.observer.run_dir());
+        self.observer.apply(command, &start);
+    }
+
+    /// \[C-46\] [`Observer::learned`].
+    pub fn learned(&self, base: &KeyBase, repository: Option<&str>) {
+        self.observer.learned(base, repository);
+    }
+
+    /// \[ADR 0069\] The plan (RFC 0003 §3.5 step 1), for a check in `reuse`, before COMMAND:
+    /// [`Observer::plan_context`], the adapter's [`Adapter::plan`], and [`Observer::planned`].
+    pub fn plan(&mut self, input: &PlanInput<'_>) -> Planned {
+        let context = match self.observer.plan_context(input) {
+            Ok(context) => context,
+            Err(planned) => return planned,
+        };
+        let planning = self.adapter.plan(&self.observer.plan_at(input, &context));
+        self.observer.planned(input, context, planning)
+    }
+
+    /// \[C-39\] [`Observer::plan_notes`].
+    pub fn plan_notes(&self) -> &[String] {
+        self.observer.plan_notes()
+    }
+
+    /// What the adapter saw, decided: [`Observer::read_context`], the adapter's
+    /// [`Adapter::read`], and [`Observer::finished`]. `None` when the adapter wrote nothing, so
+    /// that everything ran and no unit is recorded.
+    pub fn finish(&self, end: &Finish<'_>) -> Option<Observed> {
+        let context = match self.observer.read_context(end) {
+            Ok(context) => context,
+            Err(observed) => return observed.map(|observed| *observed),
+        };
+        let read = self.adapter.read(&self.observer.read_at(end, &context));
+        self.observer.finished(end, context, read)
+    }
+
+    /// \[C-32\] [`Observer::whole_again`], with what the adapter's [`Adapter::again`] says of a
+    /// run that listed no test file.
+    pub fn whole_again(&mut self) -> Result<(), String> {
+        let extras =
+            self.adapter
+                .again(self.observer.root(), self.observer.cwd(), &BTreeSet::new());
+        self.observer.whole_again(extras)
+    }
+
+    /// \[C-34, ADR 0069\] [`Observer::again`], with the adapter's [`Adapter::again`] and
+    /// [`Adapter::start_variables`].
+    pub fn again(&self, observed: &Observed, again: &BTreeSet<String>) -> Option<Again> {
+        let extras = self
+            .adapter
+            .again(self.observer.root(), &observed.cwd, &observed.unit_files);
+        let again = self.observer.again(observed, again, extras)?;
+        let start = self.adapter.start_variables(again.dir());
+        Some(again.with_start(start))
+    }
+
+    /// \[C-34\] [`Observer::again_ended`], with what the adapter's [`Adapter::read`] made of the
+    /// second run's files.
+    pub fn again_ended(
+        &self,
+        again: &Again,
+        observed: &Observed,
+        tree: &Tree,
+        passed: bool,
+    ) -> BTreeMap<String, State> {
+        let files = again.files();
+        let map = store::Map::default();
+        let read = self
+            .adapter
+            .read(
+                &self
+                    .observer
+                    .again_read_at(&files, observed, tree, passed, &map),
+            )
+            .ok()
+            .flatten();
+        self.observer.again_ended(again, observed, passed, read)
+    }
+}
+
+/// What [`Observer::plan_context`] read for a plan: the check's map, and \[C-38\] what asks
+/// hints.
+pub struct PlanContext<'s> {
+    map: store::Map,
+    asker: Option<Asker<'s>>,
+}
+
+/// What [`Observer::read_context`] read after COMMAND: the facts files, what holds for the whole
+/// run, the check's map, and \[C-38\] what asks hints.
+pub struct ReadContext<'s> {
+    files: Vec<facts::FactsFile>,
+    unlisted: Option<String>,
+    stale: Option<String>,
+    unfinished: Option<String>,
+    at: StoreAt,
+    unread: Option<db::Unread>,
+    map: store::Map,
+    asker: Option<Asker<'s>>,
 }
 
 /// \[C-38\] The hints `asker` fetches for the check's sources in `sets` (or every file of the
@@ -1557,7 +1866,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
             &lookup.reuse,
         )));
     }
-    let (unit, reads, _) = what_it_reuses(p.tests, adapter.as_ref());
+    let (unit, reads, _) = what_it_reuses(p.tests, &Profile::of(adapter.as_ref()));
     let mut passed: BTreeMap<String, Found> = BTreeMap::new();
     let mut keys: BTreeMap<String, Digest> = BTreeMap::new();
     for (test_file, lists) in &keyed {
@@ -1832,6 +2141,21 @@ pub struct Again {
 }
 
 impl Again {
+    /// The second run's directory, which [`Adapter::start_variables`] reads.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// \[ADR 0120\] With `start`, what [`Adapter::start_variables`] made of [`Again::dir`].
+    pub fn with_start(self, start: Vec<(String, Option<OsString>)>) -> Again {
+        Again { start, ..self }
+    }
+
+    /// What the adapter wrote in the second run's directory, for [`Observer::again_read_at`].
+    pub fn files(&self) -> Vec<facts::FactsFile> {
+        facts::read_all(&self.dir).unwrap_or_default()
+    }
+
     /// Gives COMMAND the variables of the second run.
     pub fn apply(&self, command: &mut Command) {
         apply_variables(&self.variables, command);
