@@ -15,6 +15,24 @@ project's new branch starts from what main's CI already ran.
 
 ### Changed
 
+- **No time limit decides what a build reuses** ([ADR 0144](docs/adr/0144-no-time-limit-decides-what-a-build-reuses.md)):
+  what one machine reuses of another's no longer depends on how loaded either was.
+  - **Uploads:** the end of a `hushrun run` waits for every upload the run built, on a person's
+    machine, in a sandbox and in CI alike, then closes its manifest. On a terminal it says
+    `uploading N blocks before the run ends`, and Ctrl-C leaves the rest for the next run. This
+    replaces the 5 seconds on a person's machine, and the 20 seconds or 2 minutes (at most a
+    quarter of the compiles' cost) in CI.
+  - **Downloads** are waited for to their end, whatever the link or the compile they save. A
+    Go, Gradle, C, C++ or Xcode fetch waits for the check's `open` and its manifest, and a rustc
+    question that comes before `open` answers waits for it.
+  - **CI's `open` and other checks:** a CI job waits for `open` however long it takes, and so do
+    vouches, a baked store's check, a sandbox's check of what cargo can't see (B-23) and
+    `hushrun build fetch`.
+  - **Only silence ends a wait:** the relay writes a heartbeat while it works, Gradle's cache an
+    interim `102 Processing`, and every wait ends only on 30 seconds of silence: a frozen relay or
+    a backend that stopped answering.
+  - The line for a CI job whose backend fails is now `build reuse is off for this run: the
+    backend didn't answer`.
 - **`hushrun.whoami/v1`'s `credential`** adds `session`, `bearer` and `proxy`.
 - **A hosted platform's own variable makes a sandbox** (C-140): `CLAUDE_CODE_REMOTE` (Claude Code on
   the web), `CURSOR_AGENT_SOCKET` (Cursor's cloud agents), `COPILOT_AGENT_SESSION_ID` (Copilot's

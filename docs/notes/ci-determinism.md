@@ -1,7 +1,7 @@
 # CI determinism: tests whose outcome changes with load
 
-- **Status:** findings and a prototype, 2026-11-24. Branch `claude/multi-lang-test-compile-ci-fil292-ci-determinism`.
-- **Rules touched:** B-26, B-29, B-31, B-45, B-60, B-82 (test switch, two product fixes); C-48 (proposed).
+- **Status:** findings, and the product change of [ADR 0144](../adr/0144-no-time-limit-decides-what-a-build-reuses.md) built, 2026-11-25. Branch `claude/multi-lang-test-compile-ci-fil292-ci-determinism`.
+- **Rules touched:** B-2, B-23, B-26, B-29, B-31, B-34, B-40, B-45, B-60, B-63, B-75, B-80 (ADR 0144); C-48 (proposed).
 
 While about 17 PRs were merged into main one at a time, timing-dependent tests failed on PRs
 that didn't touch them. Each failure cost a 45–75 minute CI cycle. The bar here is that **load
@@ -52,85 +52,85 @@ machine to be slow:
 The two-machine test of `Machine::run_uploaded` (re-run A until nothing waits to upload) only
 covers G1, and it is a retry loop. G2 to G6 would still flake it.
 
-### The fix, prototyped on this branch
+### The fix: the product, not the tests (ADR 0144)
 
-**Product fixes (G5, G6).** These are real bugs, independent of tests:
+A first prototype made the tests deterministic with a debug-only switch
+(`HUSHRUN_BUILD_SETTLE`). That left every client (a team's CI, a person's laptop, an agent's
+sandbox) exposed to the same load-dependent outcomes, so it was dropped. Instead, the product
+itself no longer lets time decide what a build reuses:
 
-- `named_fetch` now sets `GoManifest::Taken` and `named_prefetching(kind) = true` in **one**
-  critical section. A drop guard clears the flag however the prefetch ends, a panic included. The
-  `cc/1` path already did this (`cc_prefetching += 1` under the same lock as `take()`).
-- `Relay::start_uploads` marks the loop as running **before** spawning it. `uploads()` is no
-  longer callable on its own.
+- **G5, G6 are fixed.** The manifest is taken and its prefetch marked under one lock, with a drop
+  guard; the C/C++ prefetch counter gets the same guard. The upload loop is marked running when
+  it is started (`Relay::start_uploads`).
+- **G1–G4 and every bound like them are gone.**
+  - The end of a command waits for every upload the run built, on every machine, unless a stop
+    signal came. Then `close` names them all. On a terminal it prints `uploading N blocks…`. A
+    relay resting after failures, or stopped, ends the wait, since no new request goes.
+  - Downloads are waited for to their end, and the rate meter and speed samples are removed.
+  - Manifest and prefetch waits have no bound.
+  - A rustc question asked while `open` is on the wire waits for it.
+  - Vouches, CI's `open`, the baked-store check, the sandbox's B-23 check and
+    `hushrun build fetch` run to their end.
+- **The only timer left is silence.** The relay heartbeats every second, and every client waits
+  on 30 s of silence, whatever the compile cost:
+  - the rustc wrapper, its notices, the Go cache program (its watchdog counts heartbeats as life),
+    Gradle's cache (which sends `102 Processing` to Gradle), the C/C++ and tsc launchers, and
+    Xcode;
+  - every backend and object-store request, with a PUT failing when its body stops moving.
 
-**`Tuning::settle`, the test switch for G1 to G4.** It is set by `HUSHRUN_BUILD_SETTLE=1` and read
-only in a debug build, like `HUSHRUN_CC_MANIFEST_WAIT_MS`. A release build is always `false`.
-When it is set:
+  A frozen relay or a dead backend still ends a wait, so a slow one never does.
 
-- `named_fetch` and `platform_names` (Go, Gradle, C/C++) have no `until`. They wait until `open`
-  or the manifest answered or failed, and until the prefetch is no longer under way.
-- `wait_for` waits for every download until it arrives, is dropped, or the relay stops. The
-  budget and rate checks are skipped.
-- `end_check_as` runs `upload::drain` on **any** machine with no cut and no deadline, until no
-  marker of this run waits to go or is claimed (one the backend put off with a date doesn't count).
-  The upload loop then stops, and `close` gets its normal `tuning.close`. A stop signal (B-49)
-  still wins.
-
-Each of these conditions is one the relay reaches without a timer, so the outcome depends only on
-the backend's answers. Request-level network timeouts (`open`/`lookup` at 10 s) remain. See
-"residual" below.
-
-`hushrun_testkit::env::SETTLE` names the switch for every two-machine test.
-`build_go.rs`'s `Machine::hushrun` sets it, and `&& sleep 1` is gone from `Machine::run` and
-`gitlab_go_run`. `a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command` measures the bound
-itself, so it removes the variable.
-
-**Why a test switch and not a product change for G1.** On a person's machine, holding the
-terminal until every upload is done is wrong: the next run sends them. In CI, the bound (a quarter
-of the compile cost, at most 2 minutes) is a cost judgement that B-31 states. The product is
-correct either way, because a manifest names only what went up. The test asked a different
-question. See "Product follow-ups" for where the end-of-run semantics might still change.
+The tests needed no switch: the two-machine helpers dropped their `&& sleep 1`/`&& sleep 2`, and
+the 15 s `HUSHRUN_CC_MANIFEST_WAIT_MS` overrides are gone, with the variable itself. Tests that
+asserted the old bounds were rewritten to assert the new rules by outcome and order, never by
+elapsed time. Examples: "the end waits for a slow PUT and closes with it", "a download is waited
+for to its end whatever its cost says", "a CI job waits for `open` until it answers", "a request
+with a held token never waits for the mint: every request carried token 1".
 
 ### Verification
 
-On a 4-CPU container, `cargo test -p hushrun --test build_go`:
+On a 4-CPU container:
 
 | Run | Result |
 |---|---|
-| The whole suite, settled, no `sleep 1` | 17 passed, 1 ignored (57 s) |
-| New test `every_package_is_reused_on_the_other_machine_however_slowly_the_backend_answers`: A's PUTs held 1 s each, B's `open` 1.5 s (> `GO_PREFETCH_WAIT`), B's downloads 300 ms (> half a runtime package's compile) | passes (11 s) |
-| The same two tests with the switch off (`SETTLE=0`), otherwise the same code | **both fail**: `24 packages: 24 built` and `23 reused, 1 built; 1 block to upload waits for the next run`. That is exactly CI's message. |
-| 8 busy loops on 4 CPUs (load average about 16), 12 iterations of `every_package…`, `…however_slowly…` and `a_go_package_one_machine…`, **unsettled** | 12 of 12 iterations failed |
-| The same load, **settled** | 12 of 12 iterations passed (3 of 3 tests each) |
+| `hushrun` unit tests (relay, uploads, sessions, bakes, everything) | 723 passed |
+| `hushrun-build` unit tests, 3 runs in a row | 652 passed each |
+| `hushrun-build` integration tests (cargo, cc, rustc, loader, process) | 75 passed |
+| End to end: build_go 18 (+1 ignored), build_cc 11 (+1), build_tsc 4, build_gradle 2, build_share 71, two_machines 24, reuse 32, build 13, build_bake 6, build_bake_deps 6, build_bake_go_cc 3, build_bake_image 11, build_cc_make 6 | all pass |
+| main's waits (measured with the first prototype's switch off, which kept them), 8 busy loops on 4 CPUs (load ≈ 16), 12 iterations of the Go two-machine tests | 12 of 12 iterations failed (`23 reused, 1 built; 1 block to upload waits for the next run`) |
+| This branch, same load, same 12 iterations of the Go tests, then build_cc's whole suite each time | 12 of 12 passed (Go 3/3, cc 11/11 each) |
+| This branch, same load, build_share's whole suite 3 times | BUILD_SHARE_UNDER_LOAD |
+| An 8 s stall injected on A's first upload over 1.5 MB (not committed), the original Go test | main's waits: 3 of 3 failed as CI did; this branch: STALL_RESULT |
 
-The new test is the regression guard. It injects a delay past each bound at the racy points, so
-if a later change brings back a time-bounded wait into an outcome path, the test fails on every
-machine, not just a loaded one.
+`every_package_is_reused_on_the_other_machine_however_slowly_the_backend_answers` is the
+regression guard. It holds A's PUTs, B's `open` and B's downloads past every old bound and
+expects every package reused, so a time-bounded wait that comes back fails it on any machine.
 
 ### Residual
 
-- Per-request timeouts (`tuning.open` and `tuning.lookup` at 10 s, `close` at 5 s) still exist
-  in settled mode. A 10 s stall of a localhost fake is far beyond what we have seen, but it is
-  still a bound. The clean fix is for `settle` to drop them too. That needs `Option<Duration>` in
-  `http::Client::post`, because `Instant + Duration::MAX` panics. The effort is small.
-- `platform_names` now clears `cc_prefetching` with a drop guard, as G5 does. Without it, a
-  panicking cc prefetch would hang a settled question instead of ending it.
+- **B-31 forbids minting an ID token once a command's end has begun.** A CI drain that outlives
+  the token held fails its remaining uploads, and says so.
+- **Job-level budgets stay:** a bake's whole build budget, and `PUBLISH_WITHIN` for a baked
+  image.
+- **Xcode's own cache client** keeps whatever timeouts it has.
+- **tsc's e2e tests** skip here (no TypeScript installed). CI runs them.
 
 ## Inventory
 
 Effort: S is under half a day, M is 1–2 days, L is more. "Shared helper" rows affect many tests.
 
-### Two-machine build tests: one mechanism, `SETTLE`
+### Two-machine build tests: done by ADR 0144
 
 | Test / helper | Cause | Class | Fix | Effort |
 |---|---|---|---|---|
-| build_go.rs `Machine::run`, `gitlab_go_run` (`&& sleep 1`, 15 call sites) | G1–G6 | b | **Done**: `SETTLE`, no sleep | – |
+| build_go.rs `Machine::run`, `gitlab_go_run` (`&& sleep 1`, 15 call sites) | G1–G6 | b | **Done**: product fix, no sleep | – |
 | build_go.rs `every_package_of_a_pure_go_command…` | G1–G6 | b | **Done** | – |
-| build_cc.rs `Machine::run` (`&& sleep 1`, 18 sites), `HUSHRUN_CC_MANIFEST_WAIT_MS=15000` | G1, G3, cc manifest wait | b | Set `SETTLE`, drop the sleep and the 15 s override. The relay half is already in this branch. | S |
-| build_tsc.rs `run` (`&& sleep 1`, `MANIFEST_WAIT_MS=15000`) | same | b | same | S |
-| build_share.rs `Machine::build`, `ci_build`, `greet` and about 24 inline `&& sleep 2` | G1 (CI drain is bounded by cost/4) | b | `SETTLE`. Keep the sleeps only in tests that measure the window itself. | M (many tests, some test the window) |
-| build_share.rs `a_merge_whose_ci_skipped_is_built_by_the_bake_before_it_bakes` | probably G1 (bounded CI drain) | b | `SETTLE`. Confirm on a loop. | S |
-| build_gradle.rs (no override at all) | G2–G4 for `gradle/1` (`named_fetch` is shared) | b | `SETTLE` | S |
-| build_bake_*.rs | bake already drains to `within`, but fetches still race G2–G4 | b | `SETTLE` for outcome tests | S |
+| build_cc.rs `Machine::run` (`&& sleep 1`, 18 sites), `HUSHRUN_CC_MANIFEST_WAIT_MS=15000` | G1, G3, cc manifest wait | b | **Done**: no sleep, no override (the variable is gone) | – |
+| build_tsc.rs `run` (`&& sleep 1`, `MANIFEST_WAIT_MS=15000`) | same | b | **Done** | – |
+| build_share.rs `Machine::build`, `ci_build`, `greet` and about 24 inline `&& sleep 2` | G1 (CI drain bounded by cost/4) | b | **Done**: sleeps removed (the SIGTERM test's `sleep 20` stays, it is the command being stopped) | – |
+| build_share.rs `a_merge_whose_ci_skipped_is_built_by_the_bake_before_it_bakes`, `a_gitlab_bake_that_builds_keeps_its_store` | G1 (bounded CI drain) | b | **Done** by the product fix; under load in the table above | – |
+| build_gradle.rs | G2–G4 for `gradle/1`, and Gradle's own 30 s socket timeout | b | **Done**: event waits, `102 Processing` heartbeats | – |
+| build_bake_*.rs | fetches raced G2–G4 | b | **Done** | – |
 
 ### Tests of a bound: replace wall-clock asserts with an injected clock
 
@@ -141,10 +141,12 @@ waiting on the answer. Nothing sleeps.
 
 | Test | Cause | Class | Fix | Effort |
 |---|---|---|---|---|
-| hushrun-build go/program/tests.rs `a_handler_that_hangs_or_panics_still_gets_one_answer` (PR #53: order plus 3 s) | the watchdog polls `slot.since.elapsed()` every 50 ms | a | The watchdog reads a `Clock`. `slow-get` blocks until its slot was answered by the watchdog (an event) instead of sleeping `budget*2`. `hang-get` blocks until `close`. The test advances the clock past the budget and receives the answer. | M |
-| same file: `after_one_relay_call_times_out…` (<550 ms against 600), `a_store_hit_the_watchdog_answered_first…` (sleeps 900 ms, so it passes vacuously when slow), `a_fetch_that_outlasts_its_wait…` | same | a | same clock | (same) |
+| hushrun-build go/program/tests.rs `a_handler_that_hangs_or_panics_still_gets_one_answer` (PR #53: order plus 3 s) | the watchdog polls each slot's last sign of life every 50 ms (ADR 0144 made it liveness, not age) | a | The watchdog reads a `Clock`. `slow-get` blocks until its slot was answered by the watchdog (an event) instead of sleeping `budget*2`. `hang-get` blocks until `close`. The test advances the clock past the budget and receives the answer. | M |
+| same file: `after_one_relay_call_times_out…`, `a_fetch_that_outlasts_its_wait…` | elapsed-time asserts | a | **Done**: they assert what the relay heard (one request; a heartbeating relay asked twice) | – |
+| same file: `a_store_hit_the_watchdog_answered_first…` (sleeps 900 ms, so it passes vacuously when slow) | same | a | the clock above | (same) |
 | hushrun units/program.rs `output_that_never_stops_is_handed_over…` (`took < MOST_AFTER*4`), `a_program_that_keeps_output_open_past_its_end…` (`< MOST_AFTER*2`) | `run_copying_stdout`'s held decision is `QUIET`/`MOST_AFTER` on `Instant` | a, **and b** | Pass a clock into the read loop. Assert `held`, `cut` and the bytes, never elapsed time. Product: what a program prints after `QUIET` is forwarded but **not kept**, so a slow child's last result lines can miss the parser (units_go `what_a_program…left_running…` relies on it). Decide in C-48 whether "kept" may depend on QUIET. | M |
-| build_relay/tests.rs, about 17 tests with ms bounds (`a_server_that_sleeps_on_open…` <2 s, `a_block_whose_stated_cost_is_absurd…` <600 ms with a 600 ms ceiling and zero headroom, `a_cold_build_s_questions_wait…` 48 asks <100 ms each, `a_ci_job_s_end_sends…` in [900 ms, 3 s), …) | wall-clock asserts on the relay's waits | a | The relay takes `tokio::time` everywhere already. Run these tests under `#[tokio::test(start_paused = true)]` or on a runtime with paused time. Tokio's auto-advance then makes every `sleep` and `timeout` instant and exact, and the bounds become exact equalities. Needs the relay's runtime to be built in the test, and `Instant::now()` replaced by `tokio::time::Instant::now()` in the relay. | L (many tests, mechanical) |
+| build_relay/tests.rs: the bound tests (`a_server_that_sleeps_on_open…`, `a_block_whose_stated_cost_is_absurd…`, `a_ci_job_s_end_sends…`, `only_a_job_writing…`, `a_stalled_begin_or_commit…`, `a_stale_vouch…`, `a_slow_id_token_endpoint…`, `a_ci_job_waits_for_open…`, `on_a_slow_link…`, the two panicking runs) | wall-clock asserts on the relay's old budgets | a | **Done**: rewritten to the new rules, asserting outcomes and order | – |
+| build_relay/tests.rs: what is left with ms asserts (`a_cold_build_s_questions_wait…` 48 asks <100 ms each, `a_cc_open_that_answers_after_its_check_ended…`, `three_failures_rest…` <200 ms) | wall-clock asserts | a | The relay takes `tokio::time` everywhere already. Run these tests under `#[tokio::test(start_paused = true)]` or on a runtime with paused time. Tokio's auto-advance then makes every `sleep` and `timeout` instant and exact, and the bounds become exact equalities. Needs the relay's runtime to be built in the test, and `Instant::now()` replaced by `tokio::time::Instant::now()` in the relay. | L (many tests, mechanical) |
 | build_go.rs `a_frozen_relay_costs_a_run_one_wait…` (SIGSTOP, `date +%s`, SIGHUP at 51 s on macOS) | freezes the whole hushrun process (the relay is a thread), so `sh` and `go` under it are also its children and session | a | Freezing isn't needed to test "one wait per run". A fake whose `open` **never answers** (`fake.hang(route::OPEN)`) gives the same relay state with no signals, and `RELAY_DOWN` (the file the first timeout writes) is the event to assert on. Assert that the second and third go commands asked the relay nothing (the fake's `seen()`), not seconds between stamps. | M |
 | build_cc.rs `a_frozen_relay_costs_a_build_one_wait…` | the cc twin, also `sleep 1500 ms` before SIGSTOP | a | same | M |
 | units_swift.rs:1252, units_ctest.rs:2884 `…left_running_keeps_printing…` (<2 s against `sleep 2; echo late`) | the late line is timed | a | The fake prints its late line when a FIFO the test opens after hushrun returns is written: ordering by event | S |
@@ -154,7 +156,8 @@ waiting on the answer. Nothing sleeps.
 | units.rs:1213 `rust_test_binaries_are_observed…` (a failing test sleeps 3 s so the others finish first) | scheduling order | a | Order the binaries with a FIFO barrier the failing one waits on | S |
 | units_dotnet.rs VSTest console summaries joined on one line (PR #54) | parsing an interleaved console | a/b | The adapter already writes and reads TRX (`units/dotnet/trx.rs`). Take counts from TRX and use the console only for the person. That removes the class rather than the case. | M |
 | units_ctest pinned to CMake 3.22 behaviour | the runner image's CMake changes under the test | c | Pin CMake in CI (like Maven and Gradle, by checksum), or assert on the version found and branch explicitly. Don't let `ubuntu-latest` choose. | S |
-| mtime ticks (`sleep 20–30 ms`, 1100 ms for Ninja and Mix) | coarse file clocks | a | Loop-until-mtime-changed helpers already exist (units_ctest). Use them everywhere, and set mtimes explicitly with `filetime` where the test only needs "older". | S |
+| hushrun-build wrapper.rs `a_file_written_just_before_the_compile_is_not_taken…` (a 5 ms sleep assumed to cross a file-clock tick) | the kernel's tick and scheduling | a | **Done**: probes until the file clock moved past the file's date | – |
+| other mtime ticks (`sleep 20–30 ms`, 1100 ms for Ninja and Mix) | coarse file clocks | a | Loop-until-mtime-changed helpers already exist (units_ctest). Use them everywhere, and set mtimes explicitly with `filetime` where the test only needs "older". | S |
 
 ### CI environment and network
 
@@ -184,31 +187,23 @@ waiting on the answer. Nothing sleeps.
 
 ## Product follow-ups (each needs an ADR)
 
-1. **End-of-run uploads that complete later can't help Go.** A manifest names only what went up
-   by `close`, and Go and Gradle fetch only by manifest (B-45, B-82). So blocks sent later by the
-   next run, or by `hushrun flush` (which today sends only results, ADR 0142), help rustc's
-   key-addressed lookups but never Go. A `close` *amendment*, the same run naming blocks it sent
-   afterwards, would make the person's-machine bound cost only latency, never reuse. This is the
-   product change that removes G1 instead of settling it.
-2. **`hushrun flush` should drain the build outbox too** (with the amendment above), so a sandbox's
-   last command can wait on completion explicitly. That is the "completion signal" a CI step or an
-   agent can use without a time budget.
-3. **C-48 "held" output**: decide whether what a test program prints after `QUIET` counts for
+1. **Manifest amendments** (`hushrun flush` for build blocks): would let a person's command exit
+   before its uploads finish without its manifest falling short. This needs a protocol change and
+   the backend's support (hushrun/cloud). Worth doing on top of ADR 0144, not instead of it.
+2. **C-48 "held" output**: decide whether what a test program prints after `QUIET` counts for
    results (today it is forwarded, not parsed).
+3. **B-31's no-mint-at-the-end rule** against a long CI drain: decide whether the end may renew
+   the job's ID token.
 
 ## Recommended order
 
-1. **First PR (this branch, ready to go):** G5 and G6 product fixes; `Tuning::settle` +
-   `testkit::env::SETTLE`; build_go.rs on it without `sleep 1`; the delayed-backend regression
-   test; CHANGELOG. This fixes the flake that cost the most cycles. Linux-only verification
-   so far: it needs one macOS run.
-2. `SETTLE` in build_cc.rs, build_tsc.rs, build_gradle.rs and build_bake*.rs, dropping their
-   sleeps and 15 s overrides (one PR, mechanical). Then build_share.rs.
-3. CI: drop `|| echo`, add caches for jars, m2, gradle-home and node, and add the jars mirror
+1. **First PR (this branch):** ADR 0144 with its spec rules, product change, tests and CHANGELOG.
+   It needs one macOS run.
+2. CI: drop `|| echo`, add caches for jars, m2, gradle-home and node, and add the jars mirror
    (one PR, no Rust).
-4. macOS: skip tool installs when checks will skip, then the split or merge-queue decision.
-5. Injected clocks: Go cache-program watchdog, `run_copying_stdout`, then the relay's unit tests
-   on paused tokio time.
-6. Frozen-relay tests become "a backend that never answers" (no SIGSTOP).
-7. .NET counts from TRX; pin CMake.
-8. Product ADR: `close` amendments and build-outbox `flush`.
+3. macOS: skip tool installs when checks will skip, then the split or merge-queue decision.
+4. Injected clocks: Go cache-program watchdog, `run_copying_stdout`, then the relay's remaining
+   ms-bound unit tests on paused tokio time.
+5. Frozen-relay tests become "a backend that never answers" (no SIGSTOP).
+6. .NET counts from TRX; pin CMake; the other mtime tests.
+7. Product ADRs: manifest amendments; C-48; B-31's end-of-run mint.

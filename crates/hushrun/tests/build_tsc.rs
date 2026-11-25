@@ -206,7 +206,6 @@ impl Machine {
             .env("HUSHRUN_NO_UPDATE_CHECK", "1")
             .env("HUSHRUN_BUILD", "on")
             .env("HUSHRUN_BUILD_AUDIT", "none")
-            .env("HUSHRUN_CC_MANIFEST_WAIT_MS", "15000")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"));
         if let Some(fake) = fake {
@@ -219,16 +218,7 @@ impl Machine {
     /// `hushrun run build -- sh -c SCRIPT`: its exit code, stdout and stderr.
     fn run(&self, fake: Option<&FakeBuild>, script: &str) -> (i32, String, String) {
         let mut cmd = self.hushrun(fake);
-        let held = if fake.is_some() { " && sleep 1" } else { "" };
-        cmd.args([
-            "run",
-            "build",
-            "--force",
-            "--",
-            "sh",
-            "-c",
-            &format!("{script}{held}"),
-        ]);
+        cmd.args(["run", "build", "--force", "--", "sh", "-c", script]);
         let output = cmd.output().unwrap();
         (
             output.status.code().unwrap_or(-1),

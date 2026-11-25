@@ -29,11 +29,10 @@ use crate::relay::{self, Answer, Problem, Request};
 use crate::session::{Current, Entry, GradleEntry};
 use crate::store::{NewFile, Store};
 
-/// The longest a `GET` waits for the relay: the relay answers sooner by its own budget, half
-/// the task's cost (B-26).
-const RELAY_WAIT: Duration = Duration::from_secs(30);
-/// How long a question the relay answers from what it holds may take.
-const QUICK_WAIT: Duration = Duration::from_secs(2);
+/// The longest a question waits on a relay that says nothing (ADR 0144): a relay working on an
+/// answer says so every heartbeat, so this bounds a frozen or gone relay only, and every question
+/// waits the same, whatever its task costs.
+const RELAY_WAIT: Duration = relay::WAIT;
 /// The most bytes a `PUT`'s body may hold: a larger entry stays in Gradle's own cache.
 pub const MOST_BODY: u64 = 512 << 20;
 /// How long a connection may sit between requests.
@@ -147,7 +146,7 @@ impl Cache {
                     return;
                 }
             };
-            let (status, body) = self.answer(&request);
+            let (status, body) = self.answer_alive(&request, &stream);
             let head = request.method == "HEAD";
             if http::write(&mut output, status, &body, head, request.close).is_err()
                 || request.close
@@ -155,6 +154,34 @@ impl Cache {
                 return;
             }
         }
+    }
+
+    /// [`Cache::answer`], with a `102 Processing` written to `stream` each heartbeat until it is
+    /// known, for a `GET` from an HTTP/1.1 client (ADR 0144): Gradle's socket timeout then ends
+    /// only a cache that is frozen or gone, never one whose download is only slow, and Gradle
+    /// never turns its remote cache off for the build because the machine was busy.
+    fn answer_alive(&self, request: &http::Request, stream: &TcpStream) -> (u16, Vec<u8>) {
+        use std::io::Write as _;
+        if request.method != "GET" || !request.interim {
+            return self.answer(request);
+        }
+        let done = std::sync::Mutex::new(false);
+        std::thread::scope(|scope| {
+            let heartbeats = scope.spawn(|| {
+                loop {
+                    std::thread::park_timeout(relay::HEARTBEAT);
+                    let done = done.lock().unwrap_or_else(|p| p.into_inner());
+                    if *done || (&*stream).write_all(http::PROCESSING).is_err() {
+                        return;
+                    }
+                }
+            });
+            let answer = self.answer(request);
+            // No interim response after this: the answer follows on the same stream.
+            *done.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            heartbeats.thread().unpark();
+            answer
+        })
     }
 
     /// One request's status and body.
@@ -256,16 +283,10 @@ impl Cache {
             outputs: super::outputs_of(file.size, &file.sha256),
         };
         let cost = block.description["rustc_ms"].as_u64().unwrap_or(0);
-        let vouch_wait = (Duration::from_millis(cost) / 2 + QUICK_WAIT).min(RELAY_WAIT);
         let reusable =
             self.current
                 .may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
-                    let wait = if matches!(request, Request::Sharing) {
-                        QUICK_WAIT
-                    } else {
-                        vouch_wait
-                    };
-                    self.ask(request, wait)
+                    self.ask(request, RELAY_WAIT)
                 });
         if !reusable {
             return None;
@@ -290,7 +311,7 @@ impl Cache {
                         key: *key,
                         problem: Problem::Rejected,
                     },
-                    QUICK_WAIT,
+                    RELAY_WAIT,
                 );
                 let until = at + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
                 let _ = store.suspend_until(
@@ -530,7 +551,7 @@ impl Cache {
             return;
         }
         if let Some(share) = self.current.share.relay()
-            && !relay::tell(&share.socket, request, QUICK_WAIT)
+            && !relay::tell(&share.socket, request, RELAY_WAIT)
         {
             self.relay_down.store(true, Ordering::SeqCst);
         }

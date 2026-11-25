@@ -189,7 +189,7 @@ impl Machine {
                 "--",
                 "sh",
                 "-c",
-                "cargo build --offline && sleep 2",
+                "cargo build --offline",
             ])
             .output()
             .unwrap();
@@ -587,7 +587,7 @@ fn ci_build(
             "--",
             "sh",
             "-c",
-            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"; cargo build --offline && sleep 2",
+            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"; cargo build --offline",
         ])
         .output()
         .unwrap();
@@ -681,13 +681,7 @@ fn a_job_never_uploads_or_reuses_what_another_job_left_in_a_kept_temporary_folde
     // blocks wait in its outbox when it ends.
     fake.set_scopes(Some("ci/1/pr7"), &["ci/1/pr7", "protected/1"]);
     fake.throttle_store(1);
-    let (stderr, close) = job_run(
-        &a,
-        &fake,
-        &runner_temp,
-        "100",
-        "cargo build --offline && sleep 2",
-    );
+    let (stderr, close) = job_run(&a, &fake, &runner_temp, "100", "cargo build --offline");
     let close = close.expect(&stderr);
     assert_eq!(close.counts.built, 2, "{stderr}");
     assert!(fake.stored().is_empty(), "{stderr}");
@@ -700,7 +694,7 @@ fn a_job_never_uploads_or_reuses_what_another_job_left_in_a_kept_temporary_folde
         &fake,
         &runner_temp,
         "101",
-        "cargo clean -q && cargo build --offline && sleep 3",
+        "cargo clean -q && cargo build --offline",
     );
     let close = close.expect(&stderr);
     // Nothing the pull request's job left was reused: the main job compiled both crates
@@ -729,13 +723,7 @@ fn a_job_with_nothing_to_build_sends_no_begin_for_another_jobs_markers() {
     let runner_temp = a.root.join("runner-temp");
     fake.set_scopes(Some("ci/1/pr7"), &["ci/1/pr7", "protected/1"]);
     fake.throttle_store(1);
-    let (stderr, _) = job_run(
-        &a,
-        &fake,
-        &runner_temp,
-        "200",
-        "cargo build --offline && sleep 2",
-    );
+    let (stderr, _) = job_run(&a, &fake, &runner_temp, "200", "cargo build --offline");
     assert!(fake.stored().is_empty(), "{stderr}");
     let begun = fake.begins().len();
     fake.throttle_store(0);
@@ -949,18 +937,16 @@ fn a_job_whose_backend_doesnt_answer_runs_unwrapped_with_one_line() {
     });
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("wrapper=none"), "{stdout}");
-    let line = "build reuse is off for this run: the backend didn't answer in time";
+    let line = "build reuse is off for this run: the backend didn't answer";
     assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
 
-    // The results lookup answers, and `open` takes longer than the 5 seconds a job gives it.
+    // ADR 0144: the results lookup answers, and `open` answers past the 5 seconds a job used to
+    // give it: the job waits for it and shares, however late it is.
     fake.delay(route::OPEN, Duration::from_secs(8));
-    let started = Instant::now();
     let (code, stdout, stderr) = ci_build(&a, &fake, |_| {});
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("wrapper=none"), "{stdout}");
-    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
-    assert!(started.elapsed() >= Duration::from_secs(5));
-    assert!(fake.stored().is_empty());
+    assert!(!stdout.contains("wrapper=none"), "{stdout}");
+    assert_eq!(stderr.matches(line).count(), 0, "{stderr}");
 }
 
 /// Every `origin.json` under `dir`, its vouches dated at the epoch: two days old and more.
@@ -1034,58 +1020,45 @@ fn lookups_since(fake: &FakeBuild, after: usize) -> Vec<(bool, usize)> {
 
 // covers: B-26, B-34
 #[test]
-fn a_warm_build_with_stale_vouches_waits_for_open_at_most_half_each_compile_and_asks_once() {
+fn a_warm_build_with_stale_vouches_waits_for_open_and_asks_once() {
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let a = Machine::new(dir.path(), "a", None);
     let (code, stderr) = a.build(&fake);
     assert_eq!(code, 0, "{stderr}");
-    // Compiles that took 400 ms where they were built: a question about a vouch of one may wait
-    // 200.
+    // Compiles that took 400 ms where they were built.
     fake.set_costs(400);
     let b = Machine::new(dir.path(), "b", Some(&a.repo));
     let (code, stderr) = b.build(&fake);
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
     // A warm build with vouches fresh, and the same a day later, when every vouch B holds is
-    // older than a day and `open` takes 10 seconds: each crate waits for it at most its 200 ms,
-    // then the server can't be reached, for it, and the entry counts.
-    let (fresh, stderr) = timed_build(&b, &fake, "on");
+    // older than a day and `open` answers long past half of any compile (ADR 0144): each crate's
+    // question waits for `open`, then for the run's one lookup of its stale vouches, which the
+    // server answers, and the crates are reused on its word.
+    let (_, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
     assert!(age_vouches(&b.root.join("cache/build")) > 0);
-    let delay = Duration::from_secs(10);
-    fake.delay(route::OPEN, delay);
+    fake.delay(route::OPEN, Duration::from_millis(1500));
     let seen = fake.seen().len();
-    let (stale, stderr) = timed_build(&b, &fake, "on");
+    let (_, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
-    // Bounded by the delay injected, not by the machine's speed: a crate that waited for `open`
-    // itself spends all 10 seconds, and two builds of a loaded machine differ by a second or
-    // two with nothing waiting.
-    assert!(
-        stale < fresh + delay / 2,
-        "with stale vouches {stale:?}, fresh {fresh:?}: {stderr}"
-    );
-    assert_eq!(lookups_since(&fake, seen), vec![], "{stderr}");
+    assert_eq!(lookups_since(&fake, seen), vec![(false, 2)], "{stderr}");
 
     // In a CI job `open` has answered before cargo starts: the job's blocks downloaded in its
-    // first call, a day old in its second, are asked about in one lookup, and the build takes
-    // what one with fresh vouches takes.
+    // first call, a day old in its second, are asked about in one lookup.
     fake.delay(route::OPEN, Duration::ZERO);
     let c = Machine::new(dir.path(), "c", Some(&a.repo));
     let (_, _, said) = timed_ci_build(&c, &fake);
     assert!(said.contains("(2 from the shared store)"), "{said}");
     let stores = ci_stores(&c.root.join("runner-temp"));
-    let (fresh, _, said) = timed_ci_build(&c, &fake);
+    let (_, _, said) = timed_ci_build(&c, &fake);
     assert!(said.contains("2 of 2 crates reused"), "{said}");
     assert!(age_vouches(&stores[0]) > 0);
     let seen = fake.seen().len();
-    let (stale, _, said) = timed_ci_build(&c, &fake);
+    let (_, _, said) = timed_ci_build(&c, &fake);
     assert!(said.contains("2 of 2 crates reused"), "{said}");
     assert_eq!(lookups_since(&fake, seen), vec![(false, 2)], "{said}");
-    assert!(
-        stale < fresh.mul_f64(1.1) + Duration::from_millis(500),
-        "with stale vouches {stale:?}, fresh {fresh:?}: {said}"
-    );
 }
 
 /// `cargo build` through hushrun, the target as the last build left it.
@@ -1161,7 +1134,7 @@ fn build_once_open_answered(m: &Machine, fake: &FakeBuild) -> (i32, String) {
                     "--",
                     "sh",
                     "-c",
-                    "while [ ! -e \"$GO\" ]; do sleep 0.05; done; cargo build --offline && sleep 2",
+                    "while [ ! -e \"$GO\" ]; do sleep 0.05; done; cargo build --offline",
                 ])
                 .output()
                 .unwrap();
@@ -1464,7 +1437,7 @@ fn greet(m: &Machine, fake: &FakeBuild, greeting: &str) -> (String, String) {
             "--",
             "sh",
             "-c",
-            "cargo run -q --offline -p show && sleep 2",
+            "cargo run -q --offline -p show",
         ])
         .output()
         .unwrap();
@@ -2511,7 +2484,7 @@ fn a_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_against_it() 
             &fake,
             &m.root.join("runner-temp"),
             run,
-            "CARGO_INCREMENTAL=0 cargo build --offline && sleep 2",
+            "CARGO_INCREMENTAL=0 cargo build --offline",
         )
     };
     let a = Machine::with(dir.path(), "a", None, macro_workspace);
@@ -2623,7 +2596,7 @@ fn a_gitlab_bake_job_bakes_in_a_store_of_its_own() {
         &temp,
         "5101",
         Some(&token),
-        "cargo build --offline && sleep 2",
+        "cargo build --offline",
         |_| {},
     );
     assert_eq!(code, 0, "{stderr}");
@@ -2713,7 +2686,7 @@ fn a_gitlab_job_shares_with_its_id_token_and_signs_every_request_with_one_key() 
         &temp,
         "5001",
         Some(&token),
-        "cargo build --offline && sleep 2",
+        "cargo build --offline",
         |_| {},
     );
     assert_eq!(code, 0, "{stderr}");
@@ -2943,7 +2916,7 @@ fn a_gitlab_job_with_no_token_but_its_own_shares_once_open_says_the_org_does() {
         &a.root.join("tmp"),
         "5006",
         Some(&token),
-        "cargo build --offline && sleep 2",
+        "cargo build --offline",
         |cmd| {
             cmd.env_remove("HUSHRUN_TOKEN");
         },
@@ -2968,7 +2941,7 @@ fn a_gitlab_job_closes_its_run_whatever_its_command_does() {
         &a.root.join("tmp"),
         "5007",
         Some(&token),
-        "cargo build --offline && sleep 2; exit 3",
+        "cargo build --offline; exit 3",
         |_| {},
     );
     assert_ne!(code, 0, "{stdout}\n{stderr}");
@@ -2992,7 +2965,7 @@ fn a_gitlab_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_agains
             &m.root.join("tmp"),
             &id.to_string(),
             Some(&token),
-            "CARGO_INCREMENTAL=0 cargo build --offline && sleep 2",
+            "CARGO_INCREMENTAL=0 cargo build --offline",
             |_| {},
         );
         assert_eq!(code, 0, "{stderr}");
@@ -3026,7 +2999,7 @@ fn every_run_of_a_gitlab_job_signs_with_one_key_whatever_its_temporary_folder() 
             &a.root.join(temp),
             "5008",
             Some(&token),
-            "cargo clean -q && cargo build --offline && sleep 2",
+            "cargo clean -q && cargo build --offline",
             change,
         )
     };
@@ -3106,7 +3079,7 @@ fn a_gitlab_job_is_known_by_its_variables_also_without_gitlab_ci_or_under_anothe
             &a.root.join(name),
             &job.to_string(),
             Some(&token),
-            "cargo clean -q && cargo build --offline && sleep 2",
+            "cargo clean -q && cargo build --offline",
             change,
         );
         assert_eq!(code, 0, "{name}: {stderr}");

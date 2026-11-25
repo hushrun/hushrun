@@ -138,6 +138,7 @@ fn request(method: &str, path: &str, token: &str, body: &[u8]) -> http::Request 
         authorization: Some(http::basic(USER_FOR_TESTS, token)),
         body: Body::Bytes(body.to_vec()),
         close: false,
+        interim: true,
     }
 }
 

@@ -685,7 +685,6 @@ fn after_one_relay_call_times_out_the_command_asks_it_nothing_more() {
     let (socket, heard) = relay(dir.path(), Says::Nothing);
     let mut m = Machine::new().with_session(Some("none"), Some(&socket));
     m.env.insert(BUDGET_VAR.into(), "600".into());
-    let started = Instant::now();
     // One after another, as Go asks for a package once its imports are done.
     let lines = m.serve_steps(
         &[
@@ -700,17 +699,12 @@ fn after_one_relay_call_times_out_the_command_asks_it_nothing_more() {
     for id in 1..=3 {
         assert_eq!(answers[&id]["Miss"], true);
     }
-    // One wait for the relay in the command, never one a request.
-    assert!(
-        started.elapsed() < Duration::from_millis(550),
-        "{:?}",
-        started.elapsed()
-    );
-    std::thread::sleep(Duration::from_millis(50));
-    // The fetch, and the quick question that told a frozen relay from a slow download.
+    // One wait for the relay in the command, never one a request: a relay that said nothing,
+    // not even a heartbeat, is down, and only the first `get` asked it (ADR 0144). Each line is
+    // heard before the relay stays silent, so all of them are in the channel by now.
     let asked: Vec<Value> = heard.try_iter().collect();
-    assert_eq!(asked.len(), 2, "{asked:?}");
-    assert_eq!(asked[1]["op"], "sharing");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0]["op"], "go_fetch");
     let lines = m.serve(&[get(1, &[16u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
 }
@@ -790,9 +784,9 @@ fn a_relay_that_failed_is_asked_nothing_by_the_runs_later_go_commands() {
     let m = Machine::new().with_session(Some("none"), Some(&socket));
     let lines = m.serve(&[get(1, &[30u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
-    // The fetch, and the quick question that found the relay down.
+    // The fetch alone: a relay that hung up is down, with no second question (ADR 0144).
     let first: Vec<Value> = heard.try_iter().map(|t| t["op"].clone()).collect();
-    assert_eq!(first, [json!("go_fetch"), json!("sharing")]);
+    assert_eq!(first, [json!("go_fetch")]);
     // Another `go` command of the same run asks it nothing.
     let lines = m.serve(&[get(1, &[31u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
@@ -806,7 +800,8 @@ fn a_fetch_that_outlasts_its_wait_on_a_live_relay_leaves_it_on() {
     let socket = dir.path().join("relay.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let (tx, heard) = mpsc::channel::<Value>();
-    // Quick questions are answered; a fetch takes longer than the program waits.
+    // A fetch takes longer than the program waits on a silent relay, and the relay says it is
+    // working all along (ADR 0144): a heartbeat many times within the silence.
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
@@ -818,7 +813,11 @@ fn a_fetch_that_outlasts_its_wait_on_a_live_relay_leaves_it_on() {
                     let fetch = asked["op"] == "go_fetch";
                     let _ = tx.send(asked);
                     if fetch {
-                        std::thread::sleep(Duration::from_secs(3));
+                        let working = Instant::now() + Duration::from_secs(3);
+                        while Instant::now() < working {
+                            std::thread::sleep(Duration::from_millis(20));
+                            let _ = (&stream).write_all(b" ");
+                        }
                     }
                     let _ = (&stream).write_all(b"{\"answer\":\"none\"}\n");
                 }
@@ -826,7 +825,8 @@ fn a_fetch_that_outlasts_its_wait_on_a_live_relay_leaves_it_on() {
         }
     });
     let mut m = Machine::new().with_session(Some("none"), Some(&socket));
-    m.env.insert(BUDGET_VAR.into(), "600".into());
+    // A silence of 1.5 s against heartbeats every 20 ms; the fetch takes twice the silence.
+    m.env.insert(BUDGET_VAR.into(), "3000".into());
     let lines = m.serve_steps(
         &[
             (1, get(1, &[32u8; 32])),

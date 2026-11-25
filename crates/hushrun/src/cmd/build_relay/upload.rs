@@ -115,21 +115,11 @@ pub(crate) fn after_commit(state: CommitState) -> Move {
     }
 }
 
-/// What decides how long the end of a command waits for uploads (B-29, B-31).
+/// What decides how long the end of a command waits for uploads (B-29, B-31, ADR 0144).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct End {
-    /// A CI job: its store goes with the job, so what it built goes up now or never.
-    pub(crate) in_ci: bool,
     /// B-49: a stop signal came while COMMAND ran: nothing is waited for but `close`.
     pub(crate) stopping: bool,
-    /// The job writes the repository's trusted blocks, as `Policy::writes_trusted` says.
-    pub(crate) trusted: bool,
-    /// What the compiles of the blocks still to go up took, together.
-    pub(crate) waiting_cost: Duration,
-    /// What this `hushrun run` call already waited at the end of its earlier checks.
-    pub(crate) waited: Duration,
-    /// B-75: a bake's build of what's missing, which waits for every upload up to this long.
-    pub(crate) bake: Option<Duration>,
 }
 
 /// B-49: the most a run that was asked to stop gives `close`: GitLab's grace period before it
@@ -145,44 +135,17 @@ pub(crate) struct EndWait {
     pub(crate) total: Duration,
 }
 
-/// How long the end of a command waits (B-29, B-31), the one place that says. Uploads may take,
-/// on a person's machine, the tuning's 5 seconds for those in flight; in CI, for every block
-/// still to go, up to 2 minutes for a job that writes trusted blocks and 20 seconds for any
-/// other, never more than a quarter of what the waiting blocks' compiles took, and both for the
-/// whole `hushrun run` call, less what its earlier checks waited. The whole end is that and
-/// `close`'s 5 seconds on a person's machine; in CI that, and never less than `close`'s time.
-/// Uploads stop when `close`'s time (or half the whole, if less) is all that is left.
-pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> EndWait {
-    if end.stopping {
-        return EndWait {
-            uploads: Duration::ZERO,
-            total: STOPPED_CLOSE.min(tuning.close),
-        };
-    }
-    // B-75: a bake's build waits for its uploads whatever its compiles cost: what it leaves
-    // unsent, it leaves out of no manifest, since it closes none then.
-    if let Some(within) = end.bake {
-        return EndWait {
-            uploads: within,
-            total: within + tuning.close,
-        };
-    }
-    let (uploads, total) = if end.in_ci {
-        let most = if end.trusted {
-            tuning.ci_trusted_wait
-        } else {
-            tuning.ci_wait
-        };
-        let uploads = most.saturating_sub(end.waited).min(end.waiting_cost / 4);
-        (uploads, uploads.max(tuning.close))
-    } else {
-        (tuning.end_wait, tuning.end_wait + tuning.close)
-    };
-    let for_close = tuning.close.min(total / 2);
-    EndWait {
-        uploads: uploads.min(total - for_close),
-        total,
-    }
+/// How long the end of a command waits (B-29, B-31), the one place that says: no deadline at
+/// all (`None`), on a person's machine, in a sandbox and in CI alike, unless a stop signal came.
+/// Every upload the run built then goes on until it is done or an answer (or a server's silence)
+/// puts it off, and `close` follows: what one machine leaves out of its manifest depends on what
+/// the backend answered, never on how loaded it was (ADR 0144). Asked to stop, the run cuts its
+/// uploads off at once and gives `close` [`STOPPED_CLOSE`].
+pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> Option<EndWait> {
+    end.stopping.then(|| EndWait {
+        uploads: Duration::ZERO,
+        total: STOPPED_CLOSE.min(tuning.close),
+    })
 }
 
 fn class_of(class: hushrun_build::model::Class) -> Class {
@@ -477,18 +440,41 @@ impl Relay {
             let handle = self.runtime.spawn(async move {
                 // Streamed from where the pack is, with the length and checksum the signed
                 // link names in its headers.
-                let (body, file) = p.pack.into_body().ok()?;
+                let moved = super::pack::Moved::new();
+                let (body, file) = p.pack.into_body(&moved).ok()?;
+                // The body is streamed: its length goes in the request, as the link names it.
+                let named = link
+                    .headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("content-length"));
                 let sent = match relay.client.link(&link) {
-                    Some(request) => match request.body(body).send().await {
-                        Ok(response) => Some(response),
-                        // B-26: the store's host, named once, by its name alone.
-                        Err(err) => {
-                            if err.is_connect() {
-                                relay.state().store_unreachable(&link.url);
+                    Some(request) => {
+                        let request = if named {
+                            request
+                        } else {
+                            request.header("content-length", size.to_string())
+                        };
+                        // ADR 0144: an upload goes on however long it takes, and ends early only
+                        // when its body has not moved, nor an answer come, for the silence.
+                        let stalled = async {
+                            while moved.still_for() < super::http::SILENCE {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             }
-                            None
+                        };
+                        tokio::select! {
+                            sent = request.body(body).send() => match sent {
+                                Ok(response) => Some(response),
+                                // B-26: the store's host, named once, by its name alone.
+                                Err(err) => {
+                                    if err.is_connect() {
+                                        relay.state().store_unreachable(&link.url);
+                                    }
+                                    None
+                                }
+                            },
+                            () = stalled => None,
                         }
-                    },
+                    }
                     None => None,
                 };
                 if let Some(file) = file {
@@ -661,10 +647,9 @@ impl Relay {
 /// How many of a first key's newest hints go up with its block.
 const HINTS_PER_BLOCK: usize = 2;
 
-/// B-31: at the end of a CI job's command, the upload loop goes on, up to `until`, while a block
-/// of this run's is still to go: one waiting that may go now, or one this run holds. It stops
-/// early once none is, or the loop stopped. With no `until` (a settled end, `Tuning::settle`, on
-/// any machine), only that ends it.
+/// B-31, ADR 0144: at the end of a command, the upload loop goes on while a block of this run's
+/// is still to go (one waiting that may go now, or one this run holds), until `until` when there
+/// is one. It stops once none is, the loop stopped, or the relay rests or stopped.
 pub(crate) async fn drain(relay: &Arc<Relay>, until: Option<Instant>) {
     let outbox = Outbox::new(&relay.config.store);
     while until.is_none_or(|until| Instant::now() < until) {
@@ -675,7 +660,18 @@ pub(crate) async fn drain(relay: &Arc<Relay>, until: Option<Instant>) {
             .iter()
             .any(|m| m.by == relay.by && m.not_before_ms <= now)
             || !outbox.claimed(&relay.run).is_empty();
-        if !left || !relay.state().uploading {
+        // Resting after failures, or stopped (B-26): no new request goes, and what is left
+        // waits for the next run. An `open` still on the wire is waited for: what goes up
+        // never depends on how fast the command was.
+        let sending = {
+            let mut state = relay.state();
+            state.uploading
+                && !matches!(
+                    state.phase_now(Instant::now()),
+                    Phase::Resting(_) | Phase::Stopped(_)
+                )
+        };
+        if !left || !sending {
             return;
         }
         tokio::time::sleep(relay.config.tuning.tick.max(Duration::from_millis(10))).await;
@@ -709,71 +705,20 @@ pub(crate) async fn settle(relay: &Arc<Relay>, cut: Option<Instant>, deadline: O
 mod tests {
     use super::*;
 
-    // covers: B-31
+    // covers: B-29, B-31, B-49
     #[test]
-    fn the_end_of_a_command_waits_as_long_as_its_context_says_and_no_longer() {
+    fn the_end_of_a_command_has_no_deadline_unless_it_was_asked_to_stop() {
         let tuning = Tuning::default();
-        let end = |in_ci, trusted, cost_s: u64, waited_s: u64| {
-            let wait = wait_at_end(
-                &tuning,
-                &End {
-                    in_ci,
-                    stopping: false,
-                    trusted,
-                    waiting_cost: Duration::from_secs(cost_s),
-                    waited: Duration::from_secs(waited_s),
-                    bake: None,
-                },
-            );
-            (wait.uploads.as_millis(), wait.total.as_millis())
-        };
+        // ADR 0144: a person's machine, a sandbox and a CI job alike: no cut, no deadline.
+        assert_eq!(wait_at_end(&tuning, &End { stopping: false }), None);
         // B-49: a run asked to stop waits for no upload, and gives `close` 2 seconds at most.
-        let stopped = wait_at_end(
-            &tuning,
-            &End {
-                in_ci: true,
-                stopping: true,
-                trusted: true,
-                waiting_cost: Duration::from_secs(600),
-                waited: Duration::ZERO,
-                bake: None,
-            },
-        );
         assert_eq!(
-            (stopped.uploads.as_millis(), stopped.total.as_millis()),
-            (0, 2_000)
+            wait_at_end(&tuning, &End { stopping: true }),
+            Some(EndWait {
+                uploads: Duration::ZERO,
+                total: Duration::from_secs(2),
+            })
         );
-        // B-75: a bake's build waits for every upload, up to its own bound, whatever the cost.
-        let bake = wait_at_end(
-            &tuning,
-            &End {
-                in_ci: true,
-                stopping: false,
-                trusted: true,
-                waiting_cost: Duration::from_secs(4),
-                waited: Duration::from_secs(300),
-                bake: Some(Duration::from_secs(600)),
-            },
-        );
-        assert_eq!(
-            (bake.uploads.as_millis(), bake.total.as_millis()),
-            (600_000, 605_000)
-        );
-        // A person's machine: the 5 seconds for those in flight, whatever waits, then `close`'s 5.
-        assert_eq!(end(false, true, 10_000, 0), (5_000, 10_000));
-        assert_eq!(end(false, false, 0, 0), (5_000, 10_000));
-        // CI: up to 2 minutes for a trusted job, 20 seconds for any other, `close` within them.
-        assert_eq!(end(true, true, 10_000, 0), (115_000, 120_000));
-        assert_eq!(end(true, false, 10_000, 0), (15_000, 20_000));
-        // Never more than a quarter of what the waiting blocks' compiles took; `close` keeps its
-        // 5 seconds, or half the whole when that is less.
-        assert_eq!(end(true, true, 40, 0), (5_000, 10_000));
-        assert_eq!(end(true, false, 32, 0), (4_000, 8_000));
-        assert_eq!(end(true, false, 4, 0), (1_000, 5_000));
-        assert_eq!(end(true, true, 0, 0), (0, 5_000));
-        // For the whole call: what earlier checks waited is spent.
-        assert_eq!(end(true, false, 10_000, 15), (2_500, 5_000));
-        assert_eq!(end(true, true, 10_000, 200), (0, 5_000));
     }
 
     // covers: B-29

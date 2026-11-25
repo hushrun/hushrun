@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
 use hushrun_build::model::Mode;
 use hushrun_build::outbox;
@@ -20,9 +20,6 @@ use super::{Download, Fetch, Phase, Relay, Stop};
 
 /// `saved.json`'s schema.
 pub(crate) const SCHEMA: &str = "hushrun.build-prefetched/v1";
-
-/// How long a fetch waits for its downloads at most.
-const FETCH_FOR: Duration = Duration::from_secs(600);
 
 /// `saved.json`: no token, and no link (a row's `get` is dropped).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,7 +126,6 @@ impl Relay {
         let relay = self.clone();
         let checks = checks.to_vec();
         self.runtime.block_on(async move {
-            let deadline = Instant::now() + FETCH_FOR;
             for check in checks {
                 relay.clone().open(check).await;
                 if let Phase::Stopped(stop) = relay.state().phase.clone() {
@@ -144,7 +140,8 @@ impl Relay {
                         .fetches
                         .values()
                         .any(|f| matches!(f.state, Download::Queued | Download::Downloading));
-                    if !busy || Instant::now() >= deadline {
+                    // ADR 0144: every download to its end, or its server's silence.
+                    if !busy {
                         break;
                     }
                     relay.pump();
@@ -197,7 +194,6 @@ impl Relay {
         let wanted = wanted.to_vec();
         let checks = checks.to_vec();
         let manifests = self.runtime.block_on(async move {
-            let deadline = Instant::now() + FETCH_FOR;
             let mut manifests = Vec::new();
             for check in checks {
                 relay.clone().open(check).await;
@@ -241,7 +237,8 @@ impl Relay {
                     .fetches
                     .values()
                     .any(|f| matches!(f.state, Download::Queued | Download::Downloading));
-                if !busy || Instant::now() >= deadline {
+                // ADR 0144: every download to its end, or its server's silence.
+                if !busy {
                     break;
                 }
                 relay.pump();

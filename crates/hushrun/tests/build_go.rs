@@ -184,18 +184,13 @@ impl Machine {
             .env("HUSHRUN_TOKEN", FakeBuild::TOKEN)
             .env("HUSHRUN_BUILD", "on")
             .env("HUSHRUN_BUILD_AUDIT", "none")
-            .env(
-                hushrun_testkit::env::SETTLE.0,
-                hushrun_testkit::env::SETTLE.1,
-            )
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"));
         cmd
     }
 
-    /// `hushrun run build -- sh -c SCRIPT`, its relay settled ([`hushrun_testkit::env::SETTLE`]):
-    /// the run ends once every upload it built went up, so the other machine's reuse never
-    /// depends on how fast this one was.
+    /// `hushrun run build -- sh -c SCRIPT`: the run ends once every upload it built went up
+    /// (ADR 0144), so the other machine's reuse never depends on how fast this one was.
     fn run(&self, fake: &FakeBuild, script: &str) -> (i32, String, String) {
         self.run_with(fake, script, |_| {})
     }
@@ -926,8 +921,6 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
         stamp("t3"),
     );
     let mut cmd = b.hushrun(&fake);
-    // What this test measures is the bound itself: the relay's waits stay as a release has them.
-    cmd.env_remove(hushrun_testkit::env::SETTLE.0);
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());

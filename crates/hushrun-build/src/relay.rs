@@ -2,8 +2,8 @@
 //! process that talks to the shared store, one line of JSON each way, over a Unix socket whose
 //! path the session names. The wrapper stays free of network code: everything here is std.
 //!
-//! No socket, a socket another user owns, no answer, an answer that can't be read, and an answer
-//! later than the wait are all a miss: the compile goes on as if there were no shared store
+//! No socket, a socket another user owns, no answer, an answer that can't be read, and a relay
+//! silent for longer than the wait are all a miss: the compile goes on as if there were no shared store
 //! (B-19). Inside one OS user the socket is no boundary and needs none: any process of that user
 //! can already read the machine's key.
 
@@ -15,9 +15,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::Class;
 
-/// The longest a wrapper waits for the relay's answer (B-26). The relay answers sooner by its
-/// own budget.
+/// The longest a wrapper waits on a relay that says nothing (B-26): no answer and no
+/// [`HEARTBEAT`]. A relay that is working on the answer (a lookup, a download) says so every
+/// [`HEARTBEAT`], so this bounds only a relay that is frozen, deadlocked or gone, never one that
+/// is slow because the machine or the network is: how long an answer takes never decides what it
+/// is (ADR 0144).
 pub const WAIT: Duration = Duration::from_secs(30);
+
+/// How often the relay writes one space while it works on an answer: a wrapper's read of the
+/// answer line takes it for the answer still coming, and JSON reads it as nothing.
+pub const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// The longest a socket path may be before the relay puts it in a short private folder instead:
 /// macOS refuses one over 103 bytes, Linux over 107.
@@ -96,8 +103,8 @@ pub enum Request {
     /// compile for the target triple `platform`. The relay asks the server only when the
     /// check's `cc/1` manifest for that platform names the first key: most compiles of a build
     /// are ones no server holds, and a lookup for each would make a cold build slower than
-    /// plain. `local_ms`: what this machine's own last compile of `step` took, when it knows;
-    /// the relay waits for the manifest within half of it.
+    /// plain. `local_ms`: what this machine's own last compile of `step` took, when it knows (a
+    /// record only: since ADR 0144 no wait depends on it).
     CcHints {
         step: Digest,
         platform: String,
@@ -259,10 +266,23 @@ pub enum Answer {
     Unknown,
 }
 
-/// Asks the relay at `socket`, waiting at most `wait`. `None` is a miss.
+/// Asks the relay at `socket`, waiting while it works and at most `wait` of silence. `None` is
+/// a miss.
 #[cfg(unix)]
 pub fn ask(socket: &Path, request: &Request, wait: Duration) -> Option<Answer> {
-    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+    ask_alive(socket, request, wait, &mut || {})
+}
+
+/// [`ask`], calling `alive` each time the relay says it is still working on the answer (a
+/// [`HEARTBEAT`]): a caller with a watchdog of its own takes the request as alive then.
+#[cfg(unix)]
+pub fn ask_alive(
+    socket: &Path,
+    request: &Request,
+    wait: Duration,
+    alive: &mut dyn FnMut(),
+) -> Option<Answer> {
+    use std::io::{Read as _, Write as _};
     use std::os::unix::fs::MetadataExt as _;
 
     // The socket must be this user's: a listener someone else put there must not get a key.
@@ -271,17 +291,36 @@ pub fn ask(socket: &Path, request: &Request, wait: Duration) -> Option<Answer> {
         return None;
     }
     let stream = connect_within(socket, wait)?;
+    // Each read waits at most `wait`: the heartbeats keep a working relay's answer coming.
     stream.set_read_timeout(Some(wait)).ok()?;
     stream.set_write_timeout(Some(wait)).ok()?;
     let mut line = serde_json::to_vec(request).ok()?;
     line.push(b'\n');
     (&stream).write_all(&line).ok()?;
-    let mut answer = String::new();
-    BufReader::new(&stream)
-        .take(1 << 20)
-        .read_line(&mut answer)
-        .ok()?;
-    serde_json::from_str(answer.trim_end()).ok()
+    let mut answer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = (&stream).read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        let got = &chunk[..n];
+        match got.iter().position(|b| *b == b'\n') {
+            Some(end) => {
+                answer.extend_from_slice(&got[..end]);
+                break;
+            }
+            None => answer.extend_from_slice(got),
+        }
+        if answer.len() > 1 << 20 {
+            return None;
+        }
+        // Only heartbeats so far: the relay is alive and still working.
+        if answer.iter().all(|b| *b == b' ') {
+            alive();
+        }
+    }
+    serde_json::from_slice(answer.trim_ascii()).ok()
 }
 
 /// Connects to the relay's socket within `wait`: a connect blocks while the socket's backlog is
@@ -303,6 +342,17 @@ fn connect_within(socket: &Path, wait: Duration) -> Option<std::os::unix::net::U
 /// No relay off unix: always a miss.
 #[cfg(not(unix))]
 pub fn ask(_socket: &Path, _request: &Request, _wait: Duration) -> Option<Answer> {
+    None
+}
+
+/// No relay off unix: always a miss.
+#[cfg(not(unix))]
+pub fn ask_alive(
+    _socket: &Path,
+    _request: &Request,
+    _wait: Duration,
+    _alive: &mut dyn FnMut(),
+) -> Option<Answer> {
     None
 }
 

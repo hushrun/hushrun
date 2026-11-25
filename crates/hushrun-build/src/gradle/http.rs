@@ -18,6 +18,8 @@ pub struct Request {
     pub body: Body,
     /// The client asked to close the connection after this request.
     pub close: bool,
+    /// HTTP/1.1: the client takes interim `1xx` responses before the answer (ADR 0144).
+    pub interim: bool,
 }
 
 /// A request's body.
@@ -138,8 +140,15 @@ pub fn read(
         authorization,
         body,
         close,
+        interim: version != "HTTP/1.0",
     })
 }
+
+/// ADR 0144: what is written to a client while its answer is worked on, once a
+/// [`crate::relay::HEARTBEAT`]: an interim response, which an HTTP/1.1 client reads past to the
+/// answer, and which keeps its socket's read timeout from running out on an answer that is only
+/// slow.
+pub const PROCESSING: &[u8] = b"HTTP/1.1 102 Processing\r\n\r\n";
 
 fn read_length(input: &mut impl BufRead, length: u64, most: u64) -> Result<Body, Unread> {
     if length > most {

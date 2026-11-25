@@ -15,14 +15,6 @@ use std::ffi::OsString;
 /// What every child process a test starts gets, whatever the developer's shell says.
 pub const SET: &[(&str, &str)] = &[("PYTHONDONTWRITEBYTECODE", "1")];
 
-/// What a test that starts `hushrun run` on two machines sets, so that what the second reuses of
-/// the first depends on what the fake backend answered and never on how loaded the machine is:
-/// every wait of the relay that the product bounds by time (a fetch waiting for `open`, a
-/// manifest or a download; the end of the command waiting for uploads) waits instead for what
-/// it waits on to be over. Read only by a debug build of hushrun (`Tuning::settle`). A test of a
-/// bound itself (a frozen or slow backend costs one wait) leaves it unset.
-pub const SETTLE: (&str, &str) = ("HUSHRUN_BUILD_SETTLE", "1");
-
 /// Variables scrubbed by name: what changes how a runner behaves.
 const NAMES: &[&str] = &[
     "NODE_OPTIONS",
