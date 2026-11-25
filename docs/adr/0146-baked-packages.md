@@ -2,7 +2,7 @@
 
 - **Status:** proposed; being built
 - **Date:** 2026-11-25
-- **Rules:** K-1 to K-5, K-7, K-8, K-11 and K-12 new (`docs/spec/11-baked-packages.md`); B-63, B-65 and B-67 read
+- **Rules:** K-1 to K-5, K-7, K-8, K-10 to K-12 new (`docs/spec/11-baked-packages.md`); B-63, B-65 and B-67 read
 
 ## Context
 

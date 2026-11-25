@@ -1,7 +1,6 @@
 # 11. Spec: baked packages
 
-> Normative. MUST, SHOULD and MAY follow RFC 2119. Draft: rules tagged `[M9]` are written and not
-> yet built.
+> Normative. MUST, SHOULD and MAY follow RFC 2119.
 >
 > A baked store (B-63) gives a sandbox its compiled code. It doesn't give it its dependencies: the
 > sandbox still runs `npm ci`, `cargo fetch` or a Gradle build that downloads half of Maven
@@ -84,7 +83,7 @@ hash is of). A rows file ends each row with a newline, holds each path once, sor
 bytes. *Rests on:* a package manager's cache needing no hard link, device or mode but "may run".
 *Breaks if:* a tool's cache held a hard link it relies on: the bake writes two files instead.
 
-**K-4 The manifest set [M9].** A part's manifest set is the lockfiles of that package manager in the
+**K-4 The manifest set.** A part's manifest set is the lockfiles of that package manager in the
 checkout and, where it has none or the lockfile is optional, the build files that name
 dependencies. For `gradle`: `settings.gradle`, `settings.gradle.kts`, every `build.gradle` and
 `build.gradle.kts`, `gradle/libs.versions.toml`, `gradle/wrapper/gradle-wrapper.properties`,
@@ -94,12 +93,16 @@ git tracks count. *Rests on:* those files deciding what the tool downloads. *Bre
 resolved by something outside them (an init script, a property of the machine): the part's
 `inputs` would stay the same while what it downloads changed, and a bake would skip.
 
-**K-5 What may be baked [M9].** A **download**: a file the package manager fetched from a
+**K-5 What may be baked.** A **download**: a file the package manager fetched from a
 registry, an index or a pinned commit, unchanged. Never a snapshot or a changing version
 (`-SNAPSHOT`, a Gradle changing module), never a path, workspace or `file:` dependency, never
 anything from the checkout, never a credential or a configuration file of the tool, never a lock
 or a file the tool writes about its own use of the cache. A **built entry**, only in a built part.
-Nothing else: a file the bake can't class is left out and counted in what the bake says. *Rests
+Nothing else: a file the bake can't class is left out and counted in what the bake says. A
+`gradle` part leaves out `*.lock`, `gc.properties` and every path with a `-SNAPSHOT` component; a
+`maven` part leaves out `_remote.repositories`, `*.lastUpdated`, `resolver-status.properties`,
+`*.lock`, `*.part`, every dot-folder (`.locks`, `.cache`) and every path with a `-SNAPSHOT`
+component. *Rests
 on:* a released version's bytes never changing at its registry. *Breaks if:* a registry served
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
@@ -149,3 +152,28 @@ since what it holds is still what the lockfile hashes or the signer signed, and 
 what it lacks, one line per part); **current**. *Rests on:* a part's `inputs` being computed the
 same way by the bake and the run. *Breaks if:* a run read another tool version than the bake did:
 the part is called behind, and is still read.
+
+**K-10 Readers.** A part reaches its tool in one of three ways: **A, in place** (the tool reads a
+second, read-only folder beside its own cache; hushrun sets one variable or one property; nothing
+is copied), **B, as a registry** (the tool downloads from the part and checks each package against
+the lockfile itself), or **C, a seed** (hushrun copies or links each file the lockfile still names,
+checked against its `locked` hash, into the tool's own cache). `gradle` is A:
+`GRADLE_RO_DEP_CACHE=<store>/parts/gradle`, a folder that holds `modules-2` (Gradle 6.2 or later).
+`maven` is A: `-Dmaven.repo.local.tail=<store>/parts/maven/repository` in `MAVEN_OPTS`, never
+`MAVEN_ARGS`, which the Maven Wrapper's launcher doesn't read; a Maven older than 3.9 ignores the
+property and downloads as it does today. A variable the person or the job already set is kept and
+the part is left alone, with a line (`packages: <part>: left alone: <VARIABLE> is set already`);
+for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARGS`,
+`.mvn/maven.config` or `.mvn/jvm.config`. A folder whose path holds white space, a quote or a
+backslash can't ride in `MAVEN_OPTS`, which is split into words: the `maven` part is left alone,
+with a line. Where a reader's variable is one another part of hushrun builds in the same run
+(`MAVEN_OPTS`, which the `maven/1` cache and the Maven test adapter write), there is one value,
+built once: the person's words, then the build cache's, then the reader's. A reader never names a
+variable an adapter or a build kind owns (`NODE_OPTIONS`, `PATH`, `PYTHONPATH`, `RUBYOPT`,
+`RUBYLIB`, `PHP_INI_SCAN_DIR`, `ERL_LIBS`, `ELIXIR_ERL_OPTIONS`, `BASH_ENV`, `MAKEFILES`,
+`VSTestTargets`, `GOFLAGS`, `RUSTC_WRAPPER`, `RUSTDOC`, `CARGO_HOME`, `GRADLE_USER_HOME`), and
+hushrun sets no offline switch. A variable a reader sets never enters a key: not a check's, not a
+block's. *Rests on:* Gradle and Maven reading the second folder only for what their own cache
+lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
+an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
+refuses it, and a run's check by names finds a file no row names.
