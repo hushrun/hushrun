@@ -439,7 +439,11 @@ fn seed_all(context: &Context, state: &State, only: &[String]) -> Vec<String> {
                 continue;
             }
         };
-        let admit = part.admit(&context.checkout, &part.manifests(&context.tracked));
+        let admit = part.admit_for(
+            &context.checkout,
+            &part.manifests(&context.tracked),
+            read.entry.verified_by,
+        );
         match hushrun_packages::seed::seed(read, under, &dest, &*admit) {
             Ok(done) if done.stamped => lines.push(format!(
                 "packages: {name}: seeded already into {}",
@@ -625,9 +629,6 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
                 format!("fetched by `{words}`"),
             ));
         }
-        take_all(
-            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
-        )?;
     } else {
         // No fetch: each part the checkout has build files for and no harvest or download takes
         // is left out.
@@ -649,10 +650,10 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
                 ));
             }
         }
-        take_all(
-            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
-        )?;
     }
+    take_all(
+        &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
+    )?;
     if metas.is_empty() {
         for line in &lines {
             eprintln!("hushrun: {line}");
@@ -930,8 +931,19 @@ fn take_all(
             continue;
         };
         let dest = new.join(store::PARTS).join(part.name()).join(under);
-        // K-5: a part its lockfile verifies keeps only the files the lockfile hashes.
+        // K-5: a part its lockfile verifies keeps only the files the lockfile hashes. K-7: a part
+        // whose class follows its lockfiles says which it is from their text.
         let locked = part.lockfile(&context.checkout, &manifests);
+        let texts: Vec<(String, String)> = manifests
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p.clone(),
+                    fs::read_to_string(context.checkout.join(p)).ok()?,
+                ))
+            })
+            .collect();
+        let verified_by = part.verified_by_for(&texts);
         let (kept, left) =
             copy_kept(&root, &dest, part, locked.as_ref()).map_err(|e| fail(e.to_string()))?;
         if kept == 0 {
@@ -965,7 +977,7 @@ fn take_all(
             tool,
             runtime: None,
             manifests: hashed(&context.checkout, &manifests),
-            verified_by: part.verified_by(),
+            verified_by,
         });
     }
     Ok(())
