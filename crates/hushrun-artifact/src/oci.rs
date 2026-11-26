@@ -511,6 +511,19 @@ impl Registry for OciRegistry {
         digest: &Digest,
         most: u64,
     ) -> Result<Vec<u8>, ArtifactError> {
+        let mut bytes = Vec::new();
+        self.pull_blob_to(repository, digest, most, &mut bytes)
+            .await?;
+        Ok(bytes)
+    }
+
+    async fn pull_blob_to(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        most: u64,
+        out: &mut (dyn std::io::Write + Send),
+    ) -> Result<u64, ArtifactError> {
         let (source, _) = self.reference(repository, "latest").await?;
         let descriptor = OciDescriptor {
             media_type: "application/octet-stream".into(),
@@ -527,17 +540,21 @@ impl Registry for OciRegistry {
             .await
             .map_err(|e| map(&repository.host, &what, e))?;
         let mut stream = pulled.stream;
-        let mut bytes = Vec::new();
+        let mut hasher = Sha256::new();
+        let mut written = 0u64;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| ArtifactError::Network(format!("{what}: {e}")))?;
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() as u64 > most {
+            written += chunk.len() as u64;
+            if written > most {
                 return Err(ArtifactError::Invalid(format!(
                     "{what} is larger than {most} bytes"
                 )));
             }
+            hasher.update(&chunk);
+            out.write_all(&chunk)
+                .map_err(|e| ArtifactError::Invalid(format!("writing {what}: {e}")))?;
         }
-        let actual = Digest::of(&bytes);
+        let actual = Digest::from_bytes(hasher.finalize().into());
         if actual != *digest {
             return Err(ArtifactError::DigestMismatch {
                 what,
@@ -545,7 +562,7 @@ impl Registry for OciRegistry {
                 actual: actual.to_string(),
             });
         }
-        Ok(bytes)
+        Ok(written)
     }
 
     async fn referrers(

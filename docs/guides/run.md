@@ -1047,6 +1047,27 @@ hushrun: build: 32 of 35 crates reused, 3 built, saving about 17s
   or replace `/hushrun` with a newer archive (good until a newer manifest replaces it), then
   snapshot again. A stale snapshot is slower, never wrong: what it lacks is fetched or compiled.
 
+- **Pulled in a setup step or a hook, for a sandbox whose image you can't change.** `hushrun build
+  pull` downloads the newest baked image of the repository from the backend's registry, checks it
+  as a run would, and puts its store at `/hushrun` (or `HUSHRUN_BUILD_LOWER`). When the store
+  there is the one the image holds already, it downloads nothing. A sandbox's setup never fails for
+  it:
+
+  ```sh
+  hushrun build pull -q || true
+  ```
+
+  A template that many sandboxes start from should be right or not be built, so its build pulls
+  with `--require-signed` and no `|| true`, and pins what it pulled with `--resolve`, which prints
+  `<image>@sha256:…` and downloads nothing:
+
+  ```sh
+  hushrun build pull --require-signed --format json > pulled.json
+  ```
+
+  The pull reads the registry with a pull token in `HUSHRUN_REGISTRY_TOKEN`, an agent token, or a
+  person's sign-in. A session (`hushrun login --session`) reads results, not the registry: a
+  sandbox that holds only a session needs a pull token for the pull, and the line says so.
 - **As a disk image, for a volume mounted read-only.** `hushrun build bake --erofs store.erofs`
   writes the store as a read-only EROFS image whose root is the store, made without root or
   `mkfs.erofs`. Write it to the volume once (or attach it as the volume's disk), mount it

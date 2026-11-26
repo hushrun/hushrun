@@ -118,7 +118,9 @@ the next: test reports carry dates and host names, a `Jar` keeps file dates by d
 - Not built: Gradle blocks in baked stores (`hushrun build bake` leaves them out), `hushrun build
   fetch` for sandboxes, Maven's build cache extension. The server keeps entries' disagreements
   (`differs` at `begin`) for every kind; for Gradle they are expected wherever a task's outputs
-  vary, and only discard the second copy.
+  vary. For a block of class `library` the server also suspends the key in the repository and
+  deletes the trusted copy, so Gradle's blocks go up as class `other`, which it stores and never
+  compares, and a `differs` leaves the block built here as it is (ADR 0146).
 
 ## Alternatives
 

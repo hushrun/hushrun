@@ -208,6 +208,8 @@ say so instead of trying to sign in, which `HUSHRUN_AGENT` refuses anyway.
   at the repository's baked packages, when the sandbox has a package store; `hushrun packages
   status` says whether it has one.
   `hushrun login --session`, in a sandbox, swaps the sandbox's credential for a short session.
+- `hushrun build pull` puts the repository's baked store at `/hushrun` for a sandbox whose image
+  is fixed. It belongs in a setup step or a hook a person wrote: don't run it to "fix" a slow build.
 - The commands for deploys, such as `plan`, `attest` and `artifact`, are CI's: `hushrun --help`
   lists them.
 

@@ -6,6 +6,7 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use hushrun_attest::testing::github_claims;
 use hushrun_testkit::sigstore::FakeSigstore;
@@ -1302,4 +1303,383 @@ fn a_bake_outside_ci_signs_with_an_id_token_at_hand_only_when_asked() {
     let (said, stderr) = bake(&w.root.join("asked"), Some("sigstore"));
     assert!(said["image"]["signed"].is_string(), "{said}\n{stderr}");
     assert_eq!(fake.count("/api/v2/signingCert"), 1, "{stderr}");
+}
+
+/// A registry that serves the image layout at `layout`, read only, over plain HTTP on the
+/// loopback, as Distribution serves what was pushed to it: each blob it sends is counted, and a
+/// layer is sent with its bytes changed while `corrupt` is set.
+struct LayoutRegistry {
+    server: hushrun_testkit::http::Server,
+    sent: Arc<Mutex<Vec<String>>>,
+    corrupt: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LayoutRegistry {
+    fn serve(layout: &Path) -> LayoutRegistry {
+        use hushrun_testkit::http::{Reply, Response, Server};
+        let layout = layout.to_path_buf();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let corrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (counted, corrupting) = (sent.clone(), corrupt.clone());
+        let server = Server::start(move |request| {
+            let blob = |digest: &str| {
+                std::fs::read(
+                    layout
+                        .join("blobs/sha256")
+                        .join(digest.trim_start_matches("sha256:")),
+                )
+                .ok()
+            };
+            let path = request.path.as_str();
+            if path == "/v2/" {
+                return Reply::Send(Response::json(200, &serde_json::json!({})));
+            }
+            let head = request.method == "HEAD";
+            if let Some((_, reference)) = path.split_once("/manifests/") {
+                let index: Value =
+                    serde_json::from_slice(&std::fs::read(layout.join("index.json")).unwrap())
+                        .unwrap();
+                let found = index["manifests"].as_array().unwrap().iter().find(|m| {
+                    m["digest"] == reference
+                        || m["annotations"]["org.opencontainers.image.ref.name"] == reference
+                });
+                let Some(found) = found else {
+                    return Reply::Send(Response::new(404));
+                };
+                let digest = found["digest"].as_str().unwrap();
+                let bytes = blob(digest).unwrap();
+                let kind = found["mediaType"].as_str().unwrap().to_string();
+                let mut response = Response::bytes(200, if head { Vec::new() } else { bytes })
+                    .header("docker-content-digest", digest);
+                response.headers.retain(|(n, _)| n != "content-type");
+                return Reply::Send(response.header("content-type", kind));
+            }
+            if let Some((_, digest)) = path.split_once("/blobs/") {
+                return Reply::Send(match blob(digest) {
+                    Some(mut bytes) => {
+                        if !head {
+                            counted.lock().unwrap().push(digest.to_string());
+                        }
+                        // A layer (a tar, larger than a config) with one byte changed.
+                        if corrupting.load(std::sync::atomic::Ordering::SeqCst)
+                            && bytes.len() > 1024
+                        {
+                            bytes[600] ^= 1;
+                        }
+                        Response::bytes(200, if head { Vec::new() } else { bytes })
+                            .header("docker-content-digest", digest)
+                    }
+                    None => Response::new(404),
+                });
+            }
+            Reply::Send(Response::new(404))
+        });
+        LayoutRegistry {
+            server,
+            sent,
+            corrupt,
+        }
+    }
+
+    /// The blobs sent since this was last asked.
+    fn sent(&self) -> Vec<String> {
+        std::mem::take(&mut *self.sent.lock().unwrap())
+    }
+}
+
+/// `hushrun build pull` of `image:tag` into `to` with `args`, its output whole.
+fn pull_with(machine: &Machine<'_>, image: &str, tag: &str, to: &Path, args: &[&str]) -> Ran {
+    ran(machine
+        .hushrun()
+        .args([
+            "build",
+            "pull",
+            "--insecure",
+            "--image",
+            image,
+            "--tag",
+            tag,
+        ])
+        .args(args)
+        .arg("--to")
+        .arg(to))
+}
+
+/// `hushrun build pull` of `image:tag` into `to`, as JSON checked against its schema.
+fn pull(machine: &Machine<'_>, image: &str, tag: &str, to: &Path) -> Value {
+    let pulled = pull_with(machine, image, tag, to, &["--format", "json"]);
+    assert_eq!(pulled.code, 0, "{}", pulled.stderr);
+    let said: Value = serde_json::from_str(&pulled.stdout).expect(&pulled.stdout);
+    let schema = hushrun_testkit::schema::load("build-pull.v1.schema.json");
+    hushrun_testkit::schema::assert_valid(&schema, &said);
+    // The line is said on stderr beside the JSON, with the whole digest.
+    assert!(
+        pulled
+            .stderr
+            .contains(&format!("({})", said["digest"].as_str().unwrap())),
+        "{}",
+        pulled.stderr
+    );
+    said
+}
+
+// covers: B-240
+#[test]
+fn a_baked_image_is_pulled_from_a_registry_into_a_fresh_sandbox_and_a_second_pull_downloads_nothing()
+ {
+    let w = World::new("acme-api.yaml");
+    let (laptop, key, target) = signed_world(&w);
+    let layout = w.root.join("layout");
+    let said = laptop.bake(&layout, &key);
+    let fixed = said["image"]["tags"][0].as_str().unwrap().to_string();
+    let digest = said["image"]["digest"].as_str().unwrap().to_string();
+    let registry = LayoutRegistry::serve(&layout);
+    let image = format!("{}/acme/app", registry.server.addr());
+    let sent = || registry.sent().len();
+    round_trip(&w, &laptop, &target, &image, &fixed, &digest, Some(&sent));
+    let lower = w.root.join("sandbox").join("hushrun");
+
+    // By digest: `--tag sha256:…` names the image itself.
+    let by_digest = pull_with(&laptop, &image, &digest, &lower, &["--force"]);
+    assert_eq!(by_digest.code, 0, "{}", by_digest.stderr);
+    assert!(
+        by_digest.stderr.contains("hushrun: pulled "),
+        "{}",
+        by_digest.stderr
+    );
+    // A folder that lost a pack is pulled again; `--force` pulls a whole one.
+    let packs = lower.join("packs");
+    let pack = std::fs::read_dir(&packs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_file(&pack).unwrap();
+    registry.sent();
+    assert_eq!(pull(&laptop, &image, &fixed, &lower)["state"], "pulled");
+    assert!(pack.is_file());
+    assert!(!registry.sent().is_empty());
+    let forced = pull_with(
+        &laptop,
+        &image,
+        &fixed,
+        &lower,
+        &["--force", "--format", "json"],
+    );
+    let forced: Value = serde_json::from_str(&forced.stdout).expect(&forced.stderr);
+    assert_eq!(forced["state"], "pulled");
+
+    // A layer whose bytes aren't its digest replaces nothing, and leaves nothing beside it.
+    let before = std::fs::read(lower.join("baked.json")).unwrap();
+    registry
+        .corrupt
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let corrupt = pull_with(&laptop, &image, &fixed, &lower, &["--force"]);
+    registry
+        .corrupt
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(corrupt.code, 1, "{}", corrupt.stderr);
+    assert!(
+        corrupt.stderr.contains("error: build pull: "),
+        "{}",
+        corrupt.stderr
+    );
+    assert_eq!(std::fs::read(lower.join("baked.json")).unwrap(), before);
+    assert_eq!(
+        std::fs::read_dir(lower.parent().unwrap()).unwrap().count(),
+        1
+    );
+
+    // A tag that names nothing exits 1 and says so.
+    let none = pull_with(&laptop, &image, "hushrun-linux-x64-nothing", &lower, &[]);
+    assert_eq!(none.code, 1);
+    assert!(
+        none.stderr.contains("has no hushrun-linux-x64-nothing"),
+        "{}",
+        none.stderr
+    );
+
+    // Signers named, and a store none of them signed: replaced by nothing. Without signers,
+    // `--require-signed` refuses it too.
+    let unsigned = w.root.join("unsigned");
+    let plain = bake_with(
+        &laptop,
+        &[
+            "--branch-tag".as_ref(),
+            "--force".as_ref(),
+            "--no-sign".as_ref(),
+            "--oci-dir".as_ref(),
+            unsigned.as_os_str(),
+        ],
+        &[],
+    );
+    assert_eq!(plain.code, 0, "{}", plain.stderr);
+    let other = LayoutRegistry::serve(&unsigned);
+    let other_image = format!("{}/acme/app", other.server.addr());
+    let refused = pull_with(&laptop, &other_image, &fixed, &lower, &["--force"]);
+    assert_eq!(refused.code, 1, "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("signature doesn't verify"),
+        "{}",
+        refused.stderr
+    );
+    assert_eq!(std::fs::read(lower.join("baked.json")).unwrap(), before);
+    let policy = std::fs::read_to_string(w.repo.join("hushrun.yaml")).unwrap();
+    let without = policy.split("\nbuild:\n").next().unwrap().to_string();
+    w.write("hushrun.yaml", &without);
+    let required = pull_with(
+        &laptop,
+        &other_image,
+        &fixed,
+        &lower,
+        &["--force", "--require-signed"],
+    );
+    assert_eq!(required.code, 1, "{}", required.stderr);
+    assert!(
+        required.stderr.contains(&format!(
+            "error: build pull: hushrun.yaml names no signer of baked stores, and --require-signed was given: {} is as it was. hushrun init --bake prints the lines to add",
+            lower.display()
+        )),
+        "{}",
+        required.stderr
+    );
+    assert_eq!(std::fs::read(lower.join("baked.json")).unwrap(), before);
+    let unchecked = pull(&laptop, &other_image, &fixed, &lower);
+    assert_eq!(unchecked["signature"], "not_checked", "{unchecked}");
+    assert_eq!(unchecked["signed_by"], Value::Null);
+    w.write("hushrun.yaml", &policy);
+}
+
+// covers: B-240
+/// The same round trip through the registries CI starts (`HUSHRUN_IT_REGISTRIES`, two hosts over
+/// plain HTTP, `--features it`): a bake pushes, a pull reads back.
+#[cfg(feature = "it")]
+#[test]
+fn a_bake_pushed_to_each_real_registry_is_pulled_back() {
+    let Ok(hosts) = std::env::var("HUSHRUN_IT_REGISTRIES") else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "HUSHRUN_IT_REGISTRIES must be set in CI"
+        );
+        return;
+    };
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    for host in hosts.split_whitespace() {
+        let w = World::new("acme-api.yaml");
+        let (laptop, key, target) = signed_world(&w);
+        let image = format!("{host}/acme/pull-{unique}");
+        let bake = ran(laptop
+            .hushrun()
+            .current_dir(w.repo.join("ws"))
+            .args([
+                "build",
+                "bake",
+                "--check",
+                "build",
+                "--branch-tag",
+                "--force",
+            ])
+            .args([
+                "--oci",
+                &image,
+                "--insecure-registry",
+                host,
+                "--signing-key",
+            ])
+            .arg(&key)
+            .args(["--format", "json"]));
+        assert_eq!(bake.code, 0, "{host}: {}", bake.stderr);
+        let said: Value = serde_json::from_str(&bake.stdout).expect(&bake.stdout);
+        let fixed = said["image"]["tags"][0].as_str().unwrap();
+        let digest = said["image"]["digest"].as_str().unwrap();
+        round_trip(&w, &laptop, &target, &image, fixed, digest, None);
+    }
+}
+
+/// B-240's round trip: `image:tag`, a bake's signed image whose manifest is `digest`, pulled into
+/// a sandbox's folder, serves a fresh machine on its signature; a second pull downloads no layer
+/// (`downloads`, where the test can count them, says how many blobs were sent since it was last
+/// asked); `--resolve` says what the tag names and reads no layer.
+fn round_trip(
+    w: &World,
+    laptop: &Machine<'_>,
+    target: &Path,
+    image: &str,
+    tag: &str,
+    digest: &str,
+    downloads: Option<&dyn Fn() -> usize>,
+) {
+    let lower = w.root.join("sandbox").join("hushrun");
+    let first = pull(laptop, image, tag, &lower);
+    assert_eq!(first["schema"], "hushrun.build-pull/v1");
+    assert_eq!(first["state"], "pulled", "{first}");
+    assert_eq!(first["digest"], digest, "the whole digest: {first}");
+    assert_eq!(first["digest"].as_str().unwrap().len(), 71);
+    assert_eq!(first["signature"], "named", "{first}");
+    assert!(
+        first["signed_by"]
+            .as_str()
+            .unwrap()
+            .starts_with("key sha256:"),
+        "{first}"
+    );
+    assert!(first["downloaded_bytes"].as_u64().unwrap() > 0);
+    assert!(lower.join("baked.json").is_file());
+    if let Some(downloads) = downloads {
+        assert!(downloads() > 0);
+    }
+    // Nothing of the layers is left beside the store.
+    assert_eq!(
+        std::fs::read_dir(lower.parent().unwrap()).unwrap().count(),
+        1
+    );
+    let again = pull_with(laptop, image, tag, &lower, &[]);
+    assert_eq!(again.code, 0, "{}", again.stderr);
+    assert!(
+        again.stderr.contains(&format!(
+            "hushrun: {} holds {image}:{tag} ({digest}) already: nothing was downloaded",
+            lower.display()
+        )),
+        "{}",
+        again.stderr
+    );
+    if let Some(downloads) = downloads {
+        assert_eq!(
+            downloads(),
+            1,
+            "a second pull reads the config, and no layer"
+        );
+    }
+    let resolved = ran(laptop.hushrun().args([
+        "build",
+        "pull",
+        "--resolve",
+        "--insecure",
+        "--image",
+        image,
+        "--tag",
+        tag,
+    ]));
+    assert_eq!(resolved.code, 0, "{}", resolved.stderr);
+    assert_eq!(resolved.stdout, format!("{image}@{digest}\n"));
+    if let Some(downloads) = downloads {
+        assert_eq!(downloads(), 1, "--resolve reads the config, and no layer");
+    }
+
+    // A fresh machine reads the pulled store on its signature alone.
+    let fresh = Machine::new(w, &format!("fresh-{}", image.len()));
+    let _ = std::fs::remove_dir_all(target);
+    let reused = fresh.cargo_build(target, Some(&lower));
+    assert_eq!(reused.code, 0, "{}", reused.stderr);
+    assert!(
+        reused
+            .stderr
+            .contains("4 of 4 crates reused (4 from the baked store)"),
+        "{}",
+        reused.stderr
+    );
 }
