@@ -397,8 +397,8 @@ pub struct PackagesBakeArgs {
     /// Bake only this part (gradle, maven); repeat for more.
     #[arg(long = "only", value_name = "PART")]
     pub only: Vec<String>,
-    /// Take the part from a cache the job already filled: gradle=<a Gradle user home>,
-    /// maven=<a local repository>. Repeat for more.
+    /// Take the part from a cache the job already filled: `gradle=` a Gradle user home,
+    /// `maven=` a local repository. Repeat for more.
     #[arg(long = "harvest", value_name = "PART=FOLDER")]
     pub harvest: Vec<String>,
     /// Fail when the store is larger than this many bytes [default: 4 GiB].

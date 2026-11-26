@@ -1,4 +1,4 @@
-# 0146. Baked packages: a package store beside the baked store
+# 0149. Baked packages: a package store beside the baked store
 
 - **Status:** proposed; being built
 - **Date:** 2026-11-25

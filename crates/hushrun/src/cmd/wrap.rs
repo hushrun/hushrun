@@ -1177,10 +1177,17 @@ impl<'a> BuildRun<'a> {
             }
         };
         // K-10: the package store's readers, whatever build reuse does; a run that may write
-        // what others trust (CI, or one with a backend) hashes every file first (K-8).
+        // what others trust (CI, or a relay whose server lets it) hashes every file first (K-8).
+        let relay = session
+            .as_ref()
+            .and_then(|session| session.current().share.relay().cloned())
+            .zip(crate::cmd::build_relay::Relay::running());
         let packages = crate::cmd::packages::given(
             global,
-            crate::gitlab_job::in_ci(&Env::from_process()) || backend.is_some(),
+            hushrun_build::baked::authority(
+                crate::gitlab_job::in_ci(&Env::from_process()),
+                relay.as_ref().map(|(_, relay)| relay.writes_trusted()),
+            ),
         );
         for line in &packages.lines {
             say.line(format_args!("{line}"));

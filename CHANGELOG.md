@@ -44,7 +44,7 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
-- **Baked packages, the format** ([ADR 0146](docs/adr/0146-baked-packages.md)): a package store,
+- **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to
   K-3), its state for a run and what lets a run read it: a signature by a signer `hushrun.yaml`

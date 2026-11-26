@@ -204,6 +204,9 @@ say so instead of trying to sign in, which `HUSHRUN_AGENT` refuses anyway.
 - `hushrun flush` sends the results that waited on this machine while the backend was out of
   reach. Run it before you finish. `hushrun fetch` is for a sandbox's setup script: it keeps the
   newest result of each check, and compiled code, for runs that later have no network.
+  `hushrun packages exec -- COMMAND` runs an install or a build with each package manager pointed
+  at the repository's baked packages, when the sandbox has a package store; `hushrun packages
+  status` says whether it has one.
   `hushrun login --session`, in a sandbox, swaps the sandbox's credential for a short session.
 - The commands for deploys, such as `plan`, `attest` and `artifact`, are CI's: `hushrun --help`
   lists them.

@@ -19,6 +19,7 @@ use cli::Cli as _;
 
 fn fixture() -> Repo {
     Repo::new(&[
+        file(".gitignore", "target/\n"),
         file("pom.xml", &parent(&["core"], "4", "3.5.4")),
         file("core/pom.xml", &module_pom("core", &[])),
         file(
@@ -122,6 +123,24 @@ fn a_store_harvested_from_a_filled_repository_is_read_offline_through_maven_opts
             .all(|f| !f.to_string_lossy().contains("/junit/")),
         "junit came from the store"
     );
+    // covers: K-10
+    // In `hushrun run` too; and the check's key is the same with and without the store: the
+    // run without it skips.
+    let run = |store_var: &std::path::Path| {
+        let mut cmd = r.hushrun();
+        cmd.args(["run", "t", "--", &m.mvn, "-B", "-q", "-o", "test"])
+            .arg(format!("-Dmaven.repo.local={}", empty.display()))
+            .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
+            .env("HUSHRUN_PACKAGES_LOWER", store_var);
+        cmd.output().unwrap()
+    };
+    let first = run(&store);
+    let said = String::from_utf8_lossy(&first.stderr).into_owned();
+    assert!(first.status.success(), "{said}");
+    assert!(said.contains("t passed"), "{said}");
+    let second = run(std::path::Path::new(""));
+    let said = String::from_utf8_lossy(&second.stderr).into_owned();
+    assert!(said.contains("t skipped"), "{said}");
     // Without the store the same offline build fails: the store is what it read.
     let _ = std::fs::remove_dir_all(&empty);
     let _ = std::fs::remove_dir_all(r.repo.join("core/target"));
