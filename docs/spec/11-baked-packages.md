@@ -88,8 +88,9 @@ checkout and, where it has none or the lockfile is optional, the build files tha
 dependencies. For `gradle`: `settings.gradle`, `settings.gradle.kts`, every `build.gradle` and
 `build.gradle.kts`, `gradle/libs.versions.toml`, `gradle/wrapper/gradle-wrapper.properties`,
 `gradle.lockfile` and `gradle/verification-metadata.xml`. For `maven`: every `pom.xml`,
-`.mvn/maven.config`, `.mvn/extensions.xml` and `.mvn/wrapper/maven-wrapper.properties`. Only files
-git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
+`.mvn/maven.config`, `.mvn/extensions.xml` and `.mvn/wrapper/maven-wrapper.properties`. For `cargo`: every
+`Cargo.lock` and `Cargo.toml`. For `go`: every `go.mod`, `go.sum`, `go.work` and `go.work.sum`.
+Only files git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
 resolved by something outside them (an init script, a property of the machine): the part's
 `inputs` would stay the same while what it downloads changed, and a bake would skip.
 
@@ -102,7 +103,10 @@ Nothing else: a file the bake can't class is left out and counted in what the ba
 `gradle` part leaves out `*.lock`, `gc.properties` and every path with a `-SNAPSHOT` component; a
 `maven` part leaves out `_remote.repositories`, `*.lastUpdated`, `resolver-status.properties`,
 `*.lock`, `*.part`, every dot-folder (`.locks`, `.cache`) and every path with a `-SNAPSHOT`
-component. *Rests
+component. A `cargo` part keeps only `registry/cache/<registry>/<name>-<version>.crate` (a git
+dependency's checkout is no registry's file and has no checksum); a `go` part keeps only
+`download/<module>/@v/<version>.info`, `.mod` and `.zip`, leaving out `list`, `*.lock`,
+`*.ziphash`, `*.partial`, temporary files and the checksum database's `sumdb/`. *Rests
 on:* a released version's bytes never changing at its registry. *Breaks if:* a registry served
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
@@ -112,11 +116,13 @@ PART=FOLDER]... [--no-build] [--force] [--max-bytes N] [-- COMMAND]` writes the 
 `COMMAND` (the check's own build, such as `./gradlew test` or `mvn -B verify`) it runs COMMAND
 the way a bake runs anything of the repository's (B-63's `in_bake`: hushrun's, CI's and signing
 credentials withheld, no result recorded, no baked store or package store read, nothing it
-started outliving it), with Gradle's user home (`GRADLE_USER_HOME`) and Maven's local repository
-(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`) at folders of the bake's own, so that what the part
+started outliving it), with Gradle's user home (`GRADLE_USER_HOME`), Maven's local repository
+(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`), the cargo home (`CARGO_HOME`) and Go's module
+cache (`GOMODCACHE`) at folders of the bake's own, so that what the part
 holds is this build's downloads and nothing a machine had before; a registry credential the job
 set for the tool stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the
-job already filled (a Gradle user home, a Maven local repository); a part harvested says
+job already filled (a Gradle user home, a Maven local repository, a cargo home, a Go module
+cache, as `go env GOMODCACHE` names it); a part harvested says
 `harvested` as its tool. Either way a part is taken only when the tool's cache holds files, and
 only the files K-5 keeps, each copied as `0644`, or `0755` when its owner may run it; a link is
 kept only when it stays inside the part. The bake then writes the rows and `packages.json`,
@@ -204,7 +210,27 @@ the part is left alone, with a line (`packages: <part>: left alone: <VARIABLE> i
 for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARGS`,
 `.mvn/maven.config` or `.mvn/jvm.config`. A folder whose path holds white space, a quote or a
 backslash can't ride in `MAVEN_OPTS`, which is split into words: the `maven` part is left alone,
-with a line. Where a reader's variable is one another part of hushrun builds in the same run
+with a line.
+
+`cargo` is C: before COMMAND starts, `hushrun run` copies each `.crate` of the part that the
+run's cargo home (`CARGO_HOME`, else `~/.cargo`) lacks into that home's `registry/cache`, at
+the same path, through a file beside it renamed into place, and only when its SHA-256 is the
+`checksum` a `Cargo.lock` of the checkout gives that name and version from a registry. Cargo
+unpacks it as it unpacks a download; it checks no checksum of a file already in its cache
+(confirmed with Cargo 1.94), so a file whose bytes aren't the ones a lockfile pins is never
+copied, with a line, and one no lockfile pins stays in the store. A file the home holds already
+is left as it is. Nothing is set: hushrun never names `CARGO_HOME`. The part's registry folders
+are the baking cargo's (`index.crates.io-<hash>`); a cargo that names its folder otherwise finds
+nothing there and downloads, as today. `hushrun packages exec` seeds the same way, and
+`hushrun packages restore` seeds outside a run; `hushrun packages env` exports nothing for it,
+with a line. `go` is B: `GOPROXY=file://<store>/parts/go/download,` then the `GOPROXY` Go would
+use without it (`go env GOPROXY`, run with `GOTOOLCHAIN=local` outside any module, so that its
+environment file and its own default count), so that a module the part lacks comes from where it
+came before. Go checks each module it takes from the part against `go.sum`, or the checksum
+database when `go.sum` lacks it, as it checks a download. Where Go would take a module `go.sum`
+lacks unchecked (`GOSUMDB=off`, `GOPRIVATE` or `GONOSUMDB`, as `go env` says), or a store's
+folder holds a character a `file://` address can't, the `go` part is left alone, with a line.
+`GOPROXY` is the one variable it sets; `GOFLAGS` is never read or set. Where a reader's variable is one another part of hushrun builds in the same run
 (`MAVEN_OPTS`, which the `maven/1` cache and the Maven test adapter write), there is one value,
 built once: the person's words, then the build cache's, then the reader's. A reader never names a
 variable an adapter or a build kind owns (`NODE_OPTIONS`, `PATH`, `PYTHONPATH`, `RUBYOPT`,
@@ -217,5 +243,7 @@ nothing and exits with COMMAND's code; `hushrun packages env` prints them as `ex
 variable a reader sets never enters a key: not a check's, not a
 block's. *Rests on:* Gradle and Maven reading the second folder only for what their own cache
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
-an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
+an empty cache, offline); on Go serving a `file://` proxy read-only and checking it against
+`go.sum` (confirmed with Go 1.24.7 and 1.27.4); on Cargo unpacking a `.crate` from its cache as
+it unpacks a download (confirmed with Cargo 1.94). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
