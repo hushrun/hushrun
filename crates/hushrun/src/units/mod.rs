@@ -2312,6 +2312,12 @@ impl Observed {
         }
     }
 
+    /// \[C-165\] The result the test file or test `name` records in this run, when it records.
+    pub fn record_of(&self, name: &str) -> Option<&UnitRecord> {
+        let key = self.recorded.get(name)?;
+        self.records.iter().find(|r| r.key == *key)
+    }
+
     /// \[C-161\] The name of the test file or test that records under `key` in this run.
     pub fn name_of(&self, key: &Digest) -> Option<&str> {
         self.recorded

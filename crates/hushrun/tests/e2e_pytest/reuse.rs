@@ -380,6 +380,103 @@ fn a_server_hears_that_a_failed_test_file_passed_when_it_ran_again_and_no_name()
     }
 }
 
+// covers: C-165, C-166, C-164
+#[test]
+fn a_test_file_the_server_saw_fail_and_pass_before_says_how_often_and_the_summary_names_it() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let mut files = hidden("reuse");
+    files[4].1 = "import os, liba\nSEEN = os.path.join(os.path.dirname(__file__), 'seen')\n\ndef test_x():\n    if os.path.exists(SEEN):\n        return\n    open(SEEN, 'w').close()\n    assert False, 'first time'\n".into();
+    let results = FakeResults::start();
+    let server = with_server(&results);
+    let r = repo_of(&files);
+    r.write("seen", "");
+    let python = python();
+    let pytest = |more: &[(&'static str, String)]| {
+        let mut env = server.clone();
+        env.extend(more.iter().cloned());
+        r.run(&pytest_args(&python, &[]), &envs(&env))
+    };
+    assert_eq!(pytest(&[]).code, 0);
+    // A server from before flaky tests: today's line, and nothing more.
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # changed\n");
+    let before = pytest(&[]);
+    assert_eq!(before.code, 1, "{}", before.stderr);
+    let again = "unit: test_hidden.py failed, then passed when it ran again: it may be flaky";
+    assert!(
+        before.stderr.contains(&format!("{again}\n")),
+        "{}",
+        before.stderr
+    );
+    assert!(
+        !before.stderr.contains("in the last 30 days"),
+        "{}",
+        before.stderr
+    );
+    let key = results.failed_keys().pop().expect("its fail was recorded");
+    // It passes again on the same files, so its key's newest result is a pass.
+    let passed = pytest(&[]);
+    assert_eq!(passed.code, 0, "{}", passed.stderr);
+    // The server holds two flakes of its key, and a third comes with this run's: the audit runs
+    // it, it fails, and it passes when it runs again.
+    results.hold_flaky(&key, 3, "2026-11-25T10:00:00.000Z");
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # changed again\n");
+    let summary = r.root.join("summary");
+    let flaky = pytest(&[]);
+    assert_eq!(flaky.code, 1, "{}", flaky.stderr);
+    assert!(
+        flaky.stderr.contains(&format!(
+            "hushrun: {again}; that makes 3 times in the last 30 days\n"
+        )),
+        "{}",
+        flaky.stderr
+    );
+    // Said once, before the run's last line.
+    assert_eq!(flaky.stderr.matches(again).count(), 1, "{}", flaky.stderr);
+    let at = flaky.stderr.find(again).unwrap();
+    let last = flaky
+        .stderr
+        .find("hushrun: unit failed in")
+        .expect("the last line");
+    assert!(at < last, "{}", flaky.stderr);
+    // The verdict stands.
+    assert_eq!(results.failed_keys().last(), Some(&key));
+    // \[C-165\] On GitHub, in a job hushrun can't tell the variants of, nothing is reused, so it
+    // fails with no second run: the line says to run it again, and \[C-166\] the job's step
+    // summary names it, with how often.
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # and again\n");
+    let on_github = pytest(&[
+        ("CI", "true".into()),
+        ("GITHUB_ACTIONS", "true".into()),
+        ("GITHUB_REPOSITORY", "acme/shop".into()),
+        ("GITHUB_JOB", "test".into()),
+        ("GITHUB_RUN_ID", "41".into()),
+        (
+            "GITHUB_STEP_SUMMARY",
+            summary.to_string_lossy().into_owned(),
+        ),
+    ]);
+    assert_eq!(on_github.code, 1, "{}", on_github.stderr);
+    assert!(
+        on_github.stderr.contains(
+            "hushrun: unit: test_hidden.py failed; it has failed and passed on the same files 3 times in the last 30 days, so it may be flaky: run it again before you change code for it\n"
+        ),
+        "{}",
+        on_github.stderr
+    );
+    let written = std::fs::read_to_string(&summary).expect("a step summary");
+    assert!(
+        written.contains(
+            "### unit: tests that may be flaky\n\n- test\\_hidden\\.py: failed and passed on the same files 3 times in the last 30 days\n"
+        ),
+        "{written}"
+    );
+}
+
 // covers: C-32
 #[test]
 fn files_that_change_while_command_runs_record_nothing() {

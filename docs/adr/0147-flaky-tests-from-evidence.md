@@ -1,8 +1,8 @@
 # 0147. Flaky tests, from evidence
 
-- **Status:** proposed; being built (C-160 to C-163 built; C-164 on are the next step)
+- **Status:** proposed; being built (C-160 to C-166 built; C-167 is the next step)
 - **Date:** 2026-11-25
-- **Rules:** C-160 to C-169 reserved, C-160 to C-163 added; C-32, C-33, C-34 amended; relies on
+- **Rules:** C-160 to C-169 reserved, C-160 to C-166 added; C-32, C-33, C-34 amended; relies on
   ADR 0069, 0074, 0080, 0087, 0088, 0142, 0145
 
 ## Context
@@ -47,12 +47,20 @@ This ADR is the CLI's half: what it sends, and (the next step) what it says with
    retries leave in the facts.
 4. **The audit is counted** (C-163). `units.audited` in a run's result counts what the plan's
    audit ran though it had passed: tests, where the run counts tests.
-5. **`id` is reserved.** A unit result may carry `id`, an identity that survives edits. This
+5. **The answer is said** (C-164 to C-166). The request that records the run is answered with
+   what the organization holds of its fails: how often each failed and passed on the same files
+   in the same place in the last 30 days. hushrun names them from this run's own names: today's
+   `it may be flaky` line gains `; that makes <n> times in the last 30 days`, a fail with no
+   second run gets a line that says to run it again before changing code for it, at most five
+   lines and a count of the rest, and on GitHub the step summary lists them. No new request is
+   made during a run, and nothing changes a verdict. The counting line names no command yet:
+   the one that lists a repository's flaky tests by name is a later step.
+6. **`id` is reserved.** A unit result may carry `id`, an identity that survives edits. This
    version sends none: making one that the server can't compute from a guessed test name needs a
    key that the repository holds, which is a later decision.
-6. **Names stay on the machine.** Every new field is a word, a flag, a count or a hash. No test
+7. **Names stay on the machine.** Every new field is a word, a flag, a count or a hash. No test
    name or path is sent.
-7. **Old and new.** A server from before these fields ignores them: a unit result's fields are
+8. **Old and new.** A server from before these fields ignores them: a unit result's fields are
    read without refusing unknown ones, and a run's result is kept as sent. This machine's own
    files (`hushrun.unit-run/v0`) leave each field out when absent, so an older hushrun reads them.
 

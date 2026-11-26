@@ -1685,12 +1685,57 @@ fn unit_json(unit: &crate::units::store::UnitRecord) -> serde_json::Value {
 }
 
 /// \[RFC 0004 §3.8\] What became of a run's results of test files and tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitsKept {
     /// The server keeps them: false for one from before test files' results.
     pub kept: bool,
     /// How many of them weren't kept: past [`MOST_RESULTS`], or an older server's limit.
     pub dropped: usize,
+    /// \[C-164\] What the server's answer said of the run's failed units, by key: empty for an
+    /// answer that says nothing, doesn't read, or a server from before it.
+    pub told: BTreeMap<Digest, Told>,
+}
+
+/// \[C-164\] What a server holds of one failed unit: how often, in the last 30 days, it failed
+/// and passed on the same files in the same place, how many of those within one run, and when
+/// last.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Told {
+    pub events: u64,
+    #[serde(default)]
+    pub in_one_run: u64,
+    #[serde(default)]
+    pub last_at: String,
+}
+
+/// \[C-164\] The most bytes of a record's answer hushrun reads for what it says of flaky units.
+pub const MOST_ANSWER_BYTES: usize = 64 * 1024;
+
+/// \[C-164\] What a record's answer, `{"flaky": {"<key>": {"events", "inOneRun", "lastAt",
+/// "by"}}, "duplicate"?: true}`, says of the run's failed units: nothing from an answer past
+/// [`MOST_ANSWER_BYTES`], one that doesn't read as that, or an item that doesn't.
+pub fn told(answer: &[u8]) -> BTreeMap<Digest, Told> {
+    if answer.len() > MOST_ANSWER_BYTES {
+        return BTreeMap::new();
+    }
+    #[derive(Deserialize)]
+    struct Answer {
+        #[serde(default)]
+        flaky: BTreeMap<String, serde_json::Value>,
+    }
+    let Ok(answer) = serde_json::from_slice::<Answer>(answer) else {
+        return BTreeMap::new();
+    };
+    answer
+        .flaky
+        .into_iter()
+        .filter_map(|(key, told)| {
+            let key = Digest::from_hex(&key).ok()?;
+            let told: Told = serde_json::from_value(told).ok()?;
+            (told.events > 0).then_some((key, told))
+        })
+        .collect()
 }
 
 /// What a run's relay needs to talk to an org's shared store of build blocks (the build protocol, B-26):
@@ -1984,6 +2029,7 @@ impl Backend {
                 return self.record(key, result).map(|()| UnitsKept {
                     kept: true,
                     dropped: 0,
+                    told: BTreeMap::new(),
                 });
             }
         };
@@ -2002,12 +2048,14 @@ impl Backend {
                 return self.record(key, &result).map(|()| UnitsKept {
                     kept: false,
                     dropped: units.len(),
+                    told: BTreeMap::new(),
                 });
             }
             if (200..300).contains(&status) {
                 return Ok(UnitsKept {
                     kept: true,
                     dropped: units.len() - sent,
+                    told: told(&answer),
                 });
             }
             if sent > OLDER_MOST_RESULTS && older_limit(status, &answer) {
@@ -2813,6 +2861,39 @@ mod tests {
         // Never past the count, whatever the room.
         assert_eq!(fitting(&result, &units, usize::MAX), 10);
         assert_eq!(fitting(&result, &units, body(0)), 0);
+    }
+
+    // covers: C-164
+    #[test]
+    fn a_records_answer_tells_flaky_units_only_when_it_reads_as_one() {
+        let k = Digest::of(b"k").hex();
+        let item =
+            json!({"events": 3, "inOneRun": 1, "lastAt": "2026-11-25T10:00:00.000Z", "by": "key"});
+        let want = Told {
+            events: 3,
+            in_one_run: 1,
+            last_at: "2026-11-25T10:00:00.000Z".into(),
+        };
+        let answer = |v: serde_json::Value| told(v.to_string().as_bytes());
+        assert_eq!(
+            answer(json!({"flaky": {&k: &item}}))[&Digest::of(b"k")],
+            want
+        );
+        // A resend outside CI that the server kept once still tells.
+        assert_eq!(
+            answer(json!({"duplicate": true, "flaky": {&k: &item}})).len(),
+            1
+        );
+        // Nothing to tell: an answer of `{}`, `{"duplicate": true}`, one that isn't JSON or an
+        // object, one past 64 KiB, an item with no events or a key that isn't one.
+        assert!(answer(json!({})).is_empty());
+        assert!(answer(json!({"duplicate": true})).is_empty());
+        assert!(told(b"<html>").is_empty() && told(b"").is_empty());
+        assert!(answer(json!("flaky")).is_empty());
+        assert!(answer(json!({"flaky": {&k: {"events": 0}}})).is_empty());
+        assert!(answer(json!({"flaky": {"nothex": &item, &k: {"events": "3"}}})).is_empty());
+        let mut big = json!({"flaky": {&k: &item}, "pad": "x".repeat(MOST_ANSWER_BYTES)});
+        assert!(answer(big.take()).is_empty());
     }
 
     // covers: C-160, C-161, C-162
