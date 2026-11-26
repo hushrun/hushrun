@@ -124,6 +124,13 @@ jobs:
       # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0090).
       - name: Name CMake for the test-program tests
         run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
+      # vcpkg, pinned, for the tests of the vcpkg package part (ADR 0159), which run where
+      # HUSHRUN_TEST_VCPKG names it.
+      - name: Install vcpkg for the package store tests
+        run: |
+          git clone --quiet --depth 1 --branch 2025.10.17 https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "HUSHRUN_TEST_VCPKG=$RUNNER_TEMP/vcpkg/vcpkg" >> "$GITHUB_ENV"
       # C++: GoogleTest, Catch2 3 and doctest for the tests of test programs started directly, and
       # clang's module scanner for C++20 modules through the launcher (ADR 0120).
       - name: Install GoogleTest, Catch2 and clang-tools for the C++ tests

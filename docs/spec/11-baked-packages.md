@@ -219,3 +219,30 @@ block's. *Rests on:* Gradle and Maven reading the second folder only for what th
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
+
+`vcpkg` is A: vcpkg's asset cache, read as one more asset source. Its manifest set is every
+`vcpkg.json` and `vcpkg-configuration.json`. The part is `parts/vcpkg/assets/<sha512>`: each file
+named by the SHA-512 a portfile (or vcpkg's own list of the tools it downloads) names, as 128
+lowercase hex characters; a bake keeps no other file. A bake's fetch (`vcpkg install
+--only-downloads` is the one to name) gets `X_VCPKG_ASSET_SOURCES=x-azurl,file://<folder>/assets,,readwrite`
+after the person's words, and `VCPKG_DOWNLOADS` at a folder of the bake's own and
+`VCPKG_BINARY_SOURCES=clear`, so that vcpkg downloads every source this build names and stores
+each there; `--harvest vcpkg=FOLDER` takes an asset cache vcpkg filled the same way. A run gives
+vcpkg `X_VCPKG_ASSET_SOURCES=x-azurl,file://<store>/parts/vcpkg/assets,,read`, after the person's
+words when they name no asset source (`clear`, `x-block-origin`). vcpkg reads at most one asset
+source and refuses to start with two, so a value that names one leaves the part alone, with a line
+(`packages: vcpkg: left alone: X_VCPKG_ASSET_SOURCES names an asset source already, and vcpkg
+reads only one`), and so does a store whose path holds white space, a quote, a backslash or one of
+`` ,;`%#? ``; a bake's fetch then isn't given the variable either, with a line. vcpkg checks each
+file it takes from an asset source against the SHA-512 its portfile names, and downloads from the
+file's own source when it differs or is missing, so the part is `verified_by: lockfile`: the
+portfiles at the checkout's baseline, or in the overlay ports it names, are its lockfile, and a
+run reads the part with no signature. vcpkg copies an asset into its own downloads folder and
+builds from its own tree, so no compile reads a file of the part where it is, no `cc/1` key holds
+the store's path, and the store may be anywhere. *Rests on:* vcpkg's asset sources (`x-azurl`
+with a `file://` URL, `read`, `x-block-origin`) and download mode starting no process of a port
+(confirmed with vcpkg 2025-10-16 on Linux: a read-only part read from an empty downloads folder
+with the origin gone; a file changed in place refused for its hash and downloaded from its
+origin). *Breaks if:* a vcpkg stopped checking an asset's SHA-512 or took one by another name: the
+part would then need a signature, as `maven`'s does. A file a portfile downloads with no SHA-512
+(`SKIP_SHA512`) never goes through an asset source, and is downloaded every time.

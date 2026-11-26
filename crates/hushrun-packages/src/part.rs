@@ -35,6 +35,13 @@ pub trait Part: Sync {
     /// whose files a harvest takes, and the folder under the part they go to. `None` when `cache`
     /// isn't one this part reads.
     fn harvest_root(&self, cache: &Path) -> Option<(PathBuf, &'static str)>;
+    /// K-6: the variables a bake's fetch gives COMMAND so that this tool downloads into `cache`, a
+    /// folder of the bake's own that [`Part::harvest_root`] is then asked about; or the line that
+    /// says why this part isn't fetched. None for a part whose cache the fetch already names.
+    fn fetch_env(&self, cache: &Path, env: Env<'_>) -> Result<Vec<(String, OsString)>, String> {
+        let _ = (cache, env);
+        Ok(Vec::new())
+    }
     /// K-5: whether a harvest keeps the file at `path` (from the harvest root).
     fn keep(&self, path: &str) -> bool;
     /// K-3: the package a kept file is of, as the tool names it, where its path says.
@@ -46,7 +53,11 @@ pub trait Part: Sync {
 }
 
 /// Every part this hushrun knows, by name.
-pub static ALL: &[&dyn Part] = &[&crate::parts::gradle::Gradle, &crate::parts::maven::Maven];
+pub static ALL: &[&dyn Part] = &[
+    &crate::parts::gradle::Gradle,
+    &crate::parts::maven::Maven,
+    &crate::parts::vcpkg::Vcpkg,
+];
 
 /// The part named `name`.
 pub fn by_name(name: &str) -> Option<&'static dyn Part> {

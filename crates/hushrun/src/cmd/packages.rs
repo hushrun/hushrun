@@ -499,7 +499,15 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     if !args.command.is_empty() {
         let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
         let _cache = Cleanup(vec![cache.clone()]);
-        run_fetch(&context.checkout, &args.command, &cache).map_err(fail)?;
+        // Each part whose tool the fetch doesn't name already says where it downloads.
+        let mut vars = Vec::new();
+        for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+            match part.fetch_env(&fetch_cache(&cache, part), &var) {
+                Ok(given) => vars.extend(given),
+                Err(why) => lines.push(format!("packages: {}: not fetched: {why}", part.name())),
+            }
+        }
+        run_fetch(&context.checkout, &args.command, &cache, &vars).map_err(fail)?;
         let words = shell_words(&args.command);
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
             fetched.push((
@@ -631,8 +639,18 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     }
     lines.push(match &signed_by {
         Ok(signer) => format!("packages: signed by {signer}"),
+        Err(why)
+            if packages
+                .parts
+                .iter()
+                .all(|p| p.verified_by == store::VerifiedBy::Lockfile) =>
+        {
+            format!(
+                "packages: the store is unsigned ({why}): every part is checked against a lockfile as it is read, so any run reads it"
+            )
+        }
         Err(why) => format!(
-            "packages: the store is unsigned ({why}): a run reads its parts only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI"
+            "packages: the store is unsigned ({why}): a run reads the parts a lockfile verifies, and the others only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI"
         ),
     });
     lines.push(format!(
@@ -876,8 +894,14 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
 /// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
-/// and Maven's local repository at folders of the bake's own under `cache`.
-fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
+/// and Maven's local repository at folders of the bake's own under `cache`, and `vars`, what the
+/// other parts give a fetch.
+fn run_fetch(
+    checkout: &Path,
+    command: &[String],
+    cache: &Path,
+    vars: &[(String, OsString)],
+) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
@@ -889,17 +913,13 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
     );
     let mut built = std::process::Command::new(program);
     built.args(args);
-    let built = crate::cmd::bake_build::in_bake(
-        built,
-        checkout,
-        &[],
-        None,
-        &[
-            ("GRADLE_USER_HOME", gradle.into_os_string()),
-            (opts, OsString::from(maven_opts)),
-            (hushrun_packages::LOWER, OsString::new()),
-        ],
-    );
+    let mut extra = vec![
+        ("GRADLE_USER_HOME", gradle.into_os_string()),
+        (opts, OsString::from(maven_opts)),
+        (hushrun_packages::LOWER, OsString::new()),
+    ];
+    extra.extend(vars.iter().map(|(n, v)| (n.as_str(), v.clone())));
+    let built = crate::cmd::bake_build::in_bake(built, checkout, &[], None, &extra);
     crate::cmd::bake_build::run_in_bake(built, None).map_err(|ended| {
         format!(
             "packages: the fetch `{}` {}",

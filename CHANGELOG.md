@@ -94,6 +94,13 @@ project's new branch starts from what main's CI already ran.
   - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
+- **Baked packages for vcpkg** ([ADR 0159](docs/adr/0159-baked-packages-vcpkg-conan.md)): a
+  `vcpkg` part holds vcpkg's asset cache, which `hushrun packages bake -- vcpkg install
+  --only-downloads` fills, and vcpkg reads it as one more asset source through
+  `X_VCPKG_ASSET_SOURCES`. vcpkg checks every file against its portfile's SHA-512, so any run
+  reads the part, signed or not. An asset source of the person's leaves it alone, with a line,
+  since vcpkg reads only one. There is no Conan part: `conan cache restore` writes what its archive
+  says, outside the cache too.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
