@@ -128,6 +128,9 @@ impl Repo {
                 cmd.env_remove(name.as_ref());
             }
         }
+        // B-16: no audit, which would compile the one reuse again one time in 50 and count it
+        // as compared, not reused.
+        cmd.env("HUSHRUN_BUILD_AUDIT", "none");
         let out = cmd.args(args).output().unwrap();
         (
             out.status.code().unwrap_or(-1),
