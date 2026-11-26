@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/build-pull.v1.schema.json",
+  "title": "hushrun.build-pull/v1",
+  "description": "Output of `hushrun build pull --format json` (B-240): the image its tag names and the store's identity, and, unless it only resolved, where the store went, how many bytes it downloaded and who signed it. A field is never removed from v1; a reader ignores fields it doesn't know.",
+  "type": "object",
+  "required": [
+    "schema",
+    "image",
+    "tag",
+    "digest",
+    "manifest",
+    "platform",
+    "state"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hushrun.build-pull/v1"
+    },
+    "image": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tag": {
+      "type": "string",
+      "minLength": 1
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "manifest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "platform": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state": {
+      "enum": [
+        "pulled",
+        "already_there",
+        "resolved"
+      ]
+    },
+    "to": {
+      "type": "string",
+      "minLength": 1
+    },
+    "downloaded_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "signature": {
+      "enum": [
+        "named",
+        "not_checked"
+      ]
+    },
+    "signed_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

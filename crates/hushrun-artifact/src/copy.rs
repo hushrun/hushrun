@@ -385,6 +385,24 @@ mod tests {
     }
 
     // covers: A-2
+    // covers: B-240
+    #[test]
+    fn a_blob_pulled_into_a_writer_is_checked_against_its_digest_and_its_size() {
+        let fake = FakeRegistry::default();
+        let src = repo("a.example.com/app");
+        let good = fake.put_blob(&src, b"layer").digest;
+        let mut out = Vec::new();
+        assert_eq!(run(fake.pull_blob_to(&src, &good, 5, &mut out)).unwrap(), 5);
+        assert_eq!(out, b"layer");
+        assert!(run(fake.pull_blob_to(&src, &good, 4, &mut Vec::new())).is_err());
+        let wrong = Digest::of(b"other");
+        fake.put_blob_as(&src, wrong, b"layer");
+        assert!(matches!(
+            run(fake.pull_blob_to(&src, &wrong, 5, &mut Vec::new())),
+            Err(ArtifactError::DigestMismatch { .. })
+        ));
+    }
+
     #[test]
     fn mismatches_fail_the_copy() {
         let src = repo("a.example.com/app");

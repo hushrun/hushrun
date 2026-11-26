@@ -213,6 +213,8 @@ say so instead of trying to sign in, which `HUSHRUN_AGENT` refuses anyway.
   reach. Run it before you finish. `hushrun fetch` is for a sandbox's setup script: it keeps the
   newest result of each check, and compiled code, for runs that later have no network.
   `hushrun login --session`, in a sandbox, swaps the sandbox's credential for a short session.
+- `hushrun build pull` puts the repository's baked store at `/hushrun` for a sandbox whose image
+  is fixed. It belongs in a setup step or a hook a person wrote: don't run it to "fix" a slow build.
 - The commands for deploys, such as `plan`, `attest` and `artifact`, are CI's: `hushrun --help`
   lists them.
 

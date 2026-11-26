@@ -98,7 +98,9 @@ project's new branch starts from what main's CI already ran.
   the Maven test adapter's). A module's `buildinfo.xml` and the files it names are one block,
   checked whole, `buildinfo.xml` kept in a canonical form; it is searched for the machine's folders
   before it may leave, fetched only where the check's `maven/1` manifest names it, and never
-  audited or compared. A run whose Maven skips tests shares nothing it builds. The summary says
+  audited or compared. Its blocks go up as class `other`, so two builds whose jars differ in a
+  date never suspend the module's key ([ADR 0146](docs/adr/0146-tool-keyed-blocks-go-up-as-other.md)).
+  A run whose Maven skips tests shares nothing it builds. The summary says
   `build: maven: N modules: …`. A build without the extension, or with a remote of its own, is
   said in one line. Not yet in baked stores or `hushrun build fetch`.
 - **Svelte's tests reuse** (C-62 to C-65, ADR 0109). With Vitest, `.svelte` components are
@@ -137,7 +139,18 @@ project's new branch starts from what main's CI already ran.
   to 18, whose compiles all failed through the launcher, get no include-graph variables (B-243).
 - **`hushrun build pull`** (B-240, [ADR 0143](docs/adr/0143-a-baked-store-pulled-into-a-fixed-sandbox.md)):
   the repository's newest baked store from the backend's registry, checked (and its signature, when
-  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`.
+  `hushrun.yaml` names signers) before it replaces `/hushrun` or `HUSHRUN_BUILD_LOWER`
+  ([ADR 0148](docs/adr/0148-a-pull-that-says-what-it-pulled.md)): a pull into a
+  folder that holds the store the image names already downloads nothing (`--force` pulls anyway);
+  each layer goes to disk as it arrives, never into memory whole; `--resolve` prints
+  `<image>@<digest>` only; `--format json` gives `hushrun.build-pull/v1`; `--require-signed`
+  refuses a store no named signer signed; the line names the whole digest; an image on another
+  registry is pulled with docker's credentials; a session the registry refuses is told which token
+  to set. Tested against Distribution and zot.
+- **`hushrun build bake`'s step outputs** (B-244): `hushrun-image`, `hushrun-image-digest`,
+  `hushrun-image-tag`, `hushrun-image-published` and `hushrun-manifest`, on GitHub Actions and, with
+  `HUSHRUN_BAKE_ENV`, in a GitLab dotenv file; `init --bake` wires both up. `build pull` writes
+  `hushrun-image-digest` and `hushrun-manifest`.
 - **Recipes per agent cloud** in `recipes/agent-clouds/`, and a Dev Container Feature in
   `features/src/hushrun`, to publish as `ghcr.io/hushrun/features/hushrun`.
 - **A results outbox** (C-143, [ADR 0142](docs/adr/0142-results-that-wait-and-what-a-sandbox-fetches.md)):
@@ -252,7 +265,9 @@ project's new branch starts from what main's CI already ran.
   gives the build that remote unless the build set one. Entries are kept in a canonical form, so
   the same outputs have the same digest on every machine; they are checked whole, searched for the
   machine's folders before they may leave, fetched only where the check's `gradle/1` manifest
-  names them, and never audited or compared, since Gradle's outputs needn't repeat. The summary
+  names them, and never audited or compared, since Gradle's outputs needn't repeat. Its blocks go up
+  as class `other`, so two executions whose outputs differ never suspend the task's key
+  ([ADR 0146](docs/adr/0146-tool-keyed-blocks-go-up-as-other.md)). The summary
   says `build: gradle: N tasks: …`. A settings file without the line, a build whose build cache is
   off, and a port another run holds are each said in one line. Not yet in baked stores or `hushrun
   build fetch`.

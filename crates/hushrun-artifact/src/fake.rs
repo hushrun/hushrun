@@ -43,7 +43,11 @@ pub fn repo(text: &str) -> Repository {
 
 impl FakeRegistry {
     pub fn put_blob(&self, repository: &Repository, bytes: &[u8]) -> Descriptor {
-        let digest = Digest::of(bytes);
+        self.put_blob_as(repository, Digest::of(bytes), bytes)
+    }
+
+    /// A blob kept under `digest`, whatever its bytes hash to: a registry that serves wrong bytes.
+    pub fn put_blob_as(&self, repository: &Repository, digest: Digest, bytes: &[u8]) -> Descriptor {
         self.state
             .lock()
             .unwrap()

@@ -1325,7 +1325,9 @@ they are there, and they are small; then the libraries, in the manifest's order.
 the last thing a build needs and the largest: they are fetched only when asked for, and so is
 a class this version doesn't know; but a bake's relay (B-63) downloads every block the manifests
 name, programs last, since nothing would ask for them and the store holds what its manifest
-names. A pair whose first key this machine keeps to itself (B-34)
+names. A manifest of a kind a build tool keys itself (`gradle/1`, `maven/1`, whose blocks go up
+as class `other`, B-81, B-175) is downloaded whole, in its order. A pair whose first key this
+machine keeps to itself (B-34)
 is left out. A pack waits sealed in `incoming/<run>/` until a wrapper brings the
 key that opens it, and is deleted once opened and published, or when the run ends. A hint is
 written where downloaded hints live, apart from the hints compiles here wrote: those are tried
@@ -3263,7 +3265,7 @@ that runs in, or writes into, a `meson-private` folder (Meson's), passes through
 `configure-probe` and counts in no manifest: their folders and names say nothing that a later
 compile could reuse, and storing them would only fill the store.
 
-**B-240 `hushrun build pull`.** [ADR 0143] It puts the repository's newest baked store where runs read one. The image is `--image`, else `<registry host of the backend's origin>/<org>/<image name of the repository>` (B-70), and the tag `--tag`, else `hushrun-<platform>-latest` for `--platform` or this machine's (B-66). The credential, as Basic `hushrun:<token>`: `HUSHRUN_REGISTRY_TOKEN`, else the backend's token here when the image is on that backend's registry, else none (a public repository's image). It reads the manifest and each layer, each checked against its digest and at most 8 GiB, and unpacks from them only entries under `hushrun/`, regular files and folders, into a folder beside the destination; an entry outside the folder, a link or a device stops it. That folder must be a baked store (B-63, `baked.json` read, names and bytes checked), and when `hushrun.yaml` names signers of baked stores, its signature must verify (B-67). Only then does it replace the destination, `--to`, else `HUSHRUN_BUILD_LOWER`, else `/hushrun`, by renames: what was there stays when the swap fails. It says `hushrun: pulled <image>:<tag> (<digest>) into <folder>: <signed by … | why a run won't trust it unasked>`. A tag that names nothing, a store that doesn't check, or a registry that refuses exits 1, and replaces nothing. A run still decides what it trusts as it begins (B-63, B-64).
+**B-240 `hushrun build pull`.** [ADR 0143, ADR 0148] It puts the repository's newest baked store where runs read one. The image is `--image`, else `<registry host of the backend's origin>/<org>/<image name of the repository>` (B-70), and the tag `--tag` (a tag, or `sha256:<64 hex>` for the image itself), else `hushrun-<platform>-latest` for `--platform` or this machine's (B-66). The credential, as Basic `hushrun:<token>`: `HUSHRUN_REGISTRY_TOKEN`, else the backend's token here when the image is on that backend's registry, else none (a public repository's image); for an image on a host that isn't hushrun's registry with none of these, docker's own credentials for that host, as `bake --oci` reads them. When the registry refuses and the credential sent was a session, it says `build pull: <image>:<tag>: this sandbox holds a session, which reads results and not the registry: set HUSHRUN_REGISTRY_TOKEN to a pull token an owner or admin makes for this repository`. It reads the manifest and the config, whose label (B-65) names the store's manifest identity and platform. With `--resolve` it prints `<image>@sha256:<64 hex>` on stdout and reads no layer and writes nothing. When the label's manifest is the `manifest` of the destination's `baked.json`, and the destination passes B-63's check by names, it downloads nothing and says `hushrun: <folder> holds <image>:<tag> (<digest>) already: nothing was downloaded`; `--force` pulls anyway. Otherwise it writes each layer to a file beside the destination as it arrives, hashed on the way, checked against its digest and at most 8 GiB, never holding a layer in memory, and unpacks from each file only entries under `hushrun/`, regular files and folders, into a folder beside the destination; an entry outside the folder, a link, a device or a layer that ends inside an entry stops it. That folder must be a baked store (B-63, `baked.json` read, names and bytes checked), and when `hushrun.yaml` names signers of baked stores, its signature must verify (B-67); with `--require-signed` a store is refused also when `hushrun.yaml` names no signer or there is no `hushrun.yaml`: `build pull: hushrun.yaml names no signer of baked stores, and --require-signed was given: <folder> is as it was. hushrun init --bake prints the lines to add`. Only then does it replace the destination, `--to`, else `HUSHRUN_BUILD_LOWER`, else `/hushrun`, by renames: what was there stays when the swap fails, and no layer file is left behind. It says `hushrun: pulled <image>:<tag> (<digest>) into <folder>: <signed by … | why a run won't trust it unasked>`, with the whole digest, `sha256:` and 64 hex. With `--format json` it also prints `hushrun.build-pull/v1` (`docs/schemas/build-pull.v1.schema.json`) on stdout: `image`, `tag`, `digest`, `manifest`, `platform` and `state` (`pulled`, `already_there`, `resolved`), and, but for `resolved`, `to`, `downloaded_bytes`, `signature` (`named` when a signer `hushrun.yaml` names signed it, `not_checked` when it names none) and `signed_by` (the signer, or null); a field is never removed from `v1`. On GitHub Actions, unless `--no-ci-output`, it writes the step outputs `hushrun-image-digest` and `hushrun-manifest`. A tag that names nothing, a store that doesn't check, or a registry that refuses exits 1, and replaces nothing. A run still decides what it trusts as it begins (B-63, B-64).
 
 ## Gradle (draft)
 
@@ -3360,6 +3362,12 @@ block there already that was only downloaded gives way to this execution, which 
 the relay; one built here stays. Gradle's entries are never audited (B-16) and never compared in
 shared `observe` (B-33): a difference is no sign of a forged entry when a task may make other bytes
 each time (a test report's dates, a jar's file dates); it is logged (`differed`) and nothing else.
+A Gradle block goes up as class `other`, whatever its record says, since the server suspends a key
+whose trusted `library` copies differ and deletes the trusted one; `begin`'s `differs` for it
+leaves the block built here as it is, its key neither kept here (B-34) nor discarded. No report
+about a Gradle block says it differs: the server suspends a key on a trusted job's `differs`
+report whatever the class; one that couldn't be read, was missing or was rejected is reported as
+for every kind.
 
 **B-82 Manifest and close.** A check whose run serves the cache asks `open` of kind `gradle/1` and
 platform `jvm` beside its own `open`, for its manifest alone, as a Go command's does (B-45), and,
@@ -3481,7 +3489,8 @@ write, as for every kind (B-29). Not stored: a key suspended, a store below B-22
 there already that was only downloaded gives way to this build, which is then told to the relay;
 one built here stays. Maven's entries are never audited (B-16) and never compared in shared
 `observe` (B-33): a jar keeps its files' dates; a difference is logged (`differed`) and nothing
-else. *Rests on:* the extension restoring an entry built with tests skipped into a build that runs
+else. A Maven block goes up as class `other`, as Gradle's does (B-81), and `begin`'s `differs` for
+it leaves the block built here as it is, and no report about it says it differs. *Rests on:* the extension restoring an entry built with tests skipped into a build that runs
 them, and skipping them, unless the build reconciles the property (seen with the extension 1.2.0).
 
 **B-176 Manifest and close.** A check whose run serves the cache asks `open` of kind `maven/1` and
@@ -3638,6 +3647,21 @@ CC_PRINT_HEADERS_FILTERING=direct-per-file CC_PRINT_HEADERS_FILE=/dev/null <comp
 -E /dev/null -o /dev/null`, which must exit 0. clang 15 to 18 know the filtering variable but not
 `direct-per-file`, and fail every compile given it; they compile with B-54's fallback, as GCC
 does. The identity's memo is `hushrun.cc-compiler-memo/3`, so that each compiler is asked again.
+
+**B-244 The bake's step outputs.** [ADR 0148] On a CI runner, a bake that names a registry
+(`--oci`, or the hosted registry) says what it published, for a later job to pull or build a
+template from by digest. On GitHub Actions, unless `--no-ci-output`, it writes to `$GITHUB_OUTPUT`:
+`hushrun-image` (the repository, with no tag), `hushrun-image-digest` (`sha256:…`, empty when
+nothing was published), `hushrun-image-tag` (the moving tag it moved, else the fixed tag),
+`hushrun-image-published` (`true` when `image.state` is `published`, `false` when the re-bake limit
+held it, B-73) and `hushrun-manifest` (the store's manifest identity). When `HUSHRUN_BAKE_ENV` names
+a file, it writes the same values there as `KEY=value` lines, the names uppercased with `_`
+(`HUSHRUN_IMAGE_DIGEST=…`), for GitLab's `artifacts: reports: dotenv`; a file outside the
+project's folder (`CI_PROJECT_DIR`, else the current folder) is refused with a line, and the bake
+exits 1. The text and the JSON are as they were. `hushrun init --bake` (B-69) gives the GitHub
+bake step `id: bake` (and the branch's `id: bake_branch`) and the job these five as its `outputs`,
+and sets `HUSHRUN_BAKE_ENV: hushrun-bake.env` with `artifacts: reports: dotenv: hushrun-bake.env`
+on the GitLab job.
 ## TypeScript (draft)
 
 > Draft, from [ADR 0106](../adr/0106-typescript-build-blocks.md) (proposed). Built: local reuse

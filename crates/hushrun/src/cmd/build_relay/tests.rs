@@ -1534,17 +1534,28 @@ fn the_prefetch_queues_macros_and_scripts_before_libraries_each_in_the_manifests
         (ProcMacro, 7),
         (Library, 8),
     ];
-    let order: Vec<u8> = super::prefetch_order(found.clone(), |found| found.0, false)
+    let order: Vec<u8> = super::prefetch_order(Kind::Rustc, found.clone(), |found| found.0, false)
         .into_iter()
         .map(|found| found.1)
         .collect();
     assert_eq!(order, [3, 5, 7, 1, 4, 8]);
     // B-63: a bake's relay takes the rest too, last.
-    let whole: Vec<u8> = super::prefetch_order(found, |found| found.0, true)
+    let whole: Vec<u8> = super::prefetch_order(Kind::Rustc, found.clone(), |found| found.0, true)
         .into_iter()
         .map(|found| found.1)
         .collect();
     assert_eq!(whole, [3, 5, 7, 1, 4, 8, 2, 6]);
+    // B-81, B-175: a kind a build tool keys itself takes every block its manifest names, in
+    // the manifest's order, a bake's relay or not: its blocks go up as `other`.
+    for kind in [Kind::Gradle, Kind::Maven] {
+        for whole in [false, true] {
+            let order: Vec<u8> = super::prefetch_order(kind, found.clone(), |found| found.0, whole)
+                .into_iter()
+                .map(|found| found.1)
+                .collect();
+            assert_eq!(order, [1, 2, 3, 4, 5, 6, 7, 8], "{kind:?}");
+        }
+    }
 }
 
 // covers: B-29, B-34
@@ -5219,4 +5230,229 @@ fn a_check_closes_its_xcode_values_once_for_each_xcode_build() {
         close.manifest,
         vec![Pair(xcode_address(&shared), xcode_address(&shared))]
     );
+}
+
+/// A block of a kind a build tool keys itself (`gradle/1`, `maven/1`) in `store`, built here by
+/// `by`: its first key is its key, and its record says `library`, as Gradle's and Maven's
+/// caches write it.
+fn tool_block(store: &Store, kind: Kind, seed: u8, by: Option<Identity>) -> Digest {
+    let key = Digest::of(&[seed, 11]);
+    let dir = store.root().with_file_name(format!("tool-src-{seed}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("entry.tar");
+    let bytes: Vec<u8> = (0..20_000)
+        .map(|i| Digest::of(&[seed, (i / 32) as u8]).as_bytes()[i % 32])
+        .collect();
+    std::fs::write(&file, &bytes).unwrap();
+    let description = json!({"schema": hushrun_build::key::BLOCK_SCHEMA, "kind": kind.word(),
+        "step": key, "class": "library", "rustc_ms": 1000, "built_ms": 1});
+    store
+        .publish_with_origin(
+            &key,
+            &description,
+            &[NewFile {
+                name: "entry.tar".into(),
+                source: file,
+            }],
+            &Origin::built_here("1-1", by),
+            SystemTime::now(),
+        )
+        .unwrap();
+    key
+}
+
+/// Begins a check whose run serves `kind`'s cache, as `start_sharing` does.
+fn begin_tool(relay: &Arc<Relay>, m: &Machine, kind: Kind) {
+    relay
+        .begin_check(&m.session, None, None, kind == Kind::Gradle, &|_| None)
+        .unwrap();
+    if kind == Kind::Maven {
+        relay.also_maven();
+    }
+}
+
+fn tool_built(kind: Kind, key: Digest) -> Request {
+    match kind {
+        Kind::Gradle => Request::GradleBuilt { key, cost_ms: 1000 },
+        _ => Request::MavenBuilt { key, cost_ms: 1000 },
+    }
+}
+
+fn tool_fetch(kind: Kind, key: Digest) -> Request {
+    match kind {
+        Kind::Gradle => Request::GradleFetch {
+            key,
+            local_ms: None,
+        },
+        _ => Request::MavenFetch {
+            key,
+            local_ms: None,
+        },
+    }
+}
+
+// covers: B-81, B-175
+#[test]
+fn a_gradle_or_maven_block_goes_up_as_other_and_stays_here_when_a_trusted_copy_differs() {
+    // The server suspends a key whose trusted `library` copies differ, and deletes the trusted
+    // one. Two honest executions of a Gradle task or builds of a Maven module may differ in a
+    // date, so their blocks go up as `other`, which it stores and never compares.
+    for kind in [Kind::Gradle, Kind::Maven] {
+        let fake = FakeBuild::start();
+        let m = machine();
+        let relay = start(&fake, &m, |_| {});
+        begin_tool(&relay, &m, kind);
+        until("open", || answering(&relay));
+        let key = tool_block(&m.store, kind, 1, Some(me(&fake)));
+        let address = blocks::address(kind.word(), key.as_bytes());
+        assert_eq!(ask(&relay, tool_built(kind, key)), Answer::Ok);
+        until("stored", || {
+            fake.block(address)
+                .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+        });
+        let begun: Vec<_> = fake
+            .begins()
+            .into_iter()
+            .filter(|b| b.kind == kind.word())
+            .collect();
+        assert_eq!(begun.len(), 1, "{kind:?}");
+        assert_eq!(begun[0].blocks[0].class, blocks::Class::Other, "{kind:?}");
+        assert_eq!(fake.block(address).unwrap().class, blocks::Class::Other);
+        relay.end_check(&[]);
+
+        // A trusted copy with other bytes: `differs`. The block built here stays, nothing is
+        // kept to this machine or suspended, and no line says a block was discarded.
+        let fake = FakeBuild::start();
+        let m = machine();
+        let key = tool_block(&m.store, kind, 2, Some(me(&fake)));
+        let address = blocks::address(kind.word(), key.as_bytes());
+        fake.force_begin(address, json!({"answer":"refused","reason":"differs"}), 1);
+        let relay = start(&fake, &m, |_| {});
+        begin_tool(&relay, &m, kind);
+        until("open", || answering(&relay));
+        assert_eq!(ask(&relay, tool_built(kind, key)), Answer::Ok);
+        until("refused", || {
+            fake.count(route::BEGIN) >= 1 && waiting(&m).is_empty() && no_claims(&m)
+        });
+        let lines = relay.end_check(&[]);
+        assert!(m.store.block(&key).unwrap().is_some(), "{kind:?}: it stays");
+        assert!(m.store.kept_local(&key).is_none(), "{kind:?}");
+        assert_eq!(m.store.suspended(&key), None, "{kind:?}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("discarded") || l.contains("keeps its own")),
+            "{kind:?}: {lines:?}"
+        );
+    }
+}
+
+// covers: B-80, B-174
+#[test]
+fn a_gradle_or_maven_manifest_s_other_blocks_are_all_downloaded_once_one_is_asked_for() {
+    // Their blocks are class `other`, which the prefetch of a Rust manifest leaves to be asked
+    // for. A tool-keyed manifest's are taken whole: asking for the first downloads the second.
+    for kind in [Kind::Gradle, Kind::Maven] {
+        let fake = FakeBuild::start();
+        let a = machine();
+        let keys = [
+            tool_block(&a.store, kind, 21, Some(me(&fake))),
+            tool_block(&a.store, kind, 22, Some(me(&fake))),
+        ];
+        let address = |key: &Digest| blocks::address(kind.word(), key.as_bytes());
+        for key in &keys {
+            let packed = super::pack::pack_block(&a.store, key, &a.session).unwrap();
+            fake.put_block(
+                address(key),
+                "person/1",
+                &packed.pack.bytes().unwrap(),
+                packed.outputs,
+                1000,
+                blocks::Class::Other,
+            );
+        }
+        fake.set_manifest(keys.iter().map(|k| Pair(address(k), address(k))).collect());
+        let b = machine();
+        let relay = start(&fake, &b, |_| {});
+        begin_tool(&relay, &b, kind);
+        until("open", || answering(&relay));
+        assert_eq!(
+            ask(&relay, tool_fetch(kind, keys[0])),
+            Answer::Ready { key: keys[0] },
+            "{kind:?}"
+        );
+        until("the second downloaded too", || {
+            relay
+                .state()
+                .fetches
+                .get(&address(&keys[1]))
+                .is_some_and(|f| matches!(f.state, super::Download::Arrived(_)))
+        });
+        assert_eq!(
+            ask(&relay, tool_fetch(kind, keys[1])),
+            Answer::Ready { key: keys[1] },
+            "{kind:?}"
+        );
+        relay.end_check(&[]);
+    }
+}
+
+// covers: B-81, B-175
+#[test]
+fn no_differs_report_is_ever_sent_about_a_gradle_or_maven_block() {
+    // A trusted job's `differs` report suspends the key and deletes the copy, whatever the
+    // block's class. A tool-keyed block's bytes needn't repeat: such a report is never sent,
+    // through the relay's requests or any other way, and every other problem still is.
+    for kind in [Kind::Gradle, Kind::Maven] {
+        for problem in [blocks::Problem::Differs, blocks::Problem::LinkDiffers] {
+            assert!(!super::reported(kind, problem), "{kind:?} {problem:?}");
+        }
+        for problem in [
+            blocks::Problem::Unreadable,
+            blocks::Problem::Missing,
+            blocks::Problem::Rejected,
+        ] {
+            assert!(super::reported(kind, problem), "{kind:?} {problem:?}");
+        }
+    }
+    for kind in [Kind::Rustc, Kind::Go, Kind::Cc, Kind::Xcode, Kind::Tsc] {
+        assert!(super::reported(kind, blocks::Problem::Differs), "{kind:?}");
+    }
+    // End to end: a block downloaded from another machine, then reported as differing through
+    // the tool's own request, reaches the backend as no report; a rejection does.
+    for kind in [Kind::Gradle, Kind::Maven] {
+        let fake = FakeBuild::start();
+        let a = machine();
+        let key = tool_block(&a.store, kind, 31, Some(me(&fake)));
+        let address = blocks::address(kind.word(), key.as_bytes());
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            address,
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Other,
+        );
+        fake.set_manifest(vec![Pair(address, address)]);
+        let b = machine();
+        let relay = start(&fake, &b, |_| {});
+        begin_tool(&relay, &b, kind);
+        until("open", || answering(&relay));
+        assert_eq!(
+            ask(&relay, tool_fetch(kind, key)),
+            Answer::Ready { key },
+            "{kind:?}"
+        );
+        let report = |problem| match kind {
+            Kind::Gradle => Request::GradleReport { key, problem },
+            _ => Request::MavenReport { key, problem },
+        };
+        ask(&relay, report(hushrun_build::relay::Problem::Differs));
+        ask(&relay, report(hushrun_build::relay::Problem::LinkDiffers));
+        ask(&relay, report(hushrun_build::relay::Problem::Rejected));
+        until("the rejection reported", || fake.count(route::REPORT) >= 1);
+        relay.end_check(&[]);
+        assert_eq!(fake.count(route::REPORT), 1, "{kind:?}");
+    }
 }
