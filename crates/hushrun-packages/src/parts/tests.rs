@@ -258,7 +258,7 @@ fn a_nuget_harvest_keeps_package_folders_and_their_mark() {
 
 // covers: K-10
 #[test]
-fn nugets_reader_joins_the_persons_fallback_folders_and_never_drops_a_configs() {
+fn nugets_reader_carries_the_persons_and_the_configs_fallback_folders_first() {
     let checkout = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let home_path = home.path().as_os_str().to_owned();
@@ -291,27 +291,51 @@ fn nugets_reader_joins_the_persons_fallback_folders_and_never_drops_a_configs() 
             format!("/mine;{ours}").into()
         )])
     );
-    // A config that names fallback folders, the checkout's or the user's: the part is left alone.
+    // The variable replaces every folder a config names, so the configs' list is carried first, as
+    // NuGet merges it (confirmed with the SDK): the closest config's own first, a key it named
+    // skipped further out, a relative folder from its config's folder.
     let user = home.path().join(".nuget/NuGet");
     std::fs::create_dir_all(&user).unwrap();
     std::fs::write(
         user.join("NuGet.Config"),
-        "<configuration><fallbackPackageFolders><add key=\"a\" value=\"/f\" /></fallbackPackageFolders></configuration>\n",
+        "<configuration><packageSources><clear /></packageSources><fallbackPackageFolders><add key=\"a\" value=\"/f1\" /><add key='b' value='/f2'/></fallbackPackageFolders></configuration>\n",
     )
     .unwrap();
-    assert!(matches!(
-        Nuget.reader(dir, checkout.path(), &only_home),
-        Reader::LeftAlone(why) if why.contains("names fallback folders, which NUGET_FALLBACK_PACKAGES would replace")
-    ));
-    std::fs::remove_file(user.join("NuGet.Config")).unwrap();
     std::fs::write(
         checkout.path().join("NuGet.Config"),
-        "<configuration><fallbackPackageFolders><clear /></fallbackPackageFolders></configuration>\n",
+        "<configuration>\n  <fallbackPackageFolders>\n    <!-- the team's -->\n    <add key=\"c\" value=\"rel\" />\n    <add key=\"a\" value=\"/f3\" />\n  </fallbackPackageFolders>\n</configuration>\n",
+    )
+    .unwrap();
+    let rel = checkout.path().join("rel");
+    assert_eq!(
+        Nuget.reader(dir, checkout.path(), &only_home),
+        Reader::InPlace(vec![(
+            "NUGET_FALLBACK_PACKAGES".into(),
+            format!("{};/f3;/f2;{ours}", rel.display()).into()
+        )])
+    );
+    // `<clear />` ends the list at its config.
+    std::fs::write(
+        checkout.path().join("NuGet.Config"),
+        "<configuration><fallbackPackageFolders><add key=\"x\" value=\"/x\" /><clear /><add key=\"c\" value=\"/f3\" /></fallbackPackageFolders></configuration>\n",
+    )
+    .unwrap();
+    assert_eq!(
+        Nuget.reader(dir, checkout.path(), &only_home),
+        Reader::InPlace(vec![(
+            "NUGET_FALLBACK_PACKAGES".into(),
+            format!("/f3;{ours}").into()
+        )])
+    );
+    // A list hushrun can't read exactly: the part is left alone, and no folder is dropped.
+    std::fs::write(
+        checkout.path().join("NuGet.Config"),
+        "<configuration><fallbackPackageFolders><add key=\"x\" value=\"%TEAM%/pkgs\" /></fallbackPackageFolders></configuration>\n",
     )
     .unwrap();
     assert!(matches!(
         Nuget.reader(dir, checkout.path(), &only_home),
-        Reader::LeftAlone(_)
+        Reader::LeftAlone(why) if why.contains("names fallback folders with a variable or an entity")
     ));
     // A folder with a `;` can't ride in the variable, which NuGet splits on it.
     assert!(matches!(

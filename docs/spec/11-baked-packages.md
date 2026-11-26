@@ -208,11 +208,15 @@ checked against its `locked` hash, into the tool's own cache). `gradle` is A:
 property and downloads as it does today. `nuget` is A:
 `NUGET_FALLBACK_PACKAGES=<store>/parts/nuget/packages`, a folder that holds `<id>/<version>/`. The
 variable replaces every fallback folder a NuGet.Config names, so where the person set it already,
-their folders are kept, first, and the part's joins after a `;`; where a NuGet.Config in the
-checkout's root or a folder above it, the user's (`~/.nuget/NuGet`, `~/.nuget/config`) or the
-machine's names `fallbackPackageFolders`, the part is left alone, with a line; a folder whose path
-holds a `;` is left alone too. NuGet hashes no file it reads from a fallback folder, so a `nuget`
-part is verified by a signature. A variable the person or the job already set is kept and
+their folders are kept, first, and the part's joins after a `;`; otherwise the folders the
+NuGet.Configs name (the checkout's root and each folder above it, the user's `~/.nuget/NuGet` and
+`~/.nuget/config`, the machine's) are carried first, merged as NuGet merges them: the closest
+config's in its order, a key a closer config named skipped, a relative folder from its config's
+folder, nothing past a `<clear />`. A list hushrun can't read exactly (a `%VARIABLE%`, an entity,
+an item other than `add` and `clear`) and a folder whose path holds a `;` leave the part alone,
+with a line. NuGet hashes no file it reads from a fallback folder, and a lockfile's
+`contentHash` is of the `.nupkg`, not of the extracted files NuGet reads, so a `nuget` part is
+verified by a signature, with or without `packages.lock.json`. A variable the person or the job already set is kept and
 the part is left alone, with a line (`packages: <part>: left alone: <VARIABLE> is set already`);
 for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARGS`,
 `.mvn/maven.config` or `.mvn/jvm.config`. A folder whose path holds white space, a quote or a
@@ -234,8 +238,9 @@ an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a 
 refuses it, and a run's check by names finds a file no row names. For `nuget`, *rests on:*
 NuGet reading a fallback folder only for packages its global packages folder lacks, writing
 nothing to it, and seeing a package only where its `.nupkg.metadata` is (confirmed with the .NET
-8 SDK 8.0.134 and an empty global packages folder, no source). *Breaks if:* a project's own
-NuGet.Config, below the checkout's root, named fallback folders: the variable replaces them, and
-NuGet downloads what they held, as it would without them. `obj/project.assets.json` names every
+8 SDK 8.0.134, an empty global packages folder and no source; the part's bytes were the same
+after restore and build). *Breaks if:* a project's own NuGet.Config, below the checkout's root,
+named fallback folders: the variable replaces them, and NuGet downloads what they held, as it
+would without them. `obj/project.assets.json` names every
 folder NuGet read, the part's too, and is in no key: it is never tracked, and the dotnet adapter's
 keys hold only tracked files a test project compiles (ADR 0118).
