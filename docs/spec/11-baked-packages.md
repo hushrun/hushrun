@@ -219,3 +219,38 @@ block's. *Rests on:* Gradle and Maven reading the second folder only for what th
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
+
+`bundler` is C, a seed (K-45), into the gem cache Bundler already uses. Its manifest set is every
+`Gemfile`, `Gemfile.lock`, `gems.rb`, `gems.locked` and `*.gemspec`. A part holds only the `.gem`
+files directly in a gem cache (`cache/` of a gem home, `ruby/<version>/cache/` of a
+`BUNDLE_PATH`), as `cache/<name>-<version>[-<platform>].gem`: never a git source's clone
+(`cache/bundler/git`), an installed gem, a built extension or a spec. A row's `package` is `<name>
+(<version>)` and its `locked` the lockfile's `sha256=<hex>` from `CHECKSUMS`. A part is verified by
+`lockfile` only when every lockfile of its manifest set has a `CHECKSUMS` section, and then holds
+only the files they hash; otherwise by `signature`. A bake's fetch runs with `BUNDLE_PATH` at a
+folder of its own and `BUNDLE_GLOBAL_GEM_CACHE=false`. A run seeds each gem the `GEM` sections of
+the lockfile Bundler reads from the run's folder name (`BUNDLE_GEMFILE`'s, or the nearest `Gemfile`
+or `gems.rb` up to the checkout's root) into `<Bundler.bundle_path>/cache`, the folder the `ruby`
+on `PATH` names when asked with `RUBYOPT` unset, so that `bundle install` installs each gem where
+it would after a download. hushrun sets no variable for it: not `GEM_HOME`, `GEM_PATH`,
+`BUNDLE_PATH`, `RUBYOPT` or `RUBYLIB`. The part is left alone, with a line, when no Gemfile is
+found, its lockfile names no gem, there is no `ruby`, or Bundler's global gem cache is on. *Rests
+on:* Bundler taking `<path>/cache/<file>` as the download, and checking it against `CHECKSUMS`
+itself (confirmed with Bundler 4.0.18 and Ruby 3.3.6). *Breaks if:* a `.bundle/config` in the
+checkout named Bundler's path during the bake's fetch: it outranks `BUNDLE_PATH`, the gems go
+there, and the part is left out.
+
+**K-45 A seed.** Where a part is C, `hushrun run`, `hushrun packages exec` and `env`, before
+COMMAND starts, and `hushrun packages restore`, copy each file the lockfile in the checkout names
+now from the part into the tool's own cache folder. A file the part lacks is left to the tool to
+download. A file is copied only when its row is a file, its name in the cache is one plain name
+(no separator, not `.` or `..`), the lockfile's hash of it, where it gives one, is its row's
+SHA-256, and, for a part verified by `lockfile`, the lockfile gives one. It is copied through a
+file of the seed's own in the cache folder, hashed as it is copied, and linked into place only when
+that hash is its row's; a file the cache already holds, under that name, is never written over. A
+file refused for any of these is left out, with one line for the part; a cache folder that can't
+be made or written leaves the part alone, with a line. A seed sets no variable and enters no key.
+`restore` says how many files it copied, how many the cache held already and how many the part
+lacks. *Rests on:* the tool taking a file in its own cache as the download, with the same bytes.
+*Breaks if:* the tool's cache folder is one another user may write: what a seed links there, they
+can change, as they can what the tool downloads there.

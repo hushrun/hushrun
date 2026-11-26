@@ -1,8 +1,11 @@
 //! A part (K-10): one package manager's side of a package store: which files of a checkout are its
 //! manifest set, what of its cache a bake keeps, and how a run points the tool at it.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+use hushrun_core::blocks::Hex32;
 
 use crate::store::VerifiedBy;
 
@@ -18,8 +21,31 @@ pub enum Reader {
     /// Mechanism A for Maven: one word that joins `MAVEN_OPTS`, merged with whatever else of
     /// hushrun builds that variable in the same run, after the person's words.
     MavenOpts(String),
+    /// Mechanism C: a run copies these files into the tool's own cache, each checked first
+    /// (K-45).
+    Seed(Seed),
     /// The tool is left alone, with this line (`packages: <part>: left alone: …`).
     LeftAlone(String),
+}
+
+/// K-45: what a run seeds: the files the lockfile names now, and the tool's own cache they go to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seed {
+    /// The tool's own cache folder.
+    pub into: PathBuf,
+    /// The files, each once.
+    pub files: Vec<SeedFile>,
+}
+
+/// K-45: one file a run seeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedFile {
+    /// Its row's path, from the part's folder.
+    pub path: String,
+    /// Its name in the tool's cache folder: one plain name.
+    pub name: String,
+    /// The SHA-256 the lockfile in the checkout gives it now, when it gives one.
+    pub sha256: Option<Hex32>,
 }
 
 /// One package manager's part.
@@ -41,12 +67,28 @@ pub trait Part: Sync {
     fn package(&self, path: &str) -> Option<String>;
     /// What checks its bytes when a tool reads them.
     fn verified_by(&self) -> VerifiedBy;
+    /// K-7: what checks its bytes for a bake whose manifest set is `manifests` (path and text):
+    /// a part verified by a lockfile only where its lockfiles hash its packages.
+    fn verified_by_for(&self, manifests: &[(String, String)]) -> VerifiedBy {
+        let _ = manifests;
+        self.verified_by()
+    }
+    /// K-3: each kept file's `locked`, by its path from the harvest root, as the lockfiles of
+    /// `manifests` (path and text) write it.
+    fn locked(&self, manifests: &[(String, String)]) -> BTreeMap<String, String> {
+        let _ = manifests;
+        BTreeMap::new()
+    }
     /// K-10: how the run whose variables are `env`, in `checkout`, reads the part at `dir`.
     fn reader(&self, dir: &Path, checkout: &Path, env: Env<'_>) -> Reader;
 }
 
 /// Every part this hushrun knows, by name.
-pub static ALL: &[&dyn Part] = &[&crate::parts::gradle::Gradle, &crate::parts::maven::Maven];
+pub static ALL: &[&dyn Part] = &[
+    &crate::parts::bundler::Bundler,
+    &crate::parts::gradle::Gradle,
+    &crate::parts::maven::Maven,
+];
 
 /// The part named `name`.
 pub fn by_name(name: &str) -> Option<&'static dyn Part> {

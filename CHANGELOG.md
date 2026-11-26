@@ -74,6 +74,13 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Baked packages for Bundler** ([ADR 0156](docs/adr/0156-baked-packages-bundler.md), K-45): a
+  store gains a `bundler` part, the `.gem` files `bundle install` downloaded. Before COMMAND
+  starts, a run copies each gem the Gemfile.lock names into the gem cache Bundler already uses,
+  so `bundle install` installs it without downloading it, to the same paths. hushrun sets no
+  variable for it. Where the Gemfile.lock has `CHECKSUMS`, each gem is checked against it and the
+  part needs no signature; otherwise it is read as a signed part is. `hushrun packages restore`
+  seeds and says what it did.
 - **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to

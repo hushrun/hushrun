@@ -237,12 +237,32 @@ fn given_by(context: &Context, state: &State) -> Given {
                 .vars
                 .extend(vars.into_iter().map(|(n, v)| (OsString::from(n), v))),
             Reader::MavenOpts(word) => given.maven = Some(word),
+            Reader::Seed(plan) => match seed(read, &plan) {
+                Ok(seeded) => given.lines.extend(seeded.lines(part.name())),
+                Err(why) => given.lines.push(why),
+            },
             Reader::LeftAlone(why) => given
                 .lines
                 .push(format!("packages: {}: left alone: {why}", part.name())),
         }
     }
     given
+}
+
+/// K-45: seeds the part a run reads into the tool's own cache; an error is the line to say.
+fn seed(
+    read: &state::ReadPart,
+    plan: &part::Seed,
+) -> Result<hushrun_packages::seed::Seeded, String> {
+    hushrun_packages::seed::seed(&read.dir, &read.rows, read.entry.verified_by, plan).map_err(
+        |err| {
+            format!(
+                "packages: {}: left alone: {} can't be written ({err})",
+                read.entry.part,
+                plan.into.display()
+            )
+        },
+    )
 }
 
 /// The folder a `maven` part would be read from, for the `maven/1` cache's roots: an entry that
@@ -383,11 +403,34 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
         if !parts.is_empty() && !parts.contains(&read.entry.part) {
             continue;
         }
-        println!(
-            "packages: {}: read in place, nothing to seed ({} files)",
-            read.entry.part,
-            read.rows.len()
-        );
+        let reader =
+            part::by_name(&read.entry.part).map(|p| p.reader(&read.dir, &context.checkout, &var));
+        match reader {
+            Some(Reader::Seed(plan)) => match seed(read, &plan) {
+                Ok(seeded) => {
+                    println!(
+                        "packages: {}: seeded {} files into {} ({} there already, {} the store lacks)",
+                        read.entry.part,
+                        seeded.copied,
+                        plan.into.display(),
+                        seeded.present,
+                        seeded.lacking
+                    );
+                    for line in seeded.lines(&read.entry.part) {
+                        eprintln!("hushrun: {line}");
+                    }
+                }
+                Err(why) => eprintln!("hushrun: {why}"),
+            },
+            Some(Reader::LeftAlone(why)) => {
+                eprintln!("hushrun: packages: {}: left alone: {why}", read.entry.part);
+            }
+            _ => println!(
+                "packages: {}: read in place, nothing to seed ({} files)",
+                read.entry.part,
+                read.rows.len()
+            ),
+        }
     }
     Ok(Exit::Ok)
 }
@@ -494,6 +537,7 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     let cleanup = Cleanup(vec![new.clone()]);
     let mut lines = Vec::new();
     let mut metas = Vec::new();
+    let mut locks = Locks::new();
     // The fetch: COMMAND, with each tool's cache at a folder of the bake's own (K-6).
     let mut fetched: Vec<(&'static dyn Part, PathBuf, String)> = Vec::new();
     if !args.command.is_empty() {
@@ -509,7 +553,7 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             ));
         }
         take_all(
-            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
+            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut locks, &mut lines,
         )?;
     } else {
         // No fetch: each part the checkout has build files for and no harvest names is left out.
@@ -530,7 +574,7 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             }
         }
         take_all(
-            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
+            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut locks, &mut lines,
         )?;
     }
     if metas.is_empty() {
@@ -558,7 +602,9 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
                 let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
                 p.package(inner)
             });
-            (package, None)
+            let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
+            let locked = locks.get(name).and_then(|l| l.get(inner)).cloned();
+            (package, locked)
         },
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -733,6 +779,9 @@ fn already_baked(
     })
 }
 
+/// Each part's `locked` hashes (K-3), by part and by path from its harvest root.
+type Locks = std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+
 /// Takes every part a fetch or a harvest gives, for the parts whose manifest set the checkout
 /// holds, into `new/parts/<part>/`.
 #[allow(clippy::too_many_arguments)]
@@ -743,6 +792,7 @@ fn take_all(
     harvests: &[(&'static dyn Part, PathBuf)],
     wanted: &dyn Fn(&dyn Part) -> bool,
     metas: &mut Vec<PartMeta>,
+    locks: &mut Locks,
     lines: &mut Vec<String>,
 ) -> Result<(), Failure> {
     let fail = |why: String| Failure::new(Exit::Unexpected, anyhow!(why));
@@ -774,7 +824,22 @@ fn take_all(
             continue;
         };
         let dest = new.join(store::PARTS).join(part.name()).join(under);
-        let (kept, left) = copy_kept(&root, &dest, part).map_err(|e| fail(e.to_string()))?;
+        // K-7: a part its lockfiles verify holds only the files they hash.
+        let texts: Vec<(String, String)> = manifests
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p.clone(),
+                    fs::read_to_string(context.checkout.join(p)).ok()?,
+                ))
+            })
+            .collect();
+        let verified_by = part.verified_by_for(&texts);
+        let locked = part.locked(&texts);
+        let hashed_only =
+            |path: &str| verified_by != store::VerifiedBy::Lockfile || locked.contains_key(path);
+        let (kept, left) =
+            copy_kept(&root, &dest, part, &hashed_only).map_err(|e| fail(e.to_string()))?;
         if kept == 0 {
             let _ = fs::remove_dir_all(new.join(store::PARTS).join(part.name()));
             continue;
@@ -798,15 +863,23 @@ fn take_all(
             tool,
             runtime: None,
             manifests: hashed(&context.checkout, &manifests),
-            verified_by: part.verified_by(),
+            verified_by,
         });
+        if !locked.is_empty() {
+            locks.insert(part.name().to_string(), locked);
+        }
     }
     Ok(())
 }
 
 /// Copies every file under `root` the part keeps into `dest`, never following a link out; returns
 /// how many it kept and how many it left out.
-fn copy_kept(root: &Path, dest: &Path, part: &dyn Part) -> std::io::Result<(usize, usize)> {
+fn copy_kept(
+    root: &Path,
+    dest: &Path,
+    part: &dyn Part,
+    also: &dyn Fn(&str) -> bool,
+) -> std::io::Result<(usize, usize)> {
     let mut kept = 0;
     let mut left = 0;
     let mut stack = vec![(root.to_path_buf(), String::new())];
@@ -828,7 +901,7 @@ fn copy_kept(root: &Path, dest: &Path, part: &dyn Part) -> std::io::Result<(usiz
                 stack.push((entry.path(), path));
                 continue;
             }
-            if !part.keep(&path) || !store::is_row_path(&path) {
+            if !part.keep(&path) || !also(&path) || !store::is_row_path(&path) {
                 left += 1;
                 continue;
             }
@@ -875,12 +948,13 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 }
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
-/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
-/// and Maven's local repository at folders of the bake's own under `cache`.
+/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
+/// Maven's local repository and Bundler's path at folders of the bake's own under `cache`.
 fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
+    let bundler = fetch_cache(cache, &hushrun_packages::parts::bundler::Bundler);
     let opts = hushrun_build::maven::OPTS_VARIABLE;
     let person = var(opts).map(|v| v.to_string_lossy().into_owned());
     let maven_opts = hushrun_packages::parts::maven::opts_with(
@@ -897,6 +971,8 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
         &[
             ("GRADLE_USER_HOME", gradle.into_os_string()),
             (opts, OsString::from(maven_opts)),
+            ("BUNDLE_PATH", bundler.into_os_string()),
+            ("BUNDLE_GLOBAL_GEM_CACHE", OsString::from("false")),
             (hushrun_packages::LOWER, OsString::new()),
         ],
     );

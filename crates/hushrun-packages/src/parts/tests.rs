@@ -185,3 +185,192 @@ fn every_part_module_is_listed() {
     modules.sort();
     assert_eq!(listed, modules);
 }
+
+const LOCK: &str = "GEM
+  remote: https://rubygems.org/
+  specs:
+    nokogiri (1.16.7-x86_64-linux-gnu)
+      racc (~> 1.4)
+    racc (1.8.1)
+    rack (3.1.8)
+
+GIT
+  remote: https://example.com/x.git
+  revision: abc
+  specs:
+    x (0.1.0)
+
+PATH
+  remote: .
+  specs:
+    shop (1.0.0)
+
+PLATFORMS
+  x86_64-linux
+
+DEPENDENCIES
+  nokogiri
+  rack
+
+CHECKSUMS
+  bundler (4.0.18) sha256=02d9a17429de1847b4e0c9f27a9ee4b20c0a74c0a641b4e77195d6019e3618ac
+  nokogiri (1.16.7-x86_64-linux-gnu) sha256=3db6795a80634def1cf86fda79d2d83b59b25ce5e186fa675f73c565589d2ad8
+  racc (1.8.1)
+  rack (3.1.8) sha256=d3fbcbca43dc2b43c9c6d7dfbac01667ae58643c42cea10013d0da970218a1b1
+  shop (1.0.0)
+
+BUNDLED WITH
+  4.0.18
+";
+
+// covers: K-10
+#[test]
+fn bundler_names_its_manifest_set_and_keeps_only_downloaded_gems() {
+    use crate::parts::bundler::Bundler;
+    let tracked = paths(&[
+        "Gemfile",
+        "Gemfile.lock",
+        "shop.gemspec",
+        "engines/a/gems.rb",
+        "engines/a/gems.locked",
+        ".bundle/config",
+        "lib/shop.rb",
+    ]);
+    assert_eq!(
+        Bundler.manifests(&tracked),
+        paths(&[
+            "Gemfile",
+            "Gemfile.lock",
+            "shop.gemspec",
+            "engines/a/gems.rb",
+            "engines/a/gems.locked",
+        ])
+    );
+    assert_eq!(part::by_name("bundler").map(|p| p.tool()), Some("Bundler"));
+    assert!(Bundler.keep("rack-3.1.8.gem"));
+    assert!(Bundler.keep("nokogiri-1.16.7-x86_64-linux-gnu.gem"));
+    for left in [
+        "bundler/git/x-abc/HEAD",
+        ".rack-3.1.8.gem.123.hushrun-seed",
+        "notes.txt",
+    ] {
+        assert!(!Bundler.keep(left), "{left}");
+    }
+    assert_eq!(
+        Bundler.package("concurrent-ruby-1.3.4.gem").as_deref(),
+        Some("concurrent-ruby (1.3.4)")
+    );
+    assert_eq!(
+        Bundler
+            .package("nokogiri-1.16.7-x86_64-linux-gnu.gem")
+            .as_deref(),
+        Some("nokogiri (1.16.7-x86_64-linux-gnu)")
+    );
+    assert_eq!(Bundler.package("README"), None);
+    // A gem home holds `cache/`; a BUNDLE_PATH holds `ruby/<version>/cache/`.
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("bundle/ruby/3.3.0/cache")).unwrap();
+    std::fs::create_dir_all(t.path().join("home/cache")).unwrap();
+    assert_eq!(
+        Bundler.harvest_root(&t.path().join("bundle")),
+        Some((t.path().join("bundle/ruby/3.3.0/cache"), "cache"))
+    );
+    assert_eq!(
+        Bundler.harvest_root(&t.path().join("home")),
+        Some((t.path().join("home/cache"), "cache"))
+    );
+    assert_eq!(Bundler.harvest_root(t.path()), None);
+}
+
+// covers: K-10
+#[test]
+fn bundler_is_verified_by_its_lockfile_only_where_it_has_checksums() {
+    use crate::parts::bundler::{Bundler, gems, seed_files};
+    use crate::store::VerifiedBy;
+    let with = ("Gemfile.lock".to_string(), LOCK.to_string());
+    let without = (
+        "engines/a/Gemfile.lock".to_string(),
+        LOCK.split("CHECKSUMS").next().unwrap().to_string(),
+    );
+    let gemfile = ("Gemfile".to_string(), "gem 'rack'\n".to_string());
+    assert_eq!(
+        Bundler.verified_by_for(&[gemfile.clone(), with.clone()]),
+        VerifiedBy::Lockfile
+    );
+    assert_eq!(
+        Bundler.verified_by_for(&[with.clone(), without.clone()]),
+        VerifiedBy::Signature
+    );
+    assert_eq!(
+        Bundler.verified_by_for(std::slice::from_ref(&gemfile)),
+        VerifiedBy::Signature
+    );
+    // GEM's specs only, never GIT's or PATH's; each with CHECKSUMS' hash where it has one.
+    let named: Vec<(String, bool)> = gems(LOCK)
+        .into_iter()
+        .map(|g| (g.file, g.locked.is_some()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("nokogiri-1.16.7-x86_64-linux-gnu.gem".to_string(), true),
+            ("racc-1.8.1.gem".to_string(), false),
+            ("rack-3.1.8.gem".to_string(), true),
+        ]
+    );
+    let locked = Bundler.locked(std::slice::from_ref(&with));
+    assert_eq!(
+        locked.get("rack-3.1.8.gem").map(String::as_str),
+        Some("sha256=d3fbcbca43dc2b43c9c6d7dfbac01667ae58643c42cea10013d0da970218a1b1")
+    );
+    assert_eq!(
+        locked.len(),
+        2,
+        "bundler itself is no spec of GEM: {locked:?}"
+    );
+    // Two lockfiles that hash one file differently give it no hash.
+    let other = (
+        "b/Gemfile.lock".to_string(),
+        LOCK.replace("sha256=d3fb", "sha256=0000"),
+    );
+    assert!(
+        !Bundler
+            .locked(&[with, other])
+            .contains_key("rack-3.1.8.gem")
+    );
+    let files = seed_files(LOCK);
+    assert_eq!(files[2].path, "cache/rack-3.1.8.gem");
+    assert_eq!(files[2].name, "rack-3.1.8.gem");
+    assert!(files[2].sha256.is_some() && files[1].sha256.is_none());
+}
+
+// covers: K-10
+#[test]
+fn bundler_seeds_from_the_gemfile_bundler_reads() {
+    use crate::parts::bundler::{Bundler, lockfile_for};
+    let t = tempfile::tempdir().unwrap();
+    let checkout = t.path();
+    std::fs::create_dir_all(checkout.join("app/lib")).unwrap();
+    std::fs::write(checkout.join("Gemfile"), "").unwrap();
+    std::fs::write(checkout.join("app/gems.rb"), "").unwrap();
+    assert_eq!(
+        lockfile_for(&checkout.join("app/lib"), checkout, &no_env),
+        Some((checkout.join("app"), checkout.join("app/gems.locked")))
+    );
+    assert_eq!(
+        lockfile_for(checkout, checkout, &no_env),
+        Some((checkout.to_path_buf(), checkout.join("Gemfile.lock")))
+    );
+    let named = |name: &str| (name == "BUNDLE_GEMFILE").then(|| OsString::from("ci/Gemfile"));
+    assert_eq!(
+        lockfile_for(checkout, checkout, &named),
+        Some((checkout.join("ci"), checkout.join("ci/Gemfile.lock")))
+    );
+    // No Gemfile up to the checkout's root: left alone, and no ruby is asked.
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(lockfile_for(empty.path(), empty.path(), &no_env), None);
+    assert!(matches!(
+        Bundler.reader(Path::new("/p"), empty.path(), &no_env),
+        Reader::LeftAlone(_)
+    ));
+}
