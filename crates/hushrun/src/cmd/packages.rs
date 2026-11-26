@@ -206,18 +206,17 @@ fn maven_opts(opts: Option<&str>, word: &str) -> String {
 }
 
 /// K-10: what the store a run here reads gives COMMAND. `may_write_trusted` is the run's
-/// authority; with `seed`, a part read by a seed is copied into its tool's cache now, before
-/// COMMAND starts. Nothing when no store is named.
-pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool, seed: bool) -> Given {
+/// authority. Nothing when no store is named.
+pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool) -> Given {
     // K-11: no store named, nothing to read: one `stat`.
     if state::named(&var).is_none() {
         return Given::default();
     }
     let context = Context::here(global);
-    given_by(&context, &context.state(may_write_trusted), seed)
+    given_by(&context, &context.state(may_write_trusted))
 }
 
-fn given_by(context: &Context, state: &State, seed: bool) -> Given {
+fn given_by(context: &Context, state: &State) -> Given {
     let mut given = Given {
         lines: state.lines(),
         ..Given::default()
@@ -238,57 +237,14 @@ fn given_by(context: &Context, state: &State, seed: bool) -> Given {
                 .vars
                 .extend(vars.into_iter().map(|(n, v)| (OsString::from(n), v))),
             Reader::MavenOpts(word) => given.maven = Some(word),
-            Reader::Seed(into) if seed => {
-                given
-                    .lines
-                    .extend(seed_part(context, read, part, &into, false));
-            }
-            Reader::Seed(_) => given.lines.push(format!(
-                "packages: {}: nothing to export: `hushrun packages restore` copies its files into {}'s cache",
-                part.name(),
-                part.tool()
-            )),
+            // K-10: a seed is an install's, never a run's: COMMAND gets nothing from it.
+            Reader::Seed => {}
             Reader::LeftAlone(why) => given
                 .lines
                 .push(format!("packages: {}: left alone: {why}", part.name())),
         }
     }
     given
-}
-
-/// K-10, mechanism C: seeds `read` into the tool's cache at `into`, only what a lockfile of the
-/// checkout pins, each file checked against its row; the lines to say, always when `say_all`.
-fn seed_part(
-    context: &Context,
-    read: &state::ReadPart,
-    part: &dyn Part,
-    into: &Path,
-    say_all: bool,
-) -> Vec<String> {
-    let locks = part.locks(&context.checkout, &part.manifests(&context.tracked));
-    let seeded = part.seed(&read.dir, &read.rows, into, &locks);
-    let name = part.name();
-    let mut lines = Vec::new();
-    if let Some(why) = seeded.error {
-        lines.push(format!("packages: {name}: left alone: {why}"));
-    }
-    if seeded.copied > 0 || say_all {
-        lines.push(format!(
-            "packages: {name}: seeded {} files into {} ({} there already, {} no lockfile pins)",
-            seeded.copied,
-            into.display(),
-            seeded.had,
-            seeded.unpinned
-        ));
-    }
-    if seeded.refused > 0 {
-        lines.push(format!(
-            "packages: {name}: left out {} files whose bytes aren't their rows': {} downloads them",
-            seeded.refused,
-            part.tool()
-        ));
-    }
-    lines
 }
 
 /// The folder a `maven` part would be read from, for the `maven/1` cache's roots: an entry that
@@ -367,7 +323,13 @@ fn export_line(name: &OsString, value: &OsString) -> String {
 }
 
 fn env_command(global: &GlobalOpts) -> CmdResult {
-    let given = given(global, in_ci(), false);
+    let mut given = Given::default();
+    if state::named(&var).is_some() {
+        let context = Context::here(global);
+        let state = context.state(in_ci());
+        given = given_by(&context, &state);
+        given.lines.extend(seed_all(&context, &state, &[]));
+    }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -396,7 +358,13 @@ pub fn exec(global: &GlobalOpts, command: &[String]) -> ExitCode {
         eprintln!("error: name the command: `hushrun packages exec -- COMMAND`");
         return Exit::Usage.into();
     };
-    let given = given(global, in_ci(), true);
+    let mut given = Given::default();
+    if state::named(&var).is_some() {
+        let context = Context::here(global);
+        let state = context.state(in_ci());
+        given = given_by(&context, &state);
+        given.lines.extend(seed_all(&context, &state, &[]));
+    }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -429,12 +397,9 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
         if !parts.is_empty() && !parts.contains(&read.entry.part) {
             continue;
         }
-        if let Some(part) = part::by_name(&read.entry.part)
-            && let Reader::Seed(into) = part.reader(&read.dir, &context.checkout, &var)
+        if part::by_name(&read.entry.part)
+            .is_some_and(|p| p.reader(&read.dir, &context.checkout, &var) == Reader::Seed)
         {
-            for line in seed_part(&context, read, part, &into, true) {
-                println!("{line}");
-            }
             continue;
         }
         println!(
@@ -443,7 +408,72 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
             read.rows.len()
         );
     }
+    for line in seed_all(&context, &state, parts) {
+        println!("{line}");
+    }
     Ok(Exit::Ok)
+}
+
+/// K-10, mechanism C: seeds every part of the store whose reader is a seed (of `only`, when it
+/// names any) into the tool's own cache, and says what it did.
+fn seed_all(context: &Context, state: &State, only: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let Some(lower) = state.lower() else {
+        return lines;
+    };
+    for read in &lower.parts {
+        if !only.is_empty() && !only.contains(&read.entry.part) {
+            continue;
+        }
+        let Some(part) = part::by_name(&read.entry.part) else {
+            continue;
+        };
+        if part.reader(&read.dir, &context.checkout, &var) != Reader::Seed {
+            continue;
+        }
+        let name = part.name();
+        let (dest, under) = match part.seed_into(&context.checkout, &var) {
+            Ok(found) => found,
+            Err(why) => {
+                lines.push(format!("packages: {name}: left alone: {why}"));
+                continue;
+            }
+        };
+        let admit = part.admit(&context.checkout, &part.manifests(&context.tracked));
+        match hushrun_packages::seed::seed(read, under, &dest, &*admit) {
+            Ok(done) if done.stamped => lines.push(format!(
+                "packages: {name}: seeded already into {}",
+                dest.display()
+            )),
+            Ok(done) => {
+                lines.push(format!(
+                    "packages: {name}: seeded {} files into {} ({} there already)",
+                    done.copied,
+                    dest.display(),
+                    done.there
+                ));
+                if done.not_locked > 0 {
+                    lines.push(format!(
+                        "packages: {name}: left out {} files no lockfile here names now",
+                        done.not_locked
+                    ));
+                }
+                if !done.changed.is_empty() {
+                    lines.push(format!(
+                        "packages: {name}: left out {} files whose bytes changed since the bake, such as {}: {} downloads what they were of",
+                        done.changed.len(),
+                        done.changed[0],
+                        part.tool()
+                    ));
+                }
+            }
+            Err(err) => lines.push(format!(
+                "packages: {name}: seeding {} stopped: {err}",
+                dest.display()
+            )),
+        }
+    }
+    lines
 }
 
 fn verify() -> CmdResult {
@@ -644,11 +674,12 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         },
         &metas,
         &|name, path| {
-            let package = part::by_name(name).and_then(|p| {
-                let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
-                p.package(inner)
-            });
-            (package, None)
+            let found = part::by_name(name);
+            let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
+            (
+                found.and_then(|p| p.package(inner)),
+                found.and_then(|p| p.locked(inner)),
+            )
         },
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -972,11 +1003,13 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
 /// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
-/// and Maven's local repository at folders of the bake's own under `cache`.
+/// Maven's local repository, pnpm's store and npm's cache at folders of the bake's own under `cache`.
 fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
+    let pnpm = fetch_cache(cache, &hushrun_packages::parts::pnpm::Pnpm);
+    let npm = fetch_cache(cache, &hushrun_packages::parts::npm::Npm);
     let opts = hushrun_build::maven::OPTS_VARIABLE;
     let person = var(opts).map(|v| v.to_string_lossy().into_owned());
     let maven_opts = hushrun_packages::parts::maven::opts_with(
@@ -993,6 +1026,11 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
         &[
             ("GRADLE_USER_HOME", gradle.into_os_string()),
             (opts, OsString::from(maven_opts)),
+            (
+                hushrun_packages::parts::pnpm::STORE_DIR,
+                pnpm.into_os_string(),
+            ),
+            (hushrun_packages::parts::npm::CACHE, npm.into_os_string()),
             (hushrun_packages::LOWER, OsString::new()),
         ],
     );

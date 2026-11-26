@@ -27,18 +27,14 @@ for `swiftpm` says.
    with or without `COMMAND`, so no build of the check is needed. `--force-resolved-versions`
    resolves exactly the lockfile and never rewrites it, and the scratch folder keeps `.build` out
    of the checkout. `--harvest swiftpm=FOLDER` takes a cache the job already filled.
-3. **The seed.** Before COMMAND starts, `hushrun run` and `hushrun packages exec` copy each clone a
-   `Package.resolved` of the checkout pins into SwiftPM's cache. On macOS that is
+3. **The seed is main's (ADR 0150):** `hushrun packages exec`, `env` and `restore` copy each
+   file of a clone a `Package.resolved` of the checkout pins into `repositories/` of SwiftPM's
+   cache, never over a file that is there, each hashed as it is copied, written beside its place
+   and renamed, with a stamp once nothing was left out. On macOS the cache is
    `~/Library/Caches/org.swift.swiftpm`; on Linux it is `$XDG_CACHE_HOME/org.swift.swiftpm`, else
-   `~/.cache/org.swift.swiftpm`. The part is the same on both. How the seed works:
-   - A clone the cache already holds is left as it is.
-   - Each clone is written beside its place and renamed in, so SwiftPM never sees half of one.
-   - Files under `objects/` are hard-linked to the store's where possible: git never writes them
-     in place. Every other file is copied.
-   - Every file is hashed as SwiftPM will read it.
-   - A seed that put every clone in place leaves `.hushrun-packages-<digest>` in the cache, so the
-     next seed of the same files for the same pins costs one `stat`.
-   - `hushrun packages restore` does the same outside a run.
+   `~/.cache/org.swift.swiftpm`. The part is the same on both. `hushrun run` seeds nothing, as for
+   pnpm and npm, though SwiftPM resolves inside `swift build` and `swift test` themselves: a
+   sandbox seeds with `hushrun packages restore` in its setup, before its checks.
 4. **A pin names a clone by its repository's name.** That name is the last component of the
    pin's location, less `.git`; SwiftPM's folder is that name, `-`, and 8 hex characters of a
    SHA-256 of its canonical location. Two pins whose locations end alike would both seed, which
@@ -62,9 +58,12 @@ unsigned store's `swiftpm` part is read only with `HUSHRUN_PACKAGES_LOWER_UNTRUS
 CI. The seed's own hash of every file also catches a changed byte where K-8 doesn't hash (a
 sandbox, a laptop), which is more than the plan's tamper case asked for.
 
-The plan's stamp was `.hushrun-packages-<store identity>`. A seed copies only what the lockfile
-pins, so the stamp's digest also covers the pins. Otherwise a lockfile that newly pins a
-repository the store holds would never seed it.
+This branch first seeded each clone whole: written into a folder beside its place and renamed
+in, objects hard-linked, a clone with any changed file not put in place. ADR 0150's seed merged
+first, file by file, and this part now uses it. The cost: in a store nobody hashed whole (a
+sandbox, a laptop), a clone one file of which changed is copied less that file, and SwiftPM then
+fails on the missing object instead of downloading the clone. In CI, K-8 leaves the whole part
+out first. A seed that groups a clone's files would close it, and is left for later.
 
 ## What was confirmed, and where
 
@@ -97,8 +96,6 @@ repository the store holds would never seed it.
 - **Naming the cache with `--cache-path`** to point SwiftPM at the store in place: SwiftPM writes
   into its cache (locks, fetches), and it is an option of COMMAND, which a reader never rewrites.
 - **Seeding every clone the part holds:** a clone no pin names is one SwiftPM never reads.
-- **Copying into an existing clone what it lacks:** a clone is one repository's state, and
-  SwiftPM fetches what it lacks itself.
 - **The registry's downloads and binary artifacts** (`registry/`, `artifacts/`): not in the
   plan's row, and no test fixture of hushrun uses them.
 
@@ -106,5 +103,5 @@ repository the store holds would never seed it.
 
 - A sandbox whose image carries a signed store resolves a Swift package's pinned dependencies
   with no network.
-- `part::Part` gains `locks`, `seed` and `download`, and `Reader` gains `Seed`, shaped like the
-  cargo and python branches' so that whichever merges first, the others merge into it.
+- `part::Part` gains `download`, the tool's own download-only commands a bake runs with or
+  without `COMMAND`.

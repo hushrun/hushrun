@@ -13,6 +13,7 @@ workspace = true
 
 # No network and no async: a run reads a package store as it begins.
 [dependencies]
+base64.workspace = true
 hushrun-build.workspace = true
 hushrun-core.workspace = true
 serde.workspace = true

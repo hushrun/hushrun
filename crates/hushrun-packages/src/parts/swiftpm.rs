@@ -1,8 +1,8 @@
 //! The `swiftpm` part: the bare clones under `repositories/` of SwiftPM's shared cache, seeded
-//! (mechanism C) into the run's own cache before COMMAND, one repository at a time, and only a
-//! repository a `Package.resolved` of the checkout pins. SwiftPM reads no second cache, so nothing
-//! can be read in place. With a pin's revision in the cache it fetches nothing: it copies the clone
-//! into the package's `.build` and checks the revision out.
+//! (mechanism C) into the cache of the user who installs, only the clones a `Package.resolved` of
+//! the checkout pins. SwiftPM reads no second cache, so nothing can be read in place. With a pin's
+//! revision in its cache it fetches nothing: it copies the clone into the package's `.build` and
+//! checks the revision out.
 //!
 //! The cache is `~/Library/Caches/org.swift.swiftpm` on macOS and `$XDG_CACHE_HOME/org.swift.swiftpm`
 //! (`~/.cache/org.swift.swiftpm`) on Linux, unless a command names another with `--cache-path`;
@@ -10,24 +10,18 @@
 //! folder, so a changed object would be checked out at the pinned revision: the part is verified by
 //! a signature, and the seed hashes every file it copies.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
-use hushrun_core::blocks::Hex32;
-
-use crate::part::{Download, Env, Locks, Part, Reader, Seeded, file_name};
-use crate::store::{self, Kind, Row, VerifiedBy};
+use crate::part::{Admit, Admits, Download, Env, Part, Reader, file_name};
+use crate::store::VerifiedBy;
 
 /// The part's folder, as under SwiftPM's cache: one bare clone per repository.
 pub const REPOSITORIES: &str = "repositories";
 /// SwiftPM's cache's folder, under the user's caches folder.
 pub const CACHE: &str = "org.swift.swiftpm";
-/// The key of [`Locks`] under which `locks` lists each `Package.resolved` it can't read.
-pub const UNREAD: &str = "/unread";
-/// The stamp a seed leaves in SwiftPM's cache: the next seed of the same files costs one `stat`.
-pub const STAMP: &str = ".hushrun-packages-";
 
 /// The `swiftpm` part.
 pub struct SwiftPm;
@@ -85,97 +79,45 @@ impl Part for SwiftPm {
         VerifiedBy::Signature
     }
 
-    fn reader(&self, _dir: &Path, _checkout: &Path, env: Env<'_>) -> Reader {
+    fn reader(&self, _dir: &Path, _checkout: &Path, _env: Env<'_>) -> Reader {
         if cfg!(windows) {
             return Reader::LeftAlone(
                 "hushrun seeds SwiftPM's cache on Linux and macOS only".to_string(),
             );
         }
-        match cache_dir(env, cfg!(target_os = "macos")) {
-            Some(cache) => Reader::Seed(cache),
-            None => Reader::LeftAlone("HOME isn't set".to_string()),
-        }
+        Reader::Seed
     }
 
-    fn locks(&self, checkout: &Path, manifests: &[String]) -> Locks {
-        let mut locks = Locks::new();
-        for path in manifests
+    fn seed_into(&self, checkout: &Path, env: Env<'_>) -> Result<(PathBuf, &'static str), String> {
+        // A Package.resolved hushrun can't read pins nothing it could guess: left alone.
+        if let Ok(text) = fs::read_to_string(checkout.join("Package.resolved"))
+            && let Err(why) = pins(&text)
+        {
+            return Err(format!("hushrun can't read Package.resolved ({why})"));
+        }
+        let cache = cache_dir(env, cfg!(target_os = "macos")).ok_or("HOME isn't set")?;
+        Ok((cache.join(REPOSITORIES), REPOSITORIES))
+    }
+
+    fn admit(&self, checkout: &Path, manifests: &[String]) -> Admits {
+        // Each clone a Package.resolved pins, by its repository's name; the bytes are checked
+        // against the row by the seed.
+        let pinned: BTreeSet<String> = manifests
             .iter()
             .filter(|p| file_name(p) == "Package.resolved")
-        {
-            let Ok(text) = fs::read_to_string(checkout.join(path)) else {
-                continue;
-            };
-            match pins(&text) {
-                Ok(pins) => {
-                    for (location, revision) in pins {
-                        let revisions = locks.entry(basename(&location).to_string()).or_default();
-                        if !revisions.contains(&revision) {
-                            revisions.push(revision);
-                        }
-                    }
-                }
-                Err(why) => locks
-                    .entry(UNREAD.to_string())
-                    .or_default()
-                    .push(format!("{path} ({why})")),
+            .filter_map(|p| fs::read_to_string(checkout.join(p)).ok())
+            .filter_map(|text| pins(&text).ok())
+            .flatten()
+            .map(|(location, _)| basename(&location).to_string())
+            .collect();
+        Box::new(move |path, _| {
+            let repository = path.split('/').next().unwrap_or(path);
+            if pinned.contains(basename_of_folder(repository)) {
+                Admit::Copy
+            } else {
+                Admit::NotLocked
             }
-        }
-        locks
-    }
-
-    fn seed(&self, dir: &Path, rows: &[Row], into: &Path, locks: &Locks) -> Seeded {
-        let mut seeded = Seeded::default();
-        if let Some(unread) = locks.get(UNREAD) {
-            seeded.error = Some(format!("hushrun can't read {}", unread.join(", ")));
-            return seeded;
-        }
-        // Each repository the lockfiles pin, with its rows.
-        let mut repositories: Vec<(&str, Vec<&Row>)> = Vec::new();
-        for row in rows {
-            let Some(inner) = row.path.strip_prefix("repositories/") else {
-                seeded.unpinned += 1;
-                continue;
-            };
-            let repository = inner.split('/').next().unwrap_or(inner);
-            if !locks.contains_key(basename_of_folder(repository)) {
-                seeded.unpinned += 1;
-                continue;
-            }
-            match repositories.last_mut() {
-                Some((name, list)) if *name == repository => list.push(row),
-                _ => repositories.push((repository, vec![row])),
-            }
-        }
-        if repositories.is_empty() {
-            return seeded;
-        }
-        let stamp = into.join(format!("{STAMP}{}", stamp_of(&repositories, locks)));
-        if fs::symlink_metadata(&stamp).is_ok() {
-            seeded.had = repositories.iter().map(|(_, r)| r.len()).sum();
-            return seeded;
-        }
-        for (repository, rows) in &repositories {
-            let to = into.join(REPOSITORIES).join(repository);
-            // Never over what is there: a clone SwiftPM has is SwiftPM's, and it fetches what
-            // that lacks.
-            if fs::symlink_metadata(&to).is_ok() {
-                seeded.had += rows.len();
-                continue;
-            }
-            match seed_repository(dir, rows, &to) {
-                Ok(true) => seeded.copied += rows.len(),
-                Ok(false) => seeded.refused += rows.len(),
-                Err(err) => {
-                    seeded.error = Some(format!("{}: {err}", to.display()));
-                    return seeded;
-                }
-            }
-        }
-        if seeded.refused == 0 {
-            let _ = fs::write(&stamp, b"");
-        }
-        seeded
+        })
     }
 
     fn download(&self, checkout: &Path, manifests: &[String], into: &Path) -> Download {
@@ -308,87 +250,6 @@ pub fn pins(text: &str) -> Result<Vec<(String, String)>, String> {
         .collect())
 }
 
-/// The stamp's digest: the repositories a seed copies, their rows, and the pins.
-fn stamp_of(repositories: &[(&str, Vec<&Row>)], locks: &Locks) -> Hex32 {
-    let mut text = String::from("hushrun.packages-seed/v1\0");
-    for (_, rows) in repositories {
-        for row in rows {
-            text.push_str(&format!("{}\0{}\0", row.path, row.sha256));
-        }
-    }
-    for (name, revisions) in locks {
-        text.push_str(&format!("{name}\0{}\0", revisions.join(",")));
-    }
-    Hex32::sha256(text.as_bytes())
-}
-
-/// Seeds one repository at `to` from its `rows` in the part at `dir`: into a folder beside it,
-/// renamed into place once every file is there, so that SwiftPM never sees half a clone. A file of
-/// git's `objects/`, which git never writes in place, is linked where it can be, any other copied;
-/// each is hashed as the tool will read it. `Ok(false)` when a file isn't its row's: nothing is left.
-fn seed_repository(dir: &Path, rows: &[&Row], to: &Path) -> io::Result<bool> {
-    let parent = to.parent().ok_or_else(|| io::Error::other("no folder"))?;
-    fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(
-        ".{}.hushrun-{}",
-        file_name(&to.to_string_lossy()),
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&temp);
-    let written = (|| -> io::Result<bool> {
-        for row in rows {
-            let inner = row
-                .path
-                .strip_prefix("repositories/")
-                .and_then(|p| p.split_once('/'))
-                .map_or("", |(_, rest)| rest);
-            let from = dir.join(&row.path);
-            let at = temp.join(inner);
-            fs::create_dir_all(at.parent().unwrap_or(&temp))?;
-            match row.kind {
-                Kind::Link => {
-                    #[cfg(unix)]
-                    std::os::unix::fs::symlink(row.target.as_deref().unwrap_or_default(), &at)?;
-                    continue;
-                }
-                Kind::File | Kind::Exe => {}
-            }
-            let linked = inner.starts_with("objects/") && fs::hard_link(&from, &at).is_ok();
-            if !linked {
-                fs::copy(&from, &at)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    let mode = if row.kind == Kind::Exe { 0o755 } else { 0o644 };
-                    fs::set_permissions(&at, fs::Permissions::from_mode(mode))?;
-                }
-            }
-            if store::sha256_file(&at)? != row.sha256 {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    })();
-    match written {
-        Ok(true) => match fs::rename(&temp, to) {
-            Ok(()) => Ok(true),
-            // Another run put the same clone there first.
-            Err(_) if to.is_dir() => {
-                let _ = fs::remove_dir_all(&temp);
-                Ok(true)
-            }
-            Err(err) => {
-                let _ = fs::remove_dir_all(&temp);
-                Err(err)
-            }
-        },
-        other => {
-            let _ = fs::remove_dir_all(&temp);
-            other
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,23 +360,40 @@ mod tests {
         );
         assert_eq!(basename("git@github.com:apple/swift-nio"), "swift-nio");
         assert_eq!(basename("https://example.com/a/b/"), "b");
-        // The lockfile in a checkout, and one it can't read.
+        // The lockfile in a checkout: a seed admits the clones it pins, and one it can't read
+        // leaves the part alone.
         let checkout = tempfile::tempdir().unwrap();
         fs::write(checkout.path().join("Package.resolved"), V2).unwrap();
-        let locks = SwiftPm.locks(
+        let admit = SwiftPm.admit(
             checkout.path(),
             &paths(&["Package.swift", "Package.resolved"]),
         );
-        assert_eq!(locks.keys().collect::<Vec<_>>(), ["swift-argument-parser"]);
+        assert_eq!(
+            admit("swift-argument-parser-0a1b2c3d/HEAD", b""),
+            Admit::Copy
+        );
+        assert_eq!(admit("swift-nio-12345678/HEAD", b""), Admit::NotLocked);
+        let home = |name: &str| (name == "HOME").then(|| OsString::from("/home/a"));
+        let (into, under) = SwiftPm.seed_into(checkout.path(), &home).unwrap();
+        assert_eq!(under, "repositories");
+        assert!(
+            into.ends_with("org.swift.swiftpm/repositories"),
+            "{}",
+            into.display()
+        );
         fs::write(
             checkout.path().join("Package.resolved"),
             r#"{"version": 9}"#,
         )
         .unwrap();
-        let locks = SwiftPm.locks(checkout.path(), &paths(&["Package.resolved"]));
         assert_eq!(
-            locks.get(UNREAD).unwrap(),
-            &["Package.resolved (version 9, which it doesn't read)".to_string()]
+            SwiftPm.seed_into(checkout.path(), &home).unwrap_err(),
+            "hushrun can't read Package.resolved (version 9, which it doesn't read)"
+        );
+        let admit = SwiftPm.admit(checkout.path(), &paths(&["Package.resolved"]));
+        assert_eq!(
+            admit("swift-argument-parser-0a1b2c3d/HEAD", b""),
+            Admit::NotLocked
         );
     }
 
@@ -552,110 +430,9 @@ mod tests {
         if !cfg!(windows) {
             assert!(matches!(
                 SwiftPm.reader(Path::new("/p"), Path::new("/c"), &home),
-                Reader::Seed(_)
+                Reader::Seed
             ));
         }
-    }
-
-    fn row(path: &str, bytes: &[u8]) -> Row {
-        Row {
-            path: path.into(),
-            kind: Kind::File,
-            bytes: bytes.len() as u64,
-            sha256: Hex32::sha256(bytes),
-            target: None,
-            package: None,
-            locked: None,
-        }
-    }
-
-    // covers: K-10
-    #[test]
-    fn a_seed_copies_whole_pinned_clones_checked_and_never_over_what_is_there() {
-        let part = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
-        let files: &[(&str, &[u8])] = &[
-            (
-                "repositories/other-00000000/HEAD",
-                b"ref: refs/heads/main\n",
-            ),
-            (
-                "repositories/swift-argument-parser-0a1b2c3d/HEAD",
-                b"ref: refs/heads/main\n",
-            ),
-            (
-                "repositories/swift-argument-parser-0a1b2c3d/objects/ab/cdef",
-                b"object",
-            ),
-            (
-                "repositories/swift-nio-12345678/HEAD",
-                b"ref: refs/heads/main\n",
-            ),
-        ];
-        for (path, bytes) in files {
-            let to = part.path().join(path);
-            fs::create_dir_all(to.parent().unwrap()).unwrap();
-            fs::write(to, bytes).unwrap();
-        }
-        let rows: Vec<Row> = files.iter().map(|(p, b)| row(p, b)).collect();
-        let mut locks = Locks::new();
-        locks.insert("swift-argument-parser".into(), vec!["41982a".into()]);
-        locks.insert("swift-nio".into(), vec!["aaaaaa".into()]);
-        // swift-nio's clone is in the cache already: SwiftPM's own, left as it is.
-        let nio = cache.path().join("repositories/swift-nio-12345678");
-        fs::create_dir_all(&nio).unwrap();
-        let seeded = SwiftPm.seed(part.path(), &rows, cache.path(), &locks);
-        assert_eq!(
-            seeded,
-            Seeded {
-                copied: 2,
-                had: 1,
-                unpinned: 1,
-                refused: 0,
-                error: None
-            }
-        );
-        let clone = cache
-            .path()
-            .join("repositories/swift-argument-parser-0a1b2c3d");
-        assert_eq!(fs::read(clone.join("objects/ab/cdef")).unwrap(), b"object");
-        assert!(!nio.join("HEAD").exists());
-        assert!(!cache.path().join("repositories/other-00000000").exists());
-        // The second seed: the stamp, and nothing else.
-        let again = SwiftPm.seed(part.path(), &rows, cache.path(), &locks);
-        assert_eq!((again.copied, again.had), (0, 3));
-        // A byte changed in the store, its size the same: refused, and no half clone is left.
-        let cache = tempfile::tempdir().unwrap();
-        fs::write(
-            part.path()
-                .join("repositories/swift-argument-parser-0a1b2c3d/objects/ab/cdef"),
-            b"objecT",
-        )
-        .unwrap();
-        let seeded = SwiftPm.seed(part.path(), &rows, cache.path(), &locks);
-        assert_eq!((seeded.copied, seeded.refused), (1, 2));
-        assert!(
-            !cache
-                .path()
-                .join("repositories/swift-argument-parser-0a1b2c3d")
-                .exists()
-        );
-        assert!(
-            fs::read_dir(cache.path().join("repositories"))
-                .unwrap()
-                .flatten()
-                .all(|e| !e.file_name().to_string_lossy().starts_with('.')),
-            "no folder of a seed is left"
-        );
-        // A Package.resolved it can't read: the part is left alone, with why.
-        let mut unread = Locks::new();
-        unread.insert(
-            UNREAD.into(),
-            vec!["Package.resolved (version 9, which it doesn't read)".into()],
-        );
-        let seeded = SwiftPm.seed(part.path(), &rows, cache.path(), &unread);
-        assert_eq!(seeded.copied, 0);
-        assert!(seeded.error.unwrap().contains("version 9"));
     }
 
     // covers: K-6

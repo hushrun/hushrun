@@ -215,28 +215,26 @@ for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARG
 backslash can't ride in `MAVEN_OPTS`, which is split into words: the `maven` part is left alone,
 with a line.
 
-`swiftpm` is C, and verified by a signature: before COMMAND starts, `hushrun run` and `hushrun
-packages exec` copy each clone of the part that a `Package.resolved` of the checkout pins (by
-its repository's name, the last component of the pin's location less `.git`; a local or
-registry package isn't SwiftPM's clone) into `repositories/` of SwiftPM's cache:
-`~/Library/Caches/org.swift.swiftpm` on macOS, `$XDG_CACHE_HOME/org.swift.swiftpm`, else
-`~/.cache/org.swift.swiftpm`, on Linux; elsewhere the part is left alone, with a line. A clone
-the cache holds already is left as it is. Each clone is written into a folder beside its place
-and renamed into it when every file is there; a file under `objects/` is linked to the store's
-where the system lets it, any other copied, and each is hashed as SwiftPM will read it: a clone
-any file of which isn't its row's is not put in place, with a line, and SwiftPM downloads it. A
-seed that put every clone in place leaves `.hushrun-packages-<digest>` in the cache, the digest
-of what it copied and the pins, so that the next seed of the same store for the same lockfile
-costs one `stat`. A `Package.resolved` of a version other than 1, 2 or 3 is read for nothing,
-and the part is left alone, with a line. `hushrun packages restore` seeds outside a run;
-`hushrun packages env` exports nothing for it, with a line. Nothing is set: no variable, no
-option. *Rests on:* SwiftPM fetching nothing for a pin whose revision its cached clone holds,
-and copying that clone into the package's `.build` (SwiftPM's `ifNeeded` update strategy;
+`swiftpm` is C, and verified by a signature (K-7): only `hushrun packages exec`, `env` and
+`restore` seed, and `hushrun run` gives COMMAND nothing for it. The seed copies each file of a
+clone a `Package.resolved` of the checkout pins (by its repository's name, the last component of
+the pin's location less `.git`; a local or registry package is no clone of SwiftPM's) into
+`repositories/` of SwiftPM's cache: `~/Library/Caches/org.swift.swiftpm` on macOS,
+`$XDG_CACHE_HOME/org.swift.swiftpm`, else `~/.cache/org.swift.swiftpm`, on Linux; elsewhere the
+part is left alone, with a line. It copies as pnpm's seed does (K-18): never over a file that is
+there, each file hashed as it is copied and left out, with a line, when its bytes aren't its
+row's, written beside its place and renamed, and a stamp when nothing was left out. A clone no
+lockfile pins now is left, with a count. A `Package.resolved` at the checkout's root of a version
+other than 1, 2 or 3 leaves the part alone, with a line; nothing of it is guessed. Nothing is set:
+no variable, no option. *Rests on:* SwiftPM fetching nothing for a pin whose revision its cached
+clone holds, and copying that clone into the package's `.build` (its `ifNeeded` update strategy;
 confirmed by CI's Swift on Linux and macOS, offline). *Breaks if:* a command named another cache
 with `--cache-path`, turned it off with `--disable-dependency-cache`, or a Swift read another
-folder than these: nothing is in it, and SwiftPM downloads as it does today. Git checks no
-object against its name when it clones from a folder, so the lockfile's revision proves
-nothing of a clone's files: a signature does, and so does the seed's hash of each file.
+folder than these: nothing is there, and SwiftPM downloads as it does today; or a file of a clone
+changed in a store nobody hashed whole: the seed leaves that file out, the clone lacks an object,
+and SwiftPM fails on it rather than download (in a run that may write what others trust, K-8 has
+left the whole part out first). Git checks no object against its name when it clones from a
+folder, so a lockfile's revision proves nothing of a clone's files: a signature does.
 
 Where a reader's variable is one another part of hushrun builds in the same run
 (`MAVEN_OPTS`, which the `maven/1` cache and the Maven test adapter write), there is one value,
@@ -253,3 +251,53 @@ block's. *Rests on:* Gradle and Maven reading the second folder only for what th
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
+
+**K-18 The `pnpm` part.** The part holds pnpm's content-addressed store as `store-dir` names it:
+`parts/pnpm/store/v<N>/files/…` (each file named by the SHA-512 of its bytes) and
+`store/v<N>/index/…` (one index a package, which lists its files), and nothing else of the store:
+not `tmp/`, not `projects/` (links to the checkouts that installed from it), not a lock. Its
+manifest set is every tracked `pnpm-lock.yaml`. A bake's fetch (`hushrun packages bake --out DIR
+-- pnpm fetch`) runs with `npm_config_store_dir` at a folder of the bake's own; `--harvest
+pnpm=FOLDER` takes a `store-dir` a job already filled (the folder `pnpm store path` names is its
+`v<N>` folder). A row of an index carries its package as pnpm writes it (`ms@2.1.3`, a scope's
+`/` as `+`) and no `locked`: the lockfile's `integrity` hashes a package's tarball, which the
+store doesn't keep, so nothing in `pnpm-lock.yaml` hashes what the part holds, and the part is
+verified by a signature (K-7). Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed: `hushrun run` gives COMMAND nothing for it, since by the time a
+check runs the install is done. The seed copies each file of the part into the store pnpm uses
+(`npm_config_store_dir` or `NPM_CONFIG_STORE_DIR` when set, else the parent of the folder
+`pnpm store path` names in the checkout), never over a file that is there, each file hashed as it
+is copied and left out, with a line, when its bytes aren't its row's; pnpm then downloads what it
+was of. A file is written beside its place and renamed, so pnpm never sees half of one. A seed
+that left nothing out writes `.hushrun-packages-<part identity>` in that store, and the next seed
+of the same part looks at nothing else. The seed never sets `NODE_OPTIONS` or any other variable,
+and never uses pnpm's global virtual store: `node_modules` is pnpm's own, with links inside the
+checkout, as an install from the network makes it. *Rests on:* pnpm installing from its store,
+with a frozen lockfile, every package whose index and files are there, and checking each file
+against its index as it imports it (confirmed with pnpm 10.28.0, store `v10`, an empty store and
+a registry nobody answers). *Breaks if:* pnpm changed its store's layout (a new `v<N>`: the part
+seeds a folder that pnpm doesn't read, and pnpm downloads as it does today), or a lockfile
+changed since the bake (the packages it adds are downloaded).
+
+**K-19 The `npm` part.** The part holds the tarballs of npm's cache and nothing else of it:
+`parts/npm/_cacache/content-v2/sha512/<2 hex>/<2 hex>/<124 hex>`, each file's path the SHA-512
+of its bytes. Not `index-v5/` (it names the registry's URLs and the times of the bake's
+requests), not `_logs/`, not another hash's folder. Its manifest set is every tracked
+`package-lock.json` and `npm-shrinkwrap.json`. A bake's fetch (`hushrun packages bake --out DIR --
+npm ci --ignore-scripts`) runs with `npm_config_cache` at a folder of the bake's own;
+`--harvest npm=FOLDER` takes a cache folder a job already filled (the one `npm config get cache`
+names). Each row carries `locked`, `sha512-<base64>` of its path, as `package-lock.json` writes
+the `integrity` of that tarball. The part is verified by the lockfile (K-7): a run reads it with
+no signature and no say-so. Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
+the `_cacache` of the cache npm uses (`npm_config_cache` or `NPM_CONFIG_CACHE` when set, else what
+`npm config get cache` names in the checkout) only a tarball whose SHA-512 an `integrity` of a
+lockfile in the checkout names now (any version of the lockfile: `packages` and nested
+`dependencies`), and only when the SHA-512 of its bytes is that hash. A tarball no lockfile names
+now is left, with a count; one whose bytes aren't its row's or its name's is left with a line, and
+npm downloads it or fails without a registry. A seed that left anything out writes no stamp, so
+the next lockfile can name what it left. *Rests on:* npm reading a tarball from its cache by the
+lockfile's `integrity`, with no index entry and no request, when the lockfile has `integrity` and
+`resolved` (confirmed with npm 10.9 and `npm ci`, an empty cache and a registry nobody answers).
+*Breaks if:* npm stopped reading its cache by hash (a seed then saves nothing, and npm downloads
+as it does today), or a lockfile held only `sha1` hashes (nothing is seeded).

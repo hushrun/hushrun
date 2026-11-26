@@ -1,6 +1,6 @@
 //! `hushrun packages` with SwiftPM (K-6, K-10): a store baked by SwiftPM's own `swift package
-//! resolve`, each repository a bare clone as SwiftPM's cache keeps it, is seeded into the run's
-//! own cache, checked, before COMMAND; SwiftPM then resolves the pinned revisions with no network.
+//! resolve`, each repository a bare clone as SwiftPM's cache keeps it, is seeded into the user's
+//! own cache, checked; SwiftPM then resolves the pinned revisions with no network.
 //!
 //! Most of it runs a stand-in `swift` that writes a cache as `swift package resolve
 //! --cache-path` does, on every machine. The rest needs Swift 6 (`HUSHRUN_TEST_SWIFT`, as the
@@ -141,7 +141,7 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
             f.display()
         );
     }
-    // A run outside CI with the person's say-so: seeded into SwiftPM's cache before COMMAND.
+    // An install outside CI with the person's say-so: seeded into SwiftPM's cache before COMMAND.
     let exec = |home: &Path, vars: &[(&str, &str)]| {
         let mut cmd = r.hushrun();
         cmd.args(["packages", "exec", "--", "sh", "-c", "true"])
@@ -158,8 +158,8 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
     let err = exec(&home, &untrusted);
     assert!(
         err.contains(&format!(
-            "packages: swiftpm: seeded 3 files into {}",
-            cache.display()
+            "packages: swiftpm: seeded 3 files into {} (0 there already)",
+            cache.join("repositories").display()
         )),
         "{err}"
     );
@@ -168,7 +168,7 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
         std::fs::read(seeded.join("objects/ab/cdef")).unwrap(),
         b"object"
     );
-    let stamps = std::fs::read_dir(&cache)
+    let stamps = std::fs::read_dir(cache.join("repositories"))
         .unwrap()
         .flatten()
         .filter(|e| {
@@ -180,7 +180,10 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
     assert_eq!(stamps, 1, "a stamp");
     // Again: the stamp says so, and nothing is copied.
     let err = exec(&home, &untrusted);
-    assert!(!err.contains("seeded"), "{err}");
+    assert!(
+        err.contains("packages: swiftpm: seeded already into "),
+        "{err}"
+    );
     let restore = r
         .hushrun()
         .args(["packages", "restore"])
@@ -189,24 +192,26 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
         .output()
         .unwrap();
     assert!(
-        text(&restore).0.contains("seeded 0 files into")
-            && text(&restore).0.contains("(3 there already"),
+        text(&restore)
+            .0
+            .contains("packages: swiftpm: seeded already into "),
         "{}",
         text(&restore).0
     );
-    // `env` can't seed: it says what does.
+    // `env` seeds as well, and exports nothing for it.
     let env = r
         .hushrun()
         .args(["packages", "env"])
+        .env("HOME", r.root.join("home-env"))
         .env("HUSHRUN_PACKAGES_LOWER", &store)
         .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
         .output()
         .unwrap();
     assert_eq!(text(&env).0, "");
     assert!(
-        text(&env)
-            .1
-            .contains("packages: swiftpm: nothing to export"),
+        swiftpm_cache(&r.root.join("home-env"))
+            .join("repositories/foo-0a1b2c3d/HEAD")
+            .is_file(),
         "{}",
         text(&env).1
     );
@@ -219,7 +224,10 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
     r.write("Package.resolved", "{\"version\": 3, \"pins\": []}\n");
     let fresh = r.root.join("home-unpinned");
     let err = exec(&fresh, &untrusted);
-    assert!(!err.contains("seeded"), "{err}");
+    assert!(
+        err.contains("packages: swiftpm: left out 3 files no lockfile here names now"),
+        "{err}"
+    );
     assert!(
         !swiftpm_cache(&fresh)
             .join("repositories/foo-0a1b2c3d")
@@ -236,17 +244,17 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
     );
     r.write("Package.resolved", RESOLVED);
     // One byte of a file changed in the store, its size the same: the seed hashes what it copies,
-    // and copies none of that clone; `verify` finds it too.
+    // and leaves that file out; `verify` finds it too.
     std::fs::write(clone.join("objects/ab/cdef"), b"objecT").unwrap();
     let changed = r.root.join("home-changed");
     let err = exec(&changed, &untrusted);
     assert!(
-        err.contains("packages: swiftpm: left out 3 files whose bytes aren't their rows': SwiftPM downloads them"),
+        err.contains("packages: swiftpm: left out 1 files whose bytes changed since the bake, such as repositories/foo-0a1b2c3d/objects/ab/cdef"),
         "{err}"
     );
     assert!(
         !swiftpm_cache(&changed)
-            .join("repositories/foo-0a1b2c3d")
+            .join("repositories/foo-0a1b2c3d/objects/ab/cdef")
             .exists()
     );
     let verify = r
@@ -490,6 +498,20 @@ fn swiftpm_resolves_offline_from_a_seeded_cache_and_no_units_key_moves() {
             .unwrap();
         text(&out).1
     };
+    // A run seeds nothing: the install before it does, here `restore`, as a setup script would.
+    let restore = r
+        .hushrun()
+        .args(["packages", "restore"])
+        .env("HOME", r.root.join("home-run"))
+        .env("HUSHRUN_PACKAGES_LOWER", &store)
+        .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
+        .output()
+        .unwrap();
+    assert!(
+        text(&restore).0.contains("packages: swiftpm: seeded "),
+        "{}",
+        text(&restore).0
+    );
     let _ = std::fs::remove_dir_all(r.repo.join(".build"));
     let first = run("home-run", &store);
     assert!(first.contains("unit passed"), "{first}");

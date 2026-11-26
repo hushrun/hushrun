@@ -74,6 +74,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **pnpm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-18): `hushrun
+  packages bake --out DIR -- pnpm fetch` keeps pnpm's store as a part, and `hushrun packages exec --
+  pnpm install --frozen-lockfile` copies it into the store pnpm uses before the install, every file
+  checked as it is copied, so a sandbox installs with no registry to reach. `hushrun packages
+  restore` does the copy alone. `hushrun run` gives a check nothing for it: no key changes.
+- **npm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-19): `hushrun
+  packages bake --out DIR -- npm ci --ignore-scripts` keeps the tarballs of npm's cache, and
+  `hushrun packages exec -- npm ci` copies into npm's cache each tarball the lockfile names now,
+  checked against its `integrity`. The lockfile is the evidence, so an unsigned store is read.
 - **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to
@@ -95,12 +104,12 @@ project's new branch starts from what main's CI already ran.
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
 - **Baked packages for SwiftPM** ([ADR 0158](docs/adr/0158-swiftpm-packages.md)): a package
-  store's `swiftpm` part holds the bare clones of SwiftPM's cache, and `hushrun run` copies each
-  one a `Package.resolved` pins into the run's SwiftPM cache before COMMAND, hashing every file
-  as it copies, so that SwiftPM resolves the pinned revisions offline. A clone the cache holds is
-  left as it is. `hushrun packages bake` runs `swift package resolve` itself, no command needed;
-  `--harvest swiftpm=FOLDER` takes a filled cache. The part needs a signature, since git checks
-  no file of a clone it copies from a folder.
+  store's `swiftpm` part holds the bare clones of SwiftPM's cache, and `hushrun packages
+  restore`, `exec` and `env` copy each one a `Package.resolved` pins into the user's SwiftPM
+  cache, hashing every file as they copy it, so that SwiftPM resolves the pinned revisions
+  offline. A file the cache holds is left as it is. `hushrun packages bake` runs `swift package
+  resolve` itself, no command needed; `--harvest swiftpm=FOLDER` takes a filled cache. The part
+  needs a signature, since git checks no file of a clone it copies from a folder.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

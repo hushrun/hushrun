@@ -2,6 +2,8 @@
 
 pub mod gradle;
 pub mod maven;
+pub mod npm;
+pub mod pnpm;
 pub mod swiftpm;
 
 #[cfg(test)]
