@@ -817,6 +817,98 @@ fn a_test_its_adapter_never_leaves_out_records_no_pass_of_its_own() {
     );
 }
 
+// covers: C-160, C-162
+#[test]
+fn a_failure_is_said_once_by_the_smallest_unit_that_records_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<String> = ["app.py", "tests/test_a.py"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let tree = tree(&paths);
+    let reads: BTreeSet<String> = paths.iter().cloned().collect();
+    let test = |failed: bool, never_left_out: bool, retried: bool| facts::MergedTest {
+        finished: true,
+        failed,
+        never_left_out,
+        retried,
+        ..facts::MergedTest::default()
+    };
+    let observed = |tests: BTreeMap<String, facts::MergedTest>| {
+        let seen = Seen {
+            outside: Default::default(),
+            declared: None,
+            getenv: Default::default(),
+            facts: Facts {
+                complete: true,
+                failed: true,
+                ..Facts::default()
+            },
+            reads: reads.clone(),
+            duration_ms: 3,
+            tests: Some(tests),
+        };
+        let (o, keyer) = decided(
+            dir.path(),
+            &tree,
+            seen,
+            &store::Map::default(),
+            &Plan::default(),
+        );
+        let file = keyer.key("tests/test_a.py", &reads, &Default::default());
+        let by_key = |key: Option<Digest>| {
+            o.records()
+                .iter()
+                .find(|r| Some(r.key) == key)
+                .cloned()
+                .unwrap_or_else(|| panic!("no record for {key:?} in {:?}", o.records()))
+        };
+        let test_key =
+            |id: &str| keyer.test_key("tests/test_a.py", id, &reads, &Default::default());
+        let named: BTreeMap<String, store::UnitRecord> = ["test_ok", "test_flaky", "test_twin"]
+            .into_iter()
+            .filter(|id| {
+                o.recorded
+                    .contains_key(&units::test_name("tests/test_a.py", id))
+            })
+            .map(|id| (id.to_string(), by_key(test_key(id))))
+            .chain([("file".to_string(), by_key(file))])
+            .collect();
+        named
+    };
+    // A test that failed, which the runner retried: it says the failure, and its file doesn't.
+    let r = observed(BTreeMap::from([
+        ("test_ok".to_string(), test(false, false, false)),
+        ("test_flaky".to_string(), test(true, false, true)),
+        ("test_twin".to_string(), test(true, true, false)),
+    ]));
+    assert_eq!(r["test_flaky"].level, Some(store::Level::Test));
+    assert!(r["test_flaky"].failed() && r["test_flaky"].retried);
+    assert_eq!(r["test_ok"].level, Some(store::Level::Test));
+    assert!(!r["test_ok"].retried);
+    // One its adapter never leaves out records its fail, with no level: no pass of its own
+    // could ever stand beside it.
+    assert_eq!(r["test_twin"].level, None);
+    assert!(
+        r["file"].failed() && r["file"].level.is_none(),
+        "{:?}",
+        r["file"]
+    );
+    // Only the one it never leaves out failed: its test file says it.
+    let r = observed(BTreeMap::from([
+        ("test_ok".to_string(), test(false, false, false)),
+        ("test_twin".to_string(), test(true, true, true)),
+    ]));
+    assert_eq!(r["test_twin"].level, None);
+    assert!(
+        !r["test_twin"].retried,
+        "a result with no level says no retry"
+    );
+    assert_eq!(r["file"].level, Some(store::Level::File));
+    assert!(r["file"].retried, "a test of it was retried");
+    assert!(r["file"].again.is_none());
+}
+
 // covers: C-39
 #[test]
 fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
@@ -931,9 +1023,8 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
     assert_eq!(
         o.records(),
         [UnitRecord {
-            key,
-            result: "pass".into(),
-            duration_ms: 3,
+            level: Some(store::Level::Test),
+            ..UnitRecord::new(key, true, 3)
         }]
     );
     let kept = &o.mapped["tests/test_a.py"];

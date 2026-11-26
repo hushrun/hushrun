@@ -570,8 +570,9 @@ enum Outcome {
 /// \[C-105\] Each test's outcome and time from Meson's `testlog.json`, one JSON object a line: a
 /// name logged more than once (`--repeat`) failed if any line did, and was skipped only if every
 /// line was. `OK` and `EXPECTEDFAIL` passed; `SKIP` was skipped; every other result failed.
-fn outcomes(text: &str) -> Result<BTreeMap<String, (Outcome, u64)>, String> {
-    let mut out: BTreeMap<String, (Outcome, u64)> = BTreeMap::new();
+/// \[C-162\] One whose lines include a pass and a failure was retried: the third field.
+fn outcomes(text: &str) -> Result<BTreeMap<String, (Outcome, u64, bool)>, String> {
+    let mut out: BTreeMap<String, (Outcome, u64, bool)> = BTreeMap::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let value: serde_json::Value =
             serde_json::from_str(line).map_err(|err| format!("a line isn't JSON: {err}"))?;
@@ -592,8 +593,12 @@ fn outcomes(text: &str) -> Result<BTreeMap<String, (Outcome, u64)>, String> {
             "SKIP" => Outcome::Skipped,
             _ => Outcome::Failed,
         };
-        let entry = out.entry(name.to_string()).or_insert((outcome, 0));
+        let entry = out.entry(name.to_string()).or_insert((outcome, 0, false));
         entry.1 = entry.1.saturating_add(ms);
+        entry.2 |= matches!(
+            (entry.0, outcome),
+            (Outcome::Failed, Outcome::Passed) | (Outcome::Passed, Outcome::Failed)
+        );
         entry.0 = match (entry.0, outcome) {
             (Outcome::Failed, _) | (_, Outcome::Failed) => Outcome::Failed,
             (Outcome::Skipped, Outcome::Skipped) => Outcome::Skipped,
@@ -604,7 +609,10 @@ fn outcomes(text: &str) -> Result<BTreeMap<String, (Outcome, u64)>, String> {
 }
 
 /// The name a test of a subproject has in the log, `<project>:<name>`, or its own.
-fn logged<'a>(log: &'a BTreeMap<String, (Outcome, u64)>, name: &str) -> Option<&'a (Outcome, u64)> {
+fn logged<'a>(
+    log: &'a BTreeMap<String, (Outcome, u64, bool)>,
+    name: &str,
+) -> Option<&'a (Outcome, u64, bool)> {
     log.get(name).or_else(|| {
         let bare = name.split_once(':').map(|(_, n)| n)?;
         log.get(bare)
@@ -667,14 +675,14 @@ fn record(p: &Pending) {
             facts
         });
         let left = p.leave.contains(&i);
-        let (outcome, duration_ms) = if left {
-            (Outcome::NotRun, 0)
+        let (outcome, duration_ms, retried) = if left {
+            (Outcome::NotRun, 0, false)
         } else {
             read.as_ref()
                 .ok()
                 .and_then(|log| logged(log, &test.name))
                 .copied()
-                .unwrap_or((Outcome::NotRun, 0))
+                .unwrap_or((Outcome::NotRun, 0, false))
         };
         let finished = matches!(
             outcome,
@@ -713,6 +721,7 @@ fn record(p: &Pending) {
                 duration_ms,
                 not_followed,
                 skipped,
+                retried,
                 ..TestFacts::default()
             }),
             None => {
@@ -824,7 +833,7 @@ mod tests {
 {"name": "g", "result": "UNEXPECTEDPASS", "duration": 0.1}
 "#;
         let out = outcomes(log).unwrap();
-        assert_eq!(out["a"], (Outcome::Passed, 500));
+        assert_eq!(out["a"], (Outcome::Passed, 500, false));
         assert_eq!(out["b"].0, Outcome::Failed);
         assert_eq!(out["c"].0, Outcome::Skipped);
         assert_eq!(out["d"].0, Outcome::Passed);
@@ -832,7 +841,38 @@ mod tests {
         assert_eq!(out["f"].0, Outcome::Failed);
         assert_eq!(out["g"].0, Outcome::Failed);
         assert!(outcomes("not json\n").is_err());
-        assert_eq!(logged(&out, "sub:a"), Some(&(Outcome::Passed, 500)));
+        assert_eq!(logged(&out, "sub:a"), Some(&(Outcome::Passed, 500, false)));
+    }
+
+    // covers: C-162
+    #[test]
+    fn a_name_logged_with_a_pass_and_a_failure_was_retried_and_still_failed() {
+        let log = r#"{"name": "f", "result": "FAIL", "duration": 0.1}
+{"name": "f", "result": "OK", "duration": 0.1}
+{"name": "p", "result": "OK", "duration": 0.1}
+{"name": "p", "result": "OK", "duration": 0.1}
+{"name": "x", "result": "FAIL", "duration": 0.1}
+{"name": "x", "result": "TIMEOUT", "duration": 0.1}
+{"name": "s", "result": "SKIP", "duration": 0.0}
+{"name": "s", "result": "FAIL", "duration": 0.1}
+"#;
+        let out = outcomes(log).unwrap();
+        assert_eq!(
+            out["f"],
+            (Outcome::Failed, 200, true),
+            "the retry's pass is still a fail"
+        );
+        assert_eq!(
+            out["p"],
+            (Outcome::Passed, 200, false),
+            "two passes didn't disagree"
+        );
+        assert_eq!(
+            out["x"],
+            (Outcome::Failed, 200, false),
+            "two failures didn't disagree"
+        );
+        assert!(!out["s"].2, "a skip isn't a pass");
     }
 
     // covers: C-102

@@ -88,7 +88,7 @@ fn pytest_reuses_what_already_passed_on_the_files_it_read() {
     let saved = changed.units["savedMs"].as_u64().expect("savedMs");
     assert_eq!(
         changed.units,
-        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved})
+        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved, "audited": 1})
     );
     // Reuse never chains: a reused test file records nothing.
     assert_eq!(unit_count(&r), 7 + 3 - 1, "{}", changed.said());
@@ -191,7 +191,7 @@ fn a_failing_run_records_what_ran_whole_and_the_fix_reuses_it() {
     );
 }
 
-// covers: C-34
+// covers: C-34, C-161
 #[test]
 fn an_injected_missed_dependency_is_caught_by_an_audit_and_suspends_reuse() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
@@ -214,6 +214,12 @@ fn an_injected_missed_dependency_is_caught_by_an_audit_and_suspends_reuse() {
     // It failed again when it ran once more, alone: a disagreement, which suspends reuse. What
     // the CLI says of it, and a person turning reuse on again, are in e2e_pytest/reuse.rs.
     assert_eq!(r.disagreements(), ["test_hidden.py"], "{}", caught.said());
+    // \[C-161\] A disagreement marks nothing: its fail says no `again`.
+    assert!(
+        r.newest_unit_run().iter().all(|u| u.get("again").is_none()),
+        "{:#?}",
+        r.newest_unit_run()
+    );
     // The next run reuses nothing, and says why.
     r.write("libb.py", "Y = 1  # again\n");
     let suspended = pytest();
@@ -226,7 +232,7 @@ fn an_injected_missed_dependency_is_caught_by_an_audit_and_suspends_reuse() {
     );
 }
 
-// covers: C-34
+// covers: C-34, C-160, C-161, C-163
 #[test]
 fn a_test_file_that_passes_when_it_runs_again_is_flaky_and_suspends_nothing() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
@@ -248,6 +254,22 @@ fn a_test_file_that_passes_when_it_runs_again_is_flaky_and_suspends_nothing() {
     assert_eq!(flaky.code, 1, "{}", flaky.said());
     assert!(r.disagreements().is_empty(), "{}", flaky.said());
     assert!(!flaky.said().contains("suspended"), "{}", flaky.said());
+    // \[C-161\] Its fail is what is recorded, and says that it passed when it ran again; with
+    // `unit: file` a test file is the smallest unit (C-160). Only the fail says it.
+    let records = r.newest_unit_run();
+    let fails: Vec<&Value> = records.iter().filter(|u| u["result"] == "fail").collect();
+    assert_eq!(fails.len(), 1, "{records:#?}");
+    assert_eq!(fails[0]["level"], "file", "{records:#?}");
+    assert_eq!(fails[0]["again"], "pass", "{records:#?}");
+    assert!(
+        records
+            .iter()
+            .filter(|u| u["result"] == "pass")
+            .all(|u| u["level"] == "file" && u.get("again").is_none()),
+        "{records:#?}"
+    );
+    // \[C-163\] It was the one audited, and the run's counts say so.
+    assert_eq!(flaky.units["audited"], 1, "{}", flaky.units);
 }
 
 /// pytest with hushrun's plugin and a `hushrun.json` written here, as a plan would.

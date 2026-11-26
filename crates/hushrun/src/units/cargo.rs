@@ -945,16 +945,17 @@ fn tests_of(starts: &[&Invocation]) -> Option<BTreeMap<String, super::facts::Mer
         }
     }
     // A test started more than once (a retry) finished when each start did, and failed when any
-    // did.
+    // did, \[C-162\] retried when one passed too.
     for (name, starts) in runs {
         let test = out.entry(name.to_string()).or_default();
         test.deselected = false;
         test.finished = starts
             .iter()
             .all(|s| s.exit.is_some() || s.signal.is_some());
-        test.failed = starts
-            .iter()
-            .any(|s| s.exit != Some(0) || s.signal.is_some());
+        let passed = |s: &&Invocation| s.exit == Some(0) && s.signal.is_none();
+        test.failed = !starts.iter().all(passed);
+        // \[C-162\] Its starts didn't all end the same: the runner retried it.
+        test.retried = starts.len() > 1 && starts.iter().any(passed) && test.failed;
         test.duration_ms = starts
             .iter()
             .map(|s| s.duration_ms)
@@ -3535,7 +3536,7 @@ mod tests {
         assert_eq!(ended(&[&reused_list], &plain, false), (false, false, 0));
     }
 
-    // covers: C-146
+    // covers: C-146, C-162
     #[test]
     fn each_test_is_its_own_start_and_a_test_left_out_is_deselected() {
         let mut list = start("--list --format terse", Some(&["x"]), 0);
@@ -3554,6 +3555,13 @@ mod tests {
         assert!(tests["k"].failed);
         // A binary reused whole, or started once by `cargo test`, tells no test.
         let mut reused = start("--list --format terse", Some(&[]), 0);
+        // \[C-162\] Of its tests, only z was started more than once with starts that disagreed.
+        assert!(tests["z"].retried);
+        assert!(!tests["x"].retried && !tests["k"].retried && !tests["y"].retried);
+        let w_first = start("--exact w --nocapture", None, 101);
+        let w_again = start("--exact w --nocapture", None, 101);
+        let both_failed = tests_of(&[&w_first, &w_again]).unwrap();
+        assert!(both_failed["w"].failed && !both_failed["w"].retried);
         reused.reused = true;
         assert_eq!(tests_of(&[&reused]), None);
         assert_eq!(tests_of(&[&start("", None, 0)]), None);

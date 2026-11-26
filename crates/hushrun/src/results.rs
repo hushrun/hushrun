@@ -1206,6 +1206,53 @@ impl Backend {
         }
     }
 
+    /// \[C-167\] `GET {base}/v0/units/flaky` for `check` in `repository`: the units the org saw
+    /// fail and pass on the same files in the last 30 days, by key. `None` from a directory, a
+    /// server from before it (404, 405), or any answer that doesn't read: then nothing is said.
+    pub fn flaky_units(
+        &self,
+        check: &str,
+        repository: Option<&str>,
+    ) -> Option<BTreeMap<Digest, Told>> {
+        let Store::Server(server) = &self.store else {
+            return None;
+        };
+        let query = format!(
+            "check={}&repository={}",
+            query_value(check),
+            query_value(&repository.unwrap_or_default().to_lowercase())
+        );
+        let (status, body) = server
+            .ledger
+            .json_get_query("v0/units/flaky", &query)
+            .ok()?;
+        if status != 200 || body.len() > MOST_ANSWER_BYTES * 16 {
+            return None;
+        }
+        #[derive(Deserialize)]
+        struct Item {
+            key: String,
+            #[serde(flatten)]
+            told: Told,
+        }
+        #[derive(Deserialize)]
+        struct Listed {
+            flaky: Vec<serde_json::Value>,
+        }
+        let listed: Listed = serde_json::from_slice(&body).ok()?;
+        Some(
+            listed
+                .flaky
+                .into_iter()
+                .filter_map(|item| {
+                    let item: Item = serde_json::from_value(item).ok()?;
+                    Some((Digest::from_hex(&item.key).ok()?, item.told))
+                })
+                .filter(|(_, told)| told.events > 0)
+                .collect(),
+        )
+    }
+
     /// Why a result recorded now would be refused for want of a machine to sign it, when this
     /// machine can tell (C-18). \[ADR 0060\] It sends nothing and registers nothing, so that
     /// `hushrun ready` and the pre-push hook spend no machine of the person's in the org: the
@@ -1662,18 +1709,77 @@ fn fitting(result: &RunResult, units: &[crate::units::store::UnitRecord], limit:
     fit
 }
 
-/// One result of a test file or a test as a run's body carries it: its key as 64 lowercase hex.
+/// One result of a test file or a test as a run's body carries it: its key as 64 lowercase hex,
+/// and \[C-160 to C-162\] what it is, how its second run ended and whether the
+/// runner retried it, each only when present.
 fn unit_json(unit: &crate::units::store::UnitRecord) -> serde_json::Value {
-    json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
+    let mut out =
+        json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms});
+    let fields = out.as_object_mut().expect("an object");
+    if let Some(level) = unit.level {
+        fields.insert("level".into(), json!(level));
+    }
+    if let Some(again) = unit.again {
+        fields.insert("again".into(), json!(again));
+    }
+    if unit.retried {
+        fields.insert("retried".into(), json!(true));
+    }
+    out
 }
 
 /// \[RFC 0004 §3.8\] What became of a run's results of test files and tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitsKept {
     /// The server keeps them: false for one from before test files' results.
     pub kept: bool,
     /// How many of them weren't kept: past [`MOST_RESULTS`], or an older server's limit.
     pub dropped: usize,
+    /// \[C-164\] What the server's answer said of the run's failed units, by key: empty for an
+    /// answer that says nothing, doesn't read, or a server from before it.
+    pub told: BTreeMap<Digest, Told>,
+}
+
+/// \[C-164\] What a server holds of one failed unit: how often, in the last 30 days, it failed
+/// and passed on the same files in the same place, how many of those within one run, and when
+/// last.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Told {
+    pub events: u64,
+    #[serde(default)]
+    pub in_one_run: u64,
+    #[serde(default)]
+    pub last_at: String,
+}
+
+/// \[C-164\] The most bytes of a record's answer hushrun reads for what it says of flaky units.
+pub const MOST_ANSWER_BYTES: usize = 64 * 1024;
+
+/// \[C-164\] What a record's answer, `{"flaky": {"<key>": {"events", "inOneRun", "lastAt",
+/// "by"}}, "duplicate"?: true}`, says of the run's failed units: nothing from an answer past
+/// [`MOST_ANSWER_BYTES`], one that doesn't read as that, or an item that doesn't.
+pub fn told(answer: &[u8]) -> BTreeMap<Digest, Told> {
+    if answer.len() > MOST_ANSWER_BYTES {
+        return BTreeMap::new();
+    }
+    #[derive(Deserialize)]
+    struct Answer {
+        #[serde(default)]
+        flaky: BTreeMap<String, serde_json::Value>,
+    }
+    let Ok(answer) = serde_json::from_slice::<Answer>(answer) else {
+        return BTreeMap::new();
+    };
+    answer
+        .flaky
+        .into_iter()
+        .filter_map(|(key, told)| {
+            let key = Digest::from_hex(&key).ok()?;
+            let told: Told = serde_json::from_value(told).ok()?;
+            (told.events > 0).then_some((key, told))
+        })
+        .collect()
 }
 
 /// What a run's relay needs to talk to an org's shared store of build blocks (the build protocol, B-26):
@@ -1967,6 +2073,7 @@ impl Backend {
                 return self.record(key, result).map(|()| UnitsKept {
                     kept: true,
                     dropped: 0,
+                    told: BTreeMap::new(),
                 });
             }
         };
@@ -1985,12 +2092,14 @@ impl Backend {
                 return self.record(key, &result).map(|()| UnitsKept {
                     kept: false,
                     dropped: units.len(),
+                    told: BTreeMap::new(),
                 });
             }
             if (200..300).contains(&status) {
                 return Ok(UnitsKept {
                     kept: true,
                     dropped: units.len() - sent,
+                    told: told(&answer),
                 });
             }
             if sent > OLDER_MOST_RESULTS && older_limit(status, &answer) {
@@ -2771,10 +2880,8 @@ mod tests {
     // covers: C-12
     #[test]
     fn a_runs_body_sends_the_results_that_fit_its_limit_cutting_the_last() {
-        let record = |n: u8, result: &str| crate::units::store::UnitRecord {
-            key: Digest::of(&[n]),
-            result: result.into(),
-            duration_ms: 12,
+        let record = |n: u8, result: &str| {
+            crate::units::store::UnitRecord::new(Digest::of(&[n]), result == "pass", 12)
         };
         let units: Vec<_> = (0..10)
             .map(|n| record(n, if n < 2 { "fail" } else { "pass" }))
@@ -2798,5 +2905,75 @@ mod tests {
         // Never past the count, whatever the room.
         assert_eq!(fitting(&result, &units, usize::MAX), 10);
         assert_eq!(fitting(&result, &units, body(0)), 0);
+    }
+
+    // covers: C-164
+    #[test]
+    fn a_records_answer_tells_flaky_units_only_when_it_reads_as_one() {
+        let k = Digest::of(b"k").hex();
+        let item =
+            json!({"events": 3, "inOneRun": 1, "lastAt": "2026-11-25T10:00:00.000Z", "by": "key"});
+        let want = Told {
+            events: 3,
+            in_one_run: 1,
+            last_at: "2026-11-25T10:00:00.000Z".into(),
+        };
+        let answer = |v: serde_json::Value| told(v.to_string().as_bytes());
+        assert_eq!(
+            answer(json!({"flaky": {&k: &item}}))[&Digest::of(b"k")],
+            want
+        );
+        // A resend outside CI that the server kept once still tells.
+        assert_eq!(
+            answer(json!({"duplicate": true, "flaky": {&k: &item}})).len(),
+            1
+        );
+        // Nothing to tell: an answer of `{}`, `{"duplicate": true}`, one that isn't JSON or an
+        // object, one past 64 KiB, an item with no events or a key that isn't one.
+        assert!(answer(json!({})).is_empty());
+        assert!(answer(json!({"duplicate": true})).is_empty());
+        assert!(told(b"<html>").is_empty() && told(b"").is_empty());
+        assert!(answer(json!("flaky")).is_empty());
+        assert!(answer(json!({"flaky": {&k: {"events": 0}}})).is_empty());
+        assert!(answer(json!({"flaky": {"nothex": &item, &k: {"events": "3"}}})).is_empty());
+        let mut big = json!({"flaky": {&k: &item}, "pad": "x".repeat(MOST_ANSWER_BYTES)});
+        assert!(answer(big.take()).is_empty());
+    }
+
+    // covers: C-160, C-161, C-162
+    #[test]
+    fn a_units_level_again_and_retry_go_in_its_json_and_the_most_a_run_sends_still_fit() {
+        use crate::units::store::{Again, Level, UnitRecord};
+        let plain = UnitRecord::new(Digest::of(b"a"), true, 3);
+        assert_eq!(
+            unit_json(&plain),
+            json!({"key": Digest::of(b"a").hex(), "result": "pass", "durationMs": 3})
+        );
+        let told = UnitRecord {
+            level: Some(Level::Test),
+            again: Some(Again::Pass),
+            retried: true,
+            ..UnitRecord::new(Digest::of(b"b"), false, 4)
+        };
+        assert_eq!(
+            unit_json(&told),
+            json!({"key": Digest::of(b"b").hex(), "result": "fail", "durationMs": 4,
+                   "level": "test", "again": "pass", "retried": true})
+        );
+        // Every result a test's pass, with its level, and a thousand fails that say everything:
+        // the most a run sends still fits a body.
+        let units: Vec<UnitRecord> = (0..MOST_RESULTS as u32)
+            .map(|n| {
+                let failed = n < 1_000;
+                UnitRecord {
+                    level: Some(Level::Test),
+                    again: failed.then_some(Again::Pass),
+                    retried: failed,
+                    ..UnitRecord::new(Digest::of(&n.to_le_bytes()), !failed, 123_456)
+                }
+            })
+            .collect();
+        let result = pass(Provider::Github, None);
+        assert_eq!(fitting(&result, &units, MOST_RUN_BYTES), MOST_RESULTS);
     }
 }

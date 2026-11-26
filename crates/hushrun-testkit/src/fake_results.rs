@@ -76,6 +76,10 @@ struct State {
     units: Vec<(String, String, u64, usize)>,
     /// Each check's reuse state, by lowercase repository and check.
     reuse: BTreeMap<(String, String), Value>,
+    /// \[ADR 0147\] What it holds of flaky units, by key: what a record's answer says of a fail
+    /// with a level under that key, and what `GET {base}/v0/units/flaky` lists. `None`: a server
+    /// from before it, whose answer is `{}` and which has no such endpoint.
+    flaky: Option<BTreeMap<String, Value>>,
     /// It answers what a server from before test files' results does: 404.
     no_units: bool,
     /// \[C-38\] Every hint it keeps.
@@ -161,6 +165,27 @@ impl FakeResults {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("fake results state")
+    }
+
+    /// \[ADR 0147\] Holds `events` flakes in the last 30 days for the unit `key` (64 hex), the
+    /// last at `last_at`: a record whose fail under it carries a level hears of them, and
+    /// `GET {base}/v0/units/flaky` lists them. A fake never told this is a server from before.
+    pub fn hold_flaky(&self, key: &str, events: u64, last_at: &str) {
+        self.state().flaky.get_or_insert_with(BTreeMap::new).insert(
+            key.to_string(),
+            json!({"events": events, "inOneRun": 0, "lastAt": last_at, "by": "key",
+                       "level": "file", "firstAt": last_at}),
+        );
+    }
+
+    /// The keys of the fails the runs so far carried, oldest first.
+    pub fn failed_keys(&self) -> Vec<String> {
+        self.state()
+            .units
+            .iter()
+            .filter(|(_, result, _, _)| result == "fail")
+            .map(|(key, _, _, _)| key.clone())
+            .collect()
     }
 
     /// Answers the next `times` requests with `method` and a path below the org's URL that
@@ -664,6 +689,24 @@ fn counts_in(r: &Value, job: Option<&str>, variant: Option<&str>) -> bool {
 /// \[ADR 0069\] `POST {base}/v0/runs/{key}`, `…/units/lookup` and `…/units/reuse`, as hushrun
 /// cloud answers them.
 fn units(state: &mut State, request: &Request, path: &str, agent: Option<&PublicKey>) -> Reply {
+    // \[ADR 0147\] The flaky units it holds, each as a record's answer says it, with its key.
+    if path == "v0/units/flaky" {
+        let Some(flaky) = &state.flaky else {
+            return error(404, "not_found", "no such endpoint");
+        };
+        if request.method != "GET" {
+            return error(405, "invalid", "another method");
+        }
+        let items: Vec<Value> = flaky
+            .iter()
+            .map(|(key, told)| {
+                let mut item = told.clone();
+                item["key"] = json!(key);
+                item
+            })
+            .collect();
+        return Reply::Send(Response::json(200, &json!({"days": 30, "flaky": items})));
+    }
     if request.method != "POST" {
         return error(405, "invalid", "another method");
     }
@@ -719,7 +762,21 @@ fn units(state: &mut State, request: &Request, path: &str, agent: Option<&Public
                 index,
             ));
         }
-        return Reply::Send(Response::json(201, &json!({})));
+        // \[ADR 0147\] What it holds of the fails that carry a level.
+        let mut flaky = serde_json::Map::new();
+        for unit in body["units"].as_array().into_iter().flatten() {
+            let key = unit["key"].as_str().unwrap_or_default();
+            if unit["result"] == "fail"
+                && unit["level"].is_string()
+                && let Some(told) = state.flaky.as_ref().and_then(|f| f.get(key))
+            {
+                flaky.insert(key.to_string(), told.clone());
+            }
+        }
+        if flaky.is_empty() {
+            return Reply::Send(Response::json(201, &json!({})));
+        }
+        return Reply::Send(Response::json(201, &json!({"flaky": flaky})));
     }
     let check = body["check"].as_str().unwrap_or_default().to_string();
     let repository = body["repository"]

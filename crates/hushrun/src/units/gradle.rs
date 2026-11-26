@@ -398,6 +398,8 @@ struct TestSaw {
     skipped: bool,
     /// \[C-39\] The hook can't leave it out: its runner gives it no method (Kotest).
     never_left_out: bool,
+    /// \[C-162\] A task ran it more than once, and one try passed and another failed.
+    retried: bool,
     duration_ms: u64,
 }
 
@@ -467,6 +469,7 @@ impl UnitSaw {
                     had.failed |= saw.failed;
                     had.skipped |= saw.skipped;
                     had.never_left_out |= saw.never_left_out;
+                    had.retried |= saw.retried;
                     had.deselected &= saw.deselected;
                     had.duration_ms = had.duration_ms.saturating_add(saw.duration_ms);
                 }
@@ -730,6 +733,8 @@ fn units_of(
         for (id, invs) in events.into_iter().flatten() {
             let failed = invs.iter().any(|inv| inv.r == "FAILURE");
             let skipped = !failed && invs.iter().any(|inv| inv.r == "SKIPPED");
+            // \[C-162\] The test-retry plugin's retry that passed: still a fail (ADR 0087 item 9).
+            let retried = failed && invs.iter().any(|inv| inv.r == "SUCCESS");
             // A test skipped in a class or a run where something failed didn't earn a pass:
             // TestNG reports a failing configuration method as a failed test and skips what it
             // guards, in its class or in every class of its suite.
@@ -740,6 +745,7 @@ fn units_of(
                 deselected: false,
                 skipped,
                 never_left_out: unnamed.contains(outer.as_str()) || one.generated,
+                retried,
                 duration_ms: invs.iter().map(|inv| inv.ms).fold(0, u64::saturating_add),
             };
             one.failed |= failed;
@@ -763,6 +769,7 @@ fn units_of(
                 deselected: whole,
                 skipped: false,
                 never_left_out: false,
+                retried: false,
                 duration_ms: 0,
             });
         }
@@ -883,6 +890,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                                 deselected: t.deselected,
                                 skipped: t.skipped,
                                 never_left_out: t.never_left_out,
+                                retried: t.retried,
                                 duration_ms: t.duration_ms,
                                 ..MergedTest::default()
                             };

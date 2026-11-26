@@ -254,6 +254,9 @@ pub struct Plan {
     received: Vec<db::HintKnown>,
     /// \[C-39\] The second tier: the tests that may be reused one by one.
     tests: PlannedTests,
+    /// \[C-34\] The test files the audit runs whole though they passed: \[C-163\] what a run
+    /// counts as audited, with `tests.audited`.
+    audited: BTreeSet<String>,
 }
 
 /// \[C-39\] A test whose key had a pass that counts here, and nothing that failed: what its reuse
@@ -1279,6 +1282,7 @@ impl Observer {
             chosen,
             received,
             tests: tested,
+            audited,
         });
         self.plan_notes = notes;
         Planned::Plan(line)
@@ -2188,6 +2192,14 @@ pub struct Counts {
     /// numbers for tests (C-10, C-39).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<TestCounts>,
+    /// \[C-163\] How many of those that ran, the plan's audit ran though they had passed on the
+    /// same files: tests, where the run counts tests. Left out when none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audited: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// \[ADR 0080\] `units.tests`: a run's tests, how many it had, ran and reused (C-10).
@@ -2230,6 +2242,9 @@ pub struct Observed {
     /// more ([`Session::again`]), with the key of that pass.
     pub again: BTreeMap<String, Digest>,
     records: Vec<UnitRecord>,
+    /// \[C-161\] The key each test file and test records under, by name, for the second run's
+    /// mark and for the lines that name what the server said of a key.
+    recorded: BTreeMap<String, Digest>,
     mapped: BTreeMap<String, Mapped>,
     rest: BTreeMap<String, String>,
     sources: BTreeSet<String>,
@@ -2293,6 +2308,33 @@ impl Observed {
     /// The test files' results this run records (C-33).
     pub fn records(&self) -> &[UnitRecord] {
         &self.records
+    }
+
+    /// \[C-161\] The unit or test `name` failed and passed when it ran once more: its result says
+    /// `again: pass`, when it has a level the server can count it by.
+    pub fn mark_again(&mut self, name: &str) {
+        let Some(key) = self.recorded.get(name) else {
+            return;
+        };
+        for record in self.records.iter_mut().filter(|r| r.key == *key) {
+            if record.failed() && record.level.is_some() {
+                record.again = Some(store::Again::Pass);
+            }
+        }
+    }
+
+    /// \[C-165\] The result the test file or test `name` records in this run, when it records.
+    pub fn record_of(&self, name: &str) -> Option<&UnitRecord> {
+        let key = self.recorded.get(name)?;
+        self.records.iter().find(|r| r.key == *key)
+    }
+
+    /// \[C-161\] The name of the test file or test that records under `key` in this run.
+    pub fn name_of(&self, key: &Digest) -> Option<&str> {
+        self.recorded
+            .iter()
+            .find(|(_, k)| *k == key)
+            .map(|(name, _)| name.as_str())
     }
 
     /// \[C-34\] Keeps a disagreement that a second run confirmed, for the check's audit file.
@@ -2969,6 +3011,8 @@ fn decide(
     let mut file_keys: BTreeSet<Digest> = BTreeSet::new();
     let mut test_counts = TestCounts::default();
     let mut told_tests = false;
+    // \[C-163\] What the audit ran: test files run whole, and tests, each as it ran.
+    let (mut audited_files, mut audited_tests) = (0u64, 0u64);
     let mut saved_ms = 0u64;
     let mut not_observed: BTreeMap<String, u64> = BTreeMap::new();
     // \[C-39\] The tests that always run as not followed: every test of a test file with what
@@ -3075,6 +3119,18 @@ fn decide(
                 test_counts.reused += u64::from(*test == State::Reused);
             }
         }
+        if let How::Plan(plan) = &how {
+            let whole = plan.audited.contains(unit);
+            audited_files += u64::from(whole && ran);
+            audited_tests += test_states
+                .iter()
+                .flatten()
+                .filter(|(id, (test, _))| {
+                    test.ran()
+                        && (whole || plan.tests.audited.contains(&units::test_name(unit, id)))
+                })
+                .count() as u64;
+        }
         match &how {
             How::Observe => {
                 if let Some((key, found)) = would.get(unit) {
@@ -3174,13 +3230,18 @@ fn decide(
         if let Some(key) = key {
             file_keys.insert(key);
         }
-        if let (Some(passed), Some(key)) = (decision.recorded(), key) {
-            out.records.push(UnitRecord {
-                key,
-                result: if passed { "pass" } else { "fail" }.into(),
-                duration_ms: seen.duration_ms,
-            });
-        }
+        // \[C-160\] Its level is decided once its tests' results are: `file` unless a test of it
+        // records a fail of its own.
+        let file_record = match (decision.recorded(), key) {
+            (Some(passed), Some(key)) => {
+                out.records
+                    .push(UnitRecord::new(key, passed, seen.duration_ms));
+                out.recorded.insert(unit.clone(), key);
+                Some(out.records.len() - 1)
+            }
+            _ => None,
+        };
+        let mut a_test_failed = false;
         // \[C-40\] Each test's list, by the one function: its test file's with `reads: file`.
         let no_dirs = BTreeSet::new();
         let unit_watch = mode.watches.units.get(unit);
@@ -3230,7 +3291,7 @@ fn decide(
         // \[C-146\] A test file whose adapter maps its tests records each test's own pass too: a
         // later change outside what it reads leaves it reusable.
         if state != State::Passed || mode.reads == Reads::Test || mapped.is_some() {
-            for (id, (test, _)) in decisions.iter().flatten() {
+            for (id, (test, test_facts)) in decisions.iter().flatten() {
                 // \[C-39\] One its adapter never leaves out records no pass of its own: no plan
                 // finds one to list it by, and it runs, as it would. A fail still counts.
                 let Some(passed) = test.recorded() else {
@@ -3240,17 +3301,32 @@ fn decide(
                 let Some(key) = keyer.test_key(unit, id, &files, &seen.outside) else {
                     continue;
                 };
-                let duration_ms = seen
-                    .tests
-                    .as_ref()
-                    .and_then(|told| told.get(id))
-                    .map_or(0, |t| t.duration_ms);
+                let told = seen.tests.as_ref().and_then(|told| told.get(id));
+                let duration_ms = told.map_or(0, |t| t.duration_ms);
+                // \[C-160\] A test is the smallest unit, but one its adapter never leaves out:
+                // it records no pass of its own, so its test file speaks for it.
+                let own = !test_facts.never_left_out;
+                a_test_failed |= own && !passed;
                 out.records.push(UnitRecord {
-                    key,
-                    result: if passed { "pass" } else { "fail" }.into(),
-                    duration_ms,
+                    level: own.then_some(store::Level::Test),
+                    retried: own && told.is_some_and(|t| t.retried),
+                    ..UnitRecord::new(key, passed, duration_ms)
                 });
+                out.recorded.insert(units::test_name(unit, id), key);
             }
+        }
+        if let Some(at) = file_record
+            && !a_test_failed
+        {
+            let record = &mut out.records[at];
+            record.level = Some(store::Level::File);
+            // \[C-162\] A test file is retried when a test of it that records nothing of its own
+            // was: what its adapter told of its tests, in a run that doesn't record them.
+            record.retried = seen
+                .tests
+                .iter()
+                .flat_map(BTreeMap::values)
+                .any(|t| t.retried);
         }
         // \[C-37\] A test file the run decided `not run` keeps its row too, with why, as a run that
         // recorded nothing else would: `hushrun why` says what the run decided, not that it never
@@ -3408,6 +3484,9 @@ fn decide(
     out.sources = sources;
     if told_tests && !tests_unknown {
         counts.tests = Some(test_counts.clone());
+        counts.audited = audited_tests;
+    } else {
+        counts.audited = audited_files;
     }
     if matches!(how, How::Plan(_)) && (counts.reused > 0 || test_counts.reused > 0) {
         counts.saved_ms = saving(saved_ms, map.whole_ms);

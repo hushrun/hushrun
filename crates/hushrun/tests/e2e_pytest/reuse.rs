@@ -151,7 +151,7 @@ fn a_run_that_reuses_says_so_records_it_skips_the_same_code_and_force_runs_every
     let saved = result["units"]["savedMs"].as_u64().expect("savedMs");
     assert_eq!(
         result["units"],
-        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved})
+        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved, "audited": 1})
     );
     // Reuse never chains: a reused test file records nothing.
     assert_eq!(r.unit_count(), 7 + 3 - 1, "{}", changed.stderr);
@@ -336,6 +336,166 @@ fn a_test_file_that_passes_when_it_runs_again_is_flaky_and_suspends_nothing() {
     assert!(!flaky.stderr.contains("suspended"), "{}", flaky.stderr);
 }
 
+// covers: C-160, C-161, C-163, C-33
+#[test]
+fn a_server_hears_that_a_failed_test_file_passed_when_it_ran_again_and_no_name() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let mut files = hidden("reuse");
+    files[4].1 = "import os, liba\nSEEN = os.path.join(os.path.dirname(__file__), 'seen')\n\ndef test_x():\n    if os.path.exists(SEEN):\n        return\n    open(SEEN, 'w').close()\n    assert False, 'first time'\n".into();
+    let results = FakeResults::start();
+    let server = with_server(&results);
+    let r = repo_of(&files);
+    r.write("seen", "");
+    let python = python();
+    let pytest = || r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(pytest().code, 0);
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # changed\n");
+    let flaky = pytest();
+    assert_eq!(flaky.code, 1, "{}", flaky.stderr);
+    // The body of the request that recorded the run: its fail says the second run passed, and
+    // the run's counts say what the audit ran.
+    let body: Value = results
+        .raw_requests()
+        .iter()
+        .rev()
+        .find(|q| q.method == "POST" && q.path.contains("/v0/runs/"))
+        .map(|q| serde_json::from_slice(&q.body).unwrap())
+        .expect("a run was recorded");
+    let units = body["units"].as_array().unwrap();
+    let fails: Vec<&Value> = units.iter().filter(|u| u["result"] == "fail").collect();
+    assert_eq!(fails.len(), 1, "{body:#}");
+    assert_eq!(fails[0]["level"], "file", "{body:#}");
+    assert_eq!(fails[0]["again"], "pass", "{body:#}");
+    assert!(fails[0].get("retried").is_none());
+    assert_eq!(body["result"]["units"]["audited"], 1, "{body:#}");
+    // \[C-33\] Hashes and words only: no test file's name or path is in any request.
+    for q in results.raw_requests() {
+        let text = String::from_utf8_lossy(&q.body);
+        for name in ["test_hidden", "liba", "libb"] {
+            assert!(!text.contains(name), "{name} in {} {}", q.path, text);
+        }
+    }
+}
+
+// covers: C-165, C-166, C-164, C-167
+#[test]
+fn a_test_file_the_server_saw_fail_and_pass_before_says_how_often_and_the_summary_names_it() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let mut files = hidden("reuse");
+    files[4].1 = "import os, liba\nSEEN = os.path.join(os.path.dirname(__file__), 'seen')\n\ndef test_x():\n    if os.path.exists(SEEN):\n        return\n    open(SEEN, 'w').close()\n    assert False, 'first time'\n".into();
+    let results = FakeResults::start();
+    let server = with_server(&results);
+    let r = repo_of(&files);
+    r.write("seen", "");
+    let python = python();
+    let pytest = |more: &[(&'static str, String)]| {
+        let mut env = server.clone();
+        env.extend(more.iter().cloned());
+        r.run(&pytest_args(&python, &[]), &envs(&env))
+    };
+    assert_eq!(pytest(&[]).code, 0);
+    // A server from before flaky tests: today's line, and nothing more.
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # changed\n");
+    let before = pytest(&[]);
+    assert_eq!(before.code, 1, "{}", before.stderr);
+    let again = "unit: test_hidden.py failed, then passed when it ran again: it may be flaky";
+    assert!(
+        before.stderr.contains(&format!("{again}\n")),
+        "{}",
+        before.stderr
+    );
+    assert!(
+        !before.stderr.contains("in the last 30 days"),
+        "{}",
+        before.stderr
+    );
+    let key = results.failed_keys().pop().expect("its fail was recorded");
+    // \[C-167\] `hushrun why` asks a server from before flaky tests, which answers 404: nothing more.
+    let why = || r.run(&["why", "unit", "test_hidden.py"], &envs(&server));
+    let asked = why();
+    assert_eq!(asked.code, 0, "{}", asked.stderr);
+    assert!(
+        !asked.stdout.contains("failed and passed"),
+        "{}",
+        asked.stdout
+    );
+    // It passes again on the same files, so its key's newest result is a pass.
+    let passed = pytest(&[]);
+    assert_eq!(passed.code, 0, "{}", passed.stderr);
+    // The server holds two flakes of its key, and a third comes with this run's: the audit runs
+    // it, it fails, and it passes when it runs again.
+    results.hold_flaky(&key, 3, "2026-11-25T10:00:00.000Z");
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # changed again\n");
+    let summary = r.root.join("summary");
+    let flaky = pytest(&[]);
+    assert_eq!(flaky.code, 1, "{}", flaky.stderr);
+    assert!(
+        flaky.stderr.contains(&format!(
+            "hushrun: {again}; that makes 3 times in the last 30 days\n"
+        )),
+        "{}",
+        flaky.stderr
+    );
+    // Said once, before the run's last line.
+    assert_eq!(flaky.stderr.matches(again).count(), 1, "{}", flaky.stderr);
+    let at = flaky.stderr.find(again).unwrap();
+    let last = flaky
+        .stderr
+        .find("hushrun: unit failed in")
+        .expect("the last line");
+    assert!(at < last, "{}", flaky.stderr);
+    // The verdict stands.
+    assert_eq!(results.failed_keys().last(), Some(&key));
+    // \[C-165\] On GitHub, in a job hushrun can't tell the variants of, nothing is reused, so it
+    // fails with no second run: the line says to run it again, and \[C-166\] the job's step
+    // summary names it, with how often.
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # and again\n");
+    let on_github = pytest(&[
+        ("CI", "true".into()),
+        ("GITHUB_ACTIONS", "true".into()),
+        ("GITHUB_REPOSITORY", "acme/shop".into()),
+        ("GITHUB_JOB", "test".into()),
+        ("GITHUB_RUN_ID", "41".into()),
+        (
+            "GITHUB_STEP_SUMMARY",
+            summary.to_string_lossy().into_owned(),
+        ),
+    ]);
+    assert_eq!(on_github.code, 1, "{}", on_github.stderr);
+    assert!(
+        on_github.stderr.contains(
+            "hushrun: unit: test_hidden.py failed; it has failed and passed on the same files 3 times in the last 30 days, so it may be flaky: run it again before you change code for it\n"
+        ),
+        "{}",
+        on_github.stderr
+    );
+    // \[C-167\] And `hushrun why` says it, from the one request it makes for it.
+    let asked = why();
+    assert_eq!(asked.code, 0, "{}", asked.stderr);
+    assert!(
+        asked.stdout.contains(
+            "\n  it has failed and passed on the same files 3 times in the last 30 days, last on 2026-11-25\n"
+        ),
+        "{}",
+        asked.stdout
+    );
+    let written = std::fs::read_to_string(&summary).expect("a step summary");
+    assert!(
+        written.contains(
+            "### unit: tests that may be flaky\n\n- test\\_hidden\\.py: failed and passed on the same files 3 times in the last 30 days\n"
+        ),
+        "{written}"
+    );
+}
+
 // covers: C-32
 #[test]
 fn files_that_change_while_command_runs_record_nothing() {
@@ -410,7 +570,8 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
             .iter()
             .any(|r| r["units"]["savedMs"].is_u64()
                 && r["units"]
-                    == json!({"total": 8, "ran": 3, "reused": 5, "savedMs": r["units"]["savedMs"]})),
+                    == json!({"total": 8, "ran": 3, "reused": 5, "savedMs": r["units"]["savedMs"],
+                                 "audited": 1})),
         "{:?}",
         results.recorded()
     );

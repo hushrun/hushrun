@@ -635,6 +635,25 @@ fn a_flaky_test_is_a_failed_one_and_a_kotlin_class_is_named_by_its_file() {
     );
 }
 
+// covers: C-162
+#[test]
+fn a_test_the_retry_plugin_passed_after_a_failure_was_retried_and_still_failed() {
+    let t = tree(&["src/test/java/ex/retry/FlakyTest.java"]);
+    let observed = observe(&[captured(include_str!("retry.json"))], &t)
+        .unwrap()
+        .unwrap();
+    let tests = observed.units["src/test/java/ex/retry/FlakyTest.java"]
+        .tests
+        .as_ref()
+        .unwrap();
+    let flaky = &tests["ex.retry.FlakyTest.flaky"];
+    assert!(flaky.failed && flaky.retried, "{flaky:?}");
+    // Three failures aren't tries that disagree, nor is one pass.
+    let always = &tests["ex.retry.FlakyTest.alwaysFails"];
+    assert!(always.failed && !always.retried, "{always:?}");
+    assert!(!tests["ex.retry.FlakyTest.stable"].retried);
+}
+
 // covers: C-46, C-32
 #[test]
 fn a_task_gradle_didnt_run_whole_records_nothing() {

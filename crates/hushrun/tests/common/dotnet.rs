@@ -103,8 +103,12 @@ pub fn unit(project: &str, framework: &str) -> String {
 /// The tests the console logger says passed or failed (`stdout`), by their names as it prints
 /// them.
 pub fn ran(stdout: &str) -> Vec<String> {
+    // Two test projects run at once: one's `  Passed <name>` can land at the end of the
+    // other's line (`Results File: <path>  Passed <name> [6 ms]`), so each line is read from
+    // VSTest's two-space indent too.
     let mut out: Vec<String> = stdout
         .lines()
+        .flat_map(|l| l.split("  "))
         .filter_map(|l| {
             let l = l.trim_start();
             let rest = l

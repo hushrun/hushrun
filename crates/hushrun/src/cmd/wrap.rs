@@ -45,6 +45,8 @@ use crate::units;
 use crate::units::words::took;
 use hushrun_core::units::Mode;
 
+mod flaky;
+
 pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
     let invoked = Instant::now();
     let (check, command) = match parse(global, args) {
@@ -838,6 +840,8 @@ fn skip_or_run(
     }
     // \[C-34\] What the second runs say: a pass, flaky; anything else, a disagreement, which
     // suspends the check's reuse for the repository until a person turns it on again.
+    // \[C-165\] Those whose second run passed: said once the record's answer is read.
+    let mut again_passed: Vec<String> = Vec::new();
     if let Some((o, _)) = observed.as_mut() {
         let store = unit_store(backend, code, job.as_deref());
         for (unit, state) in &again_states {
@@ -845,9 +849,8 @@ fn skip_or_run(
                 continue;
             };
             if *state == hushrun_core::units::State::Passed {
-                say.line(format_args!(
-                    "{check}: {unit} failed, then passed when it ran again: it may be flaky"
-                ));
+                o.mark_again(unit);
+                again_passed.push(unit.clone());
                 continue;
             }
             o.disagree(unit, key);
@@ -890,11 +893,13 @@ fn skip_or_run(
     let unit_records: &[units::store::UnitRecord] =
         observed.as_ref().map_or(&[], |(o, _)| o.records());
     let mut units_kept = false;
+    let mut told = BTreeMap::new();
     let recorded = if backend.is_server() {
         backend
             .record_with_units(&code.key, &result, unit_records)
             .map(|kept| {
                 units_kept = kept.kept;
+                told.clone_from(&kept.told);
                 if !kept.kept {
                     say.line(format_args!(
                         "{check}: test files' results weren't kept: {} {}",
@@ -941,6 +946,18 @@ fn skip_or_run(
             {
                 say.line(format_args!("{line}"));
             }
+        }
+    }
+    // \[C-165, C-166\] What the server holds of the units that failed, before the last line.
+    if let Some((o, _)) = &observed {
+        let said = flaky::said(check.as_str(), &failed_units(o, &again_passed), &told);
+        for line in &said.lines {
+            say.line(format_args!("{line}"));
+        }
+        if let Some(summary) = &said.summary
+            && let Err(err) = runner.summary(summary)
+        {
+            tracing::debug!("the step summary wasn't written: {err:#}");
         }
     }
     let mark = match (&recorded, verdict) {
@@ -1303,6 +1320,41 @@ fn flaky(decided: Option<&RunResult>, passed: bool) -> &'static str {
         }
         _ => "",
     }
+}
+
+/// \[C-165\] The run's failed units the lines may name: those whose second run passed, and
+/// every fail sent with a level (C-160), with the key it went under.
+fn failed_units<'a>(o: &'a units::Observed, again: &'a [String]) -> Vec<flaky::Failed<'a>> {
+    let mut out: Vec<flaky::Failed<'a>> = again
+        .iter()
+        .map(|name| {
+            let record = o.record_of(name).filter(|r| r.level.is_some());
+            flaky::Failed {
+                name,
+                key: record.map(|r| r.key),
+                test: record.is_some_and(|r| r.level == Some(units::store::Level::Test)),
+                again: true,
+            }
+        })
+        .collect();
+    for record in o.records() {
+        if !record.failed() || record.level.is_none() {
+            continue;
+        }
+        let Some(name) = o.name_of(&record.key) else {
+            continue;
+        };
+        if out.iter().any(|f| f.name == name) {
+            continue;
+        }
+        out.push(flaky::Failed {
+            name,
+            key: Some(record.key),
+            test: record.level == Some(units::store::Level::Test),
+            again: false,
+        });
+    }
+    out
 }
 
 /// The step summary of a run that may be flaky: its line.

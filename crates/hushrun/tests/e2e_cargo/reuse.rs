@@ -202,7 +202,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert!(units["savedMs"].is_u64(), "{units}");
     assert_eq!(
         units,
-        json!({"total": 5, "ran": 2, "reused": 3, "savedMs": units["savedMs"]})
+        json!({"total": 5, "ran": 2, "reused": 3, "savedMs": units["savedMs"], "audited": 1})
     );
     // \[ADR 0073\] Why, for a test binary: what it is built from, without a path of edges.
     r.write(
@@ -459,7 +459,7 @@ fn a_test_binary_built_with_another_value_of_a_variable_it_read_runs_again() {
     let units = r.newest_result()["units"].clone();
     assert_eq!(
         units,
-        json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"]})
+        json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"], "audited": 1})
     );
     assert_ran(&set, &["flavored", "other"], &["scripted", "steady"], 1);
     let after_set = store::env_of(&r.cache);
@@ -553,7 +553,7 @@ fn a_variable_a_build_script_sets_changing_runs_the_test_binary_that_read_it_aga
     let units = r.newest_result()["units"].clone();
     assert_eq!(
         units,
-        json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"]})
+        json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"], "audited": 1})
     );
     assert_ran(&changed, &["scripted", "other"], &["flavored", "steady"], 1);
     assert_env_changed(&before, &store::env_of(&r.cache), &["scripted"]);
@@ -1545,10 +1545,16 @@ fn build_reuse_and_test_reuse_work_in_the_same_run() {
         tests[1].1,
         "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
-    assert_eq!(tests[1].2, json!({"total": 5, "ran": 2, "reused": 3}));
+    assert_eq!(
+        tests[1].2,
+        json!({"total": 5, "ran": 2, "reused": 3, "audited": 1})
+    );
     assert_ne!(tests[2].0, 0, "{tests:?}");
     // Every test binary ran whole, the audited one too, which failed.
-    assert_eq!(tests[2].2, json!({"total": 5, "ran": 5, "reused": 0}));
+    assert_eq!(
+        tests[2].2,
+        json!({"total": 5, "ran": 5, "reused": 0, "audited": 1})
+    );
     assert!(tests[2].3, "{tests:?}");
 
     for (n, (step, plain)) in with.iter().zip(&without).enumerate() {
