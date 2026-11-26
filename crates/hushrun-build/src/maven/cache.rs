@@ -475,7 +475,6 @@ impl Cache {
         cost_ms: u64,
         at: SystemTime,
     ) -> bool {
-        let share = self.shared.current.share.relay();
         let description = json!({
             "schema": crate::key::BLOCK_SCHEMA,
             "kind": Kind::Maven.word(),
@@ -490,17 +489,6 @@ impl Cache {
             "rustc_ms": cost_ms,
             "built_ms": epoch_ms(at),
         });
-        let run = share
-            .map(|share| share.run.clone())
-            .or_else(|| {
-                self.shared
-                    .current
-                    .folder
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_default();
-        let origin = Origin::built_here(&run, share.map(|share| share.by.clone()));
         let Some(temp) = self.write_temp(key, checked, files) else {
             return false;
         };
@@ -511,11 +499,7 @@ impl Cache {
                 name,
             })
             .collect();
-        let stored = store
-            .replace(key, &description, &new, &origin, at, |there, _| {
-                there.is_some_and(Origin::downloaded_only)
-            })
-            .is_ok_and(|replaced| replaced == crate::store::Replaced::Stored);
+        let stored = self.shared.store_built(store, key, &description, &new, at);
         let _ = std::fs::remove_dir_all(&temp);
         stored
     }

@@ -139,6 +139,34 @@ impl Shared {
         }
     }
 
+    /// B-32, B-81, B-175: stores `files` under `key`, with `description`, as a block this run
+    /// built: in place of one only downloaded, never of one built here. Whether it is stored.
+    pub fn store_built(
+        &self,
+        store: &Store,
+        key: &Digest,
+        description: &serde_json::Value,
+        files: &[crate::store::NewFile],
+        at: SystemTime,
+    ) -> bool {
+        let share = self.current.share.relay();
+        let run = share
+            .map(|share| share.run.clone())
+            .or_else(|| {
+                self.current
+                    .folder
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        let origin = Origin::built_here(&run, share.map(|share| share.by.clone()));
+        store
+            .replace(key, description, files, &origin, at, |there, _| {
+                there.is_some_and(Origin::downloaded_only)
+            })
+            .is_ok_and(|replaced| replaced == crate::store::Replaced::Stored)
+    }
+
     // --- the relay and the log ---------------------------------------------------------
 
     /// Asks the run's relay within `wait`: no relay, or one call that failed or timed out this
