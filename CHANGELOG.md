@@ -93,6 +93,13 @@ project's new branch starts from what main's CI already ran.
   packages bake --out DIR -- npm ci --ignore-scripts` keeps the tarballs of npm's cache, and
   `hushrun packages exec -- npm ci` copies into npm's cache each tarball the lockfile names now,
   checked against its `integrity`. The lockfile is the evidence, so an unsigned store is read.
+- **Bundler in the package store** ([ADR 0156](docs/adr/0156-baked-packages-bundler.md), K-45):
+  `hushrun packages bake` keeps the `.gem` files a Gemfile.lock names as a part, fetched by
+  `bundle cache --no-install`, which runs no gem's install script. `hushrun packages exec --
+  bundle install` copies each gem the lockfile names into the gem cache Bundler already uses, so
+  it installs without downloading it, to the same paths; `hushrun packages restore` does the copy
+  alone. hushrun sets no variable for it. Where the Gemfile.lock has `CHECKSUMS`, each gem is
+  checked against it and the part needs no signature; otherwise it is read as a signed part is.
 - **Composer in the package store** ([ADR 0155](docs/adr/0155-baked-packages-composer.md)):
   `hushrun packages bake --out DIR -- composer install --download-only --no-scripts --no-plugins`
   keeps the archives of Composer's cache, and `hushrun packages exec -- composer install` copies
