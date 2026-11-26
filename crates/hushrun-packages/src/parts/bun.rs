@@ -96,7 +96,7 @@ pub fn read_lock(text: &str) -> Result<Vec<Locked>, String> {
             integrity: integrity.to_string(),
         });
     }
-    out.sort_by(|a, b| a.tarball().cmp(&b.tarball()));
+    out.sort_by_key(Locked::tarball);
     out.dedup();
     Ok(out)
 }

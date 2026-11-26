@@ -33,9 +33,8 @@ pub fn is_sha512_hex(hex: &str) -> bool {
 /// `text` as JSON, a comma before `}` or `]` allowed (outside strings).
 pub fn json_with_trailing_commas(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
     let (mut in_string, mut escaped) = (false, false);
-    while let Some((i, c)) = chars.next() {
+    for (i, c) in text.char_indices() {
         if in_string {
             out.push(c);
             match c {
