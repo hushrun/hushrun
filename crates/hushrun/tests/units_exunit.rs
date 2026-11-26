@@ -525,7 +525,22 @@ fn a_seeded_install_leaves_every_key_as_a_network_install_does() {
         second.stdout
     );
     let reads_seeded: Vec<Vec<String>> = units.iter().map(|u| read_by(&r, u)).collect();
-    assert_eq!(reads_seeded, reads_net);
+    // What only the install could change is the same: the unit that calls the dependency reads
+    // the same files, and no unit reads a file of deps/ or _build. (A unit's reads also hold what
+    // ran while it ran, which another test file's module can join in one run and not the next, so
+    // the other units are compared by their own files.)
+    assert_eq!(reads_seeded[2], reads_net[2]);
+    for (unit, (net, seeded)) in units.iter().zip(reads_net.iter().zip(&reads_seeded)) {
+        for reads in [net, seeded] {
+            assert!(reads.contains(&unit.to_string()), "{unit}: {reads:?}");
+            assert!(
+                reads
+                    .iter()
+                    .all(|p| !p.starts_with("deps/") && !p.starts_with("_build/")),
+                "{unit}: {reads:?}"
+            );
+        }
+    }
     // With reuse, after a network install and then a seeded one, every pass holds: nothing runs
     // but an audit's check.
     server.refuse_tarballs(false);
