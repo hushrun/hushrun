@@ -374,3 +374,45 @@ fn bundler_seeds_from_the_gemfile_bundler_reads() {
         Reader::LeftAlone(_)
     ));
 }
+
+// covers: K-6
+#[test]
+fn bundler_fetches_by_itself_and_installs_nothing() {
+    use crate::parts::bundler::Bundler;
+    let checkout = Path::new("/c");
+    let cache = Path::new("/bake/bundler");
+    let fetches = Bundler.fetch(
+        checkout,
+        &paths(&[
+            "Gemfile",
+            "Gemfile.lock",
+            "a/gems.rb",
+            "a/gems.locked",
+            "b/Gemfile",
+        ]),
+        cache,
+    );
+    assert_eq!(fetches.len(), 2, "one per lockfile: {fetches:?}");
+    assert_eq!(fetches[0].dir, Path::new("/c"));
+    assert_eq!(fetches[0].argv, ["bundle", "cache", "--no-install"]);
+    let env = |i: usize, name: &str| {
+        fetches[i]
+            .env
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(env(1, "BUNDLE_GEMFILE"), Some("/c/a/gems.rb".into()));
+    assert_eq!(env(0, "BUNDLE_PATH"), Some("/bake/bundler".into()));
+    assert_eq!(
+        env(0, "BUNDLE_CACHE_PATH"),
+        Some("/bake/bundler/.app-0".into())
+    );
+    assert_eq!(env(0, "BUNDLE_FROZEN"), Some("true".into()));
+    assert_eq!(env(0, "BUNDLE_GLOBAL_GEM_CACHE"), Some("false".into()));
+    assert!(
+        crate::parts::gradle::Gradle
+            .fetch(checkout, &paths(&["build.gradle"]), cache)
+            .is_empty()
+    );
+}

@@ -1,6 +1,6 @@
-//! `hushrun packages` with Bundler (K-6, K-10, K-45): a store baked from the check's own `bundle
-//! install` is seeded into the gem cache of an empty Bundler path, so that `bundle install`
-//! downloads none of its gems. Needs Bundler 4 (`HUSHRUN_TEST_BUNDLER`, its `bundle`, with its
+//! `hushrun packages` with Bundler (K-6, K-10, K-45): a store baked by `bundle cache --no-install`
+//! is seeded into the gem cache of an empty Bundler path, so that `bundle install` downloads none
+//! of its gems. Needs Bundler 4 (`HUSHRUN_TEST_BUNDLER`, its `bundle`, with its
 //! Ruby beside it). The gems come from a source in a folder the test writes: no network.
 
 #[path = "common/cli.rs"]
@@ -18,7 +18,8 @@ use repo::Repo;
 use cli::Cli as _;
 
 /// Writes a gem source at ARGV[0]: one gem of one file per `name:version` that follows, and the
-/// full index Bundler reads from a `file://` source.
+/// full index Bundler reads from a `file://` source. A `name:version:ext` gem has an install
+/// script, which writes the file `CANARY` names when it runs.
 const SOURCE: &str = r##"require "rubygems/package"
 require "tmpdir"
 require "zlib"
@@ -26,7 +27,7 @@ require "fileutils"
 dir = ARGV.fetch(0)
 FileUtils.mkdir_p(File.join(dir, "gems"))
 ARGV.drop(1).each do |pair|
-  name, version = pair.split(":")
+  name, version, ext = pair.split(":")
   spec = Gem::Specification.new do |s|
     s.name = name
     s.version = version
@@ -34,10 +35,18 @@ ARGV.drop(1).each do |pair|
     s.authors = ["hushrun"]
     s.license = "MIT"
     s.files = ["lib/#{name}.rb"]
+    if ext
+      s.files << "ext/extconf.rb"
+      s.extensions = ["ext/extconf.rb"]
+    end
   end
   Dir.mktmpdir do |src|
     FileUtils.mkdir_p(File.join(src, "lib"))
     File.write(File.join(src, "lib", "#{name}.rb"), "module #{name.capitalize}; VERSION = #{version.inspect}; end\n")
+    if ext
+      FileUtils.mkdir_p(File.join(src, "ext"))
+      File.write(File.join(src, "ext", "extconf.rb"), "File.write(#{ENV.fetch("CANARY").inspect}, 'ran')\nFile.write('Makefile', \"all:\\n\\ninstall:\\n\\nclean:\\n\")\n")
+    end
     Dir.chdir(src) { FileUtils.mv(Gem::Package.build(spec), File.join(dir, "gems")) }
   end
 end
@@ -79,9 +88,10 @@ fn bundler() -> Option<PathBuf> {
     found
 }
 
-/// A repository whose Gemfile names two gems of a source beside it, locked by Bundler with its
-/// CHECKSUMS, and committed.
-fn fixture(bundle: &Path) -> Repo {
+/// A repository whose Gemfile names `gems` of a source beside it, locked by Bundler with its
+/// CHECKSUMS, and committed. The source has `tiny`, `other`, `extra`, and `evil`, whose install
+/// script writes `canary` beside the repository.
+fn fixture(bundle: &Path, gems: &[&str]) -> Repo {
     let bin = bundle.parent().expect("bundle's folder");
     let mut path = vec![bin.to_path_buf()];
     path.extend(std::env::split_paths(
@@ -112,24 +122,29 @@ fn fixture(bundle: &Path) -> Repo {
         .command(&bin.join("ruby").to_string_lossy())
         .arg(&script)
         .arg(&source)
-        .args(["tiny:1.0.0", "other:2.0.0"])
+        .args(["tiny:1.0.0", "other:2.0.0", "extra:1.0.0", "evil:1.0.0:ext"])
         .env("SOURCE_DATE_EPOCH", "0")
+        .env("CANARY", r.root.join("canary"))
         .output()
         .unwrap();
     assert!(made.status.success(), "{}", said(&made));
-    r.write(
-        "Gemfile",
-        &format!(
-            "source \"file://{}\"\ngem \"tiny\"\ngem \"other\"\n",
-            source.display()
-        ),
-    );
+    gemfile(&r, gems);
     let locked = install(&r, bundle, &r.root.join("first"));
     assert!(locked.status.success(), "{}", said(&locked));
+    let _ = std::fs::remove_file(r.root.join("canary"));
     let lock = std::fs::read_to_string(r.repo.join("Gemfile.lock")).unwrap();
     assert!(lock.contains("CHECKSUMS"), "{lock}");
     hushrun_testkit::git::commit_all(&r.repo, "lock");
     r
+}
+
+/// Writes a Gemfile that names `gems` of the source beside the repository.
+fn gemfile(r: &Repo, gems: &[&str]) {
+    let mut text = format!("source \"file://{}\"\n", r.root.join("source").display());
+    for gem in gems {
+        text.push_str(&format!("gem \"{gem}\"\n"));
+    }
+    r.write("Gemfile", &text);
 }
 
 /// `bundle install` with Bundler's path at `path`, outside hushrun.
@@ -158,29 +173,49 @@ fn hide_the_sources_gems(r: &Repo) {
     }
 }
 
-fn bake(r: &Repo, bundle: &Path, out: &Path) -> Output {
+/// A bake with no command: Bundler's part fetches itself.
+fn bake(r: &Repo, out: &Path) -> Output {
     r.hushrun()
         .args(["packages", "bake", "--force", "--out"])
         .arg(out)
-        .args(["--", &bundle.to_string_lossy(), "install"])
         .output()
         .unwrap()
 }
 
+/// Where Ruby loads `tiny` from, with Bundler's path at `path`.
+fn tiny_loads_from(r: &Repo, bundle: &Path, path: &Path) -> String {
+    let out = r
+        .command(&bundle.to_string_lossy())
+        .args([
+            "exec",
+            "ruby",
+            "-e",
+            "require 'tiny'; print $LOADED_FEATURES.grep(/tiny\\.rb\\z/).first",
+        ])
+        .env("BUNDLE_PATH", path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", said(&out));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 // covers: K-6, K-10, K-45
 #[test]
-fn a_store_baked_from_bundle_install_seeds_an_empty_bundler_path() {
+fn a_store_baked_by_bundle_cache_seeds_an_empty_bundler_path() {
     let Some(bundle) = bundler() else { return };
-    let r = fixture(&bundle);
+    let r = fixture(&bundle, &["tiny", "other"]);
     let store = r.root.join("packages");
-    let baked = bake(&r, &bundle, &store);
+    let baked = bake(&r, &store);
     let out = said(&baked);
     assert!(baked.status.success(), "{out}");
     assert!(
         out.contains("packages: bundler: 2 files"),
         "only the two downloads, not the installed gems: {out}"
     );
-    assert!(out.contains("(Gemfile, Gemfile.lock)"), "{out}");
+    assert!(
+        out.contains("from fetched by `bundle cache --no-install` (Gemfile, Gemfile.lock)"),
+        "{out}"
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(store.join("packages.json")).unwrap()).unwrap();
     assert_eq!(json["parts"][0]["part"], "bundler");
@@ -195,7 +230,33 @@ fn a_store_baked_from_bundle_install_seeds_an_empty_bundler_path() {
             && rows.contains(r#""locked":"sha256="#),
         "{rows}"
     );
+    // covers: K-10
+    // The keys test: a gem loads from the same path whether it was downloaded or seeded, so what
+    // the Ruby adapter records a test read is the same with and without the store.
+    let downloaded = r.root.join("keys");
+    assert!(install(&r, &bundle, &downloaded).status.success());
+    let from_download = tiny_loads_from(&r, &bundle, &downloaded);
+    assert!(
+        from_download.starts_with(&downloaded.display().to_string()),
+        "{from_download}"
+    );
+    std::fs::remove_dir_all(&downloaded).unwrap();
     hide_the_sources_gems(&r);
+    let seeded = r
+        .hushrun()
+        .args([
+            "packages",
+            "exec",
+            "--",
+            &bundle.to_string_lossy(),
+            "install",
+        ])
+        .env("BUNDLE_PATH", &downloaded)
+        .env("HUSHRUN_PACKAGES_LOWER", &store)
+        .output()
+        .unwrap();
+    assert!(seeded.status.success(), "{}", said(&seeded));
+    assert_eq!(tiny_loads_from(&r, &bundle, &downloaded), from_download);
     // With the store and nothing else, not even the person's say-so: the lockfile verifies it.
     let exec = |path: &Path, lower: &Path| {
         r.hushrun()
@@ -260,9 +321,9 @@ fn a_store_baked_from_bundle_install_seeds_an_empty_bundler_path() {
 #[test]
 fn a_seed_refuses_what_the_lockfile_or_the_store_no_longer_vouches_for() {
     let Some(bundle) = bundler() else { return };
-    let r = fixture(&bundle);
+    let r = fixture(&bundle, &["tiny", "other"]);
     let store = r.root.join("packages");
-    let baked = bake(&r, &bundle, &store);
+    let baked = bake(&r, &store);
     assert!(baked.status.success(), "{}", said(&baked));
     let restore = |path: &Path, extra: &[(&str, &str)]| {
         let mut cmd = r.hushrun();
@@ -282,6 +343,20 @@ fn a_seed_refuses_what_the_lockfile_or_the_store_no_longer_vouches_for() {
         "{out}"
     );
     // Seeded again: nothing is written over.
+    let out = restore(&r.root.join("a"), &[]);
+    assert!(
+        out.contains("seeded into") && out.contains("already"),
+        "{out}"
+    );
+    // Its stamp gone, a seed again finds both there and writes over neither.
+    for stamp in all_files(&r.root.join("a")) {
+        if stamp
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(".hushrun-packages-"))
+        {
+            std::fs::remove_file(stamp).unwrap();
+        }
+    }
     let out = restore(&r.root.join("a"), &[]);
     assert!(
         out.contains("seeded 0 files") && out.contains("(2 there already"),
@@ -323,12 +398,11 @@ fn a_seed_refuses_what_the_lockfile_or_the_store_no_longer_vouches_for() {
         out.contains("other-2.0.0.gem: the store's file isn't the bytes its row hashes"),
         "{out}"
     );
+    let seeded = all_files(&r.root.join("c"));
     assert!(
-        !r.root.join("c").join("ruby").exists() || {
-            let mut files = Vec::new();
-            repo::collect(&r.root.join("c"), &mut files);
-            files.iter().all(|f| !f.ends_with("other-2.0.0.gem"))
-        }
+        seeded.iter().any(|f| f.ends_with("tiny-1.0.0.gem"))
+            && !seeded.iter().any(|f| f.ends_with("other-2.0.0.gem")),
+        "{seeded:?}"
     );
 }
 
@@ -336,7 +410,7 @@ fn a_seed_refuses_what_the_lockfile_or_the_store_no_longer_vouches_for() {
 #[test]
 fn a_lockfile_without_checksums_makes_a_part_only_a_signature_verifies() {
     let Some(bundle) = bundler() else { return };
-    let r = fixture(&bundle);
+    let r = fixture(&bundle, &["tiny", "other"]);
     let lock = std::fs::read_to_string(r.repo.join("Gemfile.lock")).unwrap();
     let mut without = String::new();
     let mut skipping = false;
@@ -355,7 +429,7 @@ fn a_lockfile_without_checksums_makes_a_part_only_a_signature_verifies() {
     r.write("Gemfile.lock", &without);
     hushrun_testkit::git::commit_all(&r.repo, "no checksums");
     let store = r.root.join("packages");
-    let baked = bake(&r, &bundle, &store);
+    let baked = bake(&r, &store);
     assert!(baked.status.success(), "{}", said(&baked));
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(store.join("packages.json")).unwrap()).unwrap();
@@ -378,5 +452,120 @@ fn a_lockfile_without_checksums_makes_a_part_only_a_signature_verifies() {
     assert!(
         !out.contains("seeded 2"),
         "CI never reads an unverified store: {out}"
+    );
+}
+
+// covers: K-45
+#[test]
+fn a_lockfile_changed_by_one_gem_downloads_that_gem_and_seeds_the_rest() {
+    let Some(bundle) = bundler() else { return };
+    let r = fixture(&bundle, &["tiny", "other"]);
+    let store = r.root.join("packages");
+    let baked = bake(&r, &store);
+    assert!(baked.status.success(), "{}", said(&baked));
+    hide_the_sources_gems(&r);
+    // One more gem, which the source still has and the store doesn't.
+    gemfile(&r, &["tiny", "other", "extra"]);
+    let locked = r
+        .command(&bundle.to_string_lossy())
+        .arg("lock")
+        .output()
+        .unwrap();
+    assert!(locked.status.success(), "{}", said(&locked));
+    let read = r
+        .hushrun()
+        .args([
+            "packages",
+            "exec",
+            "--",
+            &bundle.to_string_lossy(),
+            "install",
+        ])
+        .env("BUNDLE_PATH", r.root.join("p"))
+        .env("HUSHRUN_PACKAGES_LOWER", &store)
+        .output()
+        .unwrap();
+    let out = said(&read);
+    assert!(read.status.success(), "{out}");
+    assert!(out.contains("Fetching extra 1.0.0"), "{out}");
+    assert!(
+        !out.contains("Fetching tiny") && !out.contains("Fetching other"),
+        "{out}"
+    );
+}
+
+// covers: K-6
+#[test]
+fn no_gems_install_script_runs_in_a_bake() {
+    let Some(bundle) = bundler() else { return };
+    let r = fixture(&bundle, &["tiny", "evil"]);
+    let canary = r.root.join("canary");
+    let store = r.root.join("packages");
+    let baked = bake(&r, &store);
+    assert!(baked.status.success(), "{}", said(&baked));
+    assert!(
+        !canary.exists(),
+        "the bake ran evil's install script: {}",
+        said(&baked)
+    );
+    assert!(store.join("parts/bundler/cache/evil-1.0.0.gem").is_file());
+    let files = all_files(&store.join("parts/bundler"));
+    assert_eq!(
+        files.len(),
+        2,
+        "the two .gem files and nothing else: {files:?}"
+    );
+    // The control: an install outside the bake runs it.
+    assert!(install(&r, &bundle, &r.root.join("q")).status.success());
+    assert!(canary.is_file());
+}
+
+/// Every file under `dir`.
+fn all_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(entry.path());
+            } else {
+                out.push(entry.path());
+            }
+        }
+    }
+    out
+}
+
+// covers: K-6
+#[test]
+fn with_no_bundle_on_path_the_part_is_left_out_with_a_line() {
+    let r = Repo::new(&[
+        ("Gemfile".into(), "source \"https://rubygems.org\"\n".into()),
+        (
+            "Gemfile.lock".into(),
+            "GEM\n  specs:\n\nBUNDLED WITH\n  4.0.18\n".into(),
+        ),
+    ]);
+    // PATH holds git, which the bake asks for the tracked files, and no bundle.
+    let bin = r.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|d| d.join("git"))
+        .find(|g| g.is_file())
+        .expect("git");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
+    let out = r
+        .hushrun()
+        .args(["packages", "bake", "--out"])
+        .arg(r.root.join("packages"))
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    let said = said(&out);
+    assert!(!out.status.success(), "nothing else to bake: {said}");
+    assert!(
+        said.contains("packages: bundler: left out: there's no bundle here to fetch with"),
+        "{said}"
     );
 }

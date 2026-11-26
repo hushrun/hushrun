@@ -48,6 +48,17 @@ pub struct SeedFile {
     pub sha256: Option<Hex32>,
 }
 
+/// K-6: a command that fetches a part by itself, without the check's build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fetch {
+    /// The folder it runs in.
+    pub dir: PathBuf,
+    /// The program and its arguments.
+    pub argv: Vec<String>,
+    /// The variables it gets besides the bake's.
+    pub env: Vec<(String, OsString)>,
+}
+
 /// One package manager's part.
 pub trait Part: Sync {
     /// Its name, the part's folder's and rows file's.
@@ -72,6 +83,12 @@ pub trait Part: Sync {
     fn verified_by_for(&self, manifests: &[(String, String)]) -> VerifiedBy {
         let _ = manifests;
         self.verified_by()
+    }
+    /// K-6: the commands that fetch the part into `cache` by themselves, for the manifest set
+    /// `manifests` of `checkout`; empty for a part only the check's build fetches.
+    fn fetch(&self, checkout: &Path, manifests: &[String], cache: &Path) -> Vec<Fetch> {
+        let _ = (checkout, manifests, cache);
+        Vec::new()
     }
     /// K-3: each kept file's `locked`, by its path from the harvest root, as the lockfiles of
     /// `manifests` (path and text) write it.

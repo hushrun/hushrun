@@ -237,7 +237,7 @@ fn given_by(context: &Context, state: &State) -> Given {
                 .vars
                 .extend(vars.into_iter().map(|(n, v)| (OsString::from(n), v))),
             Reader::MavenOpts(word) => given.maven = Some(word),
-            Reader::Seed(plan) => match seed(read, &plan) {
+            Reader::Seed(plan) => match seed(&lower.packages.identity, read, &plan) {
                 Ok(seeded) => given.lines.extend(seeded.lines(part.name())),
                 Err(why) => given.lines.push(why),
             },
@@ -251,18 +251,18 @@ fn given_by(context: &Context, state: &State) -> Given {
 
 /// K-45: seeds the part a run reads into the tool's own cache; an error is the line to say.
 fn seed(
+    store: &Hex32,
     read: &state::ReadPart,
     plan: &part::Seed,
 ) -> Result<hushrun_packages::seed::Seeded, String> {
-    hushrun_packages::seed::seed(&read.dir, &read.rows, read.entry.verified_by, plan).map_err(
-        |err| {
+    hushrun_packages::seed::seed(&read.dir, &read.rows, read.entry.verified_by, plan, store)
+        .map_err(|err| {
             format!(
                 "packages: {}: left alone: {} can't be written ({err})",
                 read.entry.part,
                 plan.into.display()
             )
-        },
-    )
+        })
 }
 
 /// The folder a `maven` part would be read from, for the `maven/1` cache's roots: an entry that
@@ -406,7 +406,12 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
         let reader =
             part::by_name(&read.entry.part).map(|p| p.reader(&read.dir, &context.checkout, &var));
         match reader {
-            Some(Reader::Seed(plan)) => match seed(read, &plan) {
+            Some(Reader::Seed(plan)) => match seed(&lower.packages.identity, read, &plan) {
+                Ok(seeded) if seeded.stamped => println!(
+                    "packages: {}: seeded into {} already: its stamp names these files",
+                    read.entry.part,
+                    plan.into.display()
+                ),
                 Ok(seeded) => {
                     println!(
                         "packages: {}: seeded {} files into {} ({} there already, {} the store lacks)",
@@ -538,28 +543,69 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     let mut lines = Vec::new();
     let mut metas = Vec::new();
     let mut locks = Locks::new();
-    // The fetch: COMMAND, with each tool's cache at a folder of the bake's own (K-6).
+    // The fetch: COMMAND, with each tool's cache at a folder of the bake's own (K-6), and each
+    // part that fetches by itself, without the build, unless a harvest names it.
     let mut fetched: Vec<(&'static dyn Part, PathBuf, String)> = Vec::new();
+    let mut caches = Cleanup(Vec::new());
+    let harvested = |part: &dyn Part| harvests.iter().any(|(h, _)| h.name() == part.name());
+    let mut fetches_itself: Vec<&'static dyn Part> = Vec::new();
+    if !args.no_build {
+        for part in part::ALL
+            .iter()
+            .copied()
+            .filter(|p| wanted(*p) && !harvested(*p))
+        {
+            let manifests = part.manifests(&context.tracked);
+            let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
+            caches.0.push(cache.clone());
+            let own = fetch_cache(&cache, part);
+            let commands = part.fetch(&context.checkout, &manifests, &own);
+            if commands.is_empty() {
+                continue;
+            }
+            if let Some(missing) = commands
+                .iter()
+                .filter_map(|c| c.argv.first())
+                .find(|program| !on_path(program))
+            {
+                lines.push(format!(
+                    "packages: {}: left out: there's no {missing} here to fetch with",
+                    part.name()
+                ));
+                continue;
+            }
+            let mut said = Vec::new();
+            for command in &commands {
+                run_part_fetch(command).map_err(fail)?;
+                said.push(shell_words(&command.argv));
+            }
+            said.dedup();
+            fetched.push((part, own, format!("fetched by `{}`", said.join("`, `"))));
+            fetches_itself.push(part);
+        }
+    }
     if !args.command.is_empty() {
         let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
-        let _cache = Cleanup(vec![cache.clone()]);
+        caches.0.push(cache.clone());
         run_fetch(&context.checkout, &args.command, &cache).map_err(fail)?;
         let words = shell_words(&args.command);
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+            if fetches_itself.iter().any(|f| f.name() == part.name()) {
+                continue;
+            }
             fetched.push((
                 part,
                 fetch_cache(&cache, part),
                 format!("fetched by `{words}`"),
             ));
         }
-        take_all(
-            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut locks, &mut lines,
-        )?;
     } else {
-        // No fetch: each part the checkout has build files for and no harvest names is left out.
+        // No fetch: each part the checkout has build files for, that doesn't fetch by itself and
+        // that no harvest names, is left out.
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
             if !part.manifests(&context.tracked).is_empty()
-                && !harvests.iter().any(|(h, _)| h.name() == part.name())
+                && !harvested(part)
+                && !fetches_itself.iter().any(|f| f.name() == part.name())
             {
                 lines.push(format!(
                     "packages: {}: left out: {}, and no --harvest names a {} cache",
@@ -573,10 +619,11 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
                 ));
             }
         }
-        take_all(
-            &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut locks, &mut lines,
-        )?;
     }
+    take_all(
+        &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut locks, &mut lines,
+    )?;
+    drop(caches);
     if metas.is_empty() {
         for line in &lines {
             eprintln!("hushrun: {line}");
@@ -948,13 +995,12 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 }
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
-/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
-/// Maven's local repository and Bundler's path at folders of the bake's own under `cache`.
+/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
+/// and Maven's local repository at folders of the bake's own under `cache`.
 fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
-    let bundler = fetch_cache(cache, &hushrun_packages::parts::bundler::Bundler);
     let opts = hushrun_build::maven::OPTS_VARIABLE;
     let person = var(opts).map(|v| v.to_string_lossy().into_owned());
     let maven_opts = hushrun_packages::parts::maven::opts_with(
@@ -971,8 +1017,6 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
         &[
             ("GRADLE_USER_HOME", gradle.into_os_string()),
             (opts, OsString::from(maven_opts)),
-            ("BUNDLE_PATH", bundler.into_os_string()),
-            ("BUNDLE_GLOBAL_GEM_CACHE", OsString::from("false")),
             (hushrun_packages::LOWER, OsString::new()),
         ],
     );
@@ -980,6 +1024,38 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
         format!(
             "packages: the fetch `{}` {}",
             shell_words(command),
+            ended.words()
+        )
+    })
+}
+
+/// Whether `program` is a file in a folder of `PATH`.
+fn on_path(program: &str) -> bool {
+    var("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            let file = dir.join(program);
+            file.is_file() || (cfg!(windows) && file.with_extension("bat").is_file())
+        })
+    })
+}
+
+/// K-6: runs a part's own fetch as [`run_fetch`] runs COMMAND.
+fn run_part_fetch(fetch: &part::Fetch) -> Result<(), String> {
+    let (program, args) = fetch.argv.split_first().ok_or("a fetch names no program")?;
+    let mut built = std::process::Command::new(program);
+    built.args(args);
+    let mut extra: Vec<(&str, OsString)> = fetch
+        .env
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect();
+    extra.push((hushrun_packages::LOWER, OsString::new()));
+    let built = crate::cmd::bake_build::in_bake(built, &fetch.dir, &[], None, &extra);
+    crate::cmd::bake_build::run_in_bake(built, None).map_err(|ended| {
+        format!(
+            "packages: the fetch `{}` in {} {}",
+            shell_words(&fetch.argv),
+            fetch.dir.display(),
             ended.words()
         )
     })

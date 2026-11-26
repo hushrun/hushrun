@@ -227,30 +227,44 @@ files directly in a gem cache (`cache/` of a gem home, `ruby/<version>/cache/` o
 (`cache/bundler/git`), an installed gem, a built extension or a spec. A row's `package` is `<name>
 (<version>)` and its `locked` the lockfile's `sha256=<hex>` from `CHECKSUMS`. A part is verified by
 `lockfile` only when every lockfile of its manifest set has a `CHECKSUMS` section, and then holds
-only the files they hash; otherwise by `signature`. A bake's fetch runs with `BUNDLE_PATH` at a
-folder of its own and `BUNDLE_GLOBAL_GEM_CACHE=false`. A run seeds each gem the `GEM` sections of
-the lockfile Bundler reads from the run's folder name (`BUNDLE_GEMFILE`'s, or the nearest `Gemfile`
-or `gems.rb` up to the checkout's root) into `<Bundler.bundle_path>/cache`, the folder the `ruby`
-on `PATH` names when asked with `RUBYOPT` unset, so that `bundle install` installs each gem where
-it would after a download. hushrun sets no variable for it: not `GEM_HOME`, `GEM_PATH`,
-`BUNDLE_PATH`, `RUBYOPT` or `RUBYLIB`. The part is left alone, with a line, when no Gemfile is
-found, its lockfile names no gem, there is no `ruby`, or Bundler's global gem cache is on. *Rests
-on:* Bundler taking `<path>/cache/<file>` as the download, and checking it against `CHECKSUMS`
-itself (confirmed with Bundler 4.0.18 and Ruby 3.3.6). *Breaks if:* a `.bundle/config` in the
-checkout named Bundler's path during the bake's fetch: it outranks `BUNDLE_PATH`, the gems go
-there, and the part is left out.
+only the files they hash; otherwise by `signature`. The part fetches itself, unless `--harvest`
+names it or `--no-build` is given, with or without `COMMAND`: for each lockfile of its manifest
+set the bake runs `bundle cache --no-install` in that lockfile's folder, as it runs `COMMAND`,
+with `BUNDLE_GEMFILE` naming its Gemfile, `BUNDLE_PATH` and `BUNDLE_CACHE_PATH` at folders of the
+bake's own, `BUNDLE_FROZEN=true` and `BUNDLE_GLOBAL_GEM_CACHE=false`. It downloads each gem and
+installs none, so no gem's install script runs in a bake, and it writes nothing into the
+checkout; with no `bundle` on `PATH` the part is left out, with a line. `COMMAND` gets no Bundler variable. A run seeds each gem the `GEM` sections of the
+lockfile Bundler reads from the run's folder name (`BUNDLE_GEMFILE`'s, or the nearest `Gemfile` or
+`gems.rb` up to the checkout's root) into `<Bundler.bundle_path>/cache`, the folder the `ruby` on
+`PATH` names when asked with `RUBYOPT` unset, so that `bundle install` installs each gem where it
+would after a download, and a gem loads from the same path with and without the store. hushrun sets
+no variable for it: not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_CACHE_PATH`, `RUBYOPT`,
+`RUBYLIB` or Bootsnap's. The part is left alone, with a line, when no Gemfile is found, its lockfile
+names no gem, there is no `ruby`, or Bundler's global gem cache is on. *Rests on:* Bundler taking
+`<path>/cache/<file>` as the download, and checking it against `CHECKSUMS` itself (confirmed with
+Bundler 4.0.18 and Ruby 3.3.6). *Breaks if:* a `.bundle/config` in the checkout names Bundler's
+path or app cache: it outranks the bake's variables, the fetch's gems go there, and the part is
+left out; or a run's `.bundle/config` turns the global gem cache on, which the run's question to
+`ruby` sees, so the part is left alone.
 
 **K-45 A seed.** Where a part is C, `hushrun run`, `hushrun packages exec` and `env`, before
-COMMAND starts, and `hushrun packages restore`, copy each file the lockfile in the checkout names
+COMMAND starts, and `hushrun packages restore`, put each file the lockfile in the checkout names
 now from the part into the tool's own cache folder. A file the part lacks is left to the tool to
-download. A file is copied only when its row is a file, its name in the cache is one plain name
+download. A file is put there only when its row is a file, its name in the cache is one plain name
 (no separator, not `.` or `..`), the lockfile's hash of it, where it gives one, is its row's
-SHA-256, and, for a part verified by `lockfile`, the lockfile gives one. It is copied through a
-file of the seed's own in the cache folder, hashed as it is copied, and linked into place only when
-that hash is its row's; a file the cache already holds, under that name, is never written over. A
-file refused for any of these is left out, with one line for the part; a cache folder that can't
-be made or written leaves the part alone, with a line. A seed sets no variable and enters no key.
-`restore` says how many files it copied, how many the cache held already and how many the part
-lacks. *Rests on:* the tool taking a file in its own cache as the download, with the same bytes.
-*Breaks if:* the tool's cache folder is one another user may write: what a seed links there, they
-can change, as they can what the tool downloads there.
+SHA-256, its bytes hash to its row's SHA-256 as the seed reads them, and, for a part verified by
+`lockfile`, the lockfile gives one. It is a hard link to the store's file where the file system
+allows one, else a copy through a file of the seed's own in the cache folder, hashed again as it is
+written; either is linked into place, and a file the cache already holds, under that name, is
+never written over. A file refused for any of these is left out, with one line for the part; a
+cache folder that can't be made or written leaves the part alone, with a line. A seed that left
+nothing out writes a stamp in the cache folder, `.hushrun-packages-<store identity>`, holding a
+digest of the files it was asked for (each one's row path, name and the lockfile's hash); the next
+seed asked for the same files by the same store reads the stamp and nothing else. A seed sets no
+variable and enters no key. `restore` says how many files it put there, how many the cache held
+already and how many the part lacks, or that the stamp answered. *Rests on:* the tool taking a
+file in its own cache as the download, with the same bytes. *Breaks if:* a seeded file is a link to
+the store's and something writes it in place, the tool or a person: the store's file changes with
+it, which K-1's check by sizes or K-8's hash finds, and the tool checks it against its lockfile
+where the part is verified by one; or the tool's cache folder is one another user may write: what
+a seed puts there, they can change, as they can what the tool downloads there.

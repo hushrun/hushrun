@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use hushrun_core::blocks::Hex32;
 
-use crate::part::{Env, Part, Reader, Seed, SeedFile, file_name};
+use crate::part::{Env, Fetch, Part, Reader, Seed, SeedFile, file_name};
 use crate::store::VerifiedBy;
 
 /// The part's folder under which the `.gem` files are.
@@ -73,6 +73,41 @@ impl Part for Bundler {
 
     fn verified_by(&self) -> VerifiedBy {
         VerifiedBy::Signature
+    }
+
+    fn fetch(&self, checkout: &Path, manifests: &[String], cache: &Path) -> Vec<Fetch> {
+        // `bundle cache --no-install` downloads each gem the lockfile names and installs none, so
+        // no gem's install script runs. Bundler's path and its app cache are the bake's own (the
+        // app cache is `vendor/cache` in the checkout otherwise), and the lockfile is frozen.
+        manifests
+            .iter()
+            .filter_map(|lock| {
+                let gemfile = match file_name(lock) {
+                    "Gemfile.lock" => "Gemfile",
+                    "gems.locked" => "gems.rb",
+                    _ => return None,
+                };
+                let dir = checkout.join(lock).parent()?.to_path_buf();
+                Some((dir.join(gemfile), dir))
+            })
+            .enumerate()
+            .map(|(i, (gemfile, dir))| Fetch {
+                dir,
+                argv: ["bundle", "cache", "--no-install"]
+                    .map(String::from)
+                    .to_vec(),
+                env: vec![
+                    ("BUNDLE_GEMFILE".into(), gemfile.into_os_string()),
+                    ("BUNDLE_PATH".into(), cache.as_os_str().to_owned()),
+                    (
+                        "BUNDLE_CACHE_PATH".into(),
+                        cache.join(format!(".app-{i}")).into_os_string(),
+                    ),
+                    ("BUNDLE_GLOBAL_GEM_CACHE".into(), "false".into()),
+                    ("BUNDLE_FROZEN".into(), "true".into()),
+                ],
+            })
+            .collect()
     }
 
     fn verified_by_for(&self, manifests: &[(String, String)]) -> VerifiedBy {
