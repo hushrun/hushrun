@@ -237,6 +237,8 @@ fn given_by(context: &Context, state: &State) -> Given {
                 .vars
                 .extend(vars.into_iter().map(|(n, v)| (OsString::from(n), v))),
             Reader::MavenOpts(word) => given.maven = Some(word),
+            // K-10: a seed is an install's, never a run's: COMMAND gets nothing from it.
+            Reader::Seed => {}
             Reader::LeftAlone(why) => given
                 .lines
                 .push(format!("packages: {}: left alone: {why}", part.name())),
@@ -321,7 +323,13 @@ fn export_line(name: &OsString, value: &OsString) -> String {
 }
 
 fn env_command(global: &GlobalOpts) -> CmdResult {
-    let given = given(global, in_ci());
+    let mut given = Given::default();
+    if state::named(&var).is_some() {
+        let context = Context::here(global);
+        let state = context.state(in_ci());
+        given = given_by(&context, &state);
+        given.lines.extend(seed_all(&context, &state, &[]));
+    }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -350,7 +358,13 @@ pub fn exec(global: &GlobalOpts, command: &[String]) -> ExitCode {
         eprintln!("error: name the command: `hushrun packages exec -- COMMAND`");
         return Exit::Usage.into();
     };
-    let given = given(global, in_ci());
+    let mut given = Given::default();
+    if state::named(&var).is_some() {
+        let context = Context::here(global);
+        let state = context.state(in_ci());
+        given = given_by(&context, &state);
+        given.lines.extend(seed_all(&context, &state, &[]));
+    }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -383,13 +397,83 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
         if !parts.is_empty() && !parts.contains(&read.entry.part) {
             continue;
         }
+        if part::by_name(&read.entry.part)
+            .is_some_and(|p| p.reader(&read.dir, &context.checkout, &var) == Reader::Seed)
+        {
+            continue;
+        }
         println!(
             "packages: {}: read in place, nothing to seed ({} files)",
             read.entry.part,
             read.rows.len()
         );
     }
+    for line in seed_all(&context, &state, parts) {
+        println!("{line}");
+    }
     Ok(Exit::Ok)
+}
+
+/// K-10, mechanism C: seeds every part of the store whose reader is a seed (of `only`, when it
+/// names any) into the tool's own cache, and says what it did.
+fn seed_all(context: &Context, state: &State, only: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let Some(lower) = state.lower() else {
+        return lines;
+    };
+    for read in &lower.parts {
+        if !only.is_empty() && !only.contains(&read.entry.part) {
+            continue;
+        }
+        let Some(part) = part::by_name(&read.entry.part) else {
+            continue;
+        };
+        if part.reader(&read.dir, &context.checkout, &var) != Reader::Seed {
+            continue;
+        }
+        let name = part.name();
+        let (dest, under) = match part.seed_into(&context.checkout, &var) {
+            Ok(found) => found,
+            Err(why) => {
+                lines.push(format!("packages: {name}: left alone: {why}"));
+                continue;
+            }
+        };
+        let admit = part.admit(&context.checkout, &part.manifests(&context.tracked));
+        match hushrun_packages::seed::seed(read, under, &dest, &*admit) {
+            Ok(done) if done.stamped => lines.push(format!(
+                "packages: {name}: seeded already into {}",
+                dest.display()
+            )),
+            Ok(done) => {
+                lines.push(format!(
+                    "packages: {name}: seeded {} files into {} ({} there already)",
+                    done.copied,
+                    dest.display(),
+                    done.there
+                ));
+                if done.not_locked > 0 {
+                    lines.push(format!(
+                        "packages: {name}: left out {} files no lockfile here names now",
+                        done.not_locked
+                    ));
+                }
+                if !done.changed.is_empty() {
+                    lines.push(format!(
+                        "packages: {name}: left out {} files whose bytes changed since the bake, such as {}: {} downloads what they were of",
+                        done.changed.len(),
+                        done.changed[0],
+                        part.tool()
+                    ));
+                }
+            }
+            Err(err) => lines.push(format!(
+                "packages: {name}: seeding {} stopped: {err}",
+                dest.display()
+            )),
+        }
+    }
+    lines
 }
 
 fn verify() -> CmdResult {
@@ -562,11 +646,12 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         },
         &metas,
         &|name, path| {
-            let package = part::by_name(name).and_then(|p| {
-                let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
-                p.package(inner)
-            });
-            (package, None)
+            let found = part::by_name(name);
+            let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
+            (
+                found.and_then(|p| p.package(inner)),
+                found.and_then(|p| p.locked(inner)),
+            )
         },
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -894,8 +979,8 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
 /// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
-/// and Maven's local repository at folders of the bake's own under `cache`, and `vars`, what the
-/// other parts give a fetch.
+/// Maven's local repository, pnpm's store and npm's cache at folders of the bake's own under `cache`,
+/// and `vars`, what the other parts give a fetch.
 fn run_fetch(
     checkout: &Path,
     command: &[String],
@@ -905,6 +990,8 @@ fn run_fetch(
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
+    let pnpm = fetch_cache(cache, &hushrun_packages::parts::pnpm::Pnpm);
+    let npm = fetch_cache(cache, &hushrun_packages::parts::npm::Npm);
     let opts = hushrun_build::maven::OPTS_VARIABLE;
     let person = var(opts).map(|v| v.to_string_lossy().into_owned());
     let maven_opts = hushrun_packages::parts::maven::opts_with(
@@ -916,6 +1003,11 @@ fn run_fetch(
     let mut extra = vec![
         ("GRADLE_USER_HOME", gradle.into_os_string()),
         (opts, OsString::from(maven_opts)),
+        (
+            hushrun_packages::parts::pnpm::STORE_DIR,
+            pnpm.into_os_string(),
+        ),
+        (hushrun_packages::parts::npm::CACHE, npm.into_os_string()),
         (hushrun_packages::LOWER, OsString::new()),
     ];
     extra.extend(vars.iter().map(|(n, v)| (n.as_str(), v.clone())));
