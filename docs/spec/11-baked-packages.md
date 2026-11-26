@@ -270,22 +270,74 @@ lockfile's `integrity`, with no index entry and no request, when the lockfile ha
 *Breaks if:* npm stopped reading its cache by hash (a seed then saves nothing, and npm downloads
 as it does today), or a lockfile held only `sha1` hashes (nothing is seeded).
 
+**K-30 The `pip` part.** The part is a flat folder, `parts/pip/<file>`, of the wheels and source
+archives a requirements file with hashes names, and pip reads it as a registry (K-10, B):
+`PIP_FIND_LINKS=<store>/parts/pip`. Its manifest set is every tracked `requirements*.txt`,
+`*-requirements.txt` and `.txt` file in a `requirements` folder. The part keeps a file only when
+one of them names its SHA-256 (`--hash=sha256:`), and that hash, as `sha256:<hex>`, is the row's
+`locked`. A bake fetches the part with pip's own download (K-32), `python3 -m pip download
+--no-deps --require-hashes` once per requirements file that has hashes; one that has none fetches
+nothing, with a line. `--harvest pip=FOLDER` takes a folder of such files (`pip download -d`).
+pip checks every file against the requirements file's hashes, so the part is `verified_by:
+lockfile`. The part is left alone, with a line, when `PIP_FIND_LINKS` is set, when a pip
+configuration file pip reads names `find-links` (the variable would replace it), and when the
+folder's path holds white space, which pip splits the variable on. *Rests on:* pip installing
+from the part when its index can't be reached (confirmed with pip 26.2.2, a read-only part, an
+empty cache, no network). *Breaks if:* the index can be reached: pip prefers the index's copy of
+a file whose hash equals the part's, and downloads it, so the part saves nothing there; it is
+never wrong.
+
+**K-31 The `poetry` part.** The part is `artifacts/` of a Poetry cache: `parts/poetry/artifacts/
+<2 hex>/<2 hex>/<2 hex>/<58 hex>/<file>`, each wheel or source archive unchanged in the folder
+Poetry names by the file's URL and hash. Its manifest set is every tracked `poetry.lock`. The part
+keeps a file only when a `poetry.lock` names that file's name with its SHA-256, which is the row's
+`locked`; a wheel Poetry built from a source archive in that folder is no download and is left
+out. A bake fetches the part with COMMAND (`hushrun packages bake --out DIR -- poetry install`),
+`POETRY_CACHE_DIR` at a folder of the bake's own; `--harvest poetry=FOLDER` takes a Poetry cache
+folder a job already filled. The part is verified by the lockfile (K-7). Its reader is C, a seed,
+as the `pnpm` part's is (K-18): `hushrun packages exec`, `env` and `restore` seed, `hushrun run`
+gives COMMAND nothing. The seed copies into `artifacts/` of Poetry's cache (`POETRY_CACHE_DIR`,
+else `$XDG_CACHE_HOME/pypoetry` or `~/.cache/pypoetry`, `~/Library/Caches/pypoetry` on macOS,
+`%LOCALAPPDATA%\pypoetry\Cache` on Windows) only a file a `poetry.lock` in the checkout names now
+by its name and the SHA-256 of its bytes. Poetry checks each file of its cache against
+`poetry.lock` before it installs it. The part is left alone, with a line, when `POETRY_CACHE_DIR`
+isn't an absolute path, and when the project's `poetry.toml` or the person's Poetry
+`config.toml` names `cache-dir`, which hushrun doesn't read. *Rests on:* Poetry installing a file
+its cache holds at that folder without downloading it (confirmed with Poetry 2.5.2: no file
+downloaded, and a seeded file changed in place refused). *Breaks if:* Poetry changed how it names
+that folder: the seeded files sit where Poetry never looks, and it downloads as today; or the
+index can't be reached: Poetry asks it for each file's URL, and fails as today.
+
+**K-32 A part the tool's own download fetches.** Where a tool has a command that downloads what a
+part's manifest set names and runs nothing else of the repository's (pip's `download`), a bake
+runs it for that part, with or without COMMAND, into a folder of the bake's own, the way it runs
+COMMAND (K-6), and takes the part from that folder; `--no-build` runs it not, and a part
+`--harvest` names isn't fetched. The part's `tool` is `fetched by` and the command's program and
+subcommand, such as `python3 -m pip download`. A manifest set the command can't fetch from leaves
+the part out, with a line that says why. *Rests on:* the command downloading for the machine the
+bake runs on, as the store's `platform` says. *Breaks if:* a requirements file named packages for
+another platform only: the command downloads none, and the part is left out.
+
+`uv` has no part. uv reads no second cache; its cache holds unpacked wheels in a layout of its
+own, not the files it downloaded; it takes no file from `UV_FIND_LINKS` that `uv.lock` names at an
+index; and an index named by `UV_DEFAULT_INDEX` or `UV_INDEX_URL` rewrites `uv.lock` (confirmed
+with uv 0.13.10).
+
 **K-45 The `bundler` part.** The part holds the `.gem` files of a gem cache and nothing else of
 it: `parts/bundler/cache/<name>-<version>[-<platform>].gem`. Not a git source's clone
 (`cache/bundler/git`), an installed gem, a built extension or a spec. Its manifest set is every
 tracked `Gemfile`, `Gemfile.lock`, `gems.rb`, `gems.locked` and `*.gemspec`. A row's `package` is
 `<name> (<version>)`, and its `locked` is the lockfile's `sha256=<hex>` from `CHECKSUMS`. The part
 is verified by the lockfile (K-7) only when every lockfile of its manifest set has a `CHECKSUMS`
-section, and it then holds only the files they hash; otherwise by a signature. The part fetches
-itself, with or without `COMMAND`, unless `--harvest bundler=FOLDER` names a gem home (`cache/`)
-or a `BUNDLE_PATH` (`ruby/<version>/cache/`) or `--no-build` is given: for each lockfile of its
-manifest set the bake runs `bundle cache --no-install` in that lockfile's folder, as it runs
-`COMMAND`, with `BUNDLE_GEMFILE` naming its Gemfile, `BUNDLE_PATH` and `BUNDLE_CACHE_PATH` at
-folders of the bake's own, `BUNDLE_FROZEN=true` and `BUNDLE_GLOBAL_GEM_CACHE=false`. It downloads
-each gem and installs none, so no gem's install script runs in a bake, and it writes nothing into
-the checkout. With no `bundle` on `PATH` the part is left out, with a line; `COMMAND` gets no
-Bundler variable. Its reader is C, a seed, and only `hushrun packages exec` and `hushrun packages
-restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
+section, and it then holds only the files they hash; otherwise by a signature. A bake fetches the
+part with Bundler's own download (K-32): `bundle cache --no-install --gemfile <Gemfile>
+--cache-path <part>/cache` for each lockfile of its manifest set, which downloads each gem and
+installs none, so no gem's install script runs, and writes nothing into the checkout; with no
+`bundle` on `PATH` the part is left out, with a line. `--harvest bundler=FOLDER` takes a gem home
+(`cache/`) or a `BUNDLE_PATH` (`ruby/<version>/cache/`) instead. The download and `COMMAND` get
+`BUNDLE_PATH` at a folder of the bake's own that the part never takes from, `BUNDLE_FROZEN=true`
+and `BUNDLE_GLOBAL_GEM_CACHE=false`. Its reader is C, a seed, and only `hushrun packages exec`
+and `hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
 `<Bundler.bundle_path>/cache`, where Bundler looks for a gem before it downloads one, the folder
 the `ruby` on `PATH` names when asked from the folder of the Gemfile Bundler reads
 (`BUNDLE_GEMFILE`'s, or the nearest `Gemfile` or `gems.rb` up to the checkout's root) with
@@ -293,7 +345,7 @@ the `ruby` on `PATH` names when asked from the folder of the Gemfile Bundler rea
 loads from the same path with and without the store. It copies only a gem the `GEM` section of a
 lockfile in the checkout names now, and when that lockfile's `CHECKSUMS` hashes it, only when the
 SHA-256 of its bytes is that hash; a gem named with no hash only for a part a signature verifies.
-hushrun sets no variable for it: not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_CACHE_PATH`,
+A seed sets no variable: not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_CACHE_PATH`,
 `RUBYOPT`, `RUBYLIB` or Bootsnap's. The part is left alone, with a line, when no Gemfile is found,
 there is no `ruby`, or Bundler's global gem cache is on. *Rests on:* Bundler taking
 `<path>/cache/<file>` as the download, and checking it against `CHECKSUMS` itself (confirmed with

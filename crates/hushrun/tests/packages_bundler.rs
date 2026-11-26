@@ -213,7 +213,7 @@ fn a_store_baked_by_bundle_cache_seeds_an_empty_bundler_path() {
         "only the two downloads, not the installed gems: {out}"
     );
     assert!(
-        out.contains("from fetched by `bundle cache --no-install` (Gemfile, Gemfile.lock)"),
+        out.contains("from fetched by `bundle cache` (Gemfile, Gemfile.lock)"),
         "{out}"
     );
     let json: serde_json::Value =

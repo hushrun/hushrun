@@ -4,12 +4,13 @@
 //! not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `RUBYOPT` or `RUBYLIB`.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use hushrun_core::blocks::Hex32;
 
-use crate::part::{Admit, Admits, Env, Fetch, Part, Reader, file_name};
+use crate::part::{Admit, Admits, Download, Env, Locked, Part, Reader, file_name};
 use crate::store::VerifiedBy;
 
 /// The part's folder under which the `.gem` files are.
@@ -75,11 +76,11 @@ impl Part for Bundler {
         VerifiedBy::Signature
     }
 
-    fn fetch(&self, checkout: &Path, manifests: &[String], cache: &Path) -> Vec<Fetch> {
+    fn download(&self, checkout: &Path, manifests: &[String], into: &Path) -> Download {
         // `bundle cache --no-install` downloads each gem the lockfile names and installs none, so
-        // no gem's install script runs. Bundler's path and its app cache are the bake's own (the
-        // app cache is `vendor/cache` in the checkout otherwise), and the lockfile is frozen.
-        manifests
+        // no gem's install script runs. Its app cache is the part's folder (it is `vendor/cache`
+        // in the checkout otherwise); Bundler's path is the bake's own ([`Part::fetch_vars`]).
+        let gemfiles: Vec<PathBuf> = manifests
             .iter()
             .filter_map(|lock| {
                 let gemfile = match file_name(lock) {
@@ -87,27 +88,40 @@ impl Part for Bundler {
                     "gems.locked" => "gems.rb",
                     _ => return None,
                 };
-                let dir = checkout.join(lock).parent()?.to_path_buf();
-                Some((dir.join(gemfile), dir))
+                Some(checkout.join(lock).with_file_name(gemfile))
             })
-            .enumerate()
-            .map(|(i, (gemfile, dir))| Fetch {
-                dir,
-                argv: ["bundle", "cache", "--no-install"]
-                    .map(String::from)
-                    .to_vec(),
-                env: vec![
-                    ("BUNDLE_GEMFILE".into(), gemfile.into_os_string()),
-                    ("BUNDLE_PATH".into(), cache.as_os_str().to_owned()),
-                    (
-                        "BUNDLE_CACHE_PATH".into(),
-                        cache.join(format!(".app-{i}")).into_os_string(),
-                    ),
-                    ("BUNDLE_GLOBAL_GEM_CACHE".into(), "false".into()),
-                    ("BUNDLE_FROZEN".into(), "true".into()),
-                ],
+            .collect();
+        if gemfiles.is_empty() {
+            return None;
+        }
+        if !on_path("bundle") {
+            return Some(Err("there's no bundle here to fetch with".into()));
+        }
+        let cache = into.join(CACHE);
+        Some(Ok(gemfiles
+            .into_iter()
+            .map(|gemfile| {
+                vec![
+                    "bundle".into(),
+                    "cache".into(),
+                    "--no-install".into(),
+                    "--gemfile".into(),
+                    gemfile.into_os_string(),
+                    "--cache-path".into(),
+                    cache.clone().into_os_string(),
+                ]
             })
-            .collect()
+            .collect()))
+    }
+
+    fn fetch_vars(&self, cache: &Path) -> Vec<(&'static str, OsString)> {
+        // Bundler's path at a folder of the bake's own that the part never takes from, so that
+        // what it holds is this bake's downloads; the lockfile stays as the checkout has it.
+        vec![
+            ("BUNDLE_PATH", cache.join(".path").into_os_string()),
+            ("BUNDLE_GLOBAL_GEM_CACHE", "false".into()),
+            ("BUNDLE_FROZEN", "true".into()),
+        ]
     }
 
     fn verified_by_for(&self, manifests: &[(String, String)]) -> VerifiedBy {
@@ -122,24 +136,37 @@ impl Part for Bundler {
         }
     }
 
-    fn locked_in(&self, manifests: &[(String, String)]) -> BTreeMap<String, String> {
-        let mut out: BTreeMap<String, Option<String>> = BTreeMap::new();
-        for (_, text) in lockfiles(manifests) {
+    fn lockfile(&self, checkout: &Path, manifests: &[String]) -> Option<Locked> {
+        // Only where every lockfile has CHECKSUMS: then the part is the lockfile's (K-7).
+        let texts: Vec<(String, String)> = manifests
+            .iter()
+            .filter_map(|p| Some((p.clone(), std::fs::read_to_string(checkout.join(p)).ok()?)))
+            .collect();
+        if self.verified_by_for(&texts) != VerifiedBy::Lockfile {
+            return None;
+        }
+        let mut seen: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for (_, text) in lockfiles(&texts) {
             for gem in gems(text) {
-                let Some(locked) = gem.locked else { continue };
+                let Some(written) = gem.locked else { continue };
                 // Two lockfiles that hash one file differently: neither is its hash.
-                out.entry(gem.file)
+                seen.entry(gem.file)
                     .and_modify(|had| {
-                        if had.as_deref() != Some(locked.as_str()) {
+                        if had.as_deref() != Some(written.as_str()) {
                             *had = None;
                         }
                     })
-                    .or_insert(Some(locked));
+                    .or_insert(Some(written));
             }
         }
-        out.into_iter()
-            .filter_map(|(file, locked)| Some((file, locked?)))
-            .collect()
+        let mut locked = Locked::default();
+        for (file, written) in seen {
+            let Some(written) = written else { continue };
+            if let Some(hash) = written.strip_prefix("sha256=").and_then(Hex32::parse) {
+                locked.add_as(&hash, Some(&file), written);
+            }
+        }
+        Some(locked)
     }
 
     fn reader(&self, _dir: &Path, _checkout: &Path, _env: Env<'_>) -> Reader {
@@ -211,7 +238,7 @@ pub fn has_checksums(text: &str) -> bool {
 
 /// A gem a lockfile names.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Locked {
+pub struct LockedGem {
     /// Its `.gem` file's name: `<name>-<version>[-<platform>].gem`.
     pub file: String,
     /// Its hash as the lockfile's `CHECKSUMS` writes it (`sha256=<hex>`), when it has one.
@@ -220,7 +247,7 @@ pub struct Locked {
 
 /// The gems a lockfile's `GEM` sections name (not `GIT` or `PATH`: those are no download), each
 /// once, with the hash `CHECKSUMS` gives it.
-pub fn gems(text: &str) -> Vec<Locked> {
+pub fn gems(text: &str) -> Vec<LockedGem> {
     let mut section = "";
     let mut in_specs = false;
     let mut specs: Vec<String> = Vec::new();
@@ -261,7 +288,7 @@ pub fn gems(text: &str) -> Vec<Locked> {
     specs
         .into_iter()
         .filter(|f| seen.insert(f.clone()))
-        .map(|file| Locked {
+        .map(|file| LockedGem {
             locked: sums.get(&file).cloned(),
             file,
         })
@@ -345,4 +372,10 @@ pub fn cache_dir(gemfile_dir: &Path) -> Result<PathBuf, String> {
         ),
         _ => Err("ruby couldn't say where Bundler keeps its gems".into()),
     }
+}
+
+/// Whether `program` is a file in a folder of `PATH`.
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }

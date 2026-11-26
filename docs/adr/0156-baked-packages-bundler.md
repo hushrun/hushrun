@@ -49,16 +49,20 @@ no reader sets `GEM_PATH`, and a gem must load from the same path with and witho
    lockfile hashes differently is never copied: Bundler would refuse it with a "mismatched
    checksums" error instead of downloading it again, so a stale seed would break an install that
    passes today.
-5. **The part fetches itself with `bundle cache --no-install`**, for each lockfile of the
-   manifest set, run as a bake runs COMMAND, with or without COMMAND. It downloads each gem and
-   installs none, so no gem's install script runs in a bake. `BUNDLE_PATH` and an absolute
-   `BUNDLE_CACHE_PATH` are the bake's own folders, so nothing is written into the checkout;
-   `BUNDLE_FROZEN=true` keeps the lockfile as it is, and the global gem cache is off. COMMAND gets
-   no Bundler variable. `--harvest bundler=FOLDER` takes a gem home (`cache/`) or a `BUNDLE_PATH`
-   (`ruby/<version>/cache/`) instead.
-6. **Additive to the shared code:** `Part::fetch` (a part that fetches itself), `verified_by_for`
-   (a class that follows the lockfiles), `locked_in` (`locked` hashes only the lockfiles know)
-   and `admit_for`, each with a default that keeps every other part as it was.
+5. **The part fetches itself with `bundle cache --no-install`**, Bundler's own download (K-32,
+   ADR 0153's mechanism): `bundle cache --no-install --gemfile <Gemfile> --cache-path
+   <part>/cache` for each lockfile of the manifest set, with or without COMMAND. It downloads each
+   gem and installs none, so no gem's install script runs in a bake, and the absolute cache path
+   keeps it out of `vendor/cache` in the checkout. The download and COMMAND get `BUNDLE_PATH` at a
+   folder of the bake's own that the part never takes from, `BUNDLE_FROZEN=true` (the lockfile
+   stays as the checkout has it; `--frozen` is gone from `bundle cache` in Bundler 4) and
+   `BUNDLE_GLOBAL_GEM_CACHE=false`. `--harvest bundler=FOLDER` takes a gem home (`cache/`) or a
+   `BUNDLE_PATH` (`ruby/<version>/cache/`) instead.
+6. **Additive to the shared code**, each with a default that keeps every other part as it was:
+   `Part::verified_by_for` (a class that follows the lockfiles' text), `Part::admit_for` (`admit`
+   given the part's `verified_by`) and `Locked::add_as` (a hash in the lockfile's own words,
+   Bundler's `sha256=<hex>`). The lockfile hashes go through ADR 0153's `Part::lockfile`, which
+   also keeps a lockfile part to the files they hash.
 
 ## What was confirmed by running the tool
 
