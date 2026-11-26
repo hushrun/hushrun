@@ -1512,7 +1512,7 @@ impl Relay {
         }
         {
             let mut state = self.state();
-            for found in prefetch_order(looked_up, |found| found.class, whole) {
+            for found in prefetch_order(kind, looked_up, |found| found.class, whole) {
                 if !state.fetches.contains_key(&found.address) {
                     state.queue.push_back(found.address);
                     let looked = state
@@ -2791,7 +2791,7 @@ impl Relay {
     }
 
     async fn report(&self, kind: Kind, address: Hex32, scope: &str, problem: blocks::Problem) {
-        if self.saved || !self.state().answering(Instant::now()) {
+        if self.saved || !self.state().answering(Instant::now()) || !reported(kind, problem) {
             return;
         }
         let body = ReportRequest {
@@ -3371,11 +3371,21 @@ fn wire_problem(problem: Problem) -> blocks::Problem {
     }
 }
 
-/// The order the prefetch queues what it found in (B-30): what [`prefetched`] names, proc macros
-/// and build-script binaries first, each kind keeping the order it came in (the manifest's),
-/// then libraries, in that order too. With `whole` (a bake's, B-63) every block, the rest
-/// (programs) last.
-fn prefetch_order<T>(found: Vec<T>, class: impl Fn(&T) -> blocks::Class, whole: bool) -> Vec<T> {
+/// The order the prefetch queues what it found of kind `kind` in (B-30): what [`prefetched`]
+/// names, proc macros and build-script binaries first, each kind keeping the order it came in
+/// (the manifest's), then libraries, in that order too. With `whole` (a bake's, B-63) every
+/// block, the rest (programs) last. A kind a build tool keys itself (Gradle's, Maven's) takes
+/// every block its manifest names, in the manifest's order: they go up as class `other`, and
+/// the tool asks for each only as it reaches its task.
+fn prefetch_order<T>(
+    kind: Kind,
+    found: Vec<T>,
+    class: impl Fn(&T) -> blocks::Class,
+    whole: bool,
+) -> Vec<T> {
+    if kind.tool_keyed() {
+        return found;
+    }
     let (asked, rest): (Vec<T>, Vec<T>) = found
         .into_iter()
         .partition(|found| prefetched(class(found)));
@@ -3387,6 +3397,19 @@ fn prefetch_order<T>(found: Vec<T>, class: impl Fn(&T) -> blocks::Class, whole: 
         first.extend(rest);
     }
     first
+}
+
+/// Whether a report of `problem` about a block of `kind` is sent at all. A block a build tool
+/// keyed itself (Gradle's, Maven's) is never reported as differing: its bytes needn't repeat,
+/// and a trusted job's `differs` report suspends a key and deletes the copy whatever its class
+/// (B-81, B-175). That it couldn't be read, was missing or was rejected is reported as for
+/// every kind.
+fn reported(kind: Kind, problem: blocks::Problem) -> bool {
+    !(kind.tool_keyed()
+        && matches!(
+            problem,
+            blocks::Problem::Differs | blocks::Problem::LinkDiffers
+        ))
 }
 
 /// Whether a block of `class` is fetched from a manifest without being asked for (B-30):

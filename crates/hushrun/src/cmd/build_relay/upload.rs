@@ -52,11 +52,13 @@ pub(crate) enum Move {
     Later,
 }
 
-/// `begin`'s answer for one block of class `class`. `differs` for a library says one of two
-/// builds had other inputs than its key names, and the trusted copy is served in the local
-/// one's place. For a linked output it says the two machines' link environments differ in
-/// something the key doesn't hold (B-37): the machine keeps what its own linker makes.
-pub(crate) fn after_begin(answer: &Answer, class: LocalClass) -> Move {
+/// `begin`'s answer for one block of kind `kind` and class `class`. `differs` for a library says
+/// one of two builds had other inputs than its key names, and the trusted copy is served in the
+/// local one's place. For a linked output it says the two machines' link environments differ in
+/// something the key doesn't hold (B-37): the machine keeps what its own linker makes. For a
+/// block a build tool keyed itself it says nothing about either copy, whose bytes needn't repeat
+/// (B-81, B-175): the block built here stays, and nothing more is done.
+pub(crate) fn after_begin(answer: &Answer, kind: Kind, class: LocalClass) -> Move {
     match answer {
         Answer::Put { .. } => Move::Next,
         Answer::Have { .. } => Move::Done,
@@ -64,6 +66,7 @@ pub(crate) fn after_begin(answer: &Answer, class: LocalClass) -> Move {
             Refusal::TooLarge | Refusal::Unsupported | Refusal::NoScope | Refusal::Suspended => {
                 Move::Done
             }
+            Refusal::Differs if kind.tool_keyed() => Move::Done,
             Refusal::Differs if class == LocalClass::Library => Move::DoneDiscard,
             Refusal::Differs => Move::DoneKeepLocal,
             Refusal::Busy | Refusal::OverAllowance | Refusal::TooManyUploads | Refusal::Unknown => {
@@ -76,7 +79,11 @@ pub(crate) fn after_begin(answer: &Answer, class: LocalClass) -> Move {
 
 /// Whether `begin` refused a block for good: it never goes up, and the marker is done.
 pub(crate) fn refused_for_good(reason: Refusal) -> bool {
-    after_begin(&Answer::Refused { reason }, LocalClass::Library) == Move::Done
+    after_begin(
+        &Answer::Refused { reason },
+        Kind::Rustc,
+        LocalClass::Library,
+    ) == Move::Done
 }
 
 /// What a refusal says, in words.
@@ -148,7 +155,14 @@ pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> Option<EndWait> {
     })
 }
 
-fn class_of(class: hushrun_build::model::Class) -> Class {
+/// The class a block goes up as. A block a build tool keyed itself (Gradle's, Maven's) is
+/// `other`, whatever its record says: the server suspends a key whose trusted `library` copies
+/// differ, and deletes the trusted one, where such a tool's two honest executions may differ in
+/// a date (B-81, B-175). `other` it stores and never compares.
+fn class_of(kind: Kind, class: hushrun_build::model::Class) -> Class {
+    if kind.tool_keyed() {
+        return Class::Other;
+    }
     match class {
         hushrun_build::model::Class::Library => Class::Library,
         hushrun_build::model::Class::ProcMacro => Class::ProcMacro,
@@ -364,7 +378,7 @@ impl Relay {
                     bytes: p.sealed.bytes,
                     pack_sha256: p.sealed.sha256,
                     outputs: p.outputs,
-                    class: class_of(m.class),
+                    class: class_of(kind, m.class),
                     cost_ms: u32::try_from(m.cost_ms).unwrap_or(u32::MAX),
                 })
                 .collect(),
@@ -417,7 +431,7 @@ impl Relay {
                 .iter()
                 .find(|a| a.address == address)
                 .map_or(Answer::Unknown, |a| a.answer.clone());
-            let step = after_begin(&answer, marker.class);
+            let step = after_begin(&answer, kind, marker.class);
             // B-75: refused for good, it is never on the backend: a bake's build that made it
             // isn't whole.
             if let Answer::Refused { reason } = &answer
@@ -732,7 +746,7 @@ mod tests {
                 expires_in_seconds: 900,
             },
         };
-        let after_begin = |answer: &Answer| after_begin(answer, LocalClass::Library);
+        let after_begin = |answer: &Answer| after_begin(answer, Kind::Rustc, LocalClass::Library);
         assert_eq!(after_begin(&put), Move::Next);
         assert_eq!(after_begin(&Answer::Have { scope: "s".into() }), Move::Done);
         for (reason, step) in [
@@ -759,12 +773,15 @@ mod tests {
             let differs = Answer::Refused {
                 reason: Refusal::Differs,
             };
-            assert_eq!(super::after_begin(&differs, class), Move::DoneKeepLocal);
+            assert_eq!(
+                super::after_begin(&differs, Kind::Rustc, class),
+                Move::DoneKeepLocal
+            );
             let busy = Answer::Refused {
                 reason: Refusal::Busy,
             };
-            assert_eq!(super::after_begin(&busy, class), Move::Later);
-            assert_eq!(super::after_begin(&put, class), Move::Next);
+            assert_eq!(super::after_begin(&busy, Kind::Rustc, class), Move::Later);
+            assert_eq!(super::after_begin(&put, Kind::Rustc, class), Move::Next);
         }
         assert_eq!(after_put(Some(200)), Move::Next);
         assert_eq!(after_put(Some(412)), Move::Next);
@@ -776,5 +793,37 @@ mod tests {
         assert_eq!(after_commit(CommitState::Missing), Move::Later);
         assert_eq!(after_commit(CommitState::Gone), Move::Later);
         assert_eq!(after_commit(CommitState::Unknown), Move::Later);
+    }
+
+    // covers: B-81, B-175
+    #[test]
+    fn a_block_a_build_tool_keyed_goes_up_as_other_and_stays_when_a_trusted_copy_differs() {
+        // The server suspends a key whose trusted `library` copies differ and deletes the
+        // trusted one; two honest Gradle executions or Maven builds may differ in a date. Their
+        // blocks go up as `other`, which the server never compares, and a `differs` leaves the
+        // block built here as it is.
+        use hushrun_build::model::Class as Local;
+        for kind in [Kind::Gradle, Kind::Maven] {
+            assert!(kind.tool_keyed(), "{kind:?}");
+            assert_eq!(class_of(kind, Local::Library), Class::Other, "{kind:?}");
+            let differs = Answer::Refused {
+                reason: Refusal::Differs,
+            };
+            assert_eq!(
+                after_begin(&differs, kind, LocalClass::Library),
+                Move::Done,
+                "{kind:?}"
+            );
+            let busy = Answer::Refused {
+                reason: Refusal::Busy,
+            };
+            assert_eq!(after_begin(&busy, kind, LocalClass::Library), Move::Later);
+        }
+        // Every other kind keeps the class its record names.
+        for kind in [Kind::Rustc, Kind::Go, Kind::Cc, Kind::Xcode, Kind::Tsc] {
+            assert!(!kind.tool_keyed(), "{kind:?}");
+            assert_eq!(class_of(kind, Local::Library), Class::Library, "{kind:?}");
+            assert_eq!(class_of(kind, Local::Program), Class::Program, "{kind:?}");
+        }
     }
 }

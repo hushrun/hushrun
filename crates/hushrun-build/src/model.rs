@@ -155,6 +155,14 @@ impl Kind {
         matches!(self, Kind::Go | Kind::Xcode)
     }
 
+    /// Whether the build tool keys the block itself and hushrun serves it as the tool's remote
+    /// cache: Gradle's and Maven's entries, whose bytes needn't be the same from one execution
+    /// to the next. Such a block goes up as class `other`, which the server keeps and never
+    /// compares (B-81, B-175), and every class of it is fetched from its manifest (B-30).
+    pub const fn tool_keyed(self) -> bool {
+        matches!(self, Kind::Gradle | Kind::Maven)
+    }
+
     /// Whether it is `rustc`, the default, which a line leaves out.
     pub fn is_rustc(&self) -> bool {
         *self == Kind::Rustc
