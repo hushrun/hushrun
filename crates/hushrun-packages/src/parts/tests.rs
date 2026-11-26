@@ -186,6 +186,286 @@ fn every_part_module_is_listed() {
     assert_eq!(listed, modules);
 }
 
+const LOCK: &str = "GEM
+  remote: https://rubygems.org/
+  specs:
+    nokogiri (1.16.7-x86_64-linux-gnu)
+      racc (~> 1.4)
+    racc (1.8.1)
+    rack (3.1.8)
+
+GIT
+  remote: https://example.com/x.git
+  revision: abc
+  specs:
+    x (0.1.0)
+
+PATH
+  remote: .
+  specs:
+    shop (1.0.0)
+
+PLATFORMS
+  x86_64-linux
+
+DEPENDENCIES
+  nokogiri
+  rack
+
+CHECKSUMS
+  bundler (4.0.18) sha256=02d9a17429de1847b4e0c9f27a9ee4b20c0a74c0a641b4e77195d6019e3618ac
+  nokogiri (1.16.7-x86_64-linux-gnu) sha256=3db6795a80634def1cf86fda79d2d83b59b25ce5e186fa675f73c565589d2ad8
+  racc (1.8.1)
+  rack (3.1.8) sha256=d3fbcbca43dc2b43c9c6d7dfbac01667ae58643c42cea10013d0da970218a1b1
+  shop (1.0.0)
+
+BUNDLED WITH
+  4.0.18
+";
+
+// covers: K-10, K-45
+#[test]
+fn bundler_names_its_manifest_set_and_keeps_only_downloaded_gems() {
+    use crate::parts::bundler::Bundler;
+    let tracked = paths(&[
+        "Gemfile",
+        "Gemfile.lock",
+        "shop.gemspec",
+        "engines/a/gems.rb",
+        "engines/a/gems.locked",
+        ".bundle/config",
+        "lib/shop.rb",
+    ]);
+    assert_eq!(
+        Bundler.manifests(&tracked),
+        paths(&[
+            "Gemfile",
+            "Gemfile.lock",
+            "shop.gemspec",
+            "engines/a/gems.rb",
+            "engines/a/gems.locked",
+        ])
+    );
+    assert_eq!(part::by_name("bundler").map(|p| p.tool()), Some("Bundler"));
+    assert!(Bundler.keep("rack-3.1.8.gem"));
+    assert!(Bundler.keep("nokogiri-1.16.7-x86_64-linux-gnu.gem"));
+    for left in [
+        "bundler/git/x-abc/HEAD",
+        ".rack-3.1.8.gem.123.hushrun-seed",
+        "notes.txt",
+    ] {
+        assert!(!Bundler.keep(left), "{left}");
+    }
+    assert_eq!(
+        Bundler.package("concurrent-ruby-1.3.4.gem").as_deref(),
+        Some("concurrent-ruby (1.3.4)")
+    );
+    assert_eq!(
+        Bundler
+            .package("nokogiri-1.16.7-x86_64-linux-gnu.gem")
+            .as_deref(),
+        Some("nokogiri (1.16.7-x86_64-linux-gnu)")
+    );
+    assert_eq!(Bundler.package("README"), None);
+    // A gem home holds `cache/`; a BUNDLE_PATH holds `ruby/<version>/cache/`.
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("bundle/ruby/3.3.0/cache")).unwrap();
+    std::fs::create_dir_all(t.path().join("home/cache")).unwrap();
+    assert_eq!(
+        Bundler.harvest_root(&t.path().join("bundle")),
+        Some((t.path().join("bundle/ruby/3.3.0/cache"), "cache"))
+    );
+    assert_eq!(
+        Bundler.harvest_root(&t.path().join("home")),
+        Some((t.path().join("home/cache"), "cache"))
+    );
+    assert_eq!(Bundler.harvest_root(t.path()), None);
+}
+
+// covers: K-10, K-45
+#[test]
+fn bundler_is_verified_by_its_lockfile_only_where_it_has_checksums() {
+    use crate::parts::bundler::{Bundler, gems};
+    use crate::store::VerifiedBy;
+    let with = ("Gemfile.lock".to_string(), LOCK.to_string());
+    let without = (
+        "engines/a/Gemfile.lock".to_string(),
+        LOCK.split("CHECKSUMS").next().unwrap().to_string(),
+    );
+    let gemfile = ("Gemfile".to_string(), "gem 'rack'\n".to_string());
+    assert_eq!(
+        Bundler.verified_by_for(&[gemfile.clone(), with.clone()]),
+        VerifiedBy::Lockfile
+    );
+    assert_eq!(
+        Bundler.verified_by_for(&[with.clone(), without.clone()]),
+        VerifiedBy::Signature
+    );
+    assert_eq!(
+        Bundler.verified_by_for(std::slice::from_ref(&gemfile)),
+        VerifiedBy::Signature
+    );
+    // GEM's specs only, never GIT's or PATH's; each with CHECKSUMS' hash where it has one.
+    let named: Vec<(String, bool)> = gems(LOCK)
+        .into_iter()
+        .map(|g| (g.file, g.locked.is_some()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("nokogiri-1.16.7-x86_64-linux-gnu.gem".to_string(), true),
+            ("racc-1.8.1.gem".to_string(), false),
+            ("rack-3.1.8.gem".to_string(), true),
+        ]
+    );
+    // The lockfile's hashes, as it writes them, by the bytes they are of.
+    let lock_dir = tempfile::tempdir().unwrap();
+    let rack = hushrun_core::blocks::Hex32::parse(
+        "d3fbcbca43dc2b43c9c6d7dfbac01667ae58643c42cea10013d0da970218a1b1",
+    )
+    .unwrap();
+    std::fs::write(lock_dir.path().join("Gemfile.lock"), LOCK).unwrap();
+    let one = paths(&["Gemfile.lock"]);
+    let locked = Bundler.lockfile(lock_dir.path(), &one).expect("CHECKSUMS");
+    assert_eq!(
+        locked.of("rack-3.1.8.gem", &rack),
+        Some("sha256=d3fbcbca43dc2b43c9c6d7dfbac01667ae58643c42cea10013d0da970218a1b1")
+    );
+    assert_eq!(
+        locked.of("other-1.0.gem", &rack),
+        None,
+        "another file's name"
+    );
+    // Two lockfiles that hash one file differently give it no hash.
+    std::fs::create_dir_all(lock_dir.path().join("b")).unwrap();
+    std::fs::write(
+        lock_dir.path().join("b/Gemfile.lock"),
+        LOCK.replace("sha256=d3fb", "sha256=0000"),
+    )
+    .unwrap();
+    let both = paths(&["Gemfile.lock", "b/Gemfile.lock"]);
+    let locked = Bundler.lockfile(lock_dir.path(), &both).expect("CHECKSUMS");
+    assert_eq!(locked.of("rack-3.1.8.gem", &rack), None);
+    // A lockfile with no CHECKSUMS: the part is no lockfile's.
+    std::fs::write(lock_dir.path().join("b/Gemfile.lock"), &without.1).unwrap();
+    assert!(Bundler.lockfile(lock_dir.path(), &both).is_none());
+    // What a seed admits: a gem the lockfile hashes, by those bytes; one it names with no hash,
+    // only for a part a signature verifies; one it doesn't name, never.
+    use crate::part::Admit;
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("Gemfile.lock"), LOCK).unwrap();
+    let manifests = paths(&["Gemfile", "Gemfile.lock"]);
+    let strict = Bundler.admit(t.path(), &manifests);
+    let signed = Bundler.admit_for(t.path(), &manifests, VerifiedBy::Signature);
+    assert_eq!(
+        strict("rack-3.1.8.gem", b"x"),
+        Admit::Changed,
+        "other bytes than CHECKSUMS hash"
+    );
+    assert_eq!(
+        strict("racc-1.8.1.gem", b"x"),
+        Admit::NotLocked,
+        "no hash, a lockfile part"
+    );
+    assert_eq!(
+        signed("racc-1.8.1.gem", b"x"),
+        Admit::Copy,
+        "no hash, a signed part"
+    );
+    assert_eq!(
+        signed("x-0.1.0.gem", b"x"),
+        Admit::NotLocked,
+        "a git source's gem"
+    );
+    assert_eq!(strict("bundler-4.0.18.gem", b"x"), Admit::NotLocked);
+}
+
+// covers: K-10, K-45
+#[test]
+fn bundler_seeds_from_the_gemfile_bundler_reads() {
+    use crate::parts::bundler::{Bundler, lockfile_for};
+    let t = tempfile::tempdir().unwrap();
+    let checkout = t.path();
+    std::fs::create_dir_all(checkout.join("app/lib")).unwrap();
+    std::fs::write(checkout.join("Gemfile"), "").unwrap();
+    std::fs::write(checkout.join("app/gems.rb"), "").unwrap();
+    assert_eq!(
+        lockfile_for(&checkout.join("app/lib"), checkout, &no_env),
+        Some((checkout.join("app"), checkout.join("app/gems.locked")))
+    );
+    assert_eq!(
+        lockfile_for(checkout, checkout, &no_env),
+        Some((checkout.to_path_buf(), checkout.join("Gemfile.lock")))
+    );
+    let named = |name: &str| (name == "BUNDLE_GEMFILE").then(|| OsString::from("ci/Gemfile"));
+    assert_eq!(
+        lockfile_for(checkout, checkout, &named),
+        Some((checkout.join("ci"), checkout.join("ci/Gemfile.lock")))
+    );
+    // No Gemfile up to the checkout's root: left alone, and no ruby is asked.
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(lockfile_for(empty.path(), empty.path(), &no_env), None);
+    assert_eq!(
+        Bundler.reader(Path::new("/p"), empty.path(), &no_env),
+        Reader::Seed
+    );
+}
+
+// covers: K-6, K-45
+#[test]
+fn bundler_fetches_by_itself_and_installs_nothing() {
+    use crate::parts::bundler::Bundler;
+    let checkout = Path::new("/c");
+    let into = Path::new("/bake/bundler");
+    let manifests = paths(&[
+        "Gemfile",
+        "Gemfile.lock",
+        "a/gems.rb",
+        "a/gems.locked",
+        "b/Gemfile",
+    ]);
+    // The commands name `bundle` from PATH; where there is none, the part says so.
+    let commands = match Bundler.download(checkout, &manifests, into) {
+        Some(Ok(commands)) => commands,
+        Some(Err(why)) => {
+            assert_eq!(why, "there's no bundle here to fetch with");
+            return;
+        }
+        None => panic!("a lockfile is there"),
+    };
+    assert_eq!(commands.len(), 2, "one per lockfile: {commands:?}");
+    let words = |c: &[OsString]| {
+        c.iter()
+            .map(|w| w.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        words(&commands[1]),
+        [
+            "bundle",
+            "cache",
+            "--no-install",
+            "--gemfile",
+            "/c/a/gems.rb",
+            "--cache-path",
+            "/bake/bundler/cache"
+        ]
+    );
+    assert_eq!(
+        Bundler.fetch_vars(into),
+        [
+            ("BUNDLE_PATH", OsString::from("/bake/bundler/.path")),
+            ("BUNDLE_GLOBAL_GEM_CACHE", OsString::from("false")),
+            ("BUNDLE_FROZEN", OsString::from("true")),
+        ]
+    );
+    assert!(
+        Bundler
+            .download(checkout, &paths(&["Gemfile", "x.gemspec"]), into)
+            .is_none()
+    );
+}
+
 // covers: K-4
 #[test]
 fn nugets_manifest_set_is_its_projects_lockfiles_and_configs() {
