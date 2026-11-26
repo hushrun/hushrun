@@ -58,6 +58,11 @@ On 2026-11-25, in a Linux container (`tools/startup/confirm/`):
   home offline: the build passes and the home's `modules-2` gains nothing. One more dependency,
   online, is downloaded into the writable home, and the part is unchanged.
 
+- **An older hushrun beside a package store** (`tools/startup/confirm/older-hushrun.sh`, the
+  released 0.19.1 built from its tag): with a baked store and a package store side by side, it
+  reads the baked store as before (its crate reused from there, from an empty cache of its own),
+  runs a check, and gives COMMAND no variable of the packages. It never looks at the folder.
+
 Not confirmed here: that Apache's build cache extension computes the same module keys with and
 without a tail; the oldest Gradle (6.2) and Maven (3.9.0) that read these; how either tool behaves
 on another platform.
