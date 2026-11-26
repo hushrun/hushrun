@@ -192,7 +192,7 @@ fn a_baked_hex_part_is_seeded_and_mix_deps_get_downloads_no_tarball() {
     assert!(out.contains("packages: hex: 2 files"), "{out}");
     assert!(out.contains("(mix.exs, mix.lock)"), "{out}");
     assert!(
-        out.contains("every run reads it, since each file is checked against the lockfile"),
+        out.contains("each part is checked against its lockfile, so any run reads it"),
         "{out}"
     );
     assert_eq!(
@@ -239,7 +239,10 @@ fn a_baked_hex_part_is_seeded_and_mix_deps_get_downloads_no_tarball() {
     ] {
         let sha = sha256(&w.part_file(name));
         let row = rows.lines().find(|l| l.contains(name)).unwrap();
-        assert!(row.contains(&format!("\"locked\":\"{sha}\"")), "{row}");
+        assert!(
+            row.contains(&format!("\"locked\":\"sha256:{sha}\"")),
+            "{row}"
+        );
         assert!(row.contains(&format!("\"package\":\"{package}\"")), "{row}");
     }
     // An unsigned store of lockfile parts is current, in CI too.

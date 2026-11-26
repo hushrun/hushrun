@@ -4,7 +4,9 @@ pub mod gradle;
 pub mod hex;
 pub mod maven;
 pub mod npm;
+pub mod pip;
 pub mod pnpm;
+pub mod poetry;
 
 #[cfg(test)]
 mod tests;

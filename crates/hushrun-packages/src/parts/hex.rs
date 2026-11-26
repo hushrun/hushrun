@@ -9,12 +9,13 @@
 //! and of an entry only a Hex package's eight fields. A lockfile in any other form gives no
 //! hashes, and the part is left out with a line, never guessed.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use hushrun_core::blocks::Hex32;
 
-use crate::part::{Admit, Admits, Env, Locks, Part, Reader, file_name};
+use crate::part::{Admit, Admits, Env, Locked, Locks, Part, Reader, file_name};
 use crate::store::VerifiedBy;
 
 /// The part's folder under which the tarballs are, as under a Hex cache.
@@ -102,8 +103,28 @@ impl Part for Hex {
         Ok(locks)
     }
 
-    fn pinned(&self, path: &str, locks: &Locks) -> Option<String> {
-        locks.get(file_name(path))?.first().cloned()
+    /// Each tarball `mix.lock` pins, by its outer checksum: a bake keeps only these, and gives each
+    /// its `locked`. A lockfile in a form this part doesn't read pins nothing here; a bake leaves
+    /// the part out for it, with a line ([`Part::locks`]).
+    fn lockfile(&self, checkout: &Path, manifests: &[String]) -> Option<Locked> {
+        let locks = self.locks(checkout, manifests).ok()?;
+        let mut locked = Locked::default();
+        for (file, hashes) in &locks {
+            for sha256 in hashes {
+                locked.add(sha256, Some(file));
+            }
+        }
+        Some(locked)
+    }
+
+    /// Hex's cache at the bake's folder, and Mix's `deps` and build folders beside its packages,
+    /// so the checkout's are left as they were and no `_build` is ever baked.
+    fn fetch_vars(&self, cache: &Path) -> Vec<(&'static str, OsString)> {
+        vec![
+            ("HEX_HOME", cache.into()),
+            ("MIX_DEPS_PATH", cache.join("mix-deps").into()),
+            ("MIX_BUILD_PATH", cache.join("mix-build/fetch").into()),
+        ]
     }
 }
 

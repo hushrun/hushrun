@@ -46,11 +46,12 @@ install that passes today (no mechanism B). That leaves a seed.
    ExUnit adapter's). The seed finds the cache Hex would use as Hex 2.x does: `HEX_HOME`; else,
    with `MIX_XDG` `1` or `true`, `hex` under `XDG_CACHE_HOME` or `~/.cache`; else `~/.hex`.
 
-The part fits the trait #74 merged (`Reader::Seed`, `Part::seed_into`, `Part::admit`) and adds
-two methods besides `links`: `Part::locks`, the lockfiles a part reads, or an error for one in a
-form it doesn't read, which leaves the part out of a bake and a seed; and `Part::pinned`, a row's
-`locked` from those lockfiles, for a part whose files' paths don't say their hash (npm's do, so
-`Part::locked` serves it). #76's cargo part can take the same three.
+The part fits the trait #74 and #75 merged: `Reader::Seed`, `Part::seed_into` and `Part::admit`
+for the seed; `Part::lockfile` (`Locked`) for its rows' `locked` and for keeping only the tarballs
+`mix.lock` pins; `Part::fetch_vars` for `HEX_HOME`, `MIX_DEPS_PATH` and `MIX_BUILD_PATH`. It adds
+two methods: `Part::locks`, the lockfiles a part reads, or an error for one in a form it doesn't
+read, which leaves the part out of a bake and a seed; and `Part::links`, whose default `false`
+keeps every other part copying.
 
 ## What was confirmed by running the tool
 
