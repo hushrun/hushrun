@@ -1,15 +1,15 @@
 //! The `poetry` part: `artifacts/` of a Poetry cache, the wheels and source archives Poetry
 //! downloaded, unchanged, each in the folder Poetry names by its URL and hash. Poetry reads no
-//! second cache, so a run seeds its own: each file `poetry.lock` still names, checked against the
-//! lockfile's hash, is copied into Poetry's cache, where Poetry checks it against the lockfile
-//! again before it installs it. A file Poetry built there from a source archive is no download,
+//! second cache, so `hushrun packages exec`, `env` and `restore` seed its own: each file
+//! `poetry.lock` still names, checked against the lockfile's hash, is copied into Poetry's cache,
+//! where Poetry checks it against the lockfile again before it installs it. A file Poetry built there from a source archive is no download,
 //! and the lockfile names none, so a bake leaves it out.
 
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::part::{Env, Locked, Part, Reader, file_name, python_package};
+use crate::part::{Admits, Env, Locked, Part, Reader, file_name, python_package};
 use crate::store::VerifiedBy;
 
 /// The variable that names Poetry's cache folder, `cache-dir`.
@@ -60,12 +60,21 @@ impl Part for Poetry {
 
     fn reader(&self, _dir: &Path, checkout: &Path, env: Env<'_>) -> Reader {
         match cache_dir(checkout, env) {
-            Ok(cache) => Reader::Seed(cache),
+            Ok(_) => Reader::Seed,
             Err(why) => Reader::LeftAlone(why),
         }
     }
 
-    fn locked(&self, checkout: &Path, manifests: &[String]) -> Locked {
+    fn seed_into(&self, checkout: &Path, env: Env<'_>) -> Result<(PathBuf, &'static str), String> {
+        Ok((cache_dir(checkout, env)?.join(ARTIFACTS), ARTIFACTS))
+    }
+
+    fn admit(&self, checkout: &Path, manifests: &[String]) -> Admits {
+        let locked = self.lockfile(checkout, manifests).unwrap_or_default();
+        Box::new(move |path, bytes| locked.admit(path, bytes))
+    }
+
+    fn lockfile(&self, checkout: &Path, manifests: &[String]) -> Option<Locked> {
         let mut locked = Locked::default();
         for path in manifests {
             if let Ok(text) = fs::read_to_string(checkout.join(path)) {
@@ -74,7 +83,7 @@ impl Part for Poetry {
                 }
             }
         }
-        locked
+        Some(locked)
     }
 
     fn fetch_vars(&self, cache: &Path) -> Vec<(&'static str, OsString)> {

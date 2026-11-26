@@ -186,7 +186,7 @@ fn every_part_module_is_listed() {
     assert_eq!(listed, modules);
 }
 
-// covers: K-4
+// covers: K-4, K-30, K-31
 #[test]
 fn pip_and_poetry_name_their_manifest_sets() {
     use crate::parts::{pip::Pip, poetry::Poetry};
@@ -220,7 +220,7 @@ fn pip_and_poetry_name_their_manifest_sets() {
 const SIX: &str = "8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254";
 const SIX_SDIST: &str = "1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926";
 
-// covers: K-3, K-5
+// covers: K-3, K-5, K-30, K-32
 #[test]
 fn pip_keeps_the_files_a_requirements_file_hashes() {
     use crate::parts::pip::{Pip, hashes};
@@ -232,7 +232,7 @@ fn pip_keeps_the_files_a_requirements_file_hashes() {
     std::fs::write(checkout.path().join("requirements.txt"), &text).unwrap();
     std::fs::write(checkout.path().join("requirements-dev.txt"), "pytest\n").unwrap();
     let manifests = paths(&["requirements.txt", "requirements-dev.txt"]);
-    let locked = Pip.locked(checkout.path(), &manifests);
+    let locked = Pip.lockfile(checkout.path(), &manifests).unwrap();
     let six = hushrun_core::blocks::Hex32::parse(SIX).unwrap();
     assert_eq!(
         locked.of("six-1.16.0-py2.py3-none-any.whl", &six),
@@ -267,7 +267,7 @@ fn pip_keeps_the_files_a_requirements_file_hashes() {
     );
 }
 
-// covers: K-3, K-5
+// covers: K-3, K-5, K-31
 #[test]
 fn poetry_keeps_the_files_its_lockfile_hashes_and_never_a_built_wheel() {
     use crate::parts::poetry::{Poetry, files};
@@ -286,11 +286,22 @@ fn poetry_keeps_the_files_its_lockfile_hashes_and_never_a_built_wheel() {
     );
     let checkout = tempfile::tempdir().unwrap();
     std::fs::write(checkout.path().join("poetry.lock"), &lock).unwrap();
-    let locked = Poetry.locked(checkout.path(), &paths(&["poetry.lock"]));
+    let locked = Poetry
+        .lockfile(checkout.path(), &paths(&["poetry.lock"]))
+        .unwrap();
     let six = hushrun_core::blocks::Hex32::parse(SIX).unwrap();
     assert!(locked.of("six-1.16.0-py2.py3-none-any.whl", &six).is_some());
     // The same bytes under another name are no file the lockfile names.
     assert!(locked.of("six-1.16.0-cp313-none-any.whl", &six).is_none());
+    // A seed copies only what the lockfile names with these bytes.
+    let admit = Poetry.admit(checkout.path(), &paths(&["poetry.lock"]));
+    assert_eq!(
+        admit(
+            "aa/bb/cc/dd/six-1.16.0-py2.py3-none-any.whl",
+            b"other bytes"
+        ),
+        crate::part::Admit::NotLocked
+    );
     // The folder Poetry names by a file's URL and hash: 64 hex characters split 2/2/2/58.
     let folder = format!("11/e9/4b/{}", "a".repeat(58));
     assert!(Poetry.keep(&format!("{folder}/six-1.16.0-py2.py3-none-any.whl")));
@@ -303,7 +314,7 @@ fn poetry_keeps_the_files_its_lockfile_hashes_and_never_a_built_wheel() {
     }
 }
 
-// covers: K-10
+// covers: K-10, K-30, K-31
 #[test]
 fn the_python_readers() {
     use crate::parts::{pip::Pip, poetry::Poetry};
@@ -342,11 +353,12 @@ fn the_python_readers() {
         ),
         Reader::LeftAlone(_)
     ));
-    // Poetry: seeded into its cache, POETRY_CACHE_DIR's or the platform's.
+    // Poetry: seeded into its cache's artifacts/, POETRY_CACHE_DIR's or the platform's.
     let named = |name: &str| (name == "POETRY_CACHE_DIR").then(|| OsString::from("/pc"));
+    assert_eq!(Poetry.reader(dir, checkout.path(), &named), Reader::Seed);
     assert_eq!(
-        Poetry.reader(dir, checkout.path(), &named),
-        Reader::Seed("/pc".into())
+        Poetry.seed_into(checkout.path(), &named),
+        Ok(("/pc/artifacts".into(), "artifacts"))
     );
     let relative = |name: &str| (name == "POETRY_CACHE_DIR").then(|| OsString::from("pc"));
     assert!(matches!(
@@ -355,8 +367,8 @@ fn the_python_readers() {
     ));
     if cfg!(target_os = "linux") {
         assert_eq!(
-            Poetry.reader(dir, checkout.path(), &env),
-            Reader::Seed(home.path().join(".cache/pypoetry"))
+            Poetry.seed_into(checkout.path(), &env),
+            Ok((home.path().join(".cache/pypoetry/artifacts"), "artifacts"))
         );
     }
     // A cache-dir the project's poetry.toml names: hushrun doesn't read it, and leaves Poetry alone.
@@ -368,5 +380,125 @@ fn the_python_readers() {
     assert_eq!(
         Poetry.fetch_vars(Path::new("/bake/poetry")),
         [("POETRY_CACHE_DIR", OsString::from("/bake/poetry"))]
+    );
+}
+
+// covers: K-4, K-5, K-18
+#[test]
+fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {
+    use crate::parts::pnpm::Pnpm;
+    let tracked = [
+        "pnpm-lock.yaml",
+        "web/pnpm-lock.yaml",
+        "package.json",
+        "yarn.lock",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Pnpm.manifests(&tracked),
+        vec![
+            "pnpm-lock.yaml".to_string(),
+            "web/pnpm-lock.yaml".to_string()
+        ]
+    );
+    assert!(Pnpm.keep("v10/files/aa/0123"));
+    assert!(Pnpm.keep("v10/files/aa/0123-exec"));
+    assert!(Pnpm.keep("v10/index/e8/5973-ms@2.1.3.json"));
+    assert!(!Pnpm.keep("v10/projects/dabb"));
+    assert!(!Pnpm.keep("v10/tmp/x/y"));
+    assert!(!Pnpm.keep("v10/files"));
+    assert!(!Pnpm.keep("other/files/aa/x"));
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-ms@2.1.3.json").as_deref(),
+        Some("ms@2.1.3")
+    );
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-@types+node@26.6.6.json")
+            .as_deref(),
+        Some("@types+node@26.6.6")
+    );
+    assert_eq!(Pnpm.package("v10/files/aa/0123"), None);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Pnpm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_store_dir").then(|| "/s".into());
+    assert_eq!(
+        Pnpm.seed_into(Path::new("/c"), &named),
+        Ok((std::path::PathBuf::from("/s"), "store"))
+    );
+    assert!(Maven.seed_into(Path::new("/c"), &no_env).is_err());
+    let t = tempfile::tempdir().unwrap();
+    assert_eq!(Pnpm.harvest_root(t.path()), None);
+    std::fs::create_dir_all(t.path().join("v10/files")).unwrap();
+    assert_eq!(
+        Pnpm.harvest_root(t.path()),
+        Some((t.path().to_path_buf(), "store"))
+    );
+}
+
+// covers: K-3, K-4, K-5, K-19
+#[test]
+fn npm_keeps_only_tarballs_and_seeds_only_what_the_lockfile_names_by_its_bytes() {
+    use crate::part::Admit;
+    use crate::parts::npm::{Npm, locked_sha512};
+    use sha2_hw::Digest as _;
+    let tracked = [
+        "package-lock.json",
+        "a/npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Npm.manifests(&tracked),
+        vec![
+            "package-lock.json".to_string(),
+            "a/npm-shrinkwrap.json".to_string()
+        ]
+    );
+    let tarball = b"a tarball";
+    let hex: String = sha2_hw::Sha512::digest(tarball)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = format!(
+        "content-v2/sha512/{}/{}/{}",
+        &hex[..2],
+        &hex[2..4],
+        &hex[4..]
+    );
+    assert!(Npm.keep(&path));
+    assert!(!Npm.keep("index-v5/aa/bb/cc"));
+    assert!(!Npm.keep("content-v2/sha1/aa/bb/cc"));
+    assert!(!Npm.keep("_logs/x.log"));
+    let integrity = Npm.locked(&path).unwrap();
+    assert!(integrity.starts_with("sha512-"), "{integrity}");
+    // Every version of the lockfile: `packages` and nested `dependencies`.
+    let lock = format!(
+        "{{\"lockfileVersion\":3,\"packages\":{{\"node_modules/a\":{{\"integrity\":\"{integrity}\"}}}},\"dependencies\":{{\"b\":{{\"dependencies\":{{\"c\":{{\"integrity\":\"sha1-xx sha512-bad\"}}}}}}}}}}"
+    );
+    assert_eq!(
+        locked_sha512(&lock),
+        std::collections::BTreeSet::from([hex.clone()])
+    );
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("package-lock.json"), &lock).unwrap();
+    let admit = Npm.admit(t.path(), &["package-lock.json".to_string()]);
+    assert_eq!(admit(&path, tarball), Admit::Copy);
+    // A store whose rows were rewritten to match other bytes: the lockfile still catches it.
+    assert_eq!(admit(&path, b"another tarball"), Admit::Changed);
+    // A tarball the lockfile doesn't name now is left.
+    let other = format!("content-v2/sha512/00/00/{}", "0".repeat(124));
+    assert_eq!(admit(&other, b"x"), Admit::NotLocked);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Npm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_cache").then(|| "/c".into());
+    assert_eq!(
+        Npm.seed_into(Path::new("/x"), &named),
+        Ok((std::path::PathBuf::from("/c/_cacache"), "_cacache"))
     );
 }

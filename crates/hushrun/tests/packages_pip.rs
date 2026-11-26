@@ -20,7 +20,7 @@ use cli::Cli as _;
 use pypackages::{WHEEL, path_with, pip, tamper, write_wheel};
 use repo::Repo;
 
-// covers: K-6, K-10, K-3, K-30
+// covers: K-3, K-6, K-10, K-30, K-32
 #[test]
 fn a_part_pip_downloaded_is_read_where_no_index_is() {
     let Some((pip, bin)) = pip() else { return };
@@ -142,7 +142,7 @@ fn a_part_pip_downloaded_is_read_where_no_index_is() {
     assert!(!verify.status.success());
 }
 
-// covers: K-5, K-6, K-30
+// covers: K-5, K-6, K-30, K-32
 #[test]
 fn only_a_file_the_requirements_hash_is_baked() {
     let Some((_, bin)) = pip() else { return };

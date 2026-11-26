@@ -2,8 +2,8 @@
 
 - **Status:** proposed; being built
 - **Date:** 2026-11-26
-- **Rules:** K-10's `pip`, `poetry` and `uv` paragraphs and K-30 and K-31 new
-  (`docs/spec/11-baked-packages.md`); K-3 to K-8 read
+- **Rules:** K-30 to K-32 new (`docs/spec/11-baked-packages.md`); K-3 to K-8, K-10 and the seed of
+  K-18 ([ADR 0150](0150-baked-packages-pnpm.md)) read
 
 ## Context
 
@@ -20,13 +20,14 @@ lockfile rather than trusted on a signature.
    `PIP_FIND_LINKS`. pip checks each file against the requirements file's hashes, so the part is
    `verified_by: lockfile` and any run reads it, signed or not. A bake fetches it with
    `python3 -m pip download --no-deps --require-hashes`, once per requirements file with hashes,
-   with or without COMMAND (K-30): pip has a download-only command, and the check's own build
+   with or without COMMAND (K-32): pip has a download-only command, and the check's own build
    would fill pip's HTTP cache, which holds no file in a form pip reads back.
 2. **A `poetry` part, read by a seed (K-10, C; K-31).** The part is `artifacts/` of a Poetry
-   cache, each file unchanged in the folder Poetry names by its URL and hash. Before COMMAND, a
-   run copies each file `poetry.lock` still names, after checking the store's bytes against the
-   lockfile's hash, into Poetry's own cache at the same path, and leaves a file already there as
-   it is. Poetry checks every cached file against `poetry.lock` before it installs it. A bake
+   cache, each file unchanged in the folder Poetry names by its URL and hash. The seed is the one
+   ADR 0150 built for pnpm and npm: `hushrun packages exec`, `env` and `restore` copy each file
+   `poetry.lock` still names, after checking the store's bytes against the lockfile's hash, into
+   Poetry's own cache at the same path, and leave a file already there as it is; `hushrun run`
+   seeds nothing, since by the time a check runs the install is done. Poetry checks every cached file against `poetry.lock` before it installs it. A bake
    fetches the part with COMMAND, `POETRY_CACHE_DIR` at a folder of its own; a wheel Poetry built
    from a source archive sits in the same folder, isn't named by the lockfile, and is left out
    (built wheels are a later part).
@@ -85,7 +86,7 @@ archives (only wheels were installed).
 
 - An unsigned store's `pip` and `poetry` parts are read by any run, in CI too; a store with
   Gradle or Maven parts and no evidence is read for these parts alone, with one line (K-7).
-- A run with a `poetry` part writes into Poetry's cache, once per file; `hushrun packages
-  restore` does the same and says what it copied.
+- `hushrun packages exec`, `env` and `restore` with a `poetry` part write into Poetry's cache,
+  once per file, and say what they copied.
 - A pip install with its index reachable downloads as before. The `pip` part serves sandboxes
   that can't reach the index, which today fail.

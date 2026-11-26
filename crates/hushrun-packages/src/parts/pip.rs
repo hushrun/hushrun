@@ -65,7 +65,7 @@ impl Part for Pip {
         Reader::InPlace(vec![(VARIABLE.to_string(), OsString::from(dir))])
     }
 
-    fn locked(&self, checkout: &Path, manifests: &[String]) -> Locked {
+    fn lockfile(&self, checkout: &Path, manifests: &[String]) -> Option<Locked> {
         let mut locked = Locked::default();
         for path in manifests {
             if let Ok(text) = fs::read_to_string(checkout.join(path)) {
@@ -74,7 +74,7 @@ impl Part for Pip {
                 }
             }
         }
-        locked
+        Some(locked)
     }
 
     fn download(&self, checkout: &Path, manifests: &[String], into: &Path) -> Download {

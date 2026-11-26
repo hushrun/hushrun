@@ -21,13 +21,28 @@ pub enum Reader {
     /// Mechanism A for Maven: one word that joins `MAVEN_OPTS`, merged with whatever else of
     /// hushrun builds that variable in the same run, after the person's words.
     MavenOpts(String),
-    /// Mechanism C: hushrun copies each file of the part the lockfile still names, checked
-    /// against its `locked` hash, into this folder of the tool's own cache, at the file's path in
-    /// the part. A file already there is left as it is.
-    Seed(PathBuf),
+    /// Mechanism C: hushrun copies the part's files into the tool's own cache, where
+    /// [`Part::seed_into`] says, before an install (`hushrun packages exec` and `restore`).
+    /// `hushrun run` gives the tool nothing: by the time a check runs, the install is done.
+    Seed,
     /// The tool is left alone, with this line (`packages: <part>: left alone: …`).
     LeftAlone(String),
 }
+
+/// K-10, mechanism C: what a seed does with one file of a part, by its path under the part's
+/// folder the seed copies and its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    /// Copy it.
+    Copy,
+    /// The lockfile in the checkout doesn't name it now: leave it.
+    NotLocked,
+    /// Its bytes aren't what the lockfile says: leave it, with a line.
+    Changed,
+}
+
+/// What [`Part::admit`] gives a seed: for a file's path and bytes, what it does with it.
+pub type Admits = Box<dyn Fn(&str, &[u8]) -> Admit>;
 
 /// K-3: the files a lockfile names by hash, by their SHA-256: the file's name where the lockfile
 /// gives one, and the hash as the lockfile writes it.
@@ -53,13 +68,18 @@ impl Locked {
             .then_some(written.as_str())
     }
 
-    /// Whether it names no file.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+    /// What a seed does with the file at `path` whose bytes are `bytes`: copy it when the
+    /// lockfile names it with these bytes.
+    pub fn admit(&self, path: &str, bytes: &[u8]) -> Admit {
+        if self.of(file_name(path), &Hex32::sha256(bytes)).is_some() {
+            Admit::Copy
+        } else {
+            Admit::NotLocked
+        }
     }
 }
 
-/// K-6: how a bake fetches a part with the tool's own download-only command.
+/// K-32: how a bake fetches a part with the tool's own download-only command.
 pub type Download = Option<Result<Vec<Vec<OsString>>, String>>;
 
 /// One package manager's part.
@@ -83,12 +103,33 @@ pub trait Part: Sync {
     fn verified_by(&self) -> VerifiedBy;
     /// K-10: how the run whose variables are `env`, in `checkout`, reads the part at `dir`.
     fn reader(&self, dir: &Path, checkout: &Path, env: Env<'_>) -> Reader;
-    /// K-3, K-5: for a part its lockfile verifies, the files the lockfile in `checkout` names
-    /// among the `manifests`. A bake keeps only these, and a seed copies only these.
-    fn locked(&self, _checkout: &Path, _manifests: &[String]) -> Locked {
-        Locked::default()
+    /// K-10, mechanism C: the tool's own cache a seed copies into, for the run whose variables
+    /// are `env` in `checkout`, and the folder of the part whose files go there. Only a part whose
+    /// reader is [`Reader::Seed`] has one.
+    fn seed_into(
+        &self,
+        _checkout: &Path,
+        _env: Env<'_>,
+    ) -> Result<(PathBuf, &'static str), String> {
+        Err(format!("{} is read in place", self.tool()))
     }
-    /// K-6: the tool's own download-only commands, which fetch the part into `into` from the
+    /// K-10, mechanism C: which files a seed copies, for the lockfiles `manifests` of `checkout`.
+    /// Every file, for a part a signature verifies.
+    fn admit(&self, _checkout: &Path, _manifests: &[String]) -> Admits {
+        Box::new(|_, _| Admit::Copy)
+    }
+    /// K-3: the lockfile's own hash of the file at `path`, as a lockfile writes it, where the file
+    /// is the artifact that hash is of.
+    fn locked(&self, _path: &str) -> Option<String> {
+        None
+    }
+    /// K-3, K-5: for a part whose lockfile names each file by its SHA-256, the files the lockfiles
+    /// `manifests` in `checkout` name. A bake keeps only these, and gives each row its `locked`.
+    /// `None` for a part whose files the lockfile doesn't name so.
+    fn lockfile(&self, _checkout: &Path, _manifests: &[String]) -> Option<Locked> {
+        None
+    }
+    /// K-32: the tool's own download-only commands, which fetch the part into `into` from the
     /// manifest set in `checkout`. A bake runs them with or without its COMMAND. `None` for a tool
     /// that has none, an error saying why it can't fetch here.
     fn download(&self, _checkout: &Path, _manifests: &[String], _into: &Path) -> Download {
@@ -105,7 +146,9 @@ pub trait Part: Sync {
 pub static ALL: &[&dyn Part] = &[
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
+    &crate::parts::npm::Npm,
     &crate::parts::pip::Pip,
+    &crate::parts::pnpm::Pnpm,
     &crate::parts::poetry::Poetry,
 ];
 

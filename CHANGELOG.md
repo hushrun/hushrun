@@ -74,6 +74,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **pnpm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-18): `hushrun
+  packages bake --out DIR -- pnpm fetch` keeps pnpm's store as a part, and `hushrun packages exec --
+  pnpm install --frozen-lockfile` copies it into the store pnpm uses before the install, every file
+  checked as it is copied, so a sandbox installs with no registry to reach. `hushrun packages
+  restore` does the copy alone. `hushrun run` gives a check nothing for it: no key changes.
+- **npm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-19): `hushrun
+  packages bake --out DIR -- npm ci --ignore-scripts` keeps the tarballs of npm's cache, and
+  `hushrun packages exec -- npm ci` copies into npm's cache each tarball the lockfile names now,
+  checked against its `integrity`. The lockfile is the evidence, so an unsigned store is read.
 - **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to
@@ -97,9 +106,9 @@ project's new branch starts from what main's CI already ran.
   - **pip and Poetry** ([ADR 0153](docs/adr/0153-baked-python-packages.md)): a `pip` part holds
     the files a requirements file with hashes names, fetched by `pip download` with no build to
     name, and pip reads it through `PIP_FIND_LINKS` when it can't reach its index. A `poetry`
-    part holds Poetry's downloads, fetched by the bake's COMMAND; a run copies each file
-    `poetry.lock` still names, after checking its hash, into Poetry's own cache, and Poetry then
-    downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
+    part holds Poetry's downloads, fetched by the bake's COMMAND; `hushrun packages exec`, `env`
+    and `restore` copy each file `poetry.lock` still names, after checking its hash, into
+    Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
     and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
     from a store without rewriting `uv.lock`.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with

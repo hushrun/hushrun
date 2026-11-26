@@ -220,58 +220,105 @@ lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
 
-`pip` is B: `PIP_FIND_LINKS=<store>/parts/pip`, a flat folder of the wheels and source archives
-a requirements file with hashes names. Its manifest set (K-4) is every `requirements*.txt`,
-`*-requirements.txt` and `.txt` file in a `requirements` folder; its part keeps a file only when
-one of them names its SHA-256 (`--hash=sha256:`), which is the row's `locked`. A bake fetches it
-with pip's own download (K-30), `python3 -m pip download --no-deps --require-hashes` once per
-requirements file that has hashes; one that has none fetches nothing. pip checks every file
-against the requirements file's hashes, so the part is `verified_by: lockfile`. The part is left
-alone, with a line, when `PIP_FIND_LINKS` is set, when a pip configuration file pip reads names
-`find-links` (the variable would replace it), and when the folder's path holds white space, which
-pip splits the variable on. *Rests on:* pip installing from the part when its index can't be
-reached (confirmed with pip 26.2.2, a read-only part, an empty cache, no network). *Breaks if:*
-the index can be reached: pip prefers the index's copy of a file whose hash equals the part's,
-and downloads it, so the part saves nothing there; it is never wrong.
+**K-18 The `pnpm` part.** The part holds pnpm's content-addressed store as `store-dir` names it:
+`parts/pnpm/store/v<N>/files/…` (each file named by the SHA-512 of its bytes) and
+`store/v<N>/index/…` (one index a package, which lists its files), and nothing else of the store:
+not `tmp/`, not `projects/` (links to the checkouts that installed from it), not a lock. Its
+manifest set is every tracked `pnpm-lock.yaml`. A bake's fetch (`hushrun packages bake --out DIR
+-- pnpm fetch`) runs with `npm_config_store_dir` at a folder of the bake's own; `--harvest
+pnpm=FOLDER` takes a `store-dir` a job already filled (the folder `pnpm store path` names is its
+`v<N>` folder). A row of an index carries its package as pnpm writes it (`ms@2.1.3`, a scope's
+`/` as `+`) and no `locked`: the lockfile's `integrity` hashes a package's tarball, which the
+store doesn't keep, so nothing in `pnpm-lock.yaml` hashes what the part holds, and the part is
+verified by a signature (K-7). Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed: `hushrun run` gives COMMAND nothing for it, since by the time a
+check runs the install is done. The seed copies each file of the part into the store pnpm uses
+(`npm_config_store_dir` or `NPM_CONFIG_STORE_DIR` when set, else the parent of the folder
+`pnpm store path` names in the checkout), never over a file that is there, each file hashed as it
+is copied and left out, with a line, when its bytes aren't its row's; pnpm then downloads what it
+was of. A file is written beside its place and renamed, so pnpm never sees half of one. A seed
+that left nothing out writes `.hushrun-packages-<part identity>` in that store, and the next seed
+of the same part looks at nothing else. The seed never sets `NODE_OPTIONS` or any other variable,
+and never uses pnpm's global virtual store: `node_modules` is pnpm's own, with links inside the
+checkout, as an install from the network makes it. *Rests on:* pnpm installing from its store,
+with a frozen lockfile, every package whose index and files are there, and checking each file
+against its index as it imports it (confirmed with pnpm 10.28.0, store `v10`, an empty store and
+a registry nobody answers). *Breaks if:* pnpm changed its store's layout (a new `v<N>`: the part
+seeds a folder that pnpm doesn't read, and pnpm downloads as it does today), or a lockfile
+changed since the bake (the packages it adds are downloaded).
 
-`poetry` is C, a seed (K-31) into Poetry's cache: `POETRY_CACHE_DIR`, else the platform's
-(`$XDG_CACHE_HOME/pypoetry` or `~/.cache/pypoetry`, `~/Library/Caches/pypoetry` on macOS,
-`%LOCALAPPDATA%\pypoetry\Cache` on Windows). Its part is `artifacts/` of a Poetry cache, each file
-at the folder Poetry names by the file's URL and hash; its manifest set is every `poetry.lock`;
-its part keeps a file only when a `poetry.lock` names that file's name with its SHA-256, so a
-wheel Poetry built from a source archive in that folder is left out. A bake fetches it with
-COMMAND, `POETRY_CACHE_DIR` at a folder of the bake's own. Poetry checks each file of its cache
-against `poetry.lock` before it installs it. The part is left alone, with a line, when
-`POETRY_CACHE_DIR` isn't an absolute path, and when the project's `poetry.toml` or the person's
-Poetry `config.toml` names `cache-dir`, which hushrun doesn't read. *Rests on:* Poetry installing
-a file its cache holds at that folder without downloading it (confirmed with Poetry 2.5.2: no
-file downloaded, and a seeded file changed in place refused). *Breaks if:* Poetry changed how it
-names that folder: the seeded files sit where Poetry never looks, and it downloads as today.
+**K-19 The `npm` part.** The part holds the tarballs of npm's cache and nothing else of it:
+`parts/npm/_cacache/content-v2/sha512/<2 hex>/<2 hex>/<124 hex>`, each file's path the SHA-512
+of its bytes. Not `index-v5/` (it names the registry's URLs and the times of the bake's
+requests), not `_logs/`, not another hash's folder. Its manifest set is every tracked
+`package-lock.json` and `npm-shrinkwrap.json`. A bake's fetch (`hushrun packages bake --out DIR --
+npm ci --ignore-scripts`) runs with `npm_config_cache` at a folder of the bake's own;
+`--harvest npm=FOLDER` takes a cache folder a job already filled (the one `npm config get cache`
+names). Each row carries `locked`, `sha512-<base64>` of its path, as `package-lock.json` writes
+the `integrity` of that tarball. The part is verified by the lockfile (K-7): a run reads it with
+no signature and no say-so. Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
+the `_cacache` of the cache npm uses (`npm_config_cache` or `NPM_CONFIG_CACHE` when set, else what
+`npm config get cache` names in the checkout) only a tarball whose SHA-512 an `integrity` of a
+lockfile in the checkout names now (any version of the lockfile: `packages` and nested
+`dependencies`), and only when the SHA-512 of its bytes is that hash. A tarball no lockfile names
+now is left, with a count; one whose bytes aren't its row's or its name's is left with a line, and
+npm downloads it or fails without a registry. A seed that left anything out writes no stamp, so
+the next lockfile can name what it left. *Rests on:* npm reading a tarball from its cache by the
+lockfile's `integrity`, with no index entry and no request, when the lockfile has `integrity` and
+`resolved` (confirmed with npm 10.9 and `npm ci`, an empty cache and a registry nobody answers).
+*Breaks if:* npm stopped reading its cache by hash (a seed then saves nothing, and npm downloads
+as it does today), or a lockfile held only `sha1` hashes (nothing is seeded).
 
-`uv` has no part. uv reads no second cache; its cache holds unpacked wheels in a layout of its
-own, not the files it downloaded; it takes no file from `UV_FIND_LINKS` that `uv.lock` names at
-an index; and an index named by `UV_DEFAULT_INDEX` or `UV_INDEX_URL` rewrites `uv.lock`
-(confirmed with uv 0.13.10).
+**K-30 The `pip` part.** The part is a flat folder, `parts/pip/<file>`, of the wheels and source
+archives a requirements file with hashes names, and pip reads it as a registry (K-10, B):
+`PIP_FIND_LINKS=<store>/parts/pip`. Its manifest set is every tracked `requirements*.txt`,
+`*-requirements.txt` and `.txt` file in a `requirements` folder. The part keeps a file only when
+one of them names its SHA-256 (`--hash=sha256:`), and that hash, as `sha256:<hex>`, is the row's
+`locked`. A bake fetches the part with pip's own download (K-32), `python3 -m pip download
+--no-deps --require-hashes` once per requirements file that has hashes; one that has none fetches
+nothing, with a line. `--harvest pip=FOLDER` takes a folder of such files (`pip download -d`).
+pip checks every file against the requirements file's hashes, so the part is `verified_by:
+lockfile`. The part is left alone, with a line, when `PIP_FIND_LINKS` is set, when a pip
+configuration file pip reads names `find-links` (the variable would replace it), and when the
+folder's path holds white space, which pip splits the variable on. *Rests on:* pip installing
+from the part when its index can't be reached (confirmed with pip 26.2.2, a read-only part, an
+empty cache, no network). *Breaks if:* the index can be reached: pip prefers the index's copy of
+a file whose hash equals the part's, and downloads it, so the part saves nothing there; it is
+never wrong.
 
-**K-30 A part the tool's own download fetches.** Where a tool has a command that downloads what
-a part's manifest set names and runs nothing else of the repository's (pip's `download`), a bake
+**K-31 The `poetry` part.** The part is `artifacts/` of a Poetry cache: `parts/poetry/artifacts/
+<2 hex>/<2 hex>/<2 hex>/<58 hex>/<file>`, each wheel or source archive unchanged in the folder
+Poetry names by the file's URL and hash. Its manifest set is every tracked `poetry.lock`. The part
+keeps a file only when a `poetry.lock` names that file's name with its SHA-256, which is the row's
+`locked`; a wheel Poetry built from a source archive in that folder is no download and is left
+out. A bake fetches the part with COMMAND (`hushrun packages bake --out DIR -- poetry install`),
+`POETRY_CACHE_DIR` at a folder of the bake's own; `--harvest poetry=FOLDER` takes a Poetry cache
+folder a job already filled. The part is verified by the lockfile (K-7). Its reader is C, a seed,
+as the `pnpm` part's is (K-18): `hushrun packages exec`, `env` and `restore` seed, `hushrun run`
+gives COMMAND nothing. The seed copies into `artifacts/` of Poetry's cache (`POETRY_CACHE_DIR`,
+else `$XDG_CACHE_HOME/pypoetry` or `~/.cache/pypoetry`, `~/Library/Caches/pypoetry` on macOS,
+`%LOCALAPPDATA%\pypoetry\Cache` on Windows) only a file a `poetry.lock` in the checkout names now
+by its name and the SHA-256 of its bytes. Poetry checks each file of its cache against
+`poetry.lock` before it installs it. The part is left alone, with a line, when `POETRY_CACHE_DIR`
+isn't an absolute path, and when the project's `poetry.toml` or the person's Poetry
+`config.toml` names `cache-dir`, which hushrun doesn't read. *Rests on:* Poetry installing a file
+its cache holds at that folder without downloading it (confirmed with Poetry 2.5.2: no file
+downloaded, and a seeded file changed in place refused). *Breaks if:* Poetry changed how it names
+that folder: the seeded files sit where Poetry never looks, and it downloads as today; or the
+index can't be reached: Poetry asks it for each file's URL, and fails as today.
+
+**K-32 A part the tool's own download fetches.** Where a tool has a command that downloads what a
+part's manifest set names and runs nothing else of the repository's (pip's `download`), a bake
 runs it for that part, with or without COMMAND, into a folder of the bake's own, the way it runs
 COMMAND (K-6), and takes the part from that folder; `--no-build` runs it not, and a part
-`--harvest` names isn't fetched. The part's `tool` is `fetched by` and the command's program
-and subcommand, such as `python3 -m pip download`. A manifest set the command can't fetch from leaves the part out, with
-a line that says why. *Rests on:* the command downloading for the machine the bake runs on, as
-the store's `platform` says. *Breaks if:* a requirements file named packages for another
-platform only: the command downloads none, and the part is left out.
+`--harvest` names isn't fetched. The part's `tool` is `fetched by` and the command's program and
+subcommand, such as `python3 -m pip download`. A manifest set the command can't fetch from leaves
+the part out, with a line that says why. *Rests on:* the command downloading for the machine the
+bake runs on, as the store's `platform` says. *Breaks if:* a requirements file named packages for
+another platform only: the command downloads none, and the part is left out.
 
-**K-31 A seed.** A part read by a seed (K-10, C) is copied into the tool's cache before COMMAND
-starts, in `hushrun run`, `hushrun packages exec` and `env`, and by `hushrun packages restore`.
-Each row but a link is copied only when the lockfile in the checkout now names its file, by
-name where the lockfile gives one and by SHA-256, with the row's `locked`; and only when the
-store's file hashes to the row's SHA-256, which the seed checks as it copies. A row the
-lockfile names no more is left out and counted; a file whose bytes differ is left out, with a
-line naming it. A file already at its place in the cache is left as it is, unhashed: the tool
-checks its own cache against the lockfile. A copy is written beside its place and renamed into
-it, as `0644`. The seed writes nowhere else, and never into the store. *Rests on:* the tool
-checking each file of its cache against the lockfile before it uses it. *Breaks if:* a file was
-put at its place in the cache by something else with other bytes: the seed leaves it, and the
-tool refuses it as it would today.
+`uv` has no part. uv reads no second cache; its cache holds unpacked wheels in a layout of its
+own, not the files it downloaded; it takes no file from `UV_FIND_LINKS` that `uv.lock` names at an
+index; and an index named by `UV_DEFAULT_INDEX` or `UV_INDEX_URL` rewrites `uv.lock` (confirmed
+with uv 0.13.10).

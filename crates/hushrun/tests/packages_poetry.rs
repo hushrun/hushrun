@@ -176,8 +176,17 @@ fn a_part_baked_from_poetry_install_seeds_poetrys_cache() {
         "{}",
         said(&read)
     );
-    let seeded = all_files(&r.root.join("c1/artifacts"));
+    // The one file, and the seed's stamp beside it.
+    let (stamps, seeded): (Vec<PathBuf>, Vec<PathBuf>) = all_files(&r.root.join("c1/artifacts"))
+        .into_iter()
+        .partition(|f| {
+            f.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".hushrun-packages-")
+        });
     assert_eq!(seeded.len(), 1, "{seeded:?}");
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
     assert_eq!(
         seeded[0].strip_prefix(r.root.join("c1")).unwrap(),
         part[0].strip_prefix(store.join("parts/poetry")).unwrap(),
@@ -185,7 +194,7 @@ fn a_part_baked_from_poetry_install_seeds_poetrys_cache() {
     );
     // Without the store the same install fails: the file was the store's.
     assert!(!install("c2", Path::new("")).status.success());
-    // `restore` seeds too, and says so when there is nothing left to copy.
+    // `restore` seeds too, and a store seeded whole once is seeded already.
     let restore = r
         .hushrun()
         .args(["packages", "restore"])
@@ -194,25 +203,26 @@ fn a_part_baked_from_poetry_install_seeds_poetrys_cache() {
         .output()
         .unwrap();
     assert!(
-        said(&restore).contains("seeded 0 files into")
-            && said(&restore).contains("1 there already"),
+        said(&restore).contains("packages: poetry: seeded already into"),
         "{}",
         said(&restore)
     );
 
     // covers: K-10
-    // In `hushrun run` too, and the check's key is the same with and without the store: the run
-    // without it skips.
+    // `hushrun run` seeds nothing (the cache here was seeded by `exec`), and the check's key is
+    // the same with and without the store: the run without it skips.
     let run = |lower: &Path| {
+        let _ = std::fs::remove_dir_all(r.repo.join(".venv"));
         r.hushrun()
             .args(["run", "t", "--", &poetry, "install"])
-            .env("POETRY_CACHE_DIR", r.root.join("c3"))
+            .env("POETRY_CACHE_DIR", r.root.join("c1"))
             .env("HUSHRUN_PACKAGES_LOWER", lower)
             .output()
             .unwrap()
     };
     let first = run(&store);
     assert!(said(&first).contains("t passed"), "{}", said(&first));
+    assert!(!said(&first).contains("seeded"), "{}", said(&first));
     let second = run(Path::new(""));
     assert!(said(&second).contains("t skipped"), "{}", said(&second));
 
@@ -221,9 +231,9 @@ fn a_part_baked_from_poetry_install_seeds_poetrys_cache() {
     let read = install("c4", &store);
     assert!(!read.status.success());
     assert!(
-        said(&read).contains("left out 1 files whose bytes aren't the ones the lockfile hashes"),
+        said(&read).contains("left out 1 files whose bytes changed since the bake"),
         "{}",
         said(&read)
     );
-    assert!(all_files(&r.root.join("c4")).is_empty());
+    assert!(all_files(&r.root.join("c4/artifacts")).is_empty());
 }
