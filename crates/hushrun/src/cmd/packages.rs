@@ -1069,9 +1069,9 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 }
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
-/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
-/// Maven's local repository, pnpm's store and npm's cache at folders of the bake's own under `cache`,
-/// and `vars`, what the other parts give a fetch.
+/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
+/// Maven's local repository, pnpm's store, npm's cache and Composer's cache at folders of the
+/// bake's own under `cache`, and `vars`, what the other parts give a fetch.
 fn run_fetch(
     checkout: &Path,
     command: &[String],
@@ -1083,6 +1083,7 @@ fn run_fetch(
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
     let pnpm = fetch_cache(cache, &hushrun_packages::parts::pnpm::Pnpm);
     let npm = fetch_cache(cache, &hushrun_packages::parts::npm::Npm);
+    let composer = fetch_cache(cache, &hushrun_packages::parts::composer::Composer);
     let opts = hushrun_build::maven::OPTS_VARIABLE;
     let person = var(opts).map(|v| v.to_string_lossy().into_owned());
     let maven_opts = hushrun_packages::parts::maven::opts_with(
@@ -1099,6 +1100,10 @@ fn run_fetch(
             pnpm.into_os_string(),
         ),
         (hushrun_packages::parts::npm::CACHE, npm.into_os_string()),
+        (
+            hushrun_packages::parts::composer::CACHE_DIR,
+            composer.into_os_string(),
+        ),
         (hushrun_packages::LOWER, OsString::new()),
     ];
     extra.extend(vars.iter().cloned());

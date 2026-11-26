@@ -88,8 +88,8 @@ checkout and, where it has none or the lockfile is optional, the build files tha
 dependencies. For `gradle`: `settings.gradle`, `settings.gradle.kts`, every `build.gradle` and
 `build.gradle.kts`, `gradle/libs.versions.toml`, `gradle/wrapper/gradle-wrapper.properties`,
 `gradle.lockfile` and `gradle/verification-metadata.xml`. For `maven`: every `pom.xml`,
-`.mvn/maven.config`, `.mvn/extensions.xml` and `.mvn/wrapper/maven-wrapper.properties`. Only files
-git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
+`.mvn/maven.config`, `.mvn/extensions.xml` and `.mvn/wrapper/maven-wrapper.properties`. For
+`composer`: every `composer.lock`. Only files git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
 resolved by something outside them (an init script, a property of the machine): the part's
 `inputs` would stay the same while what it downloads changed, and a bake would skip.
 
@@ -102,7 +102,8 @@ Nothing else: a file the bake can't class is left out and counted in what the ba
 `gradle` part leaves out `*.lock`, `gc.properties` and every path with a `-SNAPSHOT` component; a
 `maven` part leaves out `_remote.repositories`, `*.lastUpdated`, `resolver-status.properties`,
 `*.lock`, `*.part`, every dot-folder (`.locks`, `.cache`) and every path with a `-SNAPSHOT`
-component. *Rests
+component; a `composer` part keeps only `files/<vendor>/<name>/<40 hex>.<type>`, Composer's archives,
+and leaves out the rest of its cache (`repo/`, `vcs/`, `.htaccess`). *Rests
 on:* a released version's bytes never changing at its registry. *Breaks if:* a registry served
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
@@ -112,11 +113,12 @@ PART=FOLDER]... [--no-build] [--force] [--max-bytes N] [-- COMMAND]` writes the 
 `COMMAND` (the check's own build, such as `./gradlew test` or `mvn -B verify`) it runs COMMAND
 the way a bake runs anything of the repository's (B-63's `in_bake`: hushrun's, CI's and signing
 credentials withheld, no result recorded, no baked store or package store read, nothing it
-started outliving it), with Gradle's user home (`GRADLE_USER_HOME`) and Maven's local repository
-(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`) at folders of the bake's own, so that what the part
+started outliving it), with Gradle's user home (`GRADLE_USER_HOME`), Maven's local repository
+(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`) and Composer's cache (`COMPOSER_CACHE_DIR`) at
+folders of the bake's own, so that what the part
 holds is this build's downloads and nothing a machine had before; a registry credential the job
 set for the tool stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the
-job already filled (a Gradle user home, a Maven local repository); a part harvested says
+job already filled (a Gradle user home, a Maven local repository, a Composer cache); a part harvested says
 `harvested` as its tool. Either way a part is taken only when the tool's cache holds files, and
 only the files K-5 keeps, each copied as `0644`, or `0755` when its owner may run it; a link is
 kept only when it stays inside the part. The bake then writes the rows and `packages.json`,
@@ -246,6 +248,30 @@ with the origin gone; a file changed in place refused for its hash and downloade
 origin). *Breaks if:* a vcpkg stopped checking an asset's SHA-512 or took one by another name: the
 part would then need a signature, as `maven`'s does. A file a portfile downloads with no SHA-512
 (`SKIP_SHA512`) never goes through an asset source, and is downloaded every time.
+
+`composer` is C. The part holds the archives of Composer's files cache, `parts/composer/files/
+<vendor>/<name>/<40 hex>.<type>`, where the hex is the SHA-1 of the archive's URL, as Composer
+names an archive it downloads. A bake's fetch is `composer install --download-only --no-scripts
+--no-plugins`, which writes no `vendor/` and runs no code of a package; `--harvest
+composer=FOLDER` takes a cache folder a job already filled (the one `COMPOSER_CACHE_DIR` names,
+which holds `files/`). Each row carries its package (`vendor/name`) and no `locked`: a lock's
+`dist.shasum` is empty for most packages, Packagist's among them, so the part is verified by a
+signature (K-7). Only `hushrun packages exec` and `hushrun packages restore` seed; `hushrun run`
+gives COMMAND nothing for it, and never names `PHP_INI_SCAN_DIR` or any variable of Composer's.
+The seed copies into the files cache `composer config cache-files-dir` names in the checkout only
+an archive a `composer.lock` there names now, by its package's name and the SHA-1 of its
+`dist.url`, and, where that package's `shasum` isn't empty, only when the archive's SHA-1 is it;
+one no lock names is left, with a count, and one whose bytes aren't its row's or its `shasum` is
+left with a line. `composer install` then extracts each package from the cache and writes
+`vendor/` itself, with the project's own scripts and plugins as the person's command says, the
+same `vendor/` an install from the network writes. *Rests on:* Composer reading an archive from
+its files cache by its name, with no request, and checking it against a `shasum` only when the
+lock has one (confirmed with Composer 2.8.12 on PHP 8.3, an empty cache and a registry nobody
+answers). Composer has no second, read-only cache beside its own: `COMPOSER_CACHE_READ_ONLY` with
+`COMPOSER_CACHE_DIR` would read the part, but in place of the person's cache, not beside it, so
+the part is a seed. *Breaks if:* Composer named its archives otherwise (the seed fills names it
+doesn't read, and it downloads as it does today), or a dist URL Composer rewrites before it
+downloads, such as a mirror's (that archive is left out, and downloaded).
 
 **K-18 The `pnpm` part.** The part holds pnpm's content-addressed store as `store-dir` names it:
 `parts/pnpm/store/v<N>/files/…` (each file named by the SHA-512 of its bytes) and
