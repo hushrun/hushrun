@@ -190,10 +190,9 @@ pub fn parts_of(entries: &[Entry], slot: &Slot) -> Vec<SavedPart> {
                 };
                 (Kind::Xcode, xcode.platform.clone())
             }
-            // Gradle's entries aren't baked yet (B-82): their manifest goes with `close` alone.
-            Kind::Gradle => continue,
-            // Nor are Maven's (B-176).
-            Kind::Maven => continue,
+            // Gradle's and Maven's entries aren't baked yet (B-82, B-176): their manifest goes
+            // with `close` alone.
+            Kind::Gradle | Kind::Maven => continue,
             // B-108: per Node platform, those that may leave the machine.
             Kind::Tsc => {
                 let Some(tsc) = entry

@@ -365,18 +365,10 @@ pub(crate) fn publish(
         object.insert("rustc_ms".into(), cost_ms.into());
         // The kind it was fetched as, whatever the uploader's record says: what its address
         // is taken under here when the relay asks about it (B-34).
-        match kind {
-            hushrun_build::model::Kind::Rustc => {
-                object.remove("kind");
-            }
-            hushrun_build::model::Kind::Go
-            | hushrun_build::model::Kind::Cc
-            | hushrun_build::model::Kind::Gradle
-            | hushrun_build::model::Kind::Maven
-            | hushrun_build::model::Kind::Xcode
-            | hushrun_build::model::Kind::Tsc => {
-                object.insert("kind".into(), kind.word().into());
-            }
+        if kind.is_rustc() {
+            object.remove("kind");
+        } else {
+            object.insert("kind".into(), kind.word().into());
         }
     }
     // A pack keeps no file modes: a linked output of a program, a build script or a proc macro

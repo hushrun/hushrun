@@ -5351,6 +5351,8 @@ fn a_gradle_or_maven_manifest_s_other_blocks_are_all_downloaded_once_one_is_aske
             Answer::Ready { key: keys[0] },
             "{kind:?}"
         );
+        // Their first key is their key: no hint is asked about.
+        assert_eq!(fake.count(route::HINTS_LOOKUP), 0, "{kind:?}");
         until("the second downloaded too", || {
             relay
                 .state()

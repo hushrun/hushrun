@@ -1439,7 +1439,7 @@ impl Relay {
                     .iter()
                     .map(|key| Relay::address_in(kind, key))
                     .collect();
-                if kind.self_keyed() {
+                if first_key_is_key(kind) {
                     return (blocks, HashSet::new(), HashSet::new());
                 }
                 let steps = store.steps();
@@ -1476,7 +1476,7 @@ impl Relay {
                 .map(Pair::block)
                 .filter(|a| !held_blocks.contains(a)),
         );
-        if !kind.self_keyed() {
+        if !first_key_is_key(kind) {
             for batch in hints.chunks(limit) {
                 self.lookup_hints(kind, batch).await;
             }
@@ -2260,15 +2260,7 @@ impl Relay {
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        for kind in [
-            Kind::Rustc,
-            Kind::Go,
-            Kind::Cc,
-            Kind::Gradle,
-            Kind::Xcode,
-            Kind::Maven,
-            Kind::Tsc,
-        ] {
+        for kind in Kind::ALL {
             let keys: Vec<Digest> = keys
                 .iter()
                 .filter(|(k, _)| *k == kind)
@@ -3381,6 +3373,14 @@ fn prefetch_order<T>(
         first.extend(rest);
     }
     first
+}
+
+/// Whether a block of `kind` has its key as its first key, and so no hints to look up and no
+/// first key this machine keeps to itself (B-34): a self-keyed kind's (Go's, Xcode's) and a
+/// build tool's (Gradle's, Maven's), whose cache asks for the key the tool computed. A
+/// tool-keyed kind isn't self-keyed for the rest: its manifest, not hints, says what is fetched.
+fn first_key_is_key(kind: Kind) -> bool {
+    kind.self_keyed() || kind.tool_keyed()
 }
 
 /// Whether a report of `problem` about a block of `kind` is sent at all. A block a build tool
