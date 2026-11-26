@@ -23,9 +23,6 @@ use sha2::{Digest as _, Sha256};
 
 use crate::registry::{ArtifactError, BlobStream, Manifest, OCI_INDEX, OCI_MANIFEST, Repository};
 
-/// \[B-240\] A pulled image: its manifest's digest and each layer's bytes.
-pub type PulledLayers = (Digest, Vec<Vec<u8>>);
-
 /// The image config's media type.
 pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 /// The config label that says what each layer holds, as JSON ([`Label`]).
@@ -151,6 +148,17 @@ pub struct Label {
     pub deps_only: bool,
 }
 
+impl Label {
+    /// The label an image's config bytes carry, when a bake published it: `None` for no label or
+    /// another schema.
+    pub fn of_config(config: &[u8]) -> Option<Label> {
+        let config_json: Value = serde_json::from_slice(config).ok()?;
+        let text = config_json["config"]["Labels"][LABEL].as_str()?;
+        let label: Label = serde_json::from_str(text).ok()?;
+        (label.schema == LABEL_SCHEMA).then_some(label)
+    }
+}
+
 /// The image a moving tag points to, as a bake reads it.
 #[derive(Debug, Clone)]
 pub struct Previous {
@@ -165,12 +173,7 @@ impl Previous {
     /// published (no label, another schema, layers that don't match it).
     pub fn read(manifest: &[u8], config: &[u8]) -> Option<Previous> {
         let manifest_json: Value = serde_json::from_slice(manifest).ok()?;
-        let config_json: Value = serde_json::from_slice(config).ok()?;
-        let text = config_json["config"]["Labels"][LABEL].as_str()?;
-        let label: Label = serde_json::from_str(text).ok()?;
-        if label.schema != LABEL_SCHEMA {
-            return None;
-        }
+        let label = Label::of_config(config)?;
         let descriptors = manifest_json["layers"].as_array()?;
         if descriptors.len() != label.layers.len() {
             return None;
@@ -877,41 +880,75 @@ impl crate::Artifacts {
         })
     }
 
-    /// \[B-240\] The image `tag` names in `repository`: its manifest's digest and each of its
-    /// layers, read whole, checked against their digests, and refused past `most` bytes each;
-    /// `None` when the tag names nothing.
+    /// \[B-240\] The label of the image `manifest` (of `repository`) names, read from its config
+    /// (at most [`MOST_CONFIG`] bytes, checked against its digest): `None` when it carries none.
+    pub fn label(
+        &self,
+        repository: &Repository,
+        manifest: &Manifest,
+    ) -> Result<Option<Label>, ArtifactError> {
+        let json: Value = serde_json::from_slice(&manifest.bytes).map_err(|e| {
+            ArtifactError::Invalid(format!("{}'s manifest: {e}", manifest.digest()))
+        })?;
+        let Some(config) = json["config"]["digest"]
+            .as_str()
+            .and_then(|d| Digest::parse(d).ok())
+        else {
+            return Ok(None);
+        };
+        let bytes =
+            self.runtime
+                .block_on(self.registry.pull_blob(repository, &config, MOST_CONFIG))?;
+        if Digest::of(&bytes) != config {
+            return Err(ArtifactError::Invalid(format!(
+                "{config}: the config isn't its digest"
+            )));
+        }
+        Ok(Label::of_config(&bytes))
+    }
+
+    /// \[B-240\] The layers `manifest` (an image of `repository`) names, each written into `dir`
+    /// as it arrives, under its digest's hex, checked against its digest, and refused past
+    /// `most` bytes; in the manifest's order. No layer is ever held in memory whole.
     pub fn pull_layers(
         &self,
         repository: &Repository,
-        tag: &str,
+        manifest: &Manifest,
         most: u64,
-    ) -> Result<Option<PulledLayers>, ArtifactError> {
-        self.runtime.block_on(async {
-            let manifest = match self.registry.manifest(repository, tag).await {
-                Ok(manifest) => manifest,
-                Err(ArtifactError::NotFound(_)) => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            let json: Value = serde_json::from_slice(&manifest.bytes)
-                .map_err(|e| ArtifactError::Invalid(format!("{tag}'s manifest: {e}")))?;
-            let layers = json["layers"]
-                .as_array()
-                .ok_or_else(|| ArtifactError::Invalid(format!("{tag} names no layers")))?;
-            let mut out = Vec::new();
-            for layer in layers {
-                let digest = layer["digest"]
+        dir: &Path,
+    ) -> Result<Vec<PathBuf>, ArtifactError> {
+        let what = repository.at_digest(&manifest.digest());
+        let json: Value = serde_json::from_slice(&manifest.bytes)
+            .map_err(|e| ArtifactError::Invalid(format!("{what}'s manifest: {e}")))?;
+        let layers = json["layers"]
+            .as_array()
+            .ok_or_else(|| ArtifactError::Invalid(format!("{what} names no layers")))?;
+        let digests = layers
+            .iter()
+            .map(|layer| {
+                layer["digest"]
                     .as_str()
                     .and_then(|d| Digest::parse(d).ok())
-                    .ok_or_else(|| ArtifactError::Invalid(format!("{tag}: a layer's digest")))?;
-                let bytes = self.registry.pull_blob(repository, &digest, most).await?;
-                if Digest::of(&bytes) != digest {
-                    return Err(ArtifactError::Invalid(format!(
-                        "{tag}: a layer isn't {digest}"
-                    )));
-                }
-                out.push(bytes);
+                    .ok_or_else(|| ArtifactError::Invalid(format!("{what}: a layer's digest")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let io = |path: &Path, e: io::Error| {
+            ArtifactError::Invalid(format!("writing {}: {e}", path.display()))
+        };
+        fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+        self.runtime.block_on(async {
+            let mut out = Vec::new();
+            for digest in digests {
+                let path = dir.join(digest.hex());
+                let mut file =
+                    io::BufWriter::new(fs::File::create(&path).map_err(|e| io(&path, e))?);
+                self.registry
+                    .pull_blob_to(repository, &digest, most, &mut file)
+                    .await?;
+                file.flush().map_err(|e| io(&path, e))?;
+                out.push(path);
             }
-            Ok(Some((manifest.digest(), out)))
+            Ok(out)
         })
     }
 

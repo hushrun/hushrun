@@ -747,6 +747,8 @@ jobs:
       # tests find nothing to test and pass, and such a pass must never skip these.
       - run: hushrun run registries -- env "HUSHRUN_IT_REGISTRIES=127.0.0.1:5001 127.0.0.1:5002" cargo test --locked -p hushrun-artifact --features it --test registries -- --nocapture
       - run: hushrun run artifact-registries -- env "HUSHRUN_IT_REGISTRIES=127.0.0.1:5001 127.0.0.1:5002" cargo test --locked -p hushrun --features it --test artifact_registries -- --nocapture
+      # B-240: a bake pushed to each registry, pulled back with `hushrun build pull`.
+      - run: hushrun run build-pull-registries -- env "HUSHRUN_IT_REGISTRIES=127.0.0.1:5001 127.0.0.1:5002" cargo test --locked -p hushrun --features it --test build_bake_image -- --nocapture real_registry
       - if: failure()
         run: docker logs distribution; docker logs zot
 
