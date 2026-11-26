@@ -161,6 +161,19 @@ pub enum Command {
     /// (`hushrun build share`); Go packages are reused only that way, since Go's own cache already
     /// serves one machine.
     Build(BuildArgs),
+    /// Give each package manager the repository's baked packages: a package store beside the
+    /// tool's own cache, read in place, so an install or a build downloads only what it lacks.
+    ///
+    /// `hushrun packages bake --out DIR -- COMMAND` runs COMMAND (the check's own build, such as
+    /// `./gradlew test` or `mvn -B verify`) with Gradle's and Maven's caches at folders of its
+    /// own, and keeps what they downloaded; `--harvest gradle=$HOME/.gradle` or
+    /// `--harvest maven=$HOME/.m2/repository` takes a cache the job already filled. A run reads
+    /// the store at HUSHRUN_PACKAGES_LOWER, or /hushrun-packages; `hushrun packages exec --
+    /// COMMAND` gives it to a command outside `hushrun run`. A store nothing signed is read only
+    /// with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI. hushrun never sets a tool's offline
+    /// switch: what the store lacks is downloaded as usual.
+    #[command(verbatim_doc_comment)]
+    Packages(PackagesArgs),
     /// Run a check's command, unless this exact code already passed it.
     ///
     /// `hushrun run [NAME] -- COMMAND` runs COMMAND unless the repository's files, as they are
@@ -343,6 +356,76 @@ const WHY_HELP: &str = "Examples:
                                     The same as data (hushrun.why/v1)
   hushrun why unit tests/test_cart.py::test_total
                                     One test, with `tests.unit: test`";
+
+/// `hushrun packages` (K-6 to K-12).
+#[derive(Debug, Args)]
+pub struct PackagesArgs {
+    #[command(subcommand)]
+    pub command: Option<PackagesCommand>,
+}
+
+/// `hushrun packages`'s commands.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum PackagesCommand {
+    /// The package store's state, what verifies it, and each part with its files and size.
+    Status,
+    /// Write the repository's package store: what COMMAND downloaded, or a filled cache.
+    Bake(PackagesBakeArgs),
+    /// Print `export NAME='value'` for the variables that point each tool at its part.
+    Env,
+    /// Run COMMAND with each tool pointed at its part, and exit with its code. Records nothing.
+    Exec {
+        /// The command, after `--`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Copy the parts a tool can't read in place into its own cache, and say what was done.
+    Restore {
+        /// Only these parts.
+        parts: Vec<String>,
+    },
+    /// Hash every file of the store against its row; exit 1 on the first that differs.
+    Verify,
+}
+
+/// `hushrun packages bake --out DIR` (K-6).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct PackagesBakeArgs {
+    /// The folder to write the store to, replaced in one step.
+    #[arg(long, value_name = "DIR", required_unless_present = "tar")]
+    pub out: Option<std::path::PathBuf>,
+    /// Also, or instead, write the store as one archive whose entries are under
+    /// `hushrun-packages/`, so `tar -x -C /` puts it where a run reads one. The same store is the
+    /// same bytes.
+    #[arg(long, value_name = "FILE")]
+    pub tar: Option<std::path::PathBuf>,
+    /// Run no build: take only the caches --harvest names, and leave out every other part.
+    #[arg(long, conflicts_with = "command")]
+    pub no_build: bool,
+    /// Bake even when --out already holds these parts for these build files.
+    #[arg(long)]
+    pub force: bool,
+    /// Bake only this part (gradle, maven); repeat for more.
+    #[arg(long = "only", value_name = "PART")]
+    pub only: Vec<String>,
+    /// Take the part from a cache the job already filled: `gradle=` a Gradle user home,
+    /// `maven=` a local repository. Repeat for more.
+    #[arg(long = "harvest", value_name = "PART=FOLDER")]
+    pub harvest: Vec<String>,
+    /// Sign the store with this key (PEM), as `hushrun build bake --signing-key` does. In a CI
+    /// job with an ID token it signs keylessly with none.
+    #[arg(long, value_name = "FILE")]
+    pub signing_key: Option<std::path::PathBuf>,
+    /// Write no signature.
+    #[arg(long, conflicts_with = "signing_key")]
+    pub no_sign: bool,
+    /// Fail when the store is larger than this many bytes [default: 4 GiB].
+    #[arg(long, value_name = "BYTES")]
+    pub max_bytes: Option<u64>,
+    /// The fetch: the check's own command, run with the tools' caches at folders of the bake's.
+    #[arg(last = true)]
+    pub command: Vec<String>,
+}
 
 /// `hushrun build` (B-1, B-21).
 #[derive(Debug, Args)]

@@ -74,6 +74,26 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
+  a folder beside the baked store that holds a repository's downloaded packages, one part per
+  package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to
+  K-3), its state for a run and what lets a run read it: a signature by a signer `hushrun.yaml`
+  names, or `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1` outside CI (K-7, K-8, K-11, K-12). A run finds
+  it at `HUSHRUN_PACKAGES_LOWER` or `/hushrun-packages`; `HUSHRUN_PACKAGES=off` turns it off.
+  - **`hushrun packages bake --out DIR -- COMMAND`** runs the check's own build with Gradle's user
+    home and Maven's local repository at folders of its own and keeps what they downloaded;
+    `--harvest gradle=FOLDER` or `--harvest maven=FOLDER` takes a cache the job already filled.
+    It signs as `hushrun build bake` does (`--signing-key`, or a CI job's ID token), and a run
+    reads a store signed by a signer `hushrun.yaml` names under `build: baked: signers:`, in CI
+    too.
+  - **Readers:** Gradle reads its part in place through `GRADLE_RO_DEP_CACHE`, Maven through
+    `-Dmaven.repo.local.tail=` in `MAVEN_OPTS`, in `hushrun run` (build reuse on or off) and in
+    `hushrun packages exec -- COMMAND`; `hushrun packages env` prints them. A tool finds what
+    the store lacks online, as before: hushrun sets no offline switch.
+  - `hushrun packages status`, `verify` (every file against its row) and `restore`.
+  - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
+    same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
+    `--out` already holds these parts for these build files changes nothing, unless `--force`.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

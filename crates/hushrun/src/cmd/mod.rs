@@ -21,6 +21,7 @@ pub mod keys;
 pub mod login;
 pub mod mark;
 pub mod monitor;
+pub mod packages;
 pub mod plan;
 pub mod policy;
 pub mod ready;

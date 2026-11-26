@@ -120,7 +120,7 @@ pub(crate) enum Ended {
 }
 
 impl Ended {
-    fn words(&self) -> String {
+    pub(crate) fn words(&self) -> String {
         match self {
             Ended::Unstarted(err) => format!("couldn't start: {err}"),
             Ended::Failed(status) => format!("failed ({status})"),

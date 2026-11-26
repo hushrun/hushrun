@@ -1789,3 +1789,39 @@ fn a_test_class_of_an_execution_a_run_didnt_reach_stays_a_test_class() {
     assert!(!line.contains("none had passed"), "{line}");
     at_most_the_audit(&classes(&back.stdout), &[]);
 }
+
+// covers: K-10
+#[test]
+fn a_package_stores_tail_in_maven_opts_changes_no_units_key_or_reads() {
+    let Some(maven) = maven() else { return };
+    let shared = maven.m2.clone();
+    let mvn = maven.mvn.clone();
+    let r = Reactor::new(&junit4("reuse"), maven);
+    // The same COMMAND both times, its own repository empty: only MAVEN_OPTS names the tail, as
+    // `hushrun run` gives Maven a package store's part (K-10). First the tests' repository.
+    let local = format!("-Dmaven.repo.local={}", r.root.join("m2").display());
+    let command = [mvn.as_str(), "-B", "-o", local.as_str(), "test"];
+    let tail = |at: &std::path::Path| format!("-Dmaven.repo.local.tail={}", at.display());
+    let first = run_command(&r, &command, &[("MAVEN_OPTS", &tail(&shared))]);
+    assert_eq!(first.code, 0, "{}", first.said());
+    let before = r.map()["units"].clone();
+    assert!(
+        before.as_object().is_some_and(|u| !u.is_empty()),
+        "{before:#}"
+    );
+    // Then a store's part at another path, the same packages: no unit's key or reads changes.
+    let part = r.root.join("packages/parts/maven");
+    std::fs::create_dir_all(&part).unwrap();
+    std::os::unix::fs::symlink(&shared, part.join("repository")).unwrap();
+    let second = run_command(
+        &r,
+        &command,
+        &[("MAVEN_OPTS", &tail(&part.join("repository")))],
+    );
+    assert_eq!(second.code, 0, "{}", second.said());
+    assert_eq!(
+        r.map()["units"],
+        before,
+        "the store changed a unit's key or reads"
+    );
+}
