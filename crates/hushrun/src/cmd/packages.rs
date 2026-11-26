@@ -205,15 +205,19 @@ fn maven_opts(opts: Option<&str>, word: &str) -> String {
     hushrun_packages::parts::maven::opts_with(opts, word)
 }
 
-/// K-10: what the store a run here reads gives COMMAND. `may_write_trusted` is the run's
-/// authority. Nothing when no store is named.
+/// K-10: what the store a run here reads gives COMMAND, after seeding the parts whose tool
+/// fetches inside the check's own build (cargo). `may_write_trusted` is the run's authority.
+/// Nothing when no store is named.
 pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool) -> Given {
     // K-11: no store named, nothing to read: one `stat`.
     if state::named(&var).is_none() {
         return Given::default();
     }
     let context = Context::here(global);
-    given_by(&context, &context.state(may_write_trusted))
+    let state = context.state(may_write_trusted);
+    let mut given = given_by(&context, &state);
+    given.lines.extend(seed_all(&context, &state, &[], true));
+    given
 }
 
 fn given_by(context: &Context, state: &State) -> Given {
@@ -328,7 +332,7 @@ fn env_command(global: &GlobalOpts) -> CmdResult {
         let context = Context::here(global);
         let state = context.state(in_ci());
         given = given_by(&context, &state);
-        given.lines.extend(seed_all(&context, &state, &[]));
+        given.lines.extend(seed_all(&context, &state, &[], false));
     }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
@@ -363,7 +367,7 @@ pub fn exec(global: &GlobalOpts, command: &[String]) -> ExitCode {
         let context = Context::here(global);
         let state = context.state(in_ci());
         given = given_by(&context, &state);
-        given.lines.extend(seed_all(&context, &state, &[]));
+        given.lines.extend(seed_all(&context, &state, &[], false));
     }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
@@ -408,15 +412,16 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
             read.rows.len()
         );
     }
-    for line in seed_all(&context, &state, parts) {
+    for line in seed_all(&context, &state, parts, false) {
         println!("{line}");
     }
     Ok(Exit::Ok)
 }
 
 /// K-10, mechanism C: seeds every part of the store whose reader is a seed (of `only`, when it
-/// names any) into the tool's own cache, and says what it did.
-fn seed_all(context: &Context, state: &State, only: &[String]) -> Vec<String> {
+/// names any; in a run, `in_run`, only those a run seeds) into the tool's own cache, and says
+/// what it did.
+fn seed_all(context: &Context, state: &State, only: &[String], in_run: bool) -> Vec<String> {
     let mut lines = Vec::new();
     let Some(lower) = state.lower() else {
         return lines;
@@ -428,7 +433,9 @@ fn seed_all(context: &Context, state: &State, only: &[String]) -> Vec<String> {
         let Some(part) = part::by_name(&read.entry.part) else {
             continue;
         };
-        if part.reader(&read.dir, &context.checkout, &var) != Reader::Seed {
+        if part.reader(&read.dir, &context.checkout, &var) != Reader::Seed
+            || (in_run && !part.seeds_in_a_run())
+        {
             continue;
         }
         let name = part.name();
@@ -672,6 +679,18 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         ));
     }
     let baked_ms = baked_ms();
+    // K-3: each part's lockfiles, for the rows whose `locked` only a lockfile says.
+    let locks: Vec<(&str, part::Locks)> = metas
+        .iter()
+        .filter_map(|m| {
+            let part = part::by_name(&m.part)?;
+            Some((
+                part.name(),
+                part.locks(&context.checkout, &part.manifests(&context.tracked)),
+            ))
+        })
+        .collect();
+    let no_locks = part::Locks::new();
     // K-3: a part its lockfile verifies gives each row the lockfile's own hash of its file.
     let lockeds: Vec<(String, Locked)> = metas
         .iter()
@@ -697,8 +716,13 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         &|name, path| {
             let found = part::by_name(name);
             let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
-            // K-3: a part's own `locked` by its path, else its lockfile's hash of these bytes.
-            let locked = found.and_then(|p| p.locked(inner)).or_else(|| {
+            let locks = locks
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map_or(&no_locks, |(_, l)| l);
+            // K-3: a part's own `locked` (by its path or its lockfiles), else its lockfile's
+            // hash of these bytes.
+            let locked = found.and_then(|p| p.locked_by(inner, locks)).or_else(|| {
                 let (_, lockfile) = lockeds.iter().find(|(n, _)| n == name)?;
                 let sha256 = store::sha256_file(&parts_dir.join(name).join(path)).ok()?;
                 lockfile
@@ -776,20 +800,17 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             }
         ));
     }
+    let needs_signature = packages
+        .parts
+        .iter()
+        .any(|p| p.verified_by == store::VerifiedBy::Signature);
     lines.push(match &signed_by {
         Ok(signer) => format!("packages: signed by {signer}"),
-        Err(why)
-            if packages
-                .parts
-                .iter()
-                .all(|p| p.verified_by == store::VerifiedBy::Lockfile) =>
-        {
-            format!(
-                "packages: the store is unsigned ({why}): each part is checked against its lockfile, so any run reads it"
-            )
-        }
-        Err(why) => format!(
+        Err(why) if needs_signature => format!(
             "packages: the store is unsigned ({why}): a run reads its parts a lockfile doesn't verify only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI"
+        ),
+        Err(why) => format!(
+            "packages: the store is unsigned ({why}): each part is checked against its lockfile, so any run reads it"
         ),
     });
     lines.push(format!(
@@ -1077,8 +1098,8 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
 /// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
-/// Maven's local repository, NuGet's global packages folder, pnpm's store, npm's cache and
-/// Composer's cache at folders of the bake's own under `cache`.
+/// Maven's local repository, NuGet's global packages folder, pnpm's store, npm's cache, Composer's
+/// cache, the cargo home and Go's module cache at folders of the bake's own under `cache`.
 fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
@@ -1112,6 +1133,14 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
             (
                 hushrun_packages::parts::composer::CACHE_DIR,
                 composer.into_os_string(),
+            ),
+            (
+                "CARGO_HOME",
+                fetch_cache(cache, &hushrun_packages::parts::cargo::Cargo).into_os_string(),
+            ),
+            (
+                "GOMODCACHE",
+                fetch_cache(cache, &hushrun_packages::parts::go::Go).into_os_string(),
             ),
             (hushrun_packages::LOWER, OsString::new()),
         ]
