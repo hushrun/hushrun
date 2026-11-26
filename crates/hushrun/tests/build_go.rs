@@ -912,27 +912,77 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     // A third machine, with nothing of its own yet: every package asks the relay.
     let b = Machine::new(dir.path(), "c", Some(&a.repo), &[]);
     let stamp = |name: &str| format!("date +%s > ../{name}");
+    let hires =
+        |name: &str| format!("perl -MTime::HiRes=time -e 'printf \"%.3f\\n\", time' > ../{name}");
     let script = format!(
-        "sleep 3; {}; go build -o /dev/null ./cmd/app; {}; go build -o /dev/null ./lib; {}; \
+        "{}; sleep 3; {}; go build -o /dev/null ./cmd/app; {}; go build -o /dev/null ./lib; {}; \
          go build -o /dev/null ./cmd/app; {}",
+        hires("ts"),
         stamp("t0"),
         stamp("t1"),
         stamp("t2"),
         stamp("t3"),
     );
+    let epoch = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    };
     let mut cmd = b.hushrun(&fake);
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
+    // DIAGNOSTIC: a group of its own, so that no SIGHUP unfreezes it.
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let spawned_at = epoch();
     let child = cmd.spawn().unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     // Frozen, not gone: the relay is a thread of hushrun's own process.
     let pid = child.id().to_string();
+    let stopped_at = epoch();
     Command::new("kill").args(["-STOP", &pid]).status().unwrap();
     let t3 = b.root.join("t3");
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !t3.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
+    }
+    let mut diag = String::new();
+    let ts_frozen = std::fs::read_to_string(b.root.join("ts")).unwrap_or_default();
+    diag += &format!(
+        "DIAG spawned_at={spawned_at:.3} stopped_at={stopped_at:.3} ts_while_frozen={:?} t0_while_frozen={:?} t3={}\n",
+        ts_frozen.trim(),
+        std::fs::read_to_string(b.root.join("t0"))
+            .unwrap_or_default()
+            .trim(),
+        t3.exists()
+    );
+    if !t3.exists() {
+        let sh = |c: &str| -> String {
+            let o = Command::new("sh").args(["-c", c]).output().unwrap();
+            format!(
+                "$ {c}\n{}{}\n",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+        };
+        diag += &sh(&format!(
+            "ps -A -o pid,ppid,pgid,stat,etime,command | awk '$3=={pid}'"
+        ));
+        diag += &sh(&format!(
+            "find {} -name 'go-relay-down' -o -name 'relay.sock' 2>/dev/null",
+            b.root.display()
+        ));
+        diag += &sh(&format!(
+            "find /tmp /private/tmp /var/folders -name 'relay.sock' -newer {} 2>/dev/null | head",
+            b.repo.display()
+        ));
+        diag += &sh(&format!(
+            "for p in $(ps -A -o pid=,pgid=,command= | awk '$1=={pid} || $2=={pid} && ($3 ~ /gocache/ || $3 ~ /go$/ || $3 ~ /bin\\/go/ || $4 == \"build\") {{print $1}}'); do echo \"== $p\"; ps -o pid,stat,command -p $p; sample $p 2 -mayDie 2>&1 | grep -v '^$' | head -150; done"
+        ));
+        diag += &sh(&format!(
+            "lsof -p $(pgrep -g {pid} -f gocache | head -1) 2>&1 | head -40"
+        ));
     }
     Command::new("kill").args(["-CONT", &pid]).status().unwrap();
     let out = child.wait_with_output().unwrap();
@@ -944,6 +994,8 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
             .unwrap_or(0)
     };
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = format!("{stderr}\n{diag}");
+    eprintln!("{diag}");
     assert!(t3.exists(), "go hung with a frozen relay: {stderr}");
     // The first command waits for the relay once; the run's later ones don't ask it.
     let (t0, t1, t2, t3) = (read("t0"), read("t1"), read("t2"), read("t3"));
