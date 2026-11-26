@@ -380,7 +380,7 @@ fn a_server_hears_that_a_failed_test_file_passed_when_it_ran_again_and_no_name()
     }
 }
 
-// covers: C-165, C-166, C-164
+// covers: C-165, C-166, C-164, C-167
 #[test]
 fn a_test_file_the_server_saw_fail_and_pass_before_says_how_often_and_the_summary_names_it() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
@@ -416,6 +416,15 @@ fn a_test_file_the_server_saw_fail_and_pass_before_says_how_often_and_the_summar
         before.stderr
     );
     let key = results.failed_keys().pop().expect("its fail was recorded");
+    // \[C-167\] `hushrun why` asks a server from before flaky tests, which answers 404: nothing more.
+    let why = || r.run(&["why", "unit", "test_hidden.py"], &envs(&server));
+    let asked = why();
+    assert_eq!(asked.code, 0, "{}", asked.stderr);
+    assert!(
+        !asked.stdout.contains("failed and passed"),
+        "{}",
+        asked.stdout
+    );
     // It passes again on the same files, so its key's newest result is a pass.
     let passed = pytest(&[]);
     assert_eq!(passed.code, 0, "{}", passed.stderr);
@@ -467,6 +476,16 @@ fn a_test_file_the_server_saw_fail_and_pass_before_says_how_often_and_the_summar
         ),
         "{}",
         on_github.stderr
+    );
+    // \[C-167\] And `hushrun why` says it, from the one request it makes for it.
+    let asked = why();
+    assert_eq!(asked.code, 0, "{}", asked.stderr);
+    assert!(
+        asked.stdout.contains(
+            "\n  it has failed and passed on the same files 3 times in the last 30 days, last on 2026-11-25\n"
+        ),
+        "{}",
+        asked.stdout
     );
     let written = std::fs::read_to_string(&summary).expect("a step summary");
     assert!(

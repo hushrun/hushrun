@@ -174,6 +174,28 @@ pub fn run(global: &GlobalOpts, args: &WhyArgs) -> CmdResult {
         results: held,
         counts: &counts,
     });
+    // \[C-167\] What the server holds of it: one more line when it failed and passed on the same
+    // files, under a key it would record under now.
+    let mut explained = explained;
+    if let Ok(Selection::On(backend)) = &backend
+        && !explained.keys.is_empty()
+        && let Some(flaky) = backend.flaky_units(check.as_str(), repository.as_deref())
+        && let Some(told) = explained
+            .keys
+            .iter()
+            .filter_map(|key| flaky.get(key))
+            .max_by_key(|told| told.events)
+    {
+        explained.detail.push(format!(
+            "it has failed and passed on the same files {} in the last 30 days, last on {}",
+            if told.events == 1 {
+                "1 time".to_string()
+            } else {
+                format!("{} times", units::words::thousands(told.events))
+            },
+            told.last_at.get(..10).unwrap_or(&told.last_at)
+        ));
+    }
     let says = explained.says.clone();
     answer(
         global,

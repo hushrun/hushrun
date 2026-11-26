@@ -1,8 +1,8 @@
 # 0147. Flaky tests, from evidence
 
-- **Status:** proposed; being built (C-160 to C-166 built; C-167 is the next step)
+- **Status:** proposed; built (C-160 to C-167)
 - **Date:** 2026-11-25
-- **Rules:** C-160 to C-169 reserved, C-160 to C-166 added; C-32, C-33, C-34 amended; relies on
+- **Rules:** C-160 to C-169 reserved, C-160 to C-167 added; C-32, C-33, C-34 amended; relies on
   ADR 0069, 0074, 0080, 0087, 0088, 0142, 0145
 
 ## Context
@@ -53,7 +53,8 @@ This ADR is the CLI's half: what it sends, and (the next step) what it says with
    `it may be flaky` line gains `; that makes <n> times in the last 30 days`, a fail with no
    second run gets a line that says to run it again before changing code for it, at most five
    lines and a count of the rest, and on GitHub the step summary lists them. No new request is
-   made during a run, and nothing changes a verdict. The counting line names no command yet:
+   made during a run, and nothing changes a verdict. `hushrun why` asks the server once, by the
+   keys it computes now, and adds a line when the unit did this (C-167). The counting line names no command yet:
    the one that lists a repository's flaky tests by name is a later step.
 6. **`id` is reserved.** A unit result may carry `id`, an identity that survives edits. This
    version sends none: making one that the server can't compute from a guessed test name needs a

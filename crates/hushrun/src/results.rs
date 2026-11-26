@@ -1206,6 +1206,53 @@ impl Backend {
         }
     }
 
+    /// \[C-167\] `GET {base}/v0/units/flaky` for `check` in `repository`: the units the org saw
+    /// fail and pass on the same files in the last 30 days, by key. `None` from a directory, a
+    /// server from before it (404, 405), or any answer that doesn't read: then nothing is said.
+    pub fn flaky_units(
+        &self,
+        check: &str,
+        repository: Option<&str>,
+    ) -> Option<BTreeMap<Digest, Told>> {
+        let Store::Server(server) = &self.store else {
+            return None;
+        };
+        let query = format!(
+            "check={}&repository={}",
+            query_value(check),
+            query_value(&repository.unwrap_or_default().to_lowercase())
+        );
+        let (status, body) = server
+            .ledger
+            .json_get_query("v0/units/flaky", &query)
+            .ok()?;
+        if status != 200 || body.len() > MOST_ANSWER_BYTES * 16 {
+            return None;
+        }
+        #[derive(Deserialize)]
+        struct Item {
+            key: String,
+            #[serde(flatten)]
+            told: Told,
+        }
+        #[derive(Deserialize)]
+        struct Listed {
+            flaky: Vec<serde_json::Value>,
+        }
+        let listed: Listed = serde_json::from_slice(&body).ok()?;
+        Some(
+            listed
+                .flaky
+                .into_iter()
+                .filter_map(|item| {
+                    let item: Item = serde_json::from_value(item).ok()?;
+                    Some((Digest::from_hex(&item.key).ok()?, item.told))
+                })
+                .filter(|(_, told)| told.events > 0)
+                .collect(),
+        )
+    }
+
     /// Why a result recorded now would be refused for want of a machine to sign it, when this
     /// machine can tell (C-18). \[ADR 0060\] It sends nothing and registers nothing, so that
     /// `hushrun ready` and the pre-push hook spend no machine of the person's in the org: the

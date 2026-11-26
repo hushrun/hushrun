@@ -101,6 +101,8 @@ pub struct Explanation {
     pub file: Option<String>,
     /// A path of direct edges from the test file to that file, when the adapter saw one.
     pub path: Vec<Hop>,
+    /// \[C-167\] The keys a run would record it under, as they can be computed now.
+    pub keys: Vec<hushrun_core::digest::Digest>,
 }
 
 /// Explains what a run of the check would do with `input.unit`.
@@ -117,6 +119,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         here_only: false,
         file: None,
         path: Vec::new(),
+        keys: Vec::new(),
     };
     let Some(tests) = input.tests.filter(|t| t.is_on()) else {
         out.decision = Decision::Off;
@@ -368,6 +371,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         .iter()
         .map(|l| keyer.key(&unit, &l.files, &l.outside))
         .collect();
+    out.keys = keys.iter().flatten().copied().collect();
     let changes = changes(&map, &sets, input.tree, &unit, &reads);
 
     let looked = match (&input.results, keys.iter().any(Option::is_some)) {
@@ -681,6 +685,7 @@ fn explain_test(
                 .test_key(at.unit, at.id, &l.list.files, &l.list.outside)
         })
         .collect();
+    out.keys = keys.iter().flatten().copied().collect();
     let looked = match (&input.results, keys.iter().any(Option::is_some)) {
         (Ok(results), true) => {
             shared::lookup(*results, keys.iter().flatten().copied(), input.counts)
