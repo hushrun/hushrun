@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::part::Locks;
 use crate::part::Part as _;
 use crate::part::{self, Reader};
-use crate::parts::{cargo::Cargo, go::Go, gradle::Gradle, maven::Maven, nuget::Nuget};
+use crate::parts::{cargo::Cargo, go::Go, gradle::Gradle, hex::Hex, maven::Maven, nuget::Nuget};
 
 fn paths(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -1159,4 +1159,179 @@ fn npm_keeps_only_tarballs_and_seeds_only_what_the_lockfile_names_by_its_bytes()
         Npm.seed_into(Path::new("/x"), &named),
         Ok((std::path::PathBuf::from("/c/_cacache"), "_cacache"))
     );
+}
+
+/// A `mix.lock` as Mix 1.18 and Hex 2.7 write it: two Hex packages, a git dependency and a
+/// package of an organization's repository.
+const MIX_LOCK: &str = r#"%{
+  "decimal": {:hex, :decimal, "2.3.0", "3ad6255aa77b4a3c4f818171b12d237500e63525c2fd056699967a3e7ea20f62", [:mix], [], "hexpm", "a4d66355cb29cb47c3cf30e71329e58361cfcb37c34235ef3bf1d7bf3773aeac"},
+  "jason": {:hex, :jason, "1.4.4", "b9226785a9aa77b6857ca22832cffa5d5011a667207eb2a0ad56adb5db443b8a", [:mix], [{:decimal, "~> 1.0 or ~> 2.0", [hex: :decimal, repo: "hexpm", optional: true]}], "hexpm", "c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b"},
+  "mine": {:git, "https://example.com/mine.git", "0123456789abcdef0123456789abcdef01234567", [branch: "main"]},
+  "secret": {:hex, :secret, "1.0.0", "1111111111111111111111111111111111111111111111111111111111111111", [:mix], [], "hexpm:acme", "2222222222222222222222222222222222222222222222222222222222222222"},
+}
+"#;
+
+// covers: K-3, K-4, K-5
+#[test]
+fn hex_keeps_tarballs_and_reads_the_outer_checksum_of_mix_lock() {
+    let tracked = paths(&[
+        "mix.exs",
+        "mix.lock",
+        "apps/web/mix.exs",
+        "lib/a.ex",
+        "mix.lock.bak",
+    ]);
+    assert_eq!(
+        Hex.manifests(&tracked),
+        paths(&["mix.exs", "mix.lock", "apps/web/mix.exs"])
+    );
+    for kept in ["jason-1.4.4.tar", "phoenix_live_view-1.0.0-rc.7.tar"] {
+        assert!(Hex.keep(kept), "{kept}");
+    }
+    for left in [
+        "cache.bin",
+        ".jason-1.4.4.tar.123.hushrun",
+        "jason-1.4.4.tar.tmp",
+        "Jason-1.4.4.tar",
+        "nested/jason-1.4.4.tar",
+        "jason.tar",
+    ] {
+        assert!(!Hex.keep(left), "{left}");
+    }
+    assert_eq!(
+        Hex.package("hexpm/phoenix_live_view-1.0.0-rc.7.tar")
+            .as_deref(),
+        Some("phoenix_live_view 1.0.0-rc.7")
+    );
+    let pinned = crate::parts::hex::lockfile_checksums(MIX_LOCK).unwrap();
+    assert_eq!(
+        pinned,
+        [
+            (
+                "decimal-2.3.0.tar".to_string(),
+                "a4d66355cb29cb47c3cf30e71329e58361cfcb37c34235ef3bf1d7bf3773aeac".to_string()
+            ),
+            (
+                "jason-1.4.4.tar".to_string(),
+                "c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b".to_string()
+            ),
+        ],
+        "a git dependency and an organization's package pin nothing here"
+    );
+    // The older `"name" => {…}` keys read the same; an empty lockfile pins nothing.
+    let older = MIX_LOCK.replace("\": {", "\" => {");
+    assert_eq!(
+        crate::parts::hex::lockfile_checksums(&older).unwrap(),
+        pinned
+    );
+    for empty in ["%{}", "%{\n}\n"] {
+        assert!(
+            crate::parts::hex::lockfile_checksums(empty)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // A form it doesn't know gives no hashes: an error that names what it is.
+    let six = r#"%{"jason": {:hex, :jason, "1.4.4", "b9226785a9aa77b6857ca22832cffa5d5011a667207eb2a0ad56adb5db443b8a", [:mix], []},}"#;
+    let why = crate::parts::hex::lockfile_checksums(six).unwrap_err();
+    assert!(why.contains("of 6 fields"), "{why}");
+    let spread = "%{\n  \"jason\": {:hex, :jason, \"1.4.4\",\n    \"b9\"},\n}\n";
+    assert!(crate::parts::hex::lockfile_checksums(spread).is_err());
+    assert!(crate::parts::hex::lockfile_checksums("[]").is_err());
+    let short = MIX_LOCK.replace("c5eb0cab", "c5eb");
+    assert!(crate::parts::hex::lockfile_checksums(&short).is_err());
+    // Through the part: a lockfile among the manifests, keyed by the tarball's file name.
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("mix.lock"), MIX_LOCK).unwrap();
+    let locks = Hex
+        .read_locks(checkout.path(), &paths(&["mix.exs", "mix.lock"]))
+        .unwrap();
+    assert_eq!(
+        locks["jason-1.4.4.tar"],
+        ["c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b"]
+    );
+    let locked = Hex
+        .lockfile(checkout.path(), &paths(&["mix.lock"]))
+        .unwrap();
+    let sha = hushrun_core::blocks::Hex32::parse(
+        "c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b",
+    )
+    .unwrap();
+    assert_eq!(
+        locked.of("jason-1.4.4.tar", &sha),
+        Some("sha256:c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b")
+    );
+    assert_eq!(locked.of("jason-1.4.3.tar", &sha), None);
+    // The seed's verdict: a tarball the lockfile pins, by its bytes.
+    let admit = Hex.admit(checkout.path(), &paths(&["mix.lock"]));
+    assert_eq!(
+        admit("jason-1.4.3.tar", b"x"),
+        crate::part::Admit::NotLocked
+    );
+    assert_eq!(admit("jason-1.4.4.tar", b"x"), crate::part::Admit::Changed);
+    assert!(Hex.links());
+    std::fs::write(checkout.path().join("mix.lock"), six).unwrap();
+    let why = Hex
+        .read_locks(checkout.path(), &paths(&["mix.lock"]))
+        .unwrap_err();
+    assert!(
+        why.starts_with("mix.lock is in a form this hushrun doesn't read ("),
+        "{why}"
+    );
+}
+
+// covers: K-10
+#[test]
+fn hex_is_seeded_into_the_cache_hex_would_use() {
+    let env = |vars: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            vars.iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| OsString::from(v))
+        }
+    };
+    assert_eq!(
+        Hex.reader(Path::new("/p"), Path::new("/c"), &env(&[])),
+        Reader::Seed
+    );
+    let into = |vars| Hex.seed_into(Path::new("/c"), &env(vars));
+    let seed = |path: &str| Ok((std::path::PathBuf::from(path), "packages/hexpm"));
+    assert_eq!(
+        into(&[("HOME", "/home/me")]),
+        seed("/home/me/.hex/packages/hexpm")
+    );
+    assert_eq!(
+        into(&[("HOME", "/home/me"), ("HEX_HOME", "/h"), ("MIX_XDG", "1")]),
+        seed("/h/packages/hexpm")
+    );
+    assert_eq!(
+        into(&[("HOME", "/home/me"), ("MIX_XDG", "true")]),
+        seed("/home/me/.cache/hex/packages/hexpm")
+    );
+    assert_eq!(
+        into(&[
+            ("HOME", "/home/me"),
+            ("MIX_XDG", "1"),
+            ("XDG_CACHE_HOME", "/xc")
+        ]),
+        seed("/xc/hex/packages/hexpm")
+    );
+    assert_eq!(
+        into(&[
+            ("HOME", "/home/me"),
+            ("MIX_XDG", "yes"),
+            ("XDG_CACHE_HOME", "/xc")
+        ]),
+        seed("/home/me/.hex/packages/hexpm"),
+        "Hex reads only 1 and true"
+    );
+    assert_eq!(
+        into(&[("HOME", "/home/me"), ("HEX_HOME", "")]),
+        Err("HEX_HOME is empty, not an absolute folder".into())
+    );
+    assert_eq!(
+        into(&[("HEX_HOME", "rel")]),
+        Err("HEX_HOME is `rel`, not an absolute folder".into())
+    );
+    assert_eq!(into(&[]), Err("neither HEX_HOME nor HOME is set".into()));
 }

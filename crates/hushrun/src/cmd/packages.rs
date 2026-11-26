@@ -446,12 +446,13 @@ fn seed_all(context: &Context, state: &State, only: &[String], in_run: bool) -> 
                 continue;
             }
         };
-        let admit = part.admit_for(
-            &context.checkout,
-            &part.manifests(&context.tracked),
-            read.entry.verified_by,
-        );
-        match hushrun_packages::seed::seed(read, under, &dest, &*admit) {
+        let manifests = part.manifests(&context.tracked);
+        if let Err(why) = part.read_locks(&context.checkout, &manifests) {
+            lines.push(format!("packages: {name}: left alone: {why}"));
+            continue;
+        }
+        let admit = part.admit_for(&context.checkout, &manifests, read.entry.verified_by);
+        match hushrun_packages::seed::seed(read, under, &dest, &*admit, part.links()) {
             Ok(done) if done.stamped => lines.push(format!(
                 "packages: {name}: seeded already into {}",
                 dest.display()
@@ -678,6 +679,21 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     take_all(
         &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
     )?;
+    // K-3: a part verified by its lockfile whose lockfile is in a form hushrun doesn't read is
+    // left out, never guessed.
+    metas.retain(|m| {
+        let Some(part) = part::by_name(&m.part) else {
+            return true;
+        };
+        match part.read_locks(&context.checkout, &part.manifests(&context.tracked)) {
+            Err(why) if part.verified_by() == store::VerifiedBy::Lockfile => {
+                lines.push(format!("packages: {}: left out: {why}", part.name()));
+                let _ = fs::remove_dir_all(new.join(store::PARTS).join(part.name()));
+                false
+            }
+            _ => true,
+        }
+    });
     if metas.is_empty() {
         for line in &lines {
             eprintln!("hushrun: {line}");

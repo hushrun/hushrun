@@ -307,6 +307,12 @@ jobs:
           elixir-version: "1.18.4"
       - name: Name mix for the ExUnit tests
         run: echo "HUSHRUN_TEST_MIX=$(command -v mix)" >> "$GITHUB_ENV"
+      # Hex, pinned, in a folder of its own, for the tests of the `hex` part of a package store
+      # (ADR 0157), which fail rather than pass without it once HUSHRUN_TEST_HEX names the folder.
+      - name: Install Hex for the hex part's tests
+        run: |
+          MIX_ARCHIVES="$RUNNER_TEMP/hex" mix local.hex 2.7.0 --force
+          echo "HUSHRUN_TEST_HEX=$RUNNER_TEMP/hex" >> "$GITHUB_ENV"
       # Ruby: RSpec, Minitest 6 and Minitest 5 for the tests of the Ruby adapter (ADR 0114), each
       # in a gem directory of its own, pinned.
       - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
