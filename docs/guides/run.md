@@ -862,6 +862,11 @@ it used before) and checks each module against `go.sum`. Cargo reads no second f
 its bytes are the ones `Cargo.lock` pins; `hushrun packages restore` does that in a setup script.
 A Cargo or Go part needs no signature: the lockfile checks every file.
 
+SwiftPM reads no second cache, so `hushrun packages restore` (or `exec`, or `env`) copies each
+repository your `Package.resolved` pins into SwiftPM's cache, checking every file as it copies
+and leaving alone what the cache already holds. Run it in a sandbox's setup, before the checks:
+`hushrun run` copies nothing. A bake runs `swift package resolve` itself, so it needs no command.
+
 ```sh
 # Bake: run the check's own build with the tools' caches at the bake's own folders.
 hushrun packages bake --out /hushrun-packages -- ./gradlew test
