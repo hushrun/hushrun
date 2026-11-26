@@ -2,7 +2,9 @@
 
 pub mod bun;
 pub mod bundler;
+pub mod cargo;
 pub mod composer;
+pub mod go;
 pub mod gradle;
 pub mod maven;
 pub mod npm;

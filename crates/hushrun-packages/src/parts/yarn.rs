@@ -292,7 +292,7 @@ impl Part for Yarn {
         })
     }
 
-    fn locked_by(&self, checkout: &Path, manifests: &[String]) -> Option<LockedBy> {
+    fn locked_from(&self, checkout: &Path, manifests: &[String]) -> Option<LockedBy> {
         let named = hashes(checkout, manifests);
         Some(Box::new(move |_, bytes| {
             named.get(&sha512_hex(bytes)).cloned()
@@ -447,7 +447,7 @@ mod tests {
         let admit = Yarn.admit(t.path(), &manifests);
         assert_eq!(admit("a.zip", b"zip"), Admit::Copy);
         assert_eq!(admit("a.zip", b"zap"), Admit::NotLocked);
-        let locked = Yarn.locked_by(t.path(), &manifests).unwrap();
+        let locked = Yarn.locked_from(t.path(), &manifests).unwrap();
         assert_eq!(
             locked("a.zip", b"zip"),
             Some(format!("10c0/{}", hex(b"zip")))

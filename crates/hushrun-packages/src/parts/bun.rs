@@ -225,7 +225,7 @@ impl Part for Bun {
         })
     }
 
-    fn locked_by(&self, checkout: &Path, manifests: &[String]) -> Option<LockedBy> {
+    fn locked_from(&self, checkout: &Path, manifests: &[String]) -> Option<LockedBy> {
         let named = locked_hashes(checkout, manifests);
         Some(Box::new(move |path, bytes| {
             named
@@ -534,7 +534,7 @@ mod tests {
         );
         assert!(!cache.join("@s/b@2.0.0@@@1").exists());
         assert!(!cache.join("gone@3.0.0@@@1").exists());
-        let locked = Bun.locked_by(&checkout, &manifests).unwrap();
+        let locked = Bun.locked_from(&checkout, &manifests).unwrap();
         assert_eq!(locked("a@1.0.0.tgz", &good), Some(integrity(&good)));
         assert_eq!(locked("@s/b@2.0.0.tgz", &other), None);
     }

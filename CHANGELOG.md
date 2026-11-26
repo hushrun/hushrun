@@ -147,6 +147,16 @@ project's new branch starts from what main's CI already ran.
   offline. A file the cache holds is left as it is. `hushrun packages bake` runs `swift package
   resolve` itself, no command needed; `--harvest swiftpm=FOLDER` takes a filled cache. The part
   needs a signature, since git checks no file of a clone it copies from a folder.
+- **Baked packages for Cargo and Go** ([ADR 0152](docs/adr/0152-cargo-and-go-packages.md)): a
+  package store's `cargo` part holds `.crate` files, and `hushrun run` copies each one the run's
+  cargo home lacks into it before COMMAND, only when its SHA-256 is the checksum `Cargo.lock`
+  pins (cargo checks none for a file already in its cache); `hushrun packages restore` does the
+  same for a setup script. Its `go` part is Go's first proxy: `GOPROXY=file://…,` then the proxies
+  Go would use, and Go checks each module against `go.sum`. It is left alone where Go would take
+  a module `go.sum` lacks unchecked (`GOPRIVATE`, `GONOSUMDB`, `GOSUMDB=off`). Both are checked
+  against the lockfile, so any run reads them unsigned, CI included. `bake -- COMMAND` runs the
+  fetch with `CARGO_HOME` and `GOMODCACHE` at its own folders; `--harvest cargo=FOLDER` and
+  `--harvest go=FOLDER` take a filled cargo home or module cache.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
