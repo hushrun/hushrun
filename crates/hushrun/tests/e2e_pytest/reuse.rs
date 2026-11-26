@@ -151,7 +151,7 @@ fn a_run_that_reuses_says_so_records_it_skips_the_same_code_and_force_runs_every
     let saved = result["units"]["savedMs"].as_u64().expect("savedMs");
     assert_eq!(
         result["units"],
-        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved})
+        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved, "audited": 1})
     );
     // Reuse never chains: a reused test file records nothing.
     assert_eq!(r.unit_count(), 7 + 3 - 1, "{}", changed.stderr);
@@ -454,7 +454,8 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
             .iter()
             .any(|r| r["units"]["savedMs"].is_u64()
                 && r["units"]
-                    == json!({"total": 8, "ran": 3, "reused": 5, "savedMs": r["units"]["savedMs"]})),
+                    == json!({"total": 8, "ran": 3, "reused": 5, "savedMs": r["units"]["savedMs"],
+                                 "audited": 1})),
         "{:?}",
         results.recorded()
     );

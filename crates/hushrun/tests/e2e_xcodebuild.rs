@@ -271,12 +271,13 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
     assert!(second.ran("LibTests", "testLib"), "{}", second.stdout);
     let units = r.newest_result()["units"].clone();
     let other = second.ran("OtherTests", "testAlone");
-    assert_eq!(
-        units,
-        json!({"total": 2, "ran": if other { 2 } else { 1 }, "reused": if other { 0 } else { 1 }}),
-        "{}",
-        second.stderr
-    );
+    // \[C-163\] The other target ran only as the plan's audit.
+    let mut want =
+        json!({"total": 2, "ran": if other { 2 } else { 1 }, "reused": if other { 0 } else { 1 }});
+    if other {
+        want["audited"] = json!(1);
+    }
+    assert_eq!(units, want, "{}", second.stderr);
 }
 
 // covers: C-110, C-112, C-113

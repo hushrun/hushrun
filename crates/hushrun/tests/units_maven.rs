@@ -253,7 +253,7 @@ fn a_change_runs_the_classes_of_its_module_and_of_the_modules_that_depend_on_it_
     let units = other.units.clone();
     assert_eq!(
         units,
-        serde_json::json!({"total": 6, "ran": 4, "reused": 2, "savedMs": units["savedMs"]})
+        serde_json::json!({"total": 6, "ran": 4, "reused": 2, "savedMs": units["savedMs"], "audited": 1})
     );
     // \[C-37\] What `hushrun why` says of a class is end to end: e2e_maven.rs.
 
@@ -349,8 +349,12 @@ fn junit4_where_the_hook_cant_load_runs_everything_and_records_what_ran() {
         classes(&second.stdout)
     );
     second.line("unit: no test file was reused: the test-JVM hook loaded in no test JVM");
+    // \[C-163\] The plan's audit is counted when it ran, as every class did here.
+    let mut units = second.units.clone();
+    assert!(units["audited"].as_u64().is_none_or(|n| n <= 1), "{units}");
+    units.as_object_mut().unwrap().remove("audited");
     assert_eq!(
-        second.units,
+        units,
         serde_json::json!({"total": 3, "ran": 3, "reused": 0})
     );
 }

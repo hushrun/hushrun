@@ -88,7 +88,7 @@ fn pytest_reuses_what_already_passed_on_the_files_it_read() {
     let saved = changed.units["savedMs"].as_u64().expect("savedMs");
     assert_eq!(
         changed.units,
-        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved})
+        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved, "audited": 1})
     );
     // Reuse never chains: a reused test file records nothing.
     assert_eq!(unit_count(&r), 7 + 3 - 1, "{}", changed.said());

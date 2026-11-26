@@ -378,7 +378,7 @@ fn go_reuses_what_already_passed_and_audits_it() {
     assert!(units["savedMs"].is_u64(), "{units}");
     assert_eq!(
         units,
-        serde_json::json!({"total": 7, "ran": 3, "reused": 4, "savedMs": units["savedMs"]})
+        serde_json::json!({"total": 7, "ran": 3, "reused": 4, "savedMs": units["savedMs"], "audited": 1})
     );
     // What reuse saved, from the reused packages' recorded times: below a second it says only how
     // many, from a second on how long too, which a loaded machine reaches.
