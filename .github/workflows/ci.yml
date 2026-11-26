@@ -358,6 +358,12 @@ jobs:
             composer require --working-dir "$d" --no-interaction --no-progress --quiet --dev "pestphp/pest:$v"
             echo "HUSHRUN_TEST_PEST${v%%.*}=$d/vendor" >> "$GITHUB_ENV"
           done
+      # Composer 2.8.12, pinned over the runner's, for the tests of the composer part of a package
+      # store; `self-update` checks the release's signature.
+      - name: Pin Composer for the package store tests
+        run: |
+          sudo "$(command -v composer)" self-update --no-interaction 2.8.12
+          echo "HUSHRUN_TEST_COMPOSER=$(command -v composer)" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
