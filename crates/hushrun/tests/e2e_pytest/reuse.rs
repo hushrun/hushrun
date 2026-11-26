@@ -336,6 +336,50 @@ fn a_test_file_that_passes_when_it_runs_again_is_flaky_and_suspends_nothing() {
     assert!(!flaky.stderr.contains("suspended"), "{}", flaky.stderr);
 }
 
+// covers: C-160, C-161, C-163, C-33
+#[test]
+fn a_server_hears_that_a_failed_test_file_passed_when_it_ran_again_and_no_name() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let mut files = hidden("reuse");
+    files[4].1 = "import os, liba\nSEEN = os.path.join(os.path.dirname(__file__), 'seen')\n\ndef test_x():\n    if os.path.exists(SEEN):\n        return\n    open(SEEN, 'w').close()\n    assert False, 'first time'\n".into();
+    let results = FakeResults::start();
+    let server = with_server(&results);
+    let r = repo_of(&files);
+    r.write("seen", "");
+    let python = python();
+    let pytest = || r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(pytest().code, 0);
+    std::fs::remove_file(r.repo.join("seen")).unwrap();
+    r.write("libb.py", "Y = 1  # changed\n");
+    let flaky = pytest();
+    assert_eq!(flaky.code, 1, "{}", flaky.stderr);
+    // The body of the request that recorded the run: its fail says the second run passed, and
+    // the run's counts say what the audit ran.
+    let body: Value = results
+        .raw_requests()
+        .iter()
+        .rev()
+        .find(|q| q.method == "POST" && q.path.contains("/v0/runs/"))
+        .map(|q| serde_json::from_slice(&q.body).unwrap())
+        .expect("a run was recorded");
+    let units = body["units"].as_array().unwrap();
+    let fails: Vec<&Value> = units.iter().filter(|u| u["result"] == "fail").collect();
+    assert_eq!(fails.len(), 1, "{body:#}");
+    assert_eq!(fails[0]["level"], "file", "{body:#}");
+    assert_eq!(fails[0]["again"], "pass", "{body:#}");
+    assert!(fails[0].get("retried").is_none() && fails[0].get("id").is_none());
+    assert_eq!(body["result"]["units"]["audited"], 1, "{body:#}");
+    // \[C-33\] Hashes and words only: no test file's name or path is in any request.
+    for q in results.raw_requests() {
+        let text = String::from_utf8_lossy(&q.body);
+        for name in ["test_hidden", "liba", "libb"] {
+            assert!(!text.contains(name), "{name} in {} {}", q.path, text);
+        }
+    }
+}
+
 // covers: C-32
 #[test]
 fn files_that_change_while_command_runs_record_nothing() {

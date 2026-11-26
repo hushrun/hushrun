@@ -845,6 +845,7 @@ fn skip_or_run(
                 continue;
             };
             if *state == hushrun_core::units::State::Passed {
+                o.mark_again(unit);
                 say.line(format_args!(
                     "{check}: {unit} failed, then passed when it ran again: it may be flaky"
                 ));

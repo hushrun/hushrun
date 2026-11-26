@@ -308,6 +308,10 @@ pub struct TestFacts {
     /// another test of its file shares: it records no key of its own, so no plan lists it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub never_left_out: bool,
+    /// \[C-162\] The runner ran it more than once in this process and its tries didn't end the
+    /// same: set only by an adapter that sees every try and records a result for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retried: bool,
     /// \[C-37\] Why it kept no result, when it didn't finish and didn't fail, in people's words:
     /// this machine's store keeps it with the test's row, and `hushrun why` says it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -453,6 +457,8 @@ pub struct MergedTest {
     pub not_followed: BTreeSet<NotFollowed>,
     /// \[C-39\] A process said it never leaves it out.
     pub never_left_out: bool,
+    /// \[C-162\] A process said the runner retried it and its tries didn't end the same.
+    pub retried: bool,
     /// \[C-32\] A process that ran it said it was skipped.
     pub skipped: bool,
     /// \[C-37\] Why it kept no result, as the first process that said so said it.
@@ -600,6 +606,7 @@ fn merge_tests(
         merged.skipped |= test.skipped && !test.deselected;
         merged.deselected &= test.deselected;
         merged.never_left_out |= test.never_left_out;
+        merged.retried |= test.retried;
         if merged.not_kept.is_none() {
             merged.not_kept.clone_from(&test.not_kept);
         }

@@ -50,7 +50,7 @@ fn says_in(ran: &Ran, text: &str) -> bool {
     ran.lines.iter().any(|l| l.contains(text))
 }
 
-// covers: C-39, C-5, C-10, C-36
+// covers: C-39, C-5, C-10, C-36, C-160, C-163
 #[test]
 fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
@@ -83,7 +83,41 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     // test_cart failed: its own fail and each of its tests; test_child, not observed: its three
     // followed tests; and each greet file's pass.
     assert_eq!(unit_results(&r), 1 + 6 + 3 + 3);
+    // \[C-160\] Each failure is said once, by the smallest unit that holds it: test_flips, as a
+    // test; test_cart's own fail carries no level. A test file whose tests record nothing of
+    // their own in this run (the greet files, which passed whole) is a file.
+    let levels = |records: &[Value]| {
+        let mut out = std::collections::BTreeMap::<(String, String), usize>::new();
+        for record in records {
+            let level = record["level"].as_str().unwrap_or("none").to_string();
+            let result = record["result"].as_str().unwrap().to_string();
+            *out.entry((level, result)).or_default() += 1;
+        }
+        out
+    };
+    let pair = |level: &str, result: &str, n| ((level.to_string(), result.to_string()), n);
+    assert_eq!(
+        levels(&r.newest_unit_run()),
+        [
+            pair("file", "pass", 3),
+            pair("none", "fail", 1),
+            pair("test", "fail", 1),
+            pair("test", "pass", 8),
+        ]
+        .into_iter()
+        .collect(),
+        "{:#?}",
+        r.newest_unit_run()
+    );
+    // No second run passed and no runner retried: nothing says either.
+    assert!(
+        r.newest_unit_run()
+            .iter()
+            .all(|u| u.get("again").is_none() && u.get("retried").is_none())
+    );
     let units = &first.units;
+    // \[C-163\] A run with no plan audits nothing, and says nothing of it.
+    assert!(units.get("audited").is_none(), "{units:#}");
     assert_eq!(units["tests"], json!({"total": 13, "ran": 13, "reused": 0}));
     assert_eq!(
         (units["total"].clone(), units["ran"].clone()),
@@ -114,6 +148,8 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     assert!(units["savedMs"].is_u64(), "{units:#}");
     assert_eq!(units["total"], 5, "{units:#}");
     assert_eq!(units["tests"], json!({"total": 13, "ran": 3, "reused": 10}));
+    // \[C-163\] The audit's test, counted as the plan's line counts it.
+    assert_eq!(units["audited"], 1, "{units:#}");
     // \[C-10\] Its last line, which says the 10 tests reused, and the check's skip on the same
     // code again, are the CLI's: e2e_pytest/test_as_unit.rs.
     // Reuse never chains: a test file that didn't run whole records no pass of its own, and

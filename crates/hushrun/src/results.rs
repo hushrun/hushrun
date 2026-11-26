@@ -1662,9 +1662,26 @@ fn fitting(result: &RunResult, units: &[crate::units::store::UnitRecord], limit:
     fit
 }
 
-/// One result of a test file or a test as a run's body carries it: its key as 64 lowercase hex.
+/// One result of a test file or a test as a run's body carries it: its key as 64 lowercase hex,
+/// and \[C-160 to C-162\] what it is, its identity, how its second run ended and whether the
+/// runner retried it, each only when present.
 fn unit_json(unit: &crate::units::store::UnitRecord) -> serde_json::Value {
-    json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
+    let mut out =
+        json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms});
+    let fields = out.as_object_mut().expect("an object");
+    if let Some(level) = unit.level {
+        fields.insert("level".into(), json!(level));
+    }
+    if let Some(id) = &unit.id {
+        fields.insert("id".into(), json!(id));
+    }
+    if let Some(again) = unit.again {
+        fields.insert("again".into(), json!(again));
+    }
+    if unit.retried {
+        fields.insert("retried".into(), json!(true));
+    }
+    out
 }
 
 /// \[RFC 0004 §3.8\] What became of a run's results of test files and tests.
@@ -2771,10 +2788,8 @@ mod tests {
     // covers: C-12
     #[test]
     fn a_runs_body_sends_the_results_that_fit_its_limit_cutting_the_last() {
-        let record = |n: u8, result: &str| crate::units::store::UnitRecord {
-            key: Digest::of(&[n]),
-            result: result.into(),
-            duration_ms: 12,
+        let record = |n: u8, result: &str| {
+            crate::units::store::UnitRecord::new(Digest::of(&[n]), result == "pass", 12)
         };
         let units: Vec<_> = (0..10)
             .map(|n| record(n, if n < 2 { "fail" } else { "pass" }))
@@ -2798,5 +2813,42 @@ mod tests {
         // Never past the count, whatever the room.
         assert_eq!(fitting(&result, &units, usize::MAX), 10);
         assert_eq!(fitting(&result, &units, body(0)), 0);
+    }
+
+    // covers: C-160, C-161, C-162
+    #[test]
+    fn a_units_level_again_and_retry_go_in_its_json_and_the_most_a_run_sends_still_fit() {
+        use crate::units::store::{Again, Level, UnitRecord};
+        let plain = UnitRecord::new(Digest::of(b"a"), true, 3);
+        assert_eq!(
+            unit_json(&plain),
+            json!({"key": Digest::of(b"a").hex(), "result": "pass", "durationMs": 3})
+        );
+        let told = UnitRecord {
+            level: Some(Level::Test),
+            again: Some(Again::Pass),
+            retried: true,
+            ..UnitRecord::new(Digest::of(b"b"), false, 4)
+        };
+        assert_eq!(
+            unit_json(&told),
+            json!({"key": Digest::of(b"b").hex(), "result": "fail", "durationMs": 4,
+                   "level": "test", "again": "pass", "retried": true})
+        );
+        // Every result a test's pass, with its level, and a thousand fails that say everything:
+        // the most a run sends still fits a body.
+        let units: Vec<UnitRecord> = (0..MOST_RESULTS as u32)
+            .map(|n| {
+                let failed = n < 1_000;
+                UnitRecord {
+                    level: Some(Level::Test),
+                    again: failed.then_some(Again::Pass),
+                    retried: failed,
+                    ..UnitRecord::new(Digest::of(&n.to_le_bytes()), !failed, 123_456)
+                }
+            })
+            .collect();
+        let result = pass(Provider::Github, None);
+        assert_eq!(fitting(&result, &units, MOST_RUN_BYTES), MOST_RESULTS);
     }
 }

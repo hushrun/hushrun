@@ -376,6 +376,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, test
             opened: list(&test.opened),
             dirs: list(&test.dirs),
             never_left_out: test.never_left_out,
+            retried: test.retried,
             skipped: test.skipped,
             not_kept: test.not_kept.clone(),
         };
@@ -388,6 +389,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, test
         had.skipped |= told.skipped && !told.deselected;
         had.deselected &= told.deselected;
         had.never_left_out |= told.never_left_out;
+        had.retried |= told.retried;
         if had.not_kept.is_none() {
             had.not_kept = told.not_kept;
         }

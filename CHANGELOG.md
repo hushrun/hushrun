@@ -15,6 +15,22 @@ project's new branch starts from what main's CI already ran.
 
 ### Changed
 
+- **A unit result says what it is, and what hushrun saw of it** ([ADR 0147](docs/adr/0147-flaky-tests-from-evidence.md),
+  C-160 to C-163). Contract changes, all additive, in the body of `POST {base}/v0/runs/{key}`
+  and in this machine's `hushrun.unit-run/v0` files:
+  - each unit result may carry `level` (`test`, or `file` for a test file none of whose tests
+    recorded a fail of its own), so a failure is said once, by the smallest unit that holds it;
+  - `"again": "pass"` on a fail whose second run in the same run passed (the run already said
+    `it may be flaky`); the fail is still what is recorded;
+  - `"retried": true` when the runner retried a test and its tries didn't end the same: Cargo
+    under `cargo nextest run`, Gradle's test-retry plugin, Maven's `rerunFailingTestsCount` and
+    `meson test --repeat`. Their result stays a fail;
+  - `id` is reserved for a unit's identity across edits, and not sent yet;
+  - a run's result gains `units.audited`, how many of those that ran the plan's audit ran
+    (`run-result.v0.schema.json`);
+  - the facts an adapter writes (`hushrun.unit-facts/v1`) gain a test's `retried`.
+
+  A server from before these fields ignores them. No name or path is sent.
 - **No time limit decides what a build reuses** ([ADR 0144](docs/adr/0144-no-time-limit-decides-what-a-build-reuses.md)):
   what one machine reuses of another's no longer depends on how loaded either was.
   - **Uploads:** the end of a `hushrun run` waits for every upload the run built, on a person's

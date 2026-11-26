@@ -51,6 +51,57 @@ pub struct UnitRecord {
     /// `pass` or `fail`.
     pub result: String,
     pub duration_ms: u64,
+    /// \[C-160\] What the unit is, when it is the smallest the adapter told of what this result
+    /// says: `test`, or `file` for a test file none of whose tests failed under a key of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<Level>,
+    /// \[C-160\] A unit's identity across edits, 64 lowercase hex. Nothing sets it yet: it waits
+    /// on a key the repository holds, so the server can't make one from a guessed name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// \[C-161\] The unit failed, had a pass that counted under its key, and passed when it ran
+    /// once more in the same run (C-34): `pass`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub again: Option<Again>,
+    /// \[C-162\] The runner ran it more than once in this run and its tries didn't end the same.
+    /// Its `result` is what its adapter's own rule records.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retried: bool,
+}
+
+impl UnitRecord {
+    /// A result with nothing but its key, outcome and time: the fields of C-160 to C-162 absent.
+    pub fn new(key: Digest, passed: bool, duration_ms: u64) -> UnitRecord {
+        UnitRecord {
+            key,
+            result: if passed { "pass" } else { "fail" }.into(),
+            duration_ms,
+            level: None,
+            id: None,
+            again: None,
+            retried: false,
+        }
+    }
+
+    /// Whether it records a fail.
+    pub fn failed(&self) -> bool {
+        self.result == "fail"
+    }
+}
+
+/// \[C-160\] What a unit result is: a test, or a test file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    Test,
+    File,
+}
+
+/// \[C-161\] How a unit's second run in the same run ended, when it says: it passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Again {
+    Pass,
 }
 
 /// The newest unit result for a key whose run counts here.
@@ -1081,16 +1132,8 @@ mod tests {
                 &Digest::of(b"run"),
                 &ci,
                 &[
-                    UnitRecord {
-                        key,
-                        result: "pass".into(),
-                        duration_ms: 4,
-                    },
-                    UnitRecord {
-                        key: other,
-                        result: "fail".into(),
-                        duration_ms: 5,
-                    },
+                    UnitRecord::new(key, true, 4),
+                    UnitRecord::new(other, false, 5),
                 ],
             )
             .unwrap();

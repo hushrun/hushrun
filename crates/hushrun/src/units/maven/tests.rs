@@ -544,3 +544,50 @@ fn a_module_whose_hook_left_out_what_its_list_didnt_name_says_so() {
     let why = left_out_unlisted(&graph(&["p.A#b", "p.A#d"]), &modules, &both, &ran).unwrap();
     assert!(why.contains("found no test p.A#d"), "{why}");
 }
+
+// covers: C-162, C-47
+#[test]
+fn a_test_surefire_passed_on_a_rerun_after_a_failure_was_retried_and_still_failed() {
+    // As Surefire 3 writes them with `rerunFailingTestsCount`: a rerun that passed is a
+    // `flakyFailure` of a passing case; one that failed again, a `failure` with its reruns.
+    let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="pkg.C">
+  <testcase name="flaky" classname="pkg.C" time="0.002"><flakyFailure message="x" type="java.lang.AssertionError"><stackTrace>t</stackTrace></flakyFailure></testcase>
+  <testcase name="broken" classname="pkg.C" time="0.001"><failure message="y"/><rerunFailure message="y"/></testcase>
+  <testcase name="steady" classname="pkg.C" time="0.001"/>
+</testsuite>"#;
+    let mut seen = ClassSeen::default();
+    for case in reports::cases(xml).unwrap() {
+        seen.add_case(&case);
+    }
+    let seen = decide_class(&seen, false).unwrap();
+    let tests = seen.tests.as_ref().unwrap();
+    assert!(tests["flaky"].failed && tests["flaky"].retried, "{tests:?}");
+    assert!(
+        tests["broken"].failed && !tests["broken"].retried,
+        "{tests:?}"
+    );
+    assert!(
+        !tests["steady"].failed && !tests["steady"].retried,
+        "{tests:?}"
+    );
+    // The hook's events say the same test failed: its report says the rerun passed.
+    let events = jvm::read_events(
+        br#"{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:pkg.C]","class":"pkg.C","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:pkg.C]/[method:flaky()]","class":"pkg.C","method":"flaky","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:pkg.C]/[method:flaky()]","class":"pkg.C","method":"flaky","params":"","status":"FAILED","ms":2}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:pkg.C]","class":"pkg.C","method":null,"params":null,"status":"SUCCESSFUL","ms":3}
+"#,
+    );
+    let mut both = ClassSeen {
+        events: events.classes.get("pkg.C").cloned(),
+        ..ClassSeen::default()
+    };
+    for case in reports::cases(xml).unwrap() {
+        both.add_case(&case);
+    }
+    assert!(both.events.is_some());
+    let seen = decide_class(&both, false).unwrap();
+    let flaky = &seen.tests.as_ref().unwrap()["flaky"];
+    assert!(flaky.failed && flaky.retried, "{flaky:?}");
+}

@@ -200,6 +200,21 @@ impl Repo {
         out
     }
 
+    /// \[C-160\] The unit results the newest run kept on this machine, as its
+    /// `hushrun.unit-run/v0` file holds them: each with its `level`, `again` and `retried`.
+    #[allow(dead_code, reason = "not every test file reads a run's records")]
+    pub fn newest_unit_run(&self) -> Vec<Value> {
+        let mut files = Vec::new();
+        collect(&self.cache.join("results/unit-runs/v0"), &mut files);
+        // A ULID's name sorts by time, whatever run key's folder it is in.
+        files.sort_by_key(|f| f.file_name().map(|n| n.to_os_string()));
+        let Some(newest) = files.last() else {
+            return Vec::new();
+        };
+        let v: Value = serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap();
+        v["units"].as_array().cloned().unwrap_or_default()
+    }
+
     /// hushrun.yaml, as the repository has it now.
     pub fn policy(&self) -> Policy {
         let bytes = std::fs::read(self.repo.join("hushrun.yaml")).expect("a hushrun.yaml");

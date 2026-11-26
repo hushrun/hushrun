@@ -423,8 +423,9 @@ fn unit_of(module: &Module, class: &str, tree: &Tree) -> (String, Option<Vec<Str
 #[derive(Debug, Clone, Default)]
 struct ClassSeen {
     events: Option<ClassEvents>,
-    /// From reports: each test's invocations' outcomes and time, and a failure of the class.
-    cases: BTreeMap<String, (Vec<reports::Outcome>, u64)>,
+    /// From reports: each test's invocations' outcomes and time, \[C-162\] whether Surefire's rerun
+    /// passed after one failed, and a failure of the class.
+    cases: BTreeMap<String, (Vec<reports::Outcome>, u64, bool)>,
     case_class_failed: bool,
     /// From reports: the class was skipped whole (JUnit 4's `@Ignore` on it).
     case_class_skipped: bool,
@@ -465,6 +466,7 @@ impl ClassSeen {
         let slot = self.cases.entry(id).or_default();
         slot.0.push(case.outcome);
         slot.1 = slot.1.saturating_add(case.time_ms);
+        slot.2 |= case.flaky;
     }
 
     /// \[C-39\] A case of a report of this class that no test file owns (its `classname` names
@@ -481,6 +483,7 @@ impl ClassSeen {
         let slot = self.cases.entry(id).or_default();
         slot.0.push(case.outcome);
         slot.1 = slot.1.saturating_add(case.time_ms);
+        slot.2 |= case.flaky;
     }
 
     /// Its events or its reports say something of it failed.
@@ -492,7 +495,7 @@ impl ClassSeen {
             || self
                 .cases
                 .values()
-                .any(|(o, _)| o.contains(&reports::Outcome::Failed))
+                .any(|(o, _, _)| o.contains(&reports::Outcome::Failed))
     }
 }
 
@@ -1008,6 +1011,9 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
                     deselected: t.left_out && !t.started,
                     skipped: t.skipped && !t.failed,
                     never_left_out: generated,
+                    // \[C-162\] What the events can't tell apart from a parametrized test's
+                    // invocations, its report says: Surefire's rerun passed.
+                    retried: t.failed && c.cases.get(id).is_some_and(|case| case.2),
                     duration_ms: t.duration_ms,
                     ..MergedTest::default()
                 },
@@ -1043,8 +1049,8 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
         let any_failed = c.case_class_failed
             || c.cases
                 .values()
-                .any(|(o, _)| o.contains(&reports::Outcome::Failed));
-        for (id, (outcomes, ms)) in &c.cases {
+                .any(|(o, _, _)| o.contains(&reports::Outcome::Failed));
+        for (id, (outcomes, ms, flaky)) in &c.cases {
             let failed = outcomes.contains(&reports::Outcome::Failed);
             let skipped = outcomes.contains(&reports::Outcome::Skipped);
             let finished =
@@ -1056,6 +1062,7 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
                     failed,
                     skipped: skipped && !failed,
                     never_left_out: generated,
+                    retried: failed && *flaky,
                     duration_ms: *ms,
                     ..MergedTest::default()
                 },

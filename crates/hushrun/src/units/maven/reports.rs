@@ -33,6 +33,8 @@ pub struct Case {
     pub suite: String,
     pub time_ms: u64,
     pub outcome: Outcome,
+    /// \[C-162\] A `flakyFailure` or `flakyError`: Surefire's rerun passed after it failed.
+    pub flaky: bool,
 }
 
 /// The most bytes of one report hushrun reads: past it, the report holds nothing.
@@ -133,6 +135,7 @@ fn element(
                 suite: suite.clone(),
                 time_ms: 0,
                 outcome: Outcome::Passed,
+                flaky: false,
             };
             for attr in e.attributes() {
                 let attr = attr.map_err(|e| e.to_string())?;
@@ -157,9 +160,11 @@ fn element(
                 *open = Some((case, depth));
             }
         }
-        "failure" | "error" | "rerunFailure" | "rerunError" | "flakyFailure" | "flakyError" => {
+        name @ ("failure" | "error" | "rerunFailure" | "rerunError" | "flakyFailure"
+        | "flakyError") => {
             if let Some((case, _)) = open {
                 case.outcome = Outcome::Failed;
+                case.flaky |= name.starts_with("flaky");
             }
         }
         "skipped" => {

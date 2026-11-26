@@ -365,14 +365,15 @@ impl<'r> Run<'r> {
     }
 
     /// \[C-34\] What the audit's second run said of each unit it ran again (`ended`,
-    /// [`Observer::again_ended`]): a pass is a flaky unit; anything else suspends the check's
-    /// reuse, as `hushrun run` does.
+    /// [`Observer::again_ended`]): a pass is a flaky unit, whose result says so (C-161); anything
+    /// else suspends the check's reuse, as `hushrun run` does.
     pub fn disagreements(&mut self, observed: &mut Observed, ended: BTreeMap<String, State>) {
         for (unit, state) in &ended {
             let Some(key) = observed.again.get(unit).copied() else {
                 continue;
             };
             if *state == State::Passed {
+                observed.mark_again(unit);
                 continue;
             }
             observed.disagree(unit, key);
