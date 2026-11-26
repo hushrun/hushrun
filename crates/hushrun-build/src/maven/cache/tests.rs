@@ -1,11 +1,15 @@
 use std::io::{BufRead as _, Read as _, Write as _};
+use std::net::TcpStream;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use super::*;
+use crate::model::Mode;
 use crate::origin::{Identity, Vouch, Word};
+use crate::relay::{Answer, Problem};
 use crate::session::{Session, Share, Start};
 use crate::settings;
+use std::time::Duration;
 
 /// What Apache's build cache extension 1.2.0 wrote for `demo:core`: it names `core.jar` (1544
 /// bytes) and `core-mvn-cache-ext-extra-output-1.zip` (364 bytes).
@@ -432,7 +436,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
         let store = store.clone();
         let dir = machine.dir.path().to_path_buf();
         move |request| match request {
-            Request::MavenFetch { key, .. } => {
+            Request::ToolFetch { key, .. } => {
                 let (buildinfo, jar, zip) = (canonical(), jar(), zip());
                 let files: [(&str, &[u8]); 3] = [(BUILDINFO, &buildinfo), (JAR, &jar), (ZIP, &zip)];
                 publish_download(&store, &dir, &files, "protected/1", 900);
@@ -443,7 +447,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
     });
     let cache = machine.cache();
     assert_eq!(cache.get(&module()).unwrap(), canonical());
-    assert!(matches!(relay.asked()[0], Request::MavenFetch { .. }));
+    assert!(matches!(relay.asked()[0], Request::ToolFetch { .. }));
     assert_eq!(cache.file(&module(), JAR).unwrap(), jar());
     let log = machine.log();
     assert!(log[0].downloaded && log[0].outcome == Outcome::Reused);
@@ -476,7 +480,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
     cache.put(&app, ZIP, &zip());
     cache.put(&app, BUILDINFO, buildinfo.as_bytes());
     let app_key = app.key();
-    assert!(relay.heard(|r| matches!(r, Request::MavenBuilt { key, .. } if *key == app_key)));
+    assert!(relay.heard(|r| matches!(r, Request::ToolBuilt { key, .. } if *key == app_key)));
 }
 
 // covers: B-172, B-174
@@ -493,7 +497,8 @@ fn a_downloaded_block_that_isn_t_whole_is_reported_suspended_and_removed() {
     assert!(cache.get(&module()).is_none());
     assert!(relay.asked().iter().any(|r| matches!(
         r,
-        Request::MavenReport {
+        Request::ToolReport {
+            kind: Kind::Maven,
             problem: Problem::Rejected,
             ..
         }
@@ -507,12 +512,12 @@ fn a_downloaded_block_that_isn_t_whole_is_reported_suspended_and_removed() {
 #[test]
 fn maven_s_requests_over_one_kept_connection_are_answered() {
     let machine = Machine::new(false);
-    let (listener, token) = match bind() {
+    let (listener, token) = match crate::cache::endpoint::for_run() {
         Ok(bound) => bound,
         Err(_) => return,
     };
     assert_eq!(token.len(), 64);
-    let url = url(&listener, &token).unwrap();
+    let url = crate::cache::endpoint::run_url(&listener, &token).unwrap();
     assert!(url.starts_with("http://127.0.0.1:") && url.ends_with(&token));
     let address = listener.local_addr().unwrap();
     let mut current = machine.session.current().clone();

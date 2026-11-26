@@ -452,6 +452,18 @@ impl FakeBuild {
         });
     }
 
+    /// Seeds the manifest of kind `kind` (`gradle/1`), for any repository, check and platform.
+    pub fn set_kind_manifest(&self, kind: &str, manifest: Vec<Pair>) {
+        self.state().manifests.push(Kept {
+            repository: None,
+            check: None,
+            platform: None,
+            kind: Some(kind.to_string()),
+            pairs: manifest,
+            commit: None,
+        });
+    }
+
     /// Seeds the manifest of the check `check`, for any repository and platform.
     pub fn set_check_manifest(&self, check: Hex32, manifest: Vec<Pair>) {
         self.state().manifests.push(Kept {

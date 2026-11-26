@@ -14,48 +14,36 @@
 //! local copy either way.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{self, BufReader, BufWriter, Read as _, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use hushrun_core::Digest;
 use serde_json::json;
 
 use super::buildinfo::{self, Checked};
 use super::{BUILDINFO, Local, Module, REPORT};
-use crate::gradle::http::{self, Body, Unread};
-use crate::model::{Class, Kind, Mode, NotStored, Outcome};
+use crate::cache::http::{self, Body};
+use crate::cache::shared::Shared;
+use crate::model::{Class, Kind, NotStored, Outcome};
 use crate::origin::Origin;
-use crate::relay::{self, Answer, Problem, Request};
+use crate::relay::Request;
 use crate::session::{Current, Entry, MavenEntry};
 use crate::store::{Block, NewFile, Store};
 
-/// The longest a question waits on a relay that says nothing (ADR 0144): a relay working on an
-/// answer says so every heartbeat, so this bounds a frozen or gone relay only, and every question
-/// waits the same, whatever its module costs.
-const RELAY_WAIT: Duration = relay::WAIT;
 /// The most bytes one `PUT`'s body may hold.
-pub const MOST_BODY: u64 = 512 << 20;
+pub const MOST_BODY: u64 = crate::cache::service::MOST_BODY;
 /// The most bytes held for modules whose entry isn't whole yet: what comes beyond it stays in the
 /// extension's own cache.
 pub const MOST_PENDING: u64 = 512 << 20;
-/// How long a connection may sit between requests.
-const IDLE: Duration = Duration::from_secs(120);
-/// Connections served at once: Maven opens one per thread that asks.
-const MOST_CONNECTIONS: usize = 64;
 
 /// The cache for one check's session.
 pub struct Cache {
-    current: Current,
+    /// The session, the relay and the log, as every tool's cache reaches them.
+    shared: Shared,
     /// The first part of every path Maven asks: the run's token.
     token: String,
-    /// The relay failed or timed out once: nothing more is asked of it this run.
-    relay_down: AtomicBool,
-    /// Keys whose first reuse of a download here was counted, so it is counted once.
-    first_reuses: Mutex<HashSet<Digest>>,
     /// The modules whose `buildinfo.xml` this run served: only their files are served (B-174).
     served: Mutex<HashSet<Digest>>,
     /// When this run's `GET` of a module's `buildinfo.xml` missed: Maven built the module from
@@ -87,141 +75,42 @@ impl Parts {
     }
 }
 
-/// The listener while it serves: dropping it stops it.
-#[derive(Debug)]
-pub struct Running {
-    stop: Arc<AtomicBool>,
-    address: Option<SocketAddr>,
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // Wakes the accepting thread, which then sees the flag.
-        if let Some(address) = self.address {
-            let _ = TcpStream::connect_timeout(&address, Duration::from_millis(200));
-        }
-    }
-}
-
-/// B-170: a listener on `127.0.0.1` at a port the system picks, and a token of 64 hex
-/// characters from `/dev/urandom`, both for this run alone.
-pub fn bind() -> io::Result<(TcpListener, String)> {
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
-    let mut bytes = [0u8; 32];
-    fill_random(&mut bytes)?;
-    let token = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok((listener, token))
-}
-
-/// The URL Maven is given for `listener` and `token`.
-pub fn url(listener: &TcpListener, token: &str) -> io::Result<String> {
-    let port = listener.local_addr()?.port();
-    Ok(format!("http://127.0.0.1:{port}/{token}"))
-}
-
-#[cfg(unix)]
-fn fill_random(out: &mut [u8]) -> io::Result<()> {
-    std::fs::File::open("/dev/urandom")?.read_exact(out)
-}
-
-#[cfg(not(unix))]
-fn fill_random(_out: &mut [u8]) -> io::Result<()> {
-    Err(io::Error::other("no Maven cache on this platform"))
-}
+pub use crate::cache::service::Running;
 
 /// Serves `cache` on `listener` until the returned handle is dropped.
-pub fn start(listener: TcpListener, cache: Cache) -> io::Result<Running> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let address = listener.local_addr().ok();
-    let cache = Arc::new(cache);
-    let serving = stop.clone();
-    std::thread::Builder::new()
-        .name("hushrun-maven-cache".into())
-        .spawn(move || accept(listener, cache, serving))?;
-    Ok(Running { stop, address })
+pub fn start(listener: TcpListener, cache: Cache) -> std::io::Result<Running> {
+    crate::cache::service::start(listener, cache)
 }
 
-fn accept(listener: TcpListener, cache: Arc<Cache>, stop: Arc<AtomicBool>) {
-    let open = Arc::new(AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            return;
-        }
-        let Ok(stream) = stream else {
-            continue;
-        };
-        // Only this machine: the listener is on the loopback, and a peer elsewhere is refused.
-        if !stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback()) {
-            continue;
-        }
-        if open.fetch_add(1, Ordering::SeqCst) >= MOST_CONNECTIONS {
-            open.fetch_sub(1, Ordering::SeqCst);
-            let mut out = &stream;
-            let _ = respond(&mut out, 503, b"", false, true);
-            continue;
-        }
-        let cache = cache.clone();
-        let done = open.clone();
-        let stop = stop.clone();
-        let spawned = std::thread::Builder::new()
-            .name("hushrun-maven-request".into())
-            .spawn(move || {
-                cache.connection(stream, &stop);
-                done.fetch_sub(1, Ordering::SeqCst);
-            });
-        if spawned.is_err() {
-            open.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-}
-
-/// Writes one answer: its status, its length, and its body unless it answers a `HEAD`.
-pub fn respond(
-    out: &mut impl Write,
-    status: u16,
-    body: &[u8],
-    head: bool,
-    close: bool,
-) -> io::Result<()> {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        431 => "Request Header Fields Too Large",
-        501 => "Not Implemented",
-        503 => "Service Unavailable",
-        505 => "HTTP Version Not Supported",
-        _ => "Error",
-    };
-    let mut text = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n",
-        body.len()
-    );
+/// The headers of Maven's answer of `status` with `body`: a file's type.
+fn headers(status: u16, body: &[u8]) -> &'static [(&'static str, &'static str)] {
     if status == 200 && !body.is_empty() {
-        text.push_str("Content-Type: application/octet-stream\r\n");
+        &[("Content-Type", "application/octet-stream")]
+    } else {
+        &[]
     }
-    if close {
-        text.push_str("Connection: close\r\n");
+}
+
+impl crate::cache::service::Answers for Cache {
+    fn name(&self) -> &'static str {
+        "maven"
     }
-    text.push_str("\r\n");
-    out.write_all(text.as_bytes())?;
-    if !head {
-        out.write_all(body)?;
+
+    fn answer(&self, request: &http::Request) -> (u16, Vec<u8>) {
+        Cache::answer(self, request)
     }
-    out.flush()
+
+    fn headers(&self, status: u16, body: &[u8]) -> Vec<(&'static str, &'static str)> {
+        headers(status, body).to_vec()
+    }
 }
 
 impl Cache {
     /// A cache for the session `current`, which Maven reaches under `token`.
     pub fn new(current: Current, token: &str) -> Cache {
         Cache {
-            current,
+            shared: Shared::new(current, Kind::Maven),
             token: token.to_string(),
-            relay_down: AtomicBool::new(false),
-            first_reuses: Mutex::new(HashSet::new()),
             served: Mutex::new(HashSet::new()),
             missed: Mutex::new(HashMap::new()),
             pending: Mutex::new(Pending::default()),
@@ -233,37 +122,6 @@ impl Cache {
     /// it skips tests.
     pub fn skips_tests(&self) -> Arc<Mutex<Option<String>>> {
         self.skips_tests.clone()
-    }
-
-    fn connection(&self, stream: TcpStream, stop: &AtomicBool) {
-        let _ = stream.set_read_timeout(Some(IDLE));
-        let _ = stream.set_write_timeout(Some(IDLE));
-        let _ = stream.set_nodelay(true);
-        let Ok(reading) = stream.try_clone() else {
-            return;
-        };
-        let mut input = BufReader::new(reading);
-        let mut output = BufWriter::new(&stream);
-        loop {
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            let request = match http::read(&mut input, &mut output, MOST_BODY) {
-                Ok(request) => request,
-                Err(Unread::Gone) => return,
-                Err(Unread::Bad(status)) => {
-                    let _ = respond(&mut output, status, b"", false, true);
-                    return;
-                }
-            };
-            // ADR 0144: `102 Processing` each heartbeat while a `GET` is worked on, so that the
-            // extension's client never times out on a download that is only slow.
-            let (status, body) = http::answer_alive(&request, &stream, || self.answer(&request));
-            let head = request.method == "HEAD";
-            if respond(&mut output, status, &body, head, request.close).is_err() || request.close {
-                return;
-            }
-        }
     }
 
     /// One request's status and body (B-170, B-171).
@@ -324,7 +182,7 @@ impl Cache {
     }
 
     fn holds(&self, module: &Module, file: &str) -> bool {
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         self.block_of(&store, module)
             .is_some_and(|block| block.files.iter().any(|f| f.name == file))
     }
@@ -332,26 +190,15 @@ impl Cache {
     /// B-174: the `buildinfo.xml` of `module`, or `None` (a miss).
     pub fn get(&self, module: &Module) -> Option<Vec<u8>> {
         let key = module.key();
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         let at = SystemTime::now();
         if store.suspended_at(&key, at).is_some() {
             return None;
         }
         let served = if let Ok(Some(_)) = store.block(&key) {
             self.serve(&store, &key, module, false, at)
-        } else if self.current.mode == Mode::On {
-            // A download, only where the run shares with sharing on (the relay says) and the
-            // check's `maven/1` manifest names it.
-            let asked = Request::MavenFetch {
-                key,
-                local_ms: store.step_cost(&key),
-            };
-            match self.ask(&asked, RELAY_WAIT) {
-                Some(Answer::Ready { key: got }) if got == key => {
-                    self.serve(&store, &key, module, true, at)
-                }
-                _ => None,
-            }
+        } else if self.shared.fetch(&store, &key) {
+            self.serve(&store, &key, module, true, at)
         } else {
             None
         };
@@ -375,64 +222,25 @@ impl Cache {
     ) -> Option<Vec<u8>> {
         let block = self.block_of(store, module)?;
         let origin = store.origin(key);
-        let vouch = Request::MavenVouch {
-            key: *key,
-            outputs: super::outputs_of(&block),
-        };
         let cost = block.description["rustc_ms"].as_u64().unwrap_or(0);
-        let reusable =
-            self.current
-                .may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
-                    self.ask(request, RELAY_WAIT)
-                });
-        if !reusable {
+        if !self
+            .shared
+            .vouched(key, origin.as_ref(), super::outputs_of(&block), at)
+        {
             return None;
         }
         let downloaded = origin.as_ref().is_some_and(Origin::downloaded_only);
         let Some(buildinfo) = whole(&block) else {
-            // B-172: a block that isn't a canonical entry of its module is never served. One
-            // that was downloaded is reported to the scope its record names, and its key
-            // suspended for the kept days, as every adapter's refused downloads are; then it goes.
-            if downloaded {
-                let _ = self.ask(
-                    &Request::MavenReport {
-                        key: *key,
-                        problem: Problem::Rejected,
-                    },
-                    RELAY_WAIT,
-                );
-                let until = at + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
-                let _ = store.suspend_until(
-                    key,
-                    "a downloaded Maven entry failed its checks",
-                    until,
-                    at,
-                );
-            }
-            let _ = store.discard(key);
-            self.log(Entry {
-                note: Some("a Maven entry in the store was refused: it failed its checks".into()),
-                ..maven_entry(
-                    Outcome::BuiltNotStored(NotStored::Compare),
-                    key,
-                    &module.name(),
-                )
-            });
+            let entry = maven_entry(
+                Outcome::BuiltNotStored(NotStored::Compare),
+                key,
+                &module.name(),
+            );
+            self.shared
+                .refuse(store, key, downloaded, "Maven entry", entry, at);
             return None;
         };
-        let _ = store.used(key, at);
-        let first_download = downloaded
-            && origin.as_ref().is_some_and(|o| !o.reused)
-            && self.first_reuses.lock().is_ok_and(|mut s| s.insert(*key));
-        if first_download {
-            let _ = store.update_origin(key, |origin| {
-                let mut origin = origin?;
-                (!origin.reused).then(|| {
-                    origin.reused = true;
-                    origin
-                })
-            });
-        }
+        self.shared.reused(store, key, origin.as_ref(), at);
         if let Ok(mut served) = self.served.lock() {
             served.insert(*key);
         }
@@ -451,7 +259,7 @@ impl Cache {
         if !self.served.lock().is_ok_and(|s| s.contains(&key)) {
             return None;
         }
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         let block = self.block_of(&store, module)?;
         let file = block.files.iter().find(|f| f.name == name)?;
         let bytes = std::fs::read(&file.path).ok()?;
@@ -545,7 +353,7 @@ impl Cache {
                 )
             });
         }
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         let at = SystemTime::now();
         // B-173: an entry whose files hold a folder of this machine stays with the extension's
         // own cache.
@@ -567,7 +375,7 @@ impl Cache {
                 ..maven_entry(Outcome::BuiltNotStored(NotStored::Suspended), &key, &name)
             });
         }
-        let floor = u64::from(self.current.min_free_gb).saturating_mul(1 << 30);
+        let floor = u64::from(self.shared.current.min_free_gb).saturating_mul(1 << 30);
         if floor > 0 && store.free_bytes().is_ok_and(|free| free < floor) {
             return self.log(Entry {
                 rustc_ms: cost_ms,
@@ -585,7 +393,11 @@ impl Cache {
             let took =
                 downloaded && self.publish(&store, &key, module, checked, files, cost_ms, at);
             if took {
-                self.tell(&Request::MavenBuilt { key, cost_ms });
+                self.tell(&Request::ToolBuilt {
+                    kind: Kind::Maven,
+                    key,
+                    cost_ms,
+                });
             }
             return self.log(Entry {
                 found: true,
@@ -596,7 +408,11 @@ impl Cache {
         }
         if self.publish(&store, &key, module, checked, files, cost_ms, at) {
             let _ = store.set_step_cost(&key, cost_ms, at);
-            self.tell(&Request::MavenBuilt { key, cost_ms });
+            self.tell(&Request::ToolBuilt {
+                kind: Kind::Maven,
+                key,
+                cost_ms,
+            });
             self.log(Entry {
                 rustc_ms: cost_ms,
                 stored_bytes,
@@ -618,7 +434,7 @@ impl Cache {
     /// the checkout's folder, Maven's local repository, the store's folder or the home folder, as
     /// bytes anywhere.
     pub fn stays_here(&self, checked: &Checked, files: &[(String, Vec<u8>)]) -> Option<Local> {
-        let run = self.current.maven.clone().unwrap_or_default();
+        let run = self.shared.current.maven.clone().unwrap_or_default();
         let mut folders: Vec<(Local, String)> = run
             .roots
             .iter()
@@ -629,9 +445,9 @@ impl Cache {
         }
         folders.push((
             Local::Store,
-            self.current.store.to_string_lossy().into_owned(),
+            self.shared.current.store.to_string_lossy().into_owned(),
         ));
-        if let Some(home) = &self.current.home {
+        if let Some(home) = &self.shared.current.home {
             folders.push((Local::Home, home.clone()));
         }
         folders
@@ -659,7 +475,6 @@ impl Cache {
         cost_ms: u64,
         at: SystemTime,
     ) -> bool {
-        let share = self.current.share.relay();
         let description = json!({
             "schema": crate::key::BLOCK_SCHEMA,
             "kind": Kind::Maven.word(),
@@ -670,20 +485,10 @@ impl Cache {
             "checksum": module.checksum,
             "module": module.name(),
             "hash": checked.hash_function,
-            "repository": self.current.repository,
+            "repository": self.shared.current.repository,
             "rustc_ms": cost_ms,
             "built_ms": epoch_ms(at),
         });
-        let run = share
-            .map(|share| share.run.clone())
-            .or_else(|| {
-                self.current
-                    .folder
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_default();
-        let origin = Origin::built_here(&run, share.map(|share| share.by.clone()));
         let Some(temp) = self.write_temp(key, checked, files) else {
             return false;
         };
@@ -694,11 +499,7 @@ impl Cache {
                 name,
             })
             .collect();
-        let stored = store
-            .replace(key, &description, &new, &origin, at, |there, _| {
-                there.is_some_and(Origin::downloaded_only)
-            })
-            .is_ok_and(|replaced| replaced == crate::store::Replaced::Stored);
+        let stored = self.shared.store_built(store, key, &description, &new, at);
         let _ = std::fs::remove_dir_all(&temp);
         stored
     }
@@ -710,12 +511,17 @@ impl Cache {
         checked: &Checked,
         files: &[(String, Vec<u8>)],
     ) -> Option<PathBuf> {
-        let dir = self.current.folder.join("maven-entries").join(format!(
-            "{}.{}.{:?}",
-            key.hex(),
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = self
+            .shared
+            .current
+            .folder
+            .join("maven-entries")
+            .join(format!(
+                "{}.{}.{:?}",
+                key.hex(),
+                std::process::id(),
+                std::thread::current().id()
+            ));
         std::fs::create_dir_all(&dir).ok()?;
         let written = std::fs::write(dir.join(BUILDINFO), &checked.canonical).is_ok()
             && files
@@ -728,40 +534,17 @@ impl Cache {
         Some(dir)
     }
 
-    // --- the relay and the log ---------------------------------------------------------
-
-    /// Asks the run's relay within `wait`: no relay, or one call that failed or timed out this
-    /// run, and nothing more is asked (B-26).
-    fn ask(&self, request: &Request, wait: Duration) -> Option<Answer> {
-        if self.relay_down.load(Ordering::SeqCst) {
-            return None;
-        }
-        let share = self.current.share.relay()?;
-        let answer = relay::ask(&share.socket, request, wait);
-        if answer.is_none() {
-            self.relay_down.store(true, Ordering::SeqCst);
-        }
-        answer
-    }
-
     fn tell(&self, request: &Request) {
-        if self.relay_down.load(Ordering::SeqCst) {
-            return;
-        }
-        if let Some(share) = self.current.share.relay()
-            && !relay::tell(&share.socket, request, RELAY_WAIT)
-        {
-            self.relay_down.store(true, Ordering::SeqCst);
-        }
+        self.shared.tell(request);
     }
 
     fn log(&self, entry: Entry) {
-        self.current.log(&entry);
+        self.shared.log(entry);
     }
 
     /// The session's folder.
     pub fn folder(&self) -> &Path {
-        &self.current.folder
+        self.shared.folder()
     }
 }
 

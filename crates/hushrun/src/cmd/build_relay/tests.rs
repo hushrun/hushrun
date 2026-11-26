@@ -106,7 +106,7 @@ fn start_at(
 
 fn begin(relay: &Arc<Relay>, m: &Machine) {
     relay
-        .begin_check(&m.session, None, None, false, &|_| None)
+        .begin_check(&m.session, None, None, &|_| None)
         .unwrap();
 }
 
@@ -805,9 +805,7 @@ fn panicking_run(world: &str) {
             c.tuning.close = Duration::from_secs(3);
         },
     );
-    let share = relay
-        .begin_check(session, None, None, false, &|_| None)
-        .unwrap();
+    let share = relay.begin_check(session, None, None, &|_| None).unwrap();
     until("open", || answering(&relay));
     let wait = hushrun_build::relay::WAIT;
     let (key, step) = (Digest::of(&[13, 1]), Digest::of(&[13, 2]));
@@ -1866,9 +1864,7 @@ fn a_long_session_folder_gets_its_socket_in_a_private_folder_and_a_wrapper_reach
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let relay = start(&fake, &m, |_| {});
-    let share = relay
-        .begin_check(&long, None, None, false, &|_| None)
-        .unwrap();
+    let share = relay.begin_check(&long, None, None, &|_| None).unwrap();
     assert!(!share.socket.starts_with(&long));
     assert!(share.socket.as_os_str().len() <= hushrun_build::relay::MOST_SOCKET_PATH);
     until("open", || answering(&relay));
@@ -3407,7 +3403,7 @@ fn panicking_vouches(world: &str) {
         c.tuning.close = Duration::from_secs(3);
     });
     relay
-        .begin_check(Path::new(session), None, None, false, &|_| None)
+        .begin_check(Path::new(session), None, None, &|_| None)
         .unwrap();
     until("open", || answering(&relay));
     until("the lookup's panic", || {
@@ -3503,7 +3499,7 @@ fn a_close_names_no_crate_that_stays_on_the_machine() {
     let m = machine();
     let relay = start(&fake, &m, |_| {});
     relay
-        .begin_check(&m.session, None, None, false, &|_| None)
+        .begin_check(&m.session, None, None, &|_| None)
         .unwrap();
     until("open", || answering(&relay));
     let with = |name: &[u8], reasons: &[Reason]| {
@@ -3554,13 +3550,7 @@ fn a_go_fetch_asks_the_server_only_about_what_the_checks_go_manifest_names() {
     let b = machine();
     let relay = start(&fake, &b, |_| {});
     relay
-        .begin_check(
-            &b.session,
-            None,
-            Some("darwin_arm64".into()),
-            false,
-            &|_| None,
-        )
+        .begin_check(&b.session, None, Some("darwin_arm64".into()), &|_| None)
         .unwrap();
     until("the Go manifest", || {
         matches!(relay.state().go_manifest, super::GoManifest::Got(_))
@@ -3624,9 +3614,7 @@ fn a_go_fetch_that_comes_before_the_opens_answer_waits_for_them() {
     let b = machine();
     let relay = start(&fake, &b, |c| c.tuning.open = Duration::from_secs(10));
     relay
-        .begin_check(&b.session, None, Some("linux_amd64".into()), false, &|_| {
-            None
-        })
+        .begin_check(&b.session, None, Some("linux_amd64".into()), &|_| None)
         .unwrap();
     assert!(
         matches!(relay.state().phase, super::Phase::Opening)
@@ -3661,9 +3649,7 @@ fn a_go_fetch_that_comes_before_the_opens_answer_waits_for_them() {
     let c = machine();
     let relay = start(&fake, &c, |c| c.tuning.open = Duration::from_secs(10));
     relay
-        .begin_check(&c.session, None, Some("linux_amd64".into()), false, &|_| {
-            None
-        })
+        .begin_check(&c.session, None, Some("linux_amd64".into()), &|_| None)
         .unwrap();
     assert_eq!(
         ask(
@@ -3686,9 +3672,7 @@ fn a_go_block_built_here_goes_up_and_closes_as_go_1() {
     let key = go_block(&m.store, 73, Some(me(&fake)));
     let relay = start(&fake, &m, |_| {});
     relay
-        .begin_check(&m.session, None, Some("linux_amd64".into()), false, &|_| {
-            None
-        })
+        .begin_check(&m.session, None, Some("linux_amd64".into()), &|_| None)
         .unwrap();
     until("open", || answering(&relay));
     ask(&relay, Request::GoBuilt { key, cost_ms: 1000 });
@@ -3738,13 +3722,7 @@ fn the_go_open_goes_beside_the_checks_own_and_waits_for_nothing() {
     let relay = start(&fake, &m, |_| {});
     let started = Instant::now();
     relay
-        .begin_check(
-            &m.session,
-            None,
-            Some("darwin_arm64".into()),
-            false,
-            &|_| None,
-        )
+        .begin_check(&m.session, None, Some("darwin_arm64".into()), &|_| None)
         .unwrap();
     until("the Go manifest", || {
         matches!(relay.state().go_manifest, super::GoManifest::Got(_))
@@ -3765,9 +3743,7 @@ fn the_go_manifest_names_only_archives_that_may_leave() {
     let m = machine();
     let relay = start(&fake, &m, |_| {});
     relay
-        .begin_check(&m.session, None, Some("linux_amd64".into()), false, &|_| {
-            None
-        })
+        .begin_check(&m.session, None, Some("linux_amd64".into()), &|_| None)
         .unwrap();
     until("open", || answering(&relay));
     let shared = Digest::of(b"shared");
@@ -5264,30 +5240,24 @@ fn tool_block(store: &Store, kind: Kind, seed: u8, by: Option<Identity>) -> Dige
 /// Begins a check whose run serves `kind`'s cache, as `start_sharing` does.
 fn begin_tool(relay: &Arc<Relay>, m: &Machine, kind: Kind) {
     relay
-        .begin_check(&m.session, None, None, kind == Kind::Gradle, &|_| None)
+        .begin_check(&m.session, None, None, &|_| None)
         .unwrap();
-    if kind == Kind::Maven {
-        relay.also_maven();
-    }
+    relay.also_tool(kind, "jvm");
 }
 
 fn tool_built(kind: Kind, key: Digest) -> Request {
-    match kind {
-        Kind::Gradle => Request::GradleBuilt { key, cost_ms: 1000 },
-        _ => Request::MavenBuilt { key, cost_ms: 1000 },
+    Request::ToolBuilt {
+        kind,
+        key,
+        cost_ms: 1000,
     }
 }
 
 fn tool_fetch(kind: Kind, key: Digest) -> Request {
-    match kind {
-        Kind::Gradle => Request::GradleFetch {
-            key,
-            local_ms: None,
-        },
-        _ => Request::MavenFetch {
-            key,
-            local_ms: None,
-        },
+    Request::ToolFetch {
+        kind,
+        key,
+        local_ms: None,
     }
 }
 
@@ -5381,6 +5351,8 @@ fn a_gradle_or_maven_manifest_s_other_blocks_are_all_downloaded_once_one_is_aske
             Answer::Ready { key: keys[0] },
             "{kind:?}"
         );
+        // Their first key is their key: no hint is asked about.
+        assert_eq!(fake.count(route::HINTS_LOOKUP), 0, "{kind:?}");
         until("the second downloaded too", || {
             relay
                 .state()
@@ -5444,15 +5416,101 @@ fn no_differs_report_is_ever_sent_about_a_gradle_or_maven_block() {
             Answer::Ready { key },
             "{kind:?}"
         );
-        let report = |problem| match kind {
-            Kind::Gradle => Request::GradleReport { key, problem },
-            _ => Request::MavenReport { key, problem },
-        };
+        let report = |problem| Request::ToolReport { kind, key, problem };
         ask(&relay, report(hushrun_build::relay::Problem::Differs));
         ask(&relay, report(hushrun_build::relay::Problem::LinkDiffers));
         ask(&relay, report(hushrun_build::relay::Problem::Rejected));
         until("the rejection reported", || fake.count(route::REPORT) >= 1);
         relay.end_check(&[]);
         assert_eq!(fake.count(route::REPORT), 1, "{kind:?}");
+    }
+}
+
+// covers: B-80, B-82, B-174, B-176
+#[test]
+fn one_set_of_tool_requests_serves_gradle_and_maven_each_from_its_own_manifest() {
+    // A check whose run serves both caches: each kind's fetch is answered from its own
+    // manifest alone, a key neither names asks the server nothing, a kind no tool keys is no
+    // such request, and each kind closes apart under its own platform.
+    let fake = FakeBuild::start();
+    let a = machine();
+    let gradle = tool_block(&a.store, Kind::Gradle, 41, Some(me(&fake)));
+    let maven = tool_block(&a.store, Kind::Maven, 42, Some(me(&fake)));
+    let address = |kind: Kind, key: &Digest| blocks::address(kind.word(), key.as_bytes());
+    for (kind, key) in [(Kind::Gradle, gradle), (Kind::Maven, maven)] {
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            address(kind, &key),
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Other,
+        );
+        fake.set_kind_manifest(
+            kind.word(),
+            vec![Pair(address(kind, &key), address(kind, &key))],
+        );
+    }
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    relay
+        .begin_check(&b.session, None, None, &|_| None)
+        .unwrap();
+    relay.also_tool(Kind::Gradle, "jvm");
+    relay.also_tool(Kind::Maven, "jvm");
+    until("open", || answering(&relay));
+    // Maven's key asked as Gradle's: Gradle's manifest doesn't name it.
+    assert_eq!(ask(&relay, tool_fetch(Kind::Gradle, maven)), Answer::None);
+    assert_eq!(
+        ask(&relay, tool_fetch(Kind::Gradle, gradle)),
+        Answer::Ready { key: gradle }
+    );
+    assert_eq!(
+        ask(&relay, tool_fetch(Kind::Maven, maven)),
+        Answer::Ready { key: maven }
+    );
+    let lookups = fake.count(route::LOOKUP);
+    assert_eq!(
+        ask(&relay, tool_fetch(Kind::Maven, Digest::of(b"nowhere"))),
+        Answer::None
+    );
+    assert_eq!(
+        fake.count(route::LOOKUP),
+        lookups,
+        "a key no manifest names asks nothing"
+    );
+    // A kind no build tool keys is no tool request.
+    assert_eq!(ask(&relay, tool_fetch(Kind::Rustc, gradle)), Answer::None);
+    let opens: Vec<_> = fake
+        .opens()
+        .into_iter()
+        .filter(|o| o.kind == "gradle/1" || o.kind == "maven/1")
+        .map(|o| (o.kind, o.platform))
+        .collect();
+    assert_eq!(opens.len(), 2, "{opens:?}");
+    assert!(
+        opens.iter().all(|(_, platform)| platform == "jvm"),
+        "{opens:?}"
+    );
+    let entry = |kind: Kind, key: Digest| hushrun_build::session::Entry {
+        go: None,
+        gradle: (kind == Kind::Gradle).then(Default::default),
+        maven: (kind == Kind::Maven).then(Default::default),
+        downloaded: true,
+        ..go_entry(key, hushrun_build::model::Outcome::Reused)
+    };
+    relay.end_check(&[entry(Kind::Gradle, gradle), entry(Kind::Maven, maven)]);
+    let closes = fake.closes();
+    for (kind, key) in [(Kind::Gradle, gradle), (Kind::Maven, maven)] {
+        let close = closes
+            .iter()
+            .find(|c| c.kind == kind.word())
+            .unwrap_or_else(|| panic!("{kind:?} closes apart"));
+        assert_eq!(close.platform, "jvm");
+        assert_eq!(
+            close.manifest,
+            vec![Pair(address(kind, &key), address(kind, &key))]
+        );
     }
 }

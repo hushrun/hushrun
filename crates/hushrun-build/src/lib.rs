@@ -50,6 +50,7 @@
 
 pub mod audit;
 pub mod baked;
+pub mod cache;
 pub mod cc;
 pub mod compiler;
 pub mod decide;

@@ -8,6 +8,7 @@ pub mod build;
 pub mod build_pull;
 pub mod build_relay;
 pub(crate) mod build_session;
+pub(crate) mod build_tools;
 pub(crate) mod build_xcode;
 pub(crate) mod common;
 pub mod digest;

@@ -307,7 +307,7 @@ fn cmake_project(folder: &Path) -> bool {
 /// The checkout `folder` is in (B-50): the nearest folder at or above it holding `.git` (a
 /// worktree's is a file), in the form the shell named it (`PWD`) when that is the same folder;
 /// else `folder` itself.
-fn checkout_root(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+pub(crate) fn checkout_root(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
     checkout_of(folder, env)
 }
 
@@ -773,7 +773,7 @@ fn begin_from_saved(
     let Some(Ok(relay)) = crate::cmd::build_relay::Relay::get_or_start(config) else {
         return Ok(session);
     };
-    match relay.begin_check(&current.folder, None, None, false, here.env) {
+    match relay.begin_check(&current.folder, None, None, here.env) {
         Ok(share) => {
             if let Err(err) = session.set_share(share) {
                 session.add_line(format!("build: sharing is off for this run: {err}"));
@@ -1477,232 +1477,15 @@ fn start_sharing(
         session.set_go(go);
     }
     let go = session.go().map(|go| go.platform.clone());
-    // B-77: a Gradle build's COMMAND is served hushrun's cache, and the check asks for its
-    // Gradle manifest apart.
-    let gradle = gradle_build(session, env);
-    let share = relay.begin_check(&current.folder, Some(check), go, gradle.is_some(), env)?;
+    let share = relay.begin_check(&current.folder, Some(check), go, env)?;
     if let Err(err) = session.set_share(share) {
         relay.end_check(&[]);
         return Err(Some(format!("build: sharing is off for this run: {err}")));
     }
-    if let Some(build) = gradle {
-        give_gradle(session, &build, env);
-    }
-    // B-170: a Maven build that loads Apache's build cache extension is served hushrun's cache,
-    // and the check asks for its Maven manifest apart (B-176).
-    if let Some(build) = maven_build(session, env)
-        && give_maven(session, &build, env)
-    {
-        relay.also_maven();
-    }
+    // B-77, B-170: each build tool whose build COMMAND runs in is served hushrun's cache, and
+    // the check asks for that tool's manifest apart (B-82, B-176).
+    super::build_tools::start(session, &relay, env);
     Ok(relay)
-}
-
-/// B-170: the Maven build COMMAND runs in, when it loads Apache's build cache extension and names
-/// no remote cache of its own: the nearest folder at or above the one COMMAND runs in, up to the
-/// checkout's, that holds `.mvn`, else `pom.xml`. One that doesn't load the extension, or names a
-/// remote of its own, is said in one line; a folder in no Maven build is silent.
-fn maven_build(session: &mut Session, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    if cfg!(not(unix)) {
-        return None;
-    }
-    let folder = std::env::current_dir().ok()?;
-    let checkout = checkout_root(&folder, env);
-    let within = || {
-        folder
-            .ancestors()
-            .take_while(|dir| dir.starts_with(&checkout) || *dir == checkout)
-    };
-    let build = within()
-        .find(|dir| dir.join(".mvn").is_dir())
-        .or_else(|| within().find(|dir| dir.join("pom.xml").is_file()))?
-        .to_path_buf();
-    let read = |path: &str| std::fs::read_to_string(build.join(path)).unwrap_or_default();
-    let extension = hushrun_build::maven::EXTENSION_ARTIFACT;
-    if !read(".mvn/extensions.xml").contains(extension) && !read("pom.xml").contains(extension) {
-        session.add_line(format!(
-            "build: Maven's modules aren't shared in this run: the build doesn't load Apache's build cache extension; add {extension} to .mvn/extensions.xml"
-        ));
-        return None;
-    }
-    // The build's own remote stays the build's, as a Gradle build's does.
-    let property = hushrun_build::maven::URL_PROPERTY;
-    let opts = env(hushrun_build::maven::OPTS_VARIABLE)
-        .map(|v| v.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let config = read(".mvn/maven-build-cache-config.xml");
-    let own = [
-        opts,
-        read(".mvn/maven.config"),
-        read(".mvn/jvm.config"),
-        env("MAVEN_ARGS")
-            .map(|v| v.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    ]
-    .iter()
-    .any(|text| text.contains(property))
-        || (config.contains("<remote") && config.contains("<url>"));
-    if own {
-        session.add_line(
-            "build: maven: the build names a remote cache of its own, which stays: Maven's modules aren't shared through hushrun".to_string(),
-        );
-        return None;
-    }
-    Some(build)
-}
-
-/// B-170: starts hushrun's Maven cache for the session and gives COMMAND what points the
-/// extension at it. Whether it serves; what can't be done is one line, and the run goes on
-/// without it.
-fn give_maven(session: &mut Session, build: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> bool {
-    let checkout = checkout_root(build, env);
-    let mut roots = vec![checkout.to_string_lossy().into_owned()];
-    if let Ok(resolved) = std::fs::canonicalize(&checkout)
-        && resolved != checkout
-    {
-        roots.push(resolved.to_string_lossy().into_owned());
-    }
-    roots.extend(crate::cmd::packages::maven_part_dir(env));
-    let repository = env("HOME").map(|home| {
-        PathBuf::from(home)
-            .join(".m2")
-            .to_string_lossy()
-            .into_owned()
-    });
-    let run = hushrun_build::maven::MavenRun { roots, repository };
-    match session.set_maven(run, env) {
-        Ok(_) => {
-            // B-175: and where the build's own settings skip tests.
-            let read = |path: &str| std::fs::read_to_string(build.join(path)).unwrap_or_default();
-            let var = |name: &str| {
-                env(name)
-                    .map(|v| v.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            };
-            for (place, text) in [
-                ("MAVEN_OPTS", var("MAVEN_OPTS")),
-                ("MAVEN_ARGS", var("MAVEN_ARGS")),
-                (".mvn/maven.config", read(".mvn/maven.config")),
-                (".mvn/jvm.config", read(".mvn/jvm.config")),
-            ] {
-                if let Some(property) = hushrun_build::maven::skips_tests(text.split_whitespace()) {
-                    session.maven_skips_tests(property, place);
-                    break;
-                }
-            }
-            true
-        }
-        Err(err) => {
-            session.add_line(format!(
-                "build: Maven's modules aren't shared in this run: {err}"
-            ));
-            false
-        }
-    }
-}
-
-/// B-77: the Gradle build COMMAND runs in, when its settings file loads hushrun's script: the
-/// nearest folder at or above the one COMMAND runs in, up to the checkout's, that holds
-/// `settings.gradle` or `settings.gradle.kts`. A settings file without the line is said in one
-/// line, with the line to add; a folder in no Gradle build is silent.
-fn gradle_build(session: &mut Session, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    if cfg!(not(unix)) {
-        return None;
-    }
-    let folder = std::env::current_dir().ok()?;
-    let checkout = checkout_root(&folder, env);
-    let build = folder
-        .ancestors()
-        .take_while(|dir| dir.starts_with(&checkout) || *dir == checkout)
-        .find(|dir| {
-            ["settings.gradle", "settings.gradle.kts"]
-                .iter()
-                .any(|name| dir.join(name).is_file())
-        })?
-        .to_path_buf();
-    let (file, line) = ["settings.gradle.kts", "settings.gradle"]
-        .iter()
-        .map(|name| build.join(name))
-        .find(|path| path.is_file())
-        .map(|path| {
-            let line = if path.extension().is_some_and(|e| e == "kts") {
-                crate::units::gradle::KOTLIN_LINE
-            } else {
-                crate::units::gradle::GROOVY_LINE
-            };
-            (path, line)
-        })?;
-    let text = std::fs::read_to_string(&file).unwrap_or_default();
-    if !text.contains(hushrun_build::gradle::SCRIPT_VARIABLE) {
-        session.add_line(format!(
-            "build: Gradle's tasks aren't shared in this run: {} doesn't load hushrun's script; add `{line}` after any pluginManagement {{}} and plugins {{}} block",
-            file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-        ));
-        return None;
-    }
-    Some(build)
-}
-
-/// B-77: starts hushrun's Gradle cache for the session and gives COMMAND what loads it. What
-/// can't be done is one line, and the run goes on without it.
-fn give_gradle(session: &mut Session, build: &Path, env: &dyn Fn(&str) -> Option<OsString>) {
-    let current = session.current().clone();
-    let checkout = checkout_root(build, env);
-    let given = checkout.to_string_lossy().into_owned();
-    let mut roots = vec![given.clone()];
-    if let Ok(resolved) = std::fs::canonicalize(&checkout)
-        && resolved != checkout
-    {
-        roots.push(resolved.to_string_lossy().into_owned());
-    }
-    let user_home = env("GRADLE_USER_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".gradle")));
-    let run = hushrun_build::gradle::GradleRun {
-        roots,
-        user_home: user_home.as_ref().map(|p| p.to_string_lossy().into_owned()),
-    };
-    let started = hushrun_build::gradle::install_script(&current.store).and_then(|script| {
-        let bound = hushrun_build::gradle::endpoint::bind(&current.store)?;
-        let stable = bound.stable;
-        session.set_gradle(run, &script, bound, env).map(|_| stable)
-    });
-    match started {
-        Ok(stable) => {
-            if !stable {
-                session.add_line(
-                    "build: gradle: another run is using this store's Gradle cache port, so this run's Gradle can't reuse its configuration cache".to_string(),
-                );
-            }
-            if !caching_on(build, user_home.as_deref()) {
-                session.add_line(
-                    "build: gradle: the build cache is off for this build, so Gradle asks hushrun's cache nothing: set `org.gradle.caching=true` in gradle.properties, or pass --build-cache".to_string(),
-                );
-            }
-        }
-        Err(err) => session.add_line(format!(
-            "build: Gradle's tasks aren't shared in this run: {err}"
-        )),
-    }
-}
-
-/// Whether Gradle's build cache is on for the build at `build` by its `gradle.properties` or
-/// the user's (`org.gradle.caching=true`): the user's wins, as Gradle reads them. A command line
-/// with `--build-cache` turns it on too, which this can't see.
-fn caching_on(build: &Path, user_home: Option<&Path>) -> bool {
-    let read = |path: PathBuf| -> Option<bool> {
-        let text = std::fs::read_to_string(path).ok()?;
-        text.lines()
-            .filter_map(|line| line.trim().strip_prefix("org.gradle.caching"))
-            .filter_map(|rest| rest.trim_start().strip_prefix(['=', ':']))
-            .map(|value| value.trim().eq_ignore_ascii_case("true"))
-            .next_back()
-    };
-    user_home
-        .and_then(|home| read(home.join("gradle.properties")))
-        .or_else(|| read(build.join("gradle.properties")))
-        .unwrap_or(false)
 }
 
 /// B-39: Go's cache program for COMMAND, when the folder COMMAND runs in is a Go module's whose

@@ -3340,7 +3340,7 @@ found, as B-24 says of every kind.
 
 **B-80 A `GET`.** For a key whose block is suspended (B-15): 404. A block in the store is served
 as B-78 says once `Current::may_reuse` allows it (B-34), the question to the relay being
-`gradle_vouch`. Else, in a run whose mode is `on`, the cache asks the relay `gradle_fetch`, which
+`tool_vouch` of kind `gradle/1`. Else, in a run whose mode is `on`, the cache asks the relay `tool_fetch` of kind `gradle/1`, which
 answers only while sharing is on and the check's `gradle/1` manifest (B-82) names the key, as a Go
 fetch is answered (B-45): the first such question starts the manifest's prefetch, and one asked
 while it looks up waits for it to end; then the download is waited for to its end (B-26, ADR
@@ -3354,7 +3354,7 @@ asked nothing more by the cache for the rest of the run. A `HEAD` is 200 when th
 isn't suspended, else 404, with no body: it downloads nothing and logs nothing.
 
 **B-81 A `PUT`.** Answered 200 whatever becomes of the entry. A canonical entry B-79 doesn't keep
-here is stored as a block built by this run (B-32) and told to the relay (`gradle_built`, with the
+here is stored as a block built by this run (B-32) and told to the relay (`tool_built` of kind `gradle/1`, with the
 task's execution time as its cost), which uploads it where the run may write, as for every kind
 (B-29): what the server's scopes let the caller write, a CI job's own scope or `protected/<id>`,
 a person's machine its own or `team`. Not stored: a key suspended, a store below B-22's floor. A
@@ -3459,8 +3459,8 @@ compressed entries hide what they hold, as B-24 says of every kind.
 
 **B-174 A `GET`.** Of `buildinfo.xml`: for a key whose block is suspended (B-15), 404. A block in
 the store is served as B-172 says once `Current::may_reuse` allows it (B-34), the question to the
-relay being `maven_vouch`. Else, in a run whose mode is `on`, the cache asks the relay
-`maven_fetch`, which answers only while sharing is on and the check's `maven/1` manifest (B-176)
+relay being `tool_vouch` of kind `maven/1`. Else, in a run whose mode is `on`, the cache asks the relay
+`tool_fetch` of kind `maven/1`, which answers only while sharing is on and the check's `maven/1` manifest (B-176)
 names the key, as a Gradle fetch is answered (B-80), and the download is waited for to its end
 (B-26, ADR 0144). While a `GET` is worked on, the cache writes `HTTP/1.1 102 Processing` each
 heartbeat, as Gradle's does: the extension's client reads past it, and its socket timeout ends
@@ -3484,7 +3484,7 @@ the time from this run's first missed `GET` of its `buildinfo.xml` to the entry 
 `MAVEN_OPTS`, `MAVEN_ARGS`, `.mvn/maven.config` or `.mvn/jvm.config`, said once: `build: maven:
 <place> sets <property>, so the modules this run builds aren't shared: another build would skip
 tests that never ran`. A whole entry B-173 doesn't keep here is stored as a block built by this run
-(B-32) and told to the relay (`maven_built`, with its cost), which uploads it where the run may
+(B-32) and told to the relay (`tool_built` of kind `maven/1`, with its cost), which uploads it where the run may
 write, as for every kind (B-29). Not stored: a key suspended, a store below B-22's floor. A block
 there already that was only downloaded gives way to this build, which is then told to the relay;
 one built here stays. Maven's entries are never audited (B-16) and never compared in shared

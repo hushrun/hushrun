@@ -67,6 +67,19 @@ pub enum NotBegun {
     Unusable(String),
 }
 
+/// The cache of a build tool a run serves (B-77, B-170): what COMMAND gets for it, and its
+/// listener, which stops when the session drops it.
+#[derive(Debug)]
+struct ToolService {
+    kind: crate::model::Kind,
+    /// What COMMAND gets for the tool: Gradle's script, URL and token; Maven's `MAVEN_OPTS`.
+    env: Vec<(OsString, OsString)>,
+    /// Where the cache learns why this run keeps nothing it builds, once the run knows: the
+    /// property by which COMMAND's Maven skips tests (B-175).
+    keeps_nothing: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    _running: crate::cache::service::Running,
+}
+
 /// One run's session.
 #[derive(Debug)]
 pub struct Session {
@@ -95,16 +108,8 @@ pub struct Session {
     cc_maps_setting: bool,
     /// Which manifest the run leaves in the store when it ends (B-63), when it is a check's.
     slot: Option<crate::manifests::Slot>,
-    /// What COMMAND gets for Gradle (B-77): the script, the cache's URL and its token.
-    gradle_env: Vec<(OsString, OsString)>,
-    /// hushrun's Gradle cache while it serves (B-77): it stops with the session.
-    gradle_cache: Option<crate::gradle::cache::Running>,
-    /// What COMMAND gets for Maven (B-170): `MAVEN_OPTS` with the cache's properties.
-    maven_env: Vec<(OsString, OsString)>,
-    /// hushrun's Maven cache while it serves (B-170): it stops with the session.
-    maven_cache: Option<crate::maven::cache::Running>,
-    /// Where the cache learns that COMMAND's Maven skips tests (B-175).
-    maven_skips: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// The caches of build tools this run serves (B-77, B-170), each stopping with the session.
+    tools: Vec<ToolService>,
     /// What COMMAND gets for TypeScript (B-100): `NODE_OPTIONS` with the hook, and `HUSHRUN_TSC`.
     tsc_env: Vec<(OsString, OsString)>,
 }
@@ -743,34 +748,82 @@ pub struct Counts {
     /// What the TypeScript helper's lines came to (B-109), counted apart from the crates.
     pub tsc: TscCounts,
     /// What hushrun's Gradle cache's lines came to (B-83), counted apart from the crates.
-    pub gradle: GradleCounts,
+    pub gradle: ToolCounts,
     /// What hushrun's Maven cache's lines came to (B-177), counted apart from the crates.
-    pub maven: MavenCounts,
+    pub maven: ToolCounts,
 }
 
-/// What a run's Maven modules came to (B-177).
+/// The words of a build tool's summary lines (B-83, B-177).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Units {
+    /// The tool, after `build: `: `gradle`.
+    pub tool: &'static str,
+    /// One unit and several: `task`, `tasks`.
+    pub one: &'static str,
+    pub many: &'static str,
+    /// What the tool did with one it didn't find: `run and stored`.
+    pub stored: &'static str,
+    /// Where one that stays here was made: `run here`.
+    pub made_here: &'static str,
+    /// \[B-210\] Whether the line of those that stay here names them.
+    pub names_kept: bool,
+}
+
+impl Units {
+    /// Gradle's tasks (B-83, B-210).
+    pub const GRADLE: Units = Units {
+        tool: "gradle",
+        one: "task",
+        many: "tasks",
+        stored: "run and stored",
+        made_here: "run here",
+        names_kept: true,
+    };
+
+    /// Maven's modules (B-177).
+    pub const MAVEN: Units = Units {
+        tool: "maven",
+        one: "module",
+        many: "modules",
+        stored: "built and stored",
+        made_here: "built here",
+        names_kept: false,
+    };
+
+    fn count(&self, n: u64) -> String {
+        if n == 1 {
+            format!("1 {}", self.one)
+        } else {
+            format!("{n} {}", self.many)
+        }
+    }
+}
+
+/// What a run's entries of one build tool's cache came to (B-83, B-177).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct MavenCounts {
-    /// Modules Maven asked hushrun's cache for and found, or stored in it.
-    pub modules: u64,
-    /// Served to Maven from hushrun's store.
+pub struct ToolCounts {
+    /// Entries the tool asked hushrun's cache for and found, or stored in it.
+    pub units: u64,
+    /// Served to the tool from hushrun's store.
     pub reused: u64,
     /// Of those, downloaded from the shared store for it.
     pub downloaded: u64,
-    /// Stored by Maven after it built the module.
+    /// Stored by the tool after it made the unit.
     pub built: u64,
-    /// Milliseconds the modules served took where they were built.
+    /// Milliseconds the units served took where they were made.
     pub saved_ms: u64,
-    /// Modules Maven stored that stay on this machine, by reason, in the order first seen.
-    pub local: Vec<(crate::maven::Local, u64)>,
+    /// Units the tool stored that stay on this machine, by the words of their reason, in the
+    /// order first seen.
+    pub local: Vec<(&'static str, u64)>,
+    /// \[B-210\] The units of those, by the tool's name, in the order first seen, each once.
+    #[serde(skip)]
+    pub local_names: Vec<String>,
 }
 
-impl MavenCounts {
-    fn add(&mut self, entry: &Entry) {
-        let Some(maven) = &entry.maven else {
-            return;
-        };
-        self.modules += 1;
+impl ToolCounts {
+    /// Counts `entry`, which stays on this machine for the reason `local` says, if any.
+    fn add(&mut self, entry: &Entry, local: Option<&'static str>) {
+        self.units += 1;
         match entry.outcome {
             Outcome::Reused => {
                 self.reused += 1;
@@ -781,26 +834,23 @@ impl MavenCounts {
                 self.built += 1;
             }
         }
-        if let Some(local) = maven.local {
+        if let Some(local) = local {
             match self.local.iter_mut().find(|(seen, _)| *seen == local) {
                 Some((_, n)) => *n += 1,
                 None => self.local.push((local, 1)),
             }
+            if !entry.crate_name.is_empty() && !self.local_names.contains(&entry.crate_name) {
+                self.local_names.push(entry.crate_name.clone());
+            }
         }
     }
 
-    /// B-177's lines for Maven, without a prefix. Empty when Maven asked nothing.
-    pub fn lines(&self) -> Vec<String> {
-        if self.modules == 0 {
+    /// B-83's and B-177's lines for the tool `units` names, without a prefix. Empty when the
+    /// tool asked nothing.
+    pub fn lines(&self, units: &Units) -> Vec<String> {
+        if self.units == 0 {
             return Vec::new();
         }
-        let modules = |n: u64| {
-            if n == 1 {
-                "1 module".to_string()
-            } else {
-                format!("{n} modules")
-            }
-        };
         let mut parts = Vec::new();
         if self.reused > 0 {
             let mut part = format!("{} from hushrun's cache", self.reused);
@@ -808,11 +858,12 @@ impl MavenCounts {
             parts.push(part);
         }
         if self.built > 0 {
-            parts.push(format!("{} built and stored", self.built));
+            parts.push(format!("{} {}", self.built, units.stored));
         }
         let mut first = format!(
-            "build: maven: {}: {}",
-            modules(self.modules),
+            "build: {}: {}: {}",
+            units.tool,
+            units.count(self.units),
             parts.join(", ")
         );
         if self.saved_ms >= 1_000 {
@@ -824,116 +875,27 @@ impl MavenCounts {
             let why: Vec<String> = self
                 .local
                 .iter()
-                .map(|(local, n)| format!("{n}: {}", local.words()))
-                .collect();
-            lines.push(format!(
-                "build: maven: {} built here {} on this machine ({})",
-                modules(kept),
-                if kept == 1 { "stays" } else { "stay" },
-                why.join(", ")
-            ));
-        }
-        lines
-    }
-}
-
-/// What a run's Gradle entries came to (B-83).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct GradleCounts {
-    /// Entries Gradle asked hushrun's cache for and found, or stored in it.
-    pub tasks: u64,
-    /// Served to Gradle from hushrun's store.
-    pub reused: u64,
-    /// Of those, downloaded from the shared store for it.
-    pub downloaded: u64,
-    /// Stored by Gradle after it ran the task.
-    pub built: u64,
-    /// Milliseconds the tasks served took where they were run.
-    pub saved_ms: u64,
-    /// Entries Gradle stored that stay on this machine, by reason, in the order first seen.
-    pub local: Vec<(crate::gradle::Local, u64)>,
-    /// \[B-210\] The tasks of those, by Gradle's name, in the order first seen, each once.
-    #[serde(skip)]
-    pub local_tasks: Vec<String>,
-}
-
-impl GradleCounts {
-    fn add(&mut self, entry: &Entry) {
-        let Some(gradle) = &entry.gradle else {
-            return;
-        };
-        self.tasks += 1;
-        match entry.outcome {
-            Outcome::Reused => {
-                self.reused += 1;
-                self.downloaded += u64::from(entry.downloaded);
-                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
-            }
-            Outcome::BuiltAndStored | Outcome::BuiltNotStored(_) | Outcome::PassedThrough(_) => {
-                self.built += 1;
-            }
-        }
-        if let Some(local) = gradle.local {
-            match self.local.iter_mut().find(|(seen, _)| *seen == local) {
-                Some((_, n)) => *n += 1,
-                None => self.local.push((local, 1)),
-            }
-            if !entry.crate_name.is_empty() && !self.local_tasks.contains(&entry.crate_name) {
-                self.local_tasks.push(entry.crate_name.clone());
-            }
-        }
-    }
-
-    /// B-83's lines for Gradle, without a prefix. Empty when Gradle asked nothing.
-    pub fn lines(&self) -> Vec<String> {
-        if self.tasks == 0 {
-            return Vec::new();
-        }
-        let tasks = |n: u64| {
-            if n == 1 {
-                "1 task".to_string()
-            } else {
-                format!("{n} tasks")
-            }
-        };
-        let mut parts = Vec::new();
-        if self.reused > 0 {
-            let mut part = format!("{} from hushrun's cache", self.reused);
-            part.push_str(&from_where(self.downloaded, 0));
-            parts.push(part);
-        }
-        if self.built > 0 {
-            parts.push(format!("{} run and stored", self.built));
-        }
-        let mut first = format!("build: gradle: {}: {}", tasks(self.tasks), parts.join(", "));
-        if self.saved_ms >= 1_000 {
-            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
-        }
-        let mut lines = vec![first];
-        let kept: u64 = self.local.iter().map(|(_, n)| n).sum();
-        if kept > 0 {
-            let why: Vec<String> = self
-                .local
-                .iter()
-                .map(|(local, n)| format!("{n}: {}", local.words()))
+                .map(|(words, n)| format!("{n}: {words}"))
                 .collect();
             let mut line = format!(
-                "build: gradle: {} run here {} on this machine ({})",
-                tasks(kept),
+                "build: {}: {} {} {} on this machine ({})",
+                units.tool,
+                units.count(kept),
+                units.made_here,
                 if kept == 1 { "stays" } else { "stay" },
                 why.join(", ")
             );
             // \[B-210\] Which, so that a build can tell its own task from a plugin's (kapt's
             // stubs hold their sources' paths): three at most, and how many more.
-            if !self.local_tasks.is_empty() {
+            if units.names_kept && !self.local_names.is_empty() {
                 let shown: Vec<&str> = self
-                    .local_tasks
+                    .local_names
                     .iter()
                     .take(3)
                     .map(String::as_str)
                     .collect();
                 line.push_str(&format!(": {}", shown.join(", ")));
-                let more = self.local_tasks.len() - shown.len();
+                let more = self.local_names.len() - shown.len();
                 if more > 0 {
                     line.push_str(&format!(" and {more} more"));
                 }
@@ -1357,12 +1319,16 @@ impl Counts {
                 counts.cc.add(entry);
                 continue;
             }
-            if entry.gradle.is_some() {
-                counts.gradle.add(entry);
+            if let Some(gradle) = &entry.gradle {
+                counts
+                    .gradle
+                    .add(entry, gradle.local.map(crate::gradle::Local::words));
                 continue;
             }
-            if entry.maven.is_some() {
-                counts.maven.add(entry);
+            if let Some(maven) = &entry.maven {
+                counts
+                    .maven
+                    .add(entry, maven.local.map(crate::maven::Local::words));
                 continue;
             }
             if entry.tsc.is_some() {
@@ -1476,8 +1442,8 @@ fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
     let mut lines = rust_lines(counts, rebuilt);
     lines.extend(counts.go.lines());
     lines.extend(counts.cc.lines(counts.mode));
-    lines.extend(counts.gradle.lines());
-    lines.extend(counts.maven.lines());
+    lines.extend(counts.gradle.lines(&Units::GRADLE));
+    lines.extend(counts.maven.lines(&Units::MAVEN));
     lines.extend(counts.tsc.lines(counts.mode));
     lines
 }
@@ -1727,11 +1693,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         cc_programs: None,
         cc_maps_setting: settings.cc_maps,
         slot: None,
-        gradle_env: Vec::new(),
-        gradle_cache: None,
-        maven_env: Vec::new(),
-        maven_cache: None,
-        maven_skips: None,
+        tools: Vec::new(),
         tsc_env: Vec::new(),
     })
 }
@@ -1868,8 +1830,9 @@ impl Session {
             env.push((crate::go::GOCACHEPROG.into(), go.value.clone().into()));
         }
         env.extend(self.cc_env.iter().cloned());
-        env.extend(self.gradle_env.iter().cloned());
-        env.extend(self.maven_env.iter().cloned());
+        for tool in &self.tools {
+            env.extend(tool.env.iter().cloned());
+        }
         env.extend(self.tsc_env.iter().cloned());
         if let Some(xcconfig) = &self.xcode {
             env.push((
@@ -1901,7 +1864,7 @@ impl Session {
         &mut self,
         run: crate::gradle::GradleRun,
         script: &Path,
-        bound: crate::gradle::endpoint::Bound,
+        bound: crate::cache::endpoint::Bound,
         env: &dyn Fn(&str) -> Option<OsString>,
     ) -> std::io::Result<String> {
         self.current.gradle = Some(run);
@@ -1909,7 +1872,7 @@ impl Session {
         let url = bound.url();
         let token = bound.endpoint.token.clone();
         let cache = crate::gradle::cache::Cache::new(self.current.clone(), &token);
-        self.gradle_cache = Some(crate::gradle::cache::start(bound.listener, cache)?);
+        let running = crate::cache::service::start(bound.listener, cache)?;
         let mut gradle_env: Vec<(OsString, OsString)> = Vec::new();
         if env(crate::gradle::SCRIPT_VARIABLE).is_none_or(|v| v.is_empty()) {
             gradle_env.push((
@@ -1919,13 +1882,24 @@ impl Session {
         }
         gradle_env.push((crate::gradle::CACHE_VARIABLE.into(), url.clone().into()));
         gradle_env.push((crate::gradle::TOKEN_VARIABLE.into(), token.into()));
-        self.gradle_env = gradle_env;
+        self.set_tool(ToolService {
+            kind: crate::model::Kind::Gradle,
+            env: gradle_env,
+            keeps_nothing: None,
+            _running: running,
+        });
         Ok(url)
     }
 
-    /// Whether the run serves Gradle hushrun's cache (B-77).
-    pub fn serves_gradle(&self) -> bool {
-        self.gradle_cache.is_some()
+    /// The service of the tool cache of `kind`, in place of any the run had.
+    fn set_tool(&mut self, service: ToolService) {
+        self.tools.retain(|tool| tool.kind != service.kind);
+        self.tools.push(service);
+    }
+
+    /// Whether the run serves hushrun's cache to the build tool of `kind` (B-77, B-170).
+    pub fn serves(&self, kind: crate::model::Kind) -> bool {
+        self.tools.iter().any(|tool| tool.kind == kind)
     }
 
     /// B-170: serves Maven's build cache extension hushrun's cache for this run, on a port and
@@ -1938,13 +1912,13 @@ impl Session {
         run: crate::maven::MavenRun,
         env: &dyn Fn(&str) -> Option<OsString>,
     ) -> std::io::Result<String> {
-        let (listener, token) = crate::maven::cache::bind()?;
-        let url = crate::maven::cache::url(&listener, &token)?;
+        let (listener, token) = crate::cache::endpoint::for_run()?;
+        let url = crate::cache::endpoint::run_url(&listener, &token)?;
         self.current.maven = Some(run);
         write_current(&self.current)?;
         let cache = crate::maven::cache::Cache::new(self.current.clone(), &token);
-        self.maven_skips = Some(cache.skips_tests());
-        self.maven_cache = Some(crate::maven::cache::start(listener, cache)?);
+        let keeps_nothing = Some(cache.skips_tests());
+        let running = crate::cache::service::start(listener, cache)?;
         let mut opts = env(crate::maven::OPTS_VARIABLE)
             .map(|v| v.to_string_lossy().trim().to_string())
             .unwrap_or_default();
@@ -1952,20 +1926,25 @@ impl Session {
             opts.push(' ');
         }
         opts.push_str(&crate::maven::properties(&url));
-        self.maven_env = vec![(crate::maven::OPTS_VARIABLE.into(), opts.into())];
+        self.set_tool(ToolService {
+            kind: crate::model::Kind::Maven,
+            env: vec![(crate::maven::OPTS_VARIABLE.into(), opts.into())],
+            keeps_nothing,
+            _running: running,
+        });
         Ok(url)
-    }
-
-    /// Whether the run serves Maven hushrun's cache (B-170).
-    pub fn serves_maven(&self) -> bool {
-        self.maven_cache.is_some()
     }
 
     /// B-175: Maven skips tests in this run, by `property` (`skipTests` or `maven.test.skip`) in
     /// `place` (COMMAND, `MAVEN_OPTS`, a file of `.mvn`): the cache keeps none of the modules it
     /// builds, and the run says so once. Nothing when the run doesn't serve Maven.
     pub fn maven_skips_tests(&mut self, property: &str, place: &str) {
-        let Some(skips) = &self.maven_skips else {
+        let Some(skips) = self
+            .tools
+            .iter()
+            .find(|tool| tool.kind == crate::model::Kind::Maven)
+            .and_then(|tool| tool.keeps_nothing.as_ref())
+        else {
             return;
         };
         if let Ok(mut skips) = skips.lock() {
@@ -2360,6 +2339,63 @@ fn symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    // covers: B-83, B-177, B-210
+    #[test]
+    fn one_set_of_counts_says_gradle_s_and_maven_s_lines_word_for_word() {
+        let entry = |name: &str, outcome: Outcome, downloaded: bool| Entry {
+            outcome,
+            class: Some(Class::Library),
+            crate_name: name.to_string(),
+            package: String::new(),
+            rustc_ms: 0,
+            saved_ms: if outcome == Outcome::Reused { 1_500 } else { 0 },
+            stored_bytes: 0,
+            found: false,
+            differed: false,
+            note: None,
+            portable: None,
+            step: None,
+            key: None,
+            downloaded,
+            baked: false,
+            go: None,
+            cc: None,
+            xcode: None,
+            gradle: None,
+            maven: None,
+            tsc: None,
+        };
+        let mut counts = ToolCounts::default();
+        counts.add(&entry(":a", Outcome::Reused, true), None);
+        counts.add(&entry(":b", Outcome::BuiltAndStored, false), None);
+        for name in [":c", ":d", ":e", ":f"] {
+            counts.add(
+                &entry(name, Outcome::BuiltAndStored, false),
+                Some("its outputs hold the checkout's folder"),
+            );
+        }
+        assert_eq!(
+            counts.lines(&Units::GRADLE),
+            [
+                "build: gradle: 6 tasks: 1 from hushrun's cache (1 from the shared store), 5 run and stored, saving about 1s",
+                "build: gradle: 4 tasks run here stay on this machine (4: its outputs hold the checkout's folder): :c, :d, :e and 1 more",
+            ]
+        );
+        let mut counts = ToolCounts::default();
+        counts.add(
+            &entry("core", Outcome::BuiltAndStored, false),
+            Some("its files hold the checkout's folder"),
+        );
+        assert_eq!(
+            counts.lines(&Units::MAVEN),
+            [
+                "build: maven: 1 module: 1 built and stored",
+                "build: maven: 1 module built here stays on this machine (1: its files hold the checkout's folder)",
+            ]
+        );
+        assert!(ToolCounts::default().lines(&Units::GRADLE).is_empty());
+    }
 
     // covers: B-72
     #[test]

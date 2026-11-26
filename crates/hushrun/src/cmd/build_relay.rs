@@ -229,12 +229,10 @@ struct Check {
     /// B-45: the platform of the check's Go command (`GOOS_GOARCH`), when COMMAND is a Go
     /// module's and gets the cache program: its Go manifest is asked for and closed apart.
     go: Option<String>,
-    /// B-82: COMMAND's Gradle is served hushrun's cache: its `gradle/1` manifest is asked for and
-    /// closed apart.
-    gradle: bool,
-    /// B-176: COMMAND's Maven is served hushrun's cache: its `maven/1` manifest is asked for and
-    /// closed apart.
-    maven: bool,
+    /// B-82, B-176: the kinds a build tool keys itself whose cache COMMAND's tool is served
+    /// (Gradle's, Maven's), each with the one platform its manifest is asked and closed under,
+    /// apart from the check's own.
+    tools: Vec<(Kind, String)>,
 }
 
 /// The check's Go manifest (B-45): asked once `open` answered, kept until the first Go fetch
@@ -276,14 +274,11 @@ struct State {
     go_manifest: GoManifest,
     /// The prefetch of the Go manifest is looking up what it names.
     go_prefetching: bool,
-    /// B-82: the check's `gradle/1` manifest, as the Go one is kept.
-    gradle_manifest: GoManifest,
-    /// The prefetch of the Gradle manifest is looking up what it names.
-    gradle_prefetching: bool,
-    /// B-176: the check's `maven/1` manifest, as the Gradle one is kept.
-    maven_manifest: GoManifest,
-    /// The prefetch of the Maven manifest is looking up what it names.
-    maven_prefetching: bool,
+    /// B-82, B-176: the check's manifest of each kind a build tool keys itself, as the Go one is
+    /// kept; none is not asked.
+    tool_manifests: HashMap<Kind, GoManifest>,
+    /// The kinds whose manifest's prefetch is looking up what it names.
+    tool_prefetching: HashSet<Kind>,
     /// The check's `cc/1` manifests, by target triple (B-60), and its `xcode/1` manifests, by
     /// Xcode build (B-90): by kind and platform.
     cc_manifests: HashMap<(Kind, String), CcManifest>,
@@ -337,21 +332,34 @@ struct State {
 }
 
 impl State {
-    /// The check's manifest of `kind` that a fetch must name (B-45, B-82): Gradle's, else Go's.
+    /// The check's manifest of `kind` that a fetch must name (B-45, B-82, B-176): a build
+    /// tool's, by its kind, else Go's.
     fn named_manifest(&mut self, kind: Kind) -> &mut GoManifest {
-        match kind {
-            Kind::Gradle => &mut self.gradle_manifest,
-            Kind::Maven => &mut self.maven_manifest,
-            _ => &mut self.go_manifest,
+        if kind.tool_keyed() {
+            return self
+                .tool_manifests
+                .entry(kind)
+                .or_insert(GoManifest::NotAsked);
         }
+        &mut self.go_manifest
     }
 
     /// Whether the prefetch of that manifest is looking up what it names.
-    fn named_prefetching(&mut self, kind: Kind) -> &mut bool {
-        match kind {
-            Kind::Gradle => &mut self.gradle_prefetching,
-            Kind::Maven => &mut self.maven_prefetching,
-            _ => &mut self.go_prefetching,
+    fn named_prefetching(&self, kind: Kind) -> bool {
+        if kind.tool_keyed() {
+            return self.tool_prefetching.contains(&kind);
+        }
+        self.go_prefetching
+    }
+
+    /// Marks the prefetch of that manifest as under way, or over.
+    fn set_named_prefetching(&mut self, kind: Kind, under_way: bool) {
+        if !kind.tool_keyed() {
+            self.go_prefetching = under_way;
+        } else if under_way {
+            self.tool_prefetching.insert(kind);
+        } else {
+            self.tool_prefetching.remove(&kind);
         }
     }
 
@@ -588,10 +596,8 @@ impl Relay {
                 manifest: None,
                 go_manifest: GoManifest::NotAsked,
                 go_prefetching: false,
-                gradle_manifest: GoManifest::NotAsked,
-                gradle_prefetching: false,
-                maven_manifest: GoManifest::NotAsked,
-                maven_prefetching: false,
+                tool_manifests: HashMap::new(),
+                tool_prefetching: HashSet::new(),
                 cc_manifests: HashMap::new(),
                 cc_prefetching: 0,
                 cc_told: HashSet::new(),
@@ -643,7 +649,6 @@ impl Relay {
         session_folder: &Path,
         check: Option<Hex32>,
         go: Option<String>,
-        gradle: bool,
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Result<Share, String> {
         let bound = socket::bind(session_folder, env)
@@ -670,12 +675,10 @@ impl Relay {
                 socket: bound,
                 stop_serving,
                 go,
-                gradle,
-                maven: false,
+                tools: Vec::new(),
             });
             state.go_manifest = GoManifest::NotAsked;
-            state.gradle_manifest = GoManifest::NotAsked;
-            state.maven_manifest = GoManifest::NotAsked;
+            state.tool_manifests.clear();
             state.cc_manifests.clear();
             if !matches!(state.phase, Phase::Stopped(_)) {
                 state.phase = Phase::Opening;
@@ -701,16 +704,6 @@ impl Relay {
                 let relay = self.clone();
                 self.runtime.spawn(async move {
                     relay.manifest_open(Kind::Go, check, platform).await;
-                });
-            }
-            // B-82: and Gradle's, the same way, under one platform for every machine.
-            if gradle {
-                self.state().gradle_manifest = GoManifest::Asking;
-                let relay = self.clone();
-                self.runtime.spawn(async move {
-                    relay
-                        .manifest_open(Kind::Gradle, check, hushrun_build::gradle::PLATFORM.into())
-                        .await;
                 });
             }
             self.start_uploads();
@@ -905,31 +898,28 @@ impl Relay {
                 self.report_problem_soon(Kind::Xcode, key, problem);
                 Answer::Ok
             }
-            Request::GradleFetch { key, local_ms } => {
-                self.named_fetch(Kind::Gradle, key, local_ms).await
+            // B-80, B-174: a build tool's cache's, by its kind; a kind the tool doesn't key
+            // itself is no such request.
+            Request::ToolFetch {
+                kind,
+                key,
+                local_ms,
+            } if kind.tool_keyed() => self.named_fetch(kind, key, local_ms).await,
+            Request::ToolVouch { kind, key, outputs } if kind.tool_keyed() => {
+                self.vouch(kind, key, outputs).await
             }
-            Request::GradleVouch { key, outputs } => self.vouch(Kind::Gradle, key, outputs).await,
-            Request::GradleBuilt { .. } => {
+            Request::ToolBuilt { .. } => {
                 self.built(request);
                 Answer::Ok
             }
-            Request::GradleReport { key, problem } => {
+            Request::ToolReport { kind, key, problem } => {
                 // As Go's: answered once the record is read, so the cache may discard it.
-                self.report_problem_soon(Kind::Gradle, key, problem);
+                if kind.tool_keyed() {
+                    self.report_problem_soon(kind, key, problem);
+                }
                 Answer::Ok
             }
-            Request::MavenFetch { key, local_ms } => {
-                self.named_fetch(Kind::Maven, key, local_ms).await
-            }
-            Request::MavenVouch { key, outputs } => self.vouch(Kind::Maven, key, outputs).await,
-            Request::MavenBuilt { .. } => {
-                self.built(request);
-                Answer::Ok
-            }
-            Request::MavenReport { key, problem } => {
-                self.report_problem_soon(Kind::Maven, key, problem);
-                Answer::Ok
-            }
+            Request::ToolFetch { .. } | Request::ToolVouch { .. } => Answer::None,
             // B-108: the TypeScript helper's, as the C and C++ launcher's, by its own kind and
             // manifest.
             Request::TscHints {
@@ -1171,7 +1161,7 @@ impl Relay {
             if got && state.answering(now) {
                 match std::mem::replace(state.named_manifest(kind), GoManifest::Taken) {
                     GoManifest::Got(manifest) => {
-                        *state.named_prefetching(kind) = true;
+                        state.set_named_prefetching(kind, true);
                         Some(manifest)
                     }
                     _ => None,
@@ -1186,7 +1176,7 @@ impl Relay {
             struct Prefetched<'a>(&'a Relay, Kind);
             impl Drop for Prefetched<'_> {
                 fn drop(&mut self) {
-                    *self.0.state().named_prefetching(self.1) = false;
+                    self.0.state().set_named_prefetching(self.1, false);
                 }
             }
             let _prefetched = Prefetched(&self, kind);
@@ -1202,12 +1192,7 @@ impl Relay {
                 if state.fetches.contains_key(&address) || state.found.contains_key(&address) {
                     break;
                 }
-                let prefetching = match kind {
-                    Kind::Gradle => state.gradle_prefetching,
-                    Kind::Maven => state.maven_prefetching,
-                    _ => state.go_prefetching,
-                };
-                if !prefetching {
+                if !state.named_prefetching(kind) {
                     return Answer::None;
                 }
             }
@@ -1454,7 +1439,7 @@ impl Relay {
                     .iter()
                     .map(|key| Relay::address_in(kind, key))
                     .collect();
-                if kind.self_keyed() {
+                if first_key_is_key(kind) {
                     return (blocks, HashSet::new(), HashSet::new());
                 }
                 let steps = store.steps();
@@ -1491,7 +1476,7 @@ impl Relay {
                 .map(Pair::block)
                 .filter(|a| !held_blocks.contains(a)),
         );
-        if !kind.self_keyed() {
+        if !first_key_is_key(kind) {
             for batch in hints.chunks(limit) {
                 self.lookup_hints(kind, batch).await;
             }
@@ -2275,15 +2260,7 @@ impl Relay {
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        for kind in [
-            Kind::Rustc,
-            Kind::Go,
-            Kind::Cc,
-            Kind::Gradle,
-            Kind::Xcode,
-            Kind::Maven,
-            Kind::Tsc,
-        ] {
+        for kind in Kind::ALL {
             let keys: Vec<Digest> = keys
                 .iter()
                 .filter(|(k, _)| *k == kind)
@@ -2495,20 +2472,10 @@ impl Relay {
                 false,
                 *cost_ms,
             ),
-            // B-81: a Gradle entry is a library whose first key is its key, and the cache tells
-            // only of ones that may leave (B-79).
-            Request::GradleBuilt { key, cost_ms } => (
-                Kind::Gradle,
-                *key,
-                *key,
-                LocalClass::Library,
-                true,
-                false,
-                *cost_ms,
-            ),
-            // B-175: and so is a Maven module's entry (B-173).
-            Request::MavenBuilt { key, cost_ms } => (
-                Kind::Maven,
+            // B-81, B-175: a Gradle entry or a Maven module's is a library whose first key is
+            // its key, and the cache tells only of ones that may leave (B-79, B-173).
+            Request::ToolBuilt { kind, key, cost_ms } if kind.tool_keyed() => (
+                *kind,
                 *key,
                 *key,
                 LocalClass::Library,
@@ -2608,7 +2575,7 @@ impl Relay {
         // B-33: every class is compared, a linked output among them (B-16); a Gradle entry
         // never is, since Gradle's outputs needn't be the same from one execution to the next
         // (B-81).
-        if sharing == Sharing::Observe && kind != Kind::Gradle && kind != Kind::Maven {
+        if sharing == Sharing::Observe && !kind.tool_keyed() {
             let relay = self.clone();
             let linked = class != LocalClass::Library;
             self.runtime
@@ -2819,28 +2786,33 @@ impl Relay {
 
     // --- the end of a check --------------------------------------------------------------
 
-    /// B-176: the check that began serves Maven hushrun's cache too: its `maven/1` manifest is
-    /// asked for beside the check's own `open`, under one platform for every machine, and closed
-    /// apart. Nothing for a relay that reads a saved policy, whose runs ask no manifest.
-    pub(crate) fn also_maven(self: &Arc<Relay>) {
+    /// B-82, B-176: the check that began serves a build tool's cache too (Gradle's, Maven's):
+    /// its manifest of `kind` is asked for beside the check's own `open`, under `platform`, one
+    /// for every machine, and closed apart. Nothing is asked by a relay that reads a saved
+    /// policy, whose runs ask no manifest.
+    pub(crate) fn also_tool(self: &Arc<Relay>, kind: Kind, platform: &str) {
+        if !kind.tool_keyed() {
+            return;
+        }
         let check = {
             let mut state = self.state();
             let Some(at) = state.check.as_mut() else {
                 return;
             };
-            at.maven = true;
+            if !at.tools.iter().any(|(k, _)| *k == kind) {
+                at.tools.push((kind, platform.to_string()));
+            }
             let check = at.check;
             if self.config.saved.is_some() {
                 return;
             }
-            state.maven_manifest = GoManifest::Asking;
+            *state.named_manifest(kind) = GoManifest::Asking;
             check
         };
         let relay = self.clone();
+        let platform = platform.to_string();
         self.runtime.spawn(async move {
-            relay
-                .manifest_open(Kind::Maven, check, hushrun_build::maven::PLATFORM.into())
-                .await;
+            relay.manifest_open(kind, check, platform).await;
         });
     }
 
@@ -2987,12 +2959,13 @@ impl Relay {
             // B-45: the check's Go command closes apart, with its own manifest and run.
             let go = (check.go.is_some() && entries.iter().any(|e| e.kind() == Kind::Go))
                 .then(|| self.close_request(Kind::Go, check, entries));
-            // B-82: and its Gradle, with its own manifest and run.
-            let gradle = (check.gradle && entries.iter().any(|e| e.kind() == Kind::Gradle))
-                .then(|| self.close_request(Kind::Gradle, check, entries));
-            // B-176: and its Maven, the same way.
-            let maven = (check.maven && entries.iter().any(|e| e.kind() == Kind::Maven))
-                .then(|| self.close_request(Kind::Maven, check, entries));
+            // B-82, B-176: and each build tool's, with its own manifest and run.
+            let tools: Vec<CloseRequest> = check
+                .tools
+                .iter()
+                .filter(|(kind, _)| entries.iter().any(|e| e.kind() == *kind))
+                .map(|(kind, _)| self.close_request(*kind, check, entries))
+                .collect();
             // B-60: and its C and C++ compiles, once for each target triple they were for.
             let mut cc: Vec<CloseRequest> = cc_platforms(entries)
                 .into_iter()
@@ -3019,7 +2992,7 @@ impl Relay {
                     None,
                 );
                 let go = async {
-                    for close in go.iter().chain(gradle.iter()).chain(maven.iter()) {
+                    for close in go.iter().chain(tools.iter()) {
                         let _ = relay
                             .client
                             .post::<_, serde_json::Value>(blocks::CLOSE_PATH, close, left, None)
@@ -3267,13 +3240,16 @@ impl Relay {
                 counts,
             };
         }
-        if matches!(kind, Kind::Go | Kind::Gradle | Kind::Maven) {
+        if kind == Kind::Go || kind.tool_keyed() {
             let mut bytes = check.run.0.to_vec();
             bytes.extend_from_slice(format!("{}\n", kind.word()).as_bytes());
-            let platform = if kind == Kind::Gradle {
-                hushrun_build::gradle::PLATFORM.to_string()
-            } else if kind == Kind::Maven {
-                hushrun_build::maven::PLATFORM.to_string()
+            let platform = if kind.tool_keyed() {
+                check
+                    .tools
+                    .iter()
+                    .find(|(k, _)| *k == kind)
+                    .map(|(_, platform)| platform.clone())
+                    .unwrap_or_default()
             } else {
                 check.go.clone().unwrap_or_default()
             };
@@ -3397,6 +3373,14 @@ fn prefetch_order<T>(
         first.extend(rest);
     }
     first
+}
+
+/// Whether a block of `kind` has its key as its first key, and so no hints to look up and no
+/// first key this machine keeps to itself (B-34): a self-keyed kind's (Go's, Xcode's) and a
+/// build tool's (Gradle's, Maven's), whose cache asks for the key the tool computed. A
+/// tool-keyed kind isn't self-keyed for the rest: its manifest, not hints, says what is fetched.
+fn first_key_is_key(kind: Kind) -> bool {
+    kind.self_keyed() || kind.tool_keyed()
 }
 
 /// Whether a report of `problem` about a block of `kind` is sent at all. A block a build tool

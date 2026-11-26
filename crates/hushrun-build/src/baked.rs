@@ -96,7 +96,7 @@ const MOST_HINT: u64 = 1 << 20;
 const PACK_MAGIC: &[u8; 4] = b"HRBP";
 /// How a sealed hint begins: `hushrun_core::blocks::pack::HINT_MAGIC`.
 const HINT_MAGIC: &[u8; 4] = b"HRBH";
-/// The kinds a baked store carries.
+/// The kinds a baked store carries: those whose row says so ([`Kind::facts`]).
 pub const KINDS: [Kind; 3] = [Kind::Rustc, Kind::Go, Kind::Cc];
 
 /// `baked.json`.

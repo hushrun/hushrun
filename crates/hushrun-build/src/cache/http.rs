@@ -1,7 +1,8 @@
-//! B-77: as much HTTP/1.1 as Gradle's `HttpBuildCache` speaks to hushrun's cache, over the
-//! loopback: `GET`, `HEAD` and `PUT` of one path, Basic authentication, bodies by
-//! `Content-Length` or chunked, `Expect: 100-continue`, and connections kept open between
-//! requests. Everything else is answered and the connection closed. std only.
+//! B-77, B-170: as much HTTP/1.1 as a build tool's remote cache client speaks to hushrun's
+//! cache over the loopback (Gradle's `HttpBuildCache`, Maven's build cache extension): `GET`,
+//! `HEAD` and `PUT`, Basic authentication, bodies by `Content-Length` or chunked,
+//! `Expect: 100-continue`, and connections kept open between requests. Everything else is
+//! answered and the connection closed. std only.
 
 use std::io::{self, BufRead, Read, Write};
 
@@ -248,14 +249,15 @@ fn read_chunked(input: &mut impl BufRead, most: u64) -> Result<Body, Unread> {
     })
 }
 
-/// Writes an answer: `status`, and `body` unless the request was a `HEAD` (`head`), whose
-/// `Content-Length` is still the body's.
+/// Writes an answer: `status`, its `Content-Length`, the protocol's `headers` in order, and
+/// `body` unless the request was a `HEAD` (`head`), whose `Content-Length` is still the body's.
 pub fn write(
     out: &mut impl Write,
     status: u16,
     body: &[u8],
     head: bool,
     close: bool,
+    headers: &[(&str, &str)],
 ) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -274,11 +276,8 @@ pub fn write(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n",
         body.len()
     );
-    if status == 200 && !body.is_empty() {
-        text.push_str("Content-Type: application/vnd.gradle.build-cache-artifact.v2\r\n");
-    }
-    if status == 401 {
-        text.push_str("WWW-Authenticate: Basic realm=\"hushrun\"\r\n");
+    for (name, value) in headers {
+        text.push_str(&format!("{name}: {value}\r\n"));
     }
     if close {
         text.push_str("Connection: close\r\n");
@@ -400,9 +399,16 @@ mod tests {
     #[test]
     fn a_head_answers_the_length_without_the_body() {
         let mut out = Vec::new();
-        write(&mut out, 200, b"abc", true, false).unwrap();
+        write(&mut out, 200, b"abc", true, false, &[]).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
+        // A protocol's headers follow the length, in order, and the close comes last.
+        let mut out = Vec::new();
+        write(&mut out, 401, b"", false, true, &[("A", "1"), ("B", "2")]).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nA: 1\r\nB: 2\r\nConnection: close\r\n\r\n"
+        );
     }
 }

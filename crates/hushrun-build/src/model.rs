@@ -121,38 +121,75 @@ pub enum Kind {
     Tsc,
 }
 
+/// What is true of a kind wherever hushrun asks: one row per kind ([`Kind::facts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindFacts {
+    /// The kind on the wire: the adapter and its keys' version.
+    pub word: &'static str,
+    /// A block's first key is its key, with no hints: the tool computes the key from everything
+    /// a compile read (Go's, Xcode's).
+    pub self_keyed: bool,
+    /// The build tool keys the block itself and hushrun serves it as the tool's remote cache
+    /// (Gradle's, Maven's). Its first key is its key too, but the relay asks of it what the
+    /// tool's manifest names, never hints (B-80, B-174).
+    pub tool_keyed: bool,
+    /// A baked store carries it ([`crate::baked::KINDS`]).
+    pub baked: bool,
+    /// What its blocks are called in a line: "Gradle entries".
+    pub label: &'static str,
+}
+
 impl Kind {
+    /// Every kind, in the order the relay asks about them.
+    pub const ALL: [Kind; 7] = [
+        Kind::Rustc,
+        Kind::Go,
+        Kind::Cc,
+        Kind::Gradle,
+        Kind::Xcode,
+        Kind::Maven,
+        Kind::Tsc,
+    ];
+
+    /// The kind's row.
+    pub const fn facts(self) -> KindFacts {
+        let (word, self_keyed, tool_keyed, baked, label) = match self {
+            Kind::Rustc => ("rustc/1", false, false, true, "Rust blocks"),
+            Kind::Go => ("go/1", true, false, true, "Go archives"),
+            Kind::Cc => (crate::cc::KIND, false, false, true, "C and C++ objects"),
+            Kind::Xcode => (crate::xcode::KIND, true, false, false, "Xcode values"),
+            Kind::Gradle => (crate::gradle::KIND, false, true, false, "Gradle entries"),
+            Kind::Maven => (crate::maven::KIND, false, true, false, "Maven entries"),
+            Kind::Tsc => (crate::tsc::KIND, false, false, false, "TypeScript blocks"),
+        };
+        KindFacts {
+            word,
+            self_keyed,
+            tool_keyed,
+            baked,
+            label,
+        }
+    }
+
     /// The kind on the wire: the adapter and its keys' version.
     pub const fn word(self) -> &'static str {
-        match self {
-            Kind::Rustc => "rustc/1",
-            Kind::Go => "go/1",
-            Kind::Cc => crate::cc::KIND,
-            Kind::Xcode => crate::xcode::KIND,
-            Kind::Gradle => crate::gradle::KIND,
-            Kind::Maven => crate::maven::KIND,
-            Kind::Tsc => crate::tsc::KIND,
-        }
+        self.facts().word
     }
 
     /// The kind a block's description names (`"kind": "go/1"`); none, or another word, is
     /// `rustc`.
     pub fn of_description(description: &serde_json::Value) -> Kind {
-        match description.get("kind").and_then(serde_json::Value::as_str) {
-            Some(word) if word == Kind::Go.word() => Kind::Go,
-            Some(word) if word == Kind::Cc.word() => Kind::Cc,
-            Some(word) if word == Kind::Xcode.word() => Kind::Xcode,
-            Some(word) if word == Kind::Gradle.word() => Kind::Gradle,
-            Some(word) if word == Kind::Maven.word() => Kind::Maven,
-            Some(word) if word == Kind::Tsc.word() => Kind::Tsc,
-            _ => Kind::Rustc,
-        }
+        let word = description.get("kind").and_then(serde_json::Value::as_str);
+        Kind::ALL
+            .into_iter()
+            .find(|kind| Some(kind.word()) == word)
+            .unwrap_or(Kind::Rustc)
     }
 
     /// Whether a block's first key is its key, with no hints: Go's and Xcode's, whose tools
     /// compute the key from everything a compile read.
-    pub fn self_keyed(self) -> bool {
-        matches!(self, Kind::Go | Kind::Xcode)
+    pub const fn self_keyed(self) -> bool {
+        self.facts().self_keyed
     }
 
     /// Whether the build tool keys the block itself and hushrun serves it as the tool's remote
@@ -160,7 +197,7 @@ impl Kind {
     /// to the next. Such a block goes up as class `other`, which the server keeps and never
     /// compares (B-81, B-175), and every class of it is fetched from its manifest (B-30).
     pub const fn tool_keyed(self) -> bool {
-        matches!(self, Kind::Gradle | Kind::Maven)
+        self.facts().tool_keyed
     }
 
     /// Whether it is `rustc`, the default, which a line leaves out.
@@ -663,6 +700,38 @@ pub enum Located {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: B-30, B-45, B-63, B-81, B-175
+    #[test]
+    fn every_kind_has_one_row_and_the_row_says_what_was_said_kind_by_kind() {
+        let words: Vec<&str> = Kind::ALL.iter().map(|k| k.word()).collect();
+        assert_eq!(
+            words,
+            [
+                "rustc/1", "go/1", "cc/1", "gradle/1", "xcode/1", "maven/1", "tsc/1"
+            ]
+        );
+        for kind in Kind::ALL {
+            let description = serde_json::json!({"kind": kind.word()});
+            assert_eq!(Kind::of_description(&description), kind);
+            assert_eq!(
+                kind.facts().baked,
+                crate::baked::KINDS.contains(&kind),
+                "{kind:?}"
+            );
+            assert!(!(kind.self_keyed() && kind.tool_keyed()), "{kind:?}");
+        }
+        assert_eq!(Kind::of_description(&serde_json::json!({})), Kind::Rustc);
+        assert_eq!(
+            Kind::of_description(&serde_json::json!({"kind": "nx/1"})),
+            Kind::Rustc
+        );
+        let self_keyed: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.self_keyed()).collect();
+        assert_eq!(self_keyed, [Kind::Go, Kind::Xcode]);
+        let tool_keyed: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.tool_keyed()).collect();
+        assert_eq!(tool_keyed, [Kind::Gradle, Kind::Maven]);
+        assert_eq!(Kind::Maven.facts().label, "Maven entries");
+    }
 
     fn serde_name<T: Serialize>(value: &T) -> String {
         match serde_json::to_value(value).unwrap() {

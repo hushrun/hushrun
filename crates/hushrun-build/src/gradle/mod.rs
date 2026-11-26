@@ -14,16 +14,14 @@
 //!   names a script that, after the settings file is evaluated, gives the build a remote cache
 //!   named by [`CACHE_VARIABLE`] and [`TOKEN_VARIABLE`], unless the build set one itself
 //!   ([`SCRIPT`]).
-//! - **The address** ([`endpoint`]) is the same from run to run, a port and a token kept in the
+//! - **The address** ([`crate::cache::endpoint`], kept in the store) is the same from run to run, a port and a token kept in the
 //!   store, so Gradle's configuration cache, which records the variables a settings script
 //!   reads, is reused from run to run.
 //! - **An entry** ([`entry`]) is checked whole and kept in a canonical form, whose digest of
 //!   outputs is the same wherever a task made the same outputs.
 
 pub mod cache;
-pub mod endpoint;
 pub mod entry;
-pub mod http;
 
 use hushrun_core::Digest;
 
@@ -48,6 +46,14 @@ pub const USER: &str = "hushrun";
 
 /// The path the cache answers under: Gradle asks `{url}{key}`.
 pub const PATH: &str = "/cache/";
+
+/// The store's folder of Gradle's cache, which holds its endpoint (B-77).
+pub const FOLDER: &str = "gradle";
+
+/// Listens for Gradle's cache at the endpoint the store keeps (B-77).
+pub fn bind(store: &std::path::Path) -> std::io::Result<crate::cache::endpoint::Bound> {
+    crate::cache::endpoint::bind(store, FOLDER, PATH)
+}
 
 /// The script that gives a build hushrun's cache (B-77). ADR 0087's test script ends with the
 /// same text, so a run that sets either gets it.
