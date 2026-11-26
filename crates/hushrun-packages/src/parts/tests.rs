@@ -50,17 +50,6 @@ fn each_part_names_its_manifest_set() {
         .map(|(p, _)| p.name())
         .collect();
     assert_eq!(found, ["gradle", "maven"]);
-    let tracked = paths(&[
-        "mix.exs",
-        "mix.lock",
-        "apps/web/mix.exs",
-        "lib/a.ex",
-        "mix.lock.bak",
-    ]);
-    assert_eq!(
-        Hex.manifests(&tracked),
-        paths(&["mix.exs", "mix.lock", "apps/web/mix.exs"])
-    );
     assert!(part::manifests(&paths(&["Cargo.toml"])).is_empty());
 }
 
@@ -197,6 +186,126 @@ fn every_part_module_is_listed() {
     assert_eq!(listed, modules);
 }
 
+// covers: K-4, K-5, K-18
+#[test]
+fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {
+    use crate::parts::pnpm::Pnpm;
+    let tracked = [
+        "pnpm-lock.yaml",
+        "web/pnpm-lock.yaml",
+        "package.json",
+        "yarn.lock",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Pnpm.manifests(&tracked),
+        vec![
+            "pnpm-lock.yaml".to_string(),
+            "web/pnpm-lock.yaml".to_string()
+        ]
+    );
+    assert!(Pnpm.keep("v10/files/aa/0123"));
+    assert!(Pnpm.keep("v10/files/aa/0123-exec"));
+    assert!(Pnpm.keep("v10/index/e8/5973-ms@2.1.3.json"));
+    assert!(!Pnpm.keep("v10/projects/dabb"));
+    assert!(!Pnpm.keep("v10/tmp/x/y"));
+    assert!(!Pnpm.keep("v10/files"));
+    assert!(!Pnpm.keep("other/files/aa/x"));
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-ms@2.1.3.json").as_deref(),
+        Some("ms@2.1.3")
+    );
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-@types+node@26.6.6.json")
+            .as_deref(),
+        Some("@types+node@26.6.6")
+    );
+    assert_eq!(Pnpm.package("v10/files/aa/0123"), None);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Pnpm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_store_dir").then(|| "/s".into());
+    assert_eq!(
+        Pnpm.seed_into(Path::new("/c"), &named),
+        Ok((std::path::PathBuf::from("/s"), "store"))
+    );
+    assert!(Maven.seed_into(Path::new("/c"), &no_env).is_err());
+    let t = tempfile::tempdir().unwrap();
+    assert_eq!(Pnpm.harvest_root(t.path()), None);
+    std::fs::create_dir_all(t.path().join("v10/files")).unwrap();
+    assert_eq!(
+        Pnpm.harvest_root(t.path()),
+        Some((t.path().to_path_buf(), "store"))
+    );
+}
+
+// covers: K-3, K-4, K-5, K-19
+#[test]
+fn npm_keeps_only_tarballs_and_seeds_only_what_the_lockfile_names_by_its_bytes() {
+    use crate::part::Admit;
+    use crate::parts::npm::{Npm, locked_sha512};
+    use sha2_hw::Digest as _;
+    let tracked = [
+        "package-lock.json",
+        "a/npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Npm.manifests(&tracked),
+        vec![
+            "package-lock.json".to_string(),
+            "a/npm-shrinkwrap.json".to_string()
+        ]
+    );
+    let tarball = b"a tarball";
+    let hex: String = sha2_hw::Sha512::digest(tarball)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = format!(
+        "content-v2/sha512/{}/{}/{}",
+        &hex[..2],
+        &hex[2..4],
+        &hex[4..]
+    );
+    assert!(Npm.keep(&path));
+    assert!(!Npm.keep("index-v5/aa/bb/cc"));
+    assert!(!Npm.keep("content-v2/sha1/aa/bb/cc"));
+    assert!(!Npm.keep("_logs/x.log"));
+    let integrity = Npm.locked(&path).unwrap();
+    assert!(integrity.starts_with("sha512-"), "{integrity}");
+    // Every version of the lockfile: `packages` and nested `dependencies`.
+    let lock = format!(
+        "{{\"lockfileVersion\":3,\"packages\":{{\"node_modules/a\":{{\"integrity\":\"{integrity}\"}}}},\"dependencies\":{{\"b\":{{\"dependencies\":{{\"c\":{{\"integrity\":\"sha1-xx sha512-bad\"}}}}}}}}}}"
+    );
+    assert_eq!(
+        locked_sha512(&lock),
+        std::collections::BTreeSet::from([hex.clone()])
+    );
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("package-lock.json"), &lock).unwrap();
+    let admit = Npm.admit(t.path(), &["package-lock.json".to_string()]);
+    assert_eq!(admit(&path, tarball), Admit::Copy);
+    // A store whose rows were rewritten to match other bytes: the lockfile still catches it.
+    assert_eq!(admit(&path, b"another tarball"), Admit::Changed);
+    // A tarball the lockfile doesn't name now is left.
+    let other = format!("content-v2/sha512/00/00/{}", "0".repeat(124));
+    assert_eq!(admit(&other, b"x"), Admit::NotLocked);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Npm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_cache").then(|| "/c".into());
+    assert_eq!(
+        Npm.seed_into(Path::new("/x"), &named),
+        Ok((std::path::PathBuf::from("/c/_cacache"), "_cacache"))
+    );
+}
+
 /// A `mix.lock` as Mix 1.18 and Hex 2.7 write it: two Hex packages, a git dependency and a
 /// package of an organization's repository.
 const MIX_LOCK: &str = r#"%{
@@ -207,9 +316,20 @@ const MIX_LOCK: &str = r#"%{
 }
 "#;
 
-// covers: K-3, K-5
+// covers: K-3, K-4, K-5
 #[test]
 fn hex_keeps_tarballs_and_reads_the_outer_checksum_of_mix_lock() {
+    let tracked = paths(&[
+        "mix.exs",
+        "mix.lock",
+        "apps/web/mix.exs",
+        "lib/a.ex",
+        "mix.lock.bak",
+    ]);
+    assert_eq!(
+        Hex.manifests(&tracked),
+        paths(&["mix.exs", "mix.lock", "apps/web/mix.exs"])
+    );
     for kept in ["jason-1.4.4.tar", "phoenix_live_view-1.0.0-rc.7.tar"] {
         assert!(Hex.keep(kept), "{kept}");
     }
@@ -272,14 +392,18 @@ fn hex_keeps_tarballs_and_reads_the_outer_checksum_of_mix_lock() {
         .locks(checkout.path(), &paths(&["mix.exs", "mix.lock"]))
         .unwrap();
     assert_eq!(
-        Hex.locked("packages/hexpm/jason-1.4.4.tar", &locks)
-            .as_deref(),
+        Hex.pinned("hexpm/jason-1.4.4.tar", &locks).as_deref(),
         Some("c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b")
     );
-    assert!(
-        Hex.pins("packages/hexpm/jason-1.4.3.tar", &locks)
-            .is_empty()
+    assert_eq!(Hex.pinned("hexpm/jason-1.4.3.tar", &locks), None);
+    // The seed's verdict: a tarball the lockfile pins, by its bytes.
+    let admit = Hex.admit(checkout.path(), &paths(&["mix.lock"]));
+    assert_eq!(
+        admit("jason-1.4.3.tar", b"x"),
+        crate::part::Admit::NotLocked
     );
+    assert_eq!(admit("jason-1.4.4.tar", b"x"), crate::part::Admit::Changed);
+    assert!(Hex.links());
     std::fs::write(checkout.path().join("mix.lock"), six).unwrap();
     let why = Hex
         .locks(checkout.path(), &paths(&["mix.lock"]))
@@ -300,44 +424,48 @@ fn hex_is_seeded_into_the_cache_hex_would_use() {
                 .map(|(_, v)| OsString::from(v))
         }
     };
-    let seed = |path: &str| Reader::Seed(Path::new(path).to_path_buf());
-    let reader = |vars| Hex.reader(Path::new("/p"), Path::new("/c"), &env(vars));
-    assert_eq!(reader(&[("HOME", "/home/me")]), seed("/home/me/.hex"));
     assert_eq!(
-        reader(&[("HOME", "/home/me"), ("HEX_HOME", "/h"), ("MIX_XDG", "1")]),
-        seed("/h")
+        Hex.reader(Path::new("/p"), Path::new("/c"), &env(&[])),
+        Reader::Seed
+    );
+    let into = |vars| Hex.seed_into(Path::new("/c"), &env(vars));
+    let seed = |path: &str| Ok((std::path::PathBuf::from(path), "packages/hexpm"));
+    assert_eq!(
+        into(&[("HOME", "/home/me")]),
+        seed("/home/me/.hex/packages/hexpm")
     );
     assert_eq!(
-        reader(&[("HOME", "/home/me"), ("MIX_XDG", "true")]),
-        seed("/home/me/.cache/hex")
+        into(&[("HOME", "/home/me"), ("HEX_HOME", "/h"), ("MIX_XDG", "1")]),
+        seed("/h/packages/hexpm")
     );
     assert_eq!(
-        reader(&[
+        into(&[("HOME", "/home/me"), ("MIX_XDG", "true")]),
+        seed("/home/me/.cache/hex/packages/hexpm")
+    );
+    assert_eq!(
+        into(&[
             ("HOME", "/home/me"),
             ("MIX_XDG", "1"),
             ("XDG_CACHE_HOME", "/xc")
         ]),
-        seed("/xc/hex")
+        seed("/xc/hex/packages/hexpm")
     );
     assert_eq!(
-        reader(&[
+        into(&[
             ("HOME", "/home/me"),
             ("MIX_XDG", "yes"),
             ("XDG_CACHE_HOME", "/xc")
         ]),
-        seed("/home/me/.hex"),
+        seed("/home/me/.hex/packages/hexpm"),
         "Hex reads only 1 and true"
     );
     assert_eq!(
-        reader(&[("HOME", "/home/me"), ("HEX_HOME", "")]),
-        Reader::LeftAlone("HEX_HOME is empty, not an absolute folder".into())
+        into(&[("HOME", "/home/me"), ("HEX_HOME", "")]),
+        Err("HEX_HOME is empty, not an absolute folder".into())
     );
     assert_eq!(
-        reader(&[("HEX_HOME", "rel")]),
-        Reader::LeftAlone("HEX_HOME is `rel`, not an absolute folder".into())
+        into(&[("HEX_HOME", "rel")]),
+        Err("HEX_HOME is `rel`, not an absolute folder".into())
     );
-    assert_eq!(
-        reader(&[]),
-        Reader::LeftAlone("neither HEX_HOME nor HOME is set".into())
-    );
+    assert_eq!(into(&[]), Err("neither HEX_HOME nor HOME is set".into()));
 }

@@ -1,5 +1,5 @@
 //! The `hex` part: the package tarballs of a Hex cache, `packages/hexpm/<name>-<version>.tar`,
-//! seeded (mechanism C) into the run's own Hex cache before COMMAND, each one only when its
+//! seeded (mechanism C) into Hex's own cache before an install, each one only when its
 //! SHA-256 is the outer checksum a `mix.lock` of the checkout pins. `mix deps.get` then unpacks
 //! `deps/` from the cache as it does from a download, and Hex checks each cached tarball against
 //! `mix.lock` itself. Nothing is set: hushrun never names `HEX_HOME`, `ERL_LIBS` or any variable
@@ -12,7 +12,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::part::{Env, Locks, Part, Reader, file_name};
+use hushrun_core::blocks::Hex32;
+
+use crate::part::{Admit, Admits, Env, Locks, Part, Reader, file_name};
 use crate::store::VerifiedBy;
 
 /// The part's folder under which the tarballs are, as under a Hex cache.
@@ -60,11 +62,26 @@ impl Part for Hex {
         VerifiedBy::Lockfile
     }
 
-    fn reader(&self, _dir: &Path, _checkout: &Path, env: Env<'_>) -> Reader {
-        match cache_home(env) {
-            Ok(home) => Reader::Seed(home),
-            Err(why) => Reader::LeftAlone(why),
-        }
+    fn reader(&self, _dir: &Path, _checkout: &Path, _env: Env<'_>) -> Reader {
+        Reader::Seed
+    }
+
+    fn seed_into(&self, _checkout: &Path, env: Env<'_>) -> Result<(PathBuf, &'static str), String> {
+        Ok((cache_home(env)?.join(PACKAGES), PACKAGES))
+    }
+
+    /// A tarball `mix.lock` pins now, whose SHA-256 is its outer checksum.
+    fn admit(&self, checkout: &Path, manifests: &[String]) -> Admits {
+        let locks = self.locks(checkout, manifests).unwrap_or_default();
+        Box::new(move |path, bytes| match locks.get(file_name(path)) {
+            Some(pinned) if pinned.contains(&Hex32::sha256(bytes).to_string()) => Admit::Copy,
+            Some(_) => Admit::Changed,
+            None => Admit::NotLocked,
+        })
+    }
+
+    fn links(&self) -> bool {
+        true
     }
 
     fn locks(&self, checkout: &Path, manifests: &[String]) -> Result<Locks, String> {
@@ -85,8 +102,8 @@ impl Part for Hex {
         Ok(locks)
     }
 
-    fn pins<'a>(&self, path: &str, locks: &'a Locks) -> &'a [String] {
-        locks.get(file_name(path)).map_or(&[], Vec::as_slice)
+    fn pinned(&self, path: &str, locks: &Locks) -> Option<String> {
+        locks.get(file_name(path))?.first().cloned()
     }
 }
 

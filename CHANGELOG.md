@@ -74,6 +74,15 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **pnpm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-18): `hushrun
+  packages bake --out DIR -- pnpm fetch` keeps pnpm's store as a part, and `hushrun packages exec --
+  pnpm install --frozen-lockfile` copies it into the store pnpm uses before the install, every file
+  checked as it is copied, so a sandbox installs with no registry to reach. `hushrun packages
+  restore` does the copy alone. `hushrun run` gives a check nothing for it: no key changes.
+- **npm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-19): `hushrun
+  packages bake --out DIR -- npm ci --ignore-scripts` keeps the tarballs of npm's cache, and
+  `hushrun packages exec -- npm ci` copies into npm's cache each tarball the lockfile names now,
+  checked against its `integrity`. The lockfile is the evidence, so an unsigned store is read.
 - **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to
@@ -94,16 +103,15 @@ project's new branch starts from what main's CI already ran.
   - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
-- **Baked packages for Hex** ([ADR 0157](docs/adr/0157-baked-hex-packages.md)): a package
-  store's `hex` part holds Hex's tarballs, baked by `hushrun packages bake --out DIR -- mix
-  deps.get` with Hex's cache, `deps` and `_build` at the bake's own folders, so the checkout's are
-  left as they were. `hushrun run`, `hushrun packages exec` and `hushrun packages restore` put each
-  tarball whose SHA-256 is `mix.lock`'s outer checksum into the run's Hex cache, and `mix deps.get`
-  then unpacks `deps/` with no tarball downloaded; `mix deps.compile` runs as before. Checked
-  against the lockfile, the part is read unsigned by any run, CI included. A `mix.lock` in a form
-  hushrun doesn't read leaves the part out, with a line. The seed is one for every part: linked
-  where it can be, else copied, never over a file, hashed as it is put, and once every file is in
-  place a stamp of the store makes the next seed one `stat`.
+- **Baked packages for Hex** ([ADR 0157](docs/adr/0157-baked-hex-packages.md)): a package store's
+  `hex` part holds Hex's tarballs, baked by `hushrun packages bake --out DIR -- mix deps.get` with
+  Hex's cache, `deps` and `_build` at the bake's own folders, so the checkout's are left as they
+  were. `hushrun packages exec`, `env` and `restore` put each tarball whose SHA-256 is `mix.lock`'s
+  outer checksum into the run's Hex cache, and `mix deps.get` then unpacks `deps/` with no tarball
+  downloaded; `mix deps.compile` runs as before. Checked against the lockfile, the part is read
+  unsigned by any run, CI included. A `mix.lock` in a form hushrun doesn't read leaves the part
+  out, with a line. The seed is pnpm's and npm's, which may now link a part's files where the part
+  allows it (Hex's) instead of copying them.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

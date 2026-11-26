@@ -442,9 +442,40 @@ fn seed(r: &Repo, from: &std::path::Path, into: &std::path::Path) {
             }
         })
         .collect();
-    let locks = HexPart.locks(&r.repo, &["mix.lock".to_string()]).unwrap();
-    let seeded = HexPart.seed(from, &rows, into, &locks, ".hushrun-packages-test");
-    assert_eq!((seeded.copied, seeded.refused), (1, 0), "{seeded:?}");
+    use hushrun_core::blocks::Hex32;
+    use hushrun_packages::store::{Class, PartEntry, RowsFile, VerifiedBy};
+    // As a store's part: its folder holds the cache's `packages/hexpm/`.
+    let read = hushrun_packages::state::ReadPart {
+        entry: PartEntry {
+            part: "hex".into(),
+            class: Class::Download,
+            tool: "fetched".into(),
+            runtime: None,
+            inputs: Hex32::sha256(b"inputs"),
+            manifests: vec!["mix.lock".into()],
+            identity: Hex32::sha256(b"identity"),
+            rows: RowsFile {
+                sha256: Hex32::sha256(b"rows"),
+                bytes: 0,
+                count: rows.len() as u64,
+            },
+            bytes: 0,
+            verified_by: VerifiedBy::Lockfile,
+        },
+        rows,
+        dir: from.to_path_buf(),
+        behind: false,
+    };
+    let manifests = ["mix.lock".to_string()];
+    let (dest, under) = HexPart
+        .seed_into(&r.repo, &|name: &str| {
+            (name == "HEX_HOME").then(|| into.as_os_str().to_os_string())
+        })
+        .unwrap();
+    let admit = HexPart.admit(&r.repo, &manifests);
+    let seeded =
+        hushrun_packages::seed::seed(&read, under, &dest, &*admit, HexPart.links()).unwrap();
+    assert_eq!((seeded.copied, seeded.changed.len()), (1, 0), "{seeded:?}");
 }
 
 // covers: C-115, K-10

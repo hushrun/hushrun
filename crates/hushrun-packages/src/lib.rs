@@ -17,7 +17,7 @@
 
 pub mod part;
 pub mod parts;
-pub mod seeding;
+pub mod seed;
 pub mod state;
 pub mod store;
 pub mod tar;

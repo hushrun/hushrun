@@ -261,20 +261,30 @@ fn a_baked_hex_part_is_seeded_and_mix_deps_get_downloads_no_tarball() {
     assert!(read.status.success(), "{out}");
     assert!(
         out.contains(&format!(
-            "packages: hex: put 2 files into {}",
-            home.display()
+            "packages: hex: seeded 2 files into {} (0 there already)",
+            home.join("packages/hexpm").display()
         )),
         "{out}"
     );
     assert_eq!(w.server.tarballs_asked(), Vec::<String>::new(), "{out}");
     assert!(w.r.repo.join("deps/leaf/lib/leaf.ex").is_file());
     assert!(w.r.repo.join("deps/canary/mix.exs").is_file());
+    // The tarballs are links to the store's own files.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let (a, b) = (
+            std::fs::metadata(w.part_file("leaf-1.0.0.tar")).unwrap(),
+            std::fs::metadata(home.join("packages/hexpm/leaf-1.0.0.tar")).unwrap(),
+        );
+        assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+    }
     // The compile then runs as it does today, outside the bake.
     let compiled = w.mix(&home, &["deps.compile"]);
     assert!(compiled.status.success(), "{}", said(&compiled));
     assert!(w.canary[1].exists(), "the dependency's compile ran");
-    // The second seed of the same store looks at its stamp and nothing else.
-    let stamps: Vec<PathBuf> = std::fs::read_dir(&home)
+    // The second seed of the same part looks at its stamp and nothing else.
+    let stamps: Vec<PathBuf> = std::fs::read_dir(home.join("packages/hexpm"))
         .unwrap()
         .flatten()
         .map(|e| e.path())
@@ -287,46 +297,37 @@ fn a_baked_hex_part_is_seeded_and_mix_deps_get_downloads_no_tarball() {
     std::fs::remove_file(home.join("packages/hexpm/leaf-1.0.0.tar")).unwrap();
     let again = w.hushrun(&home, &["packages", "restore"], &[]);
     assert!(
-        said(&again)
-            .contains("packages: hex: Hex's cache holds every file the lockfile pins already"),
+        said(&again).contains("packages: hex: seeded already into "),
         "{}",
         said(&again)
     );
     assert!(!home.join("packages/hexpm/leaf-1.0.0.tar").exists());
 
-    // `hushrun run` seeds too, and the check's key is the same with and without the store: the
-    // run without it skips.
+    // `env` seeds too, and exports nothing. `hushrun run` gives COMMAND nothing for a seed, and
+    // the check's key is the same with and without the store: the run without it skips.
     let home = w.fresh("check-home");
-    let first = {
-        let mut cmd = w.r.hushrun();
-        cmd.args(["run", "t", "--", "mix", "deps.get"])
-            .env("HUSHRUN_PACKAGES_LOWER", &w.store)
-            .env("HEX_HOME", &home)
-            .env("MIX_HOME", w.r.root.join("mix-home"));
-        cmd.output().unwrap()
-    };
-    let out = said(&first);
-    assert!(first.status.success(), "{out}");
-    assert!(out.contains("t passed"), "{out}");
-    assert!(out.contains("packages: hex: put 2 files"), "{out}");
-    let second = {
-        let mut cmd = w.r.hushrun();
-        cmd.args(["run", "t", "--", "mix", "deps.get"])
-            .env("HUSHRUN_PACKAGES_LOWER", "")
-            .env("HEX_HOME", &home)
-            .env("MIX_HOME", w.r.root.join("mix-home"));
-        cmd.output().unwrap()
-    };
-    assert!(said(&second).contains("t skipped"), "{}", said(&second));
-
-    // `env` exports nothing for a seed, and says where its files go instead.
     let env = w.hushrun(&home, &["packages", "env"], &[]);
     assert_eq!(String::from_utf8_lossy(&env.stdout), "");
     assert!(
-        String::from_utf8_lossy(&env.stderr).contains("packages: hex: nothing to export"),
+        String::from_utf8_lossy(&env.stderr).contains("packages: hex: seeded 2 files into"),
         "{}",
         said(&env)
     );
+    let run = |store: &Path| {
+        let mut cmd = w.r.hushrun();
+        cmd.args(["run", "t", "--", "mix", "deps.get"])
+            .env("HUSHRUN_PACKAGES_LOWER", store)
+            .env("HEX_HOME", &home)
+            .env("MIX_HOME", w.r.root.join("mix-home"));
+        cmd.output().unwrap()
+    };
+    let first = run(&w.store);
+    let out = said(&first);
+    assert!(first.status.success(), "{out}");
+    assert!(out.contains("t passed"), "{out}");
+    assert!(!out.contains("packages: hex: seeded"), "{out}");
+    let second = run(Path::new(""));
+    assert!(said(&second).contains("t skipped"), "{}", said(&second));
 
     // Without the store, the same install fails: the tarballs came from the store.
     let home = w.fresh("bare-home");
@@ -356,7 +357,11 @@ fn a_lockfile_changed_by_one_package_downloads_that_package_alone() {
     let read = w.hushrun(&home, &["packages", "exec", "--", "mix", "deps.get"], &[]);
     let out = said(&read);
     assert!(read.status.success(), "{out}");
-    assert!(out.contains("packages: hex: put 1 files into"), "{out}");
+    assert!(out.contains("packages: hex: seeded 1 files into"), "{out}");
+    assert!(
+        out.contains("packages: hex: left out 1 files no lockfile here names now"),
+        "{out}"
+    );
     assert!(
         out.contains("packages: hex: behind: the build files changed"),
         "{out}"
@@ -367,10 +372,13 @@ fn a_lockfile_changed_by_one_package_downloads_that_package_alone() {
         "a package the lockfile no longer pins stays in the store"
     );
     assert!(
-        std::fs::read_dir(&home).unwrap().flatten().all(|e| !e
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".hushrun-packages-")),
+        std::fs::read_dir(home.join("packages/hexpm"))
+            .unwrap()
+            .flatten()
+            .all(|e| !e
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".hushrun-packages-")),
         "no stamp while a file of the part is left out"
     );
 }
@@ -395,10 +403,10 @@ fn one_byte_changed_is_refused_by_the_seed_found_by_ci_and_by_verify() {
     let out = said(&read);
     assert!(read.status.success(), "{out}");
     assert!(
-        out.contains("packages: hex: left out 1 files whose bytes aren't the ones the lockfile pins; Hex downloads those packages"),
+        out.contains("packages: hex: left out 1 files whose bytes changed since the bake, such as packages/hexpm/leaf-1.0.0.tar: Hex downloads what they were of"),
         "{out}"
     );
-    assert!(out.contains("packages: hex: put 1 files into"), "{out}");
+    assert!(out.contains("packages: hex: seeded 1 files into"), "{out}");
     assert_eq!(w.server.tarballs_asked(), ["leaf-1.0.0.tar"]);
     assert_eq!(
         std::fs::read(home.join("packages/hexpm/leaf-1.0.0.tar")).unwrap(),
@@ -414,7 +422,7 @@ fn one_byte_changed_is_refused_by_the_seed_found_by_ci_and_by_verify() {
     let out = said(&read);
     assert!(read.status.success(), "{out}");
     assert!(out.contains("packages: hex: ignored: "), "{out}");
-    assert!(!out.contains("packages: hex: put"), "{out}");
+    assert!(!out.contains("packages: hex: seeded"), "{out}");
     assert_eq!(
         w.server.tarballs_asked(),
         ["canary-0.1.0.tar", "leaf-1.0.0.tar"]
