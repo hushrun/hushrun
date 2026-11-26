@@ -63,6 +63,12 @@ impl Locked {
         }
     }
 
+    /// Adds a file the lockfile names, with its hash as that lockfile writes it (Bundler's
+    /// `sha256=<hex>`), where [`Locked::add`]'s `sha256:<hex>` isn't its words.
+    pub fn add_as(&mut self, sha256: &Hex32, file: Option<&str>, written: String) {
+        self.0.insert(*sha256, (file.map(str::to_string), written));
+    }
+
     /// The hash as the lockfile writes it, when it names a file of this name with these bytes.
     pub fn of(&self, file: &str, sha256: &Hex32) -> Option<&str> {
         let (named, written) = self.0.get(sha256)?;
@@ -105,6 +111,12 @@ pub trait Part: Sync {
     fn package(&self, path: &str) -> Option<String>;
     /// What checks its bytes when a tool reads them.
     fn verified_by(&self) -> VerifiedBy;
+    /// K-7: what checks its bytes for a bake whose manifest set is `manifests` (path and text):
+    /// a part verified by a lockfile only where its lockfiles hash its packages.
+    fn verified_by_for(&self, manifests: &[(String, String)]) -> VerifiedBy {
+        let _ = manifests;
+        self.verified_by()
+    }
     /// K-10: how the run whose variables are `env`, in `checkout`, reads the part at `dir`.
     fn reader(&self, dir: &Path, checkout: &Path, env: Env<'_>) -> Reader;
     /// K-10, mechanism C: the tool's own cache a seed copies into, for the run whose variables
@@ -121,6 +133,13 @@ pub trait Part: Sync {
     /// Every file, for a part a signature verifies.
     fn admit(&self, _checkout: &Path, _manifests: &[String]) -> Admits {
         Box::new(|_, _| Admit::Copy)
+    }
+    /// K-10, mechanism C: [`Part::admit`] for a part whose `packages.json` says `verified_by`,
+    /// for a part whose class follows its lockfiles: one a lockfile verifies admits no file the
+    /// lockfile doesn't hash.
+    fn admit_for(&self, checkout: &Path, manifests: &[String], verified_by: VerifiedBy) -> Admits {
+        let _ = verified_by;
+        self.admit(checkout, manifests)
     }
     /// K-3: the lockfile's own hash of the file at `path`, as a lockfile writes it, where the file
     /// is the artifact that hash is of.
@@ -163,6 +182,7 @@ pub trait Part: Sync {
 
 /// Every part this hushrun knows, by name.
 pub static ALL: &[&dyn Part] = &[
+    &crate::parts::bundler::Bundler,
     &crate::parts::cargo::Cargo,
     &crate::parts::composer::Composer,
     &crate::parts::go::Go,

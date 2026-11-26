@@ -403,3 +403,34 @@ another platform only: the command downloads none, and the part is left out.
 own, not the files it downloaded; it takes no file from `UV_FIND_LINKS` that `uv.lock` names at an
 index; and an index named by `UV_DEFAULT_INDEX` or `UV_INDEX_URL` rewrites `uv.lock` (confirmed
 with uv 0.13.10).
+
+**K-45 The `bundler` part.** The part holds the `.gem` files of a gem cache and nothing else of
+it: `parts/bundler/cache/<name>-<version>[-<platform>].gem`. Not a git source's clone
+(`cache/bundler/git`), an installed gem, a built extension or a spec. Its manifest set is every
+tracked `Gemfile`, `Gemfile.lock`, `gems.rb`, `gems.locked` and `*.gemspec`. A row's `package` is
+`<name> (<version>)`, and its `locked` is the lockfile's `sha256=<hex>` from `CHECKSUMS`. The part
+is verified by the lockfile (K-7) only when every lockfile of its manifest set has a `CHECKSUMS`
+section, and it then holds only the files they hash; otherwise by a signature. A bake fetches the
+part with Bundler's own download (K-32): `bundle cache --no-install --gemfile <Gemfile>
+--cache-path <part>/cache` for each lockfile of its manifest set, which downloads each gem and
+installs none, so no gem's install script runs, and writes nothing into the checkout; with no
+`bundle` on `PATH` the part is left out, with a line. `--harvest bundler=FOLDER` takes a gem home
+(`cache/`) or a `BUNDLE_PATH` (`ruby/<version>/cache/`) instead. The download and `COMMAND` get
+`BUNDLE_PATH` at a folder of the bake's own that the part never takes from, `BUNDLE_FROZEN=true`
+and `BUNDLE_GLOBAL_GEM_CACHE=false`. Its reader is C, a seed, and only `hushrun packages exec`
+and `hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
+`<Bundler.bundle_path>/cache`, where Bundler looks for a gem before it downloads one, the folder
+the `ruby` on `PATH` names when asked from the folder of the Gemfile Bundler reads
+(`BUNDLE_GEMFILE`'s, or the nearest `Gemfile` or `gems.rb` up to the checkout's root) with
+`RUBYOPT` unset. So `bundle install` installs each gem where it would after a download, and a gem
+loads from the same path with and without the store. It copies only a gem the `GEM` section of a
+lockfile in the checkout names now, and when that lockfile's `CHECKSUMS` hashes it, only when the
+SHA-256 of its bytes is that hash; a gem named with no hash only for a part a signature verifies.
+A seed sets no variable: not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_CACHE_PATH`,
+`RUBYOPT`, `RUBYLIB` or Bootsnap's. The part is left alone, with a line, when no Gemfile is found,
+there is no `ruby`, or Bundler's global gem cache is on. *Rests on:* Bundler taking
+`<path>/cache/<file>` as the download, and checking it against `CHECKSUMS` itself (confirmed with
+Bundler 4.0.18 and Ruby 3.3.6). *Breaks if:* a `.bundle/config` in the checkout names Bundler's
+path or app cache during the bake: it outranks the bake's variables, the gems go there, and the
+part is left out; or the global gem cache is on, which the question to `ruby` sees: the part is
+left alone.
