@@ -2054,6 +2054,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha1dc",
  "sha2 0.11.1",
  "tempfile",
 ]
