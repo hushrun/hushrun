@@ -228,7 +228,8 @@ impl Cache {
         if self.current.mode != Mode::On {
             return None;
         }
-        let asked = Request::GradleFetch {
+        let asked = Request::ToolFetch {
+            kind: Kind::Gradle,
             key,
             local_ms: store.step_cost(&key),
         };
@@ -260,7 +261,8 @@ impl Cache {
         }
         let file = &block.files[0];
         let origin = store.origin(key);
-        let vouch = Request::GradleVouch {
+        let vouch = Request::ToolVouch {
+            kind: Kind::Gradle,
             key: *key,
             outputs: super::outputs_of(file.size, &file.sha256),
         };
@@ -289,7 +291,8 @@ impl Cache {
             // for the kept days, as every adapter's refused downloads are; then it goes.
             if downloaded {
                 let _ = self.ask(
-                    &Request::GradleReport {
+                    &Request::ToolReport {
+                        kind: Kind::Gradle,
                         key: *key,
                         problem: Problem::Rejected,
                     },
@@ -393,7 +396,11 @@ impl Cache {
             let took = downloaded
                 && self.publish(&store, &key, gradle_key, &checked, &canonical, cost_ms, at);
             if took {
-                self.tell(&Request::GradleBuilt { key, cost_ms });
+                self.tell(&Request::ToolBuilt {
+                    kind: Kind::Gradle,
+                    key,
+                    cost_ms,
+                });
             }
             return self.log(Entry {
                 found: true,
@@ -404,7 +411,11 @@ impl Cache {
         }
         if self.publish(&store, &key, gradle_key, &checked, &canonical, cost_ms, at) {
             let _ = store.set_step_cost(&key, cost_ms, at);
-            self.tell(&Request::GradleBuilt { key, cost_ms });
+            self.tell(&Request::ToolBuilt {
+                kind: Kind::Gradle,
+                key,
+                cost_ms,
+            });
             self.log(Entry {
                 rustc_ms: cost_ms,
                 stored_bytes: canonical.len() as u64,

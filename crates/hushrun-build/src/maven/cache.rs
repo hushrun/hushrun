@@ -298,7 +298,8 @@ impl Cache {
         } else if self.current.mode == Mode::On {
             // A download, only where the run shares with sharing on (the relay says) and the
             // check's `maven/1` manifest names it.
-            let asked = Request::MavenFetch {
+            let asked = Request::ToolFetch {
+                kind: Kind::Maven,
                 key,
                 local_ms: store.step_cost(&key),
             };
@@ -331,7 +332,8 @@ impl Cache {
     ) -> Option<Vec<u8>> {
         let block = self.block_of(store, module)?;
         let origin = store.origin(key);
-        let vouch = Request::MavenVouch {
+        let vouch = Request::ToolVouch {
+            kind: Kind::Maven,
             key: *key,
             outputs: super::outputs_of(&block),
         };
@@ -351,7 +353,8 @@ impl Cache {
             // suspended for the kept days, as every adapter's refused downloads are; then it goes.
             if downloaded {
                 let _ = self.ask(
-                    &Request::MavenReport {
+                    &Request::ToolReport {
+                        kind: Kind::Maven,
                         key: *key,
                         problem: Problem::Rejected,
                     },
@@ -541,7 +544,11 @@ impl Cache {
             let took =
                 downloaded && self.publish(&store, &key, module, checked, files, cost_ms, at);
             if took {
-                self.tell(&Request::MavenBuilt { key, cost_ms });
+                self.tell(&Request::ToolBuilt {
+                    kind: Kind::Maven,
+                    key,
+                    cost_ms,
+                });
             }
             return self.log(Entry {
                 found: true,
@@ -552,7 +559,11 @@ impl Cache {
         }
         if self.publish(&store, &key, module, checked, files, cost_ms, at) {
             let _ = store.set_step_cost(&key, cost_ms, at);
-            self.tell(&Request::MavenBuilt { key, cost_ms });
+            self.tell(&Request::ToolBuilt {
+                kind: Kind::Maven,
+                key,
+                cost_ms,
+            });
             self.log(Entry {
                 rustc_ms: cost_ms,
                 stored_bytes,

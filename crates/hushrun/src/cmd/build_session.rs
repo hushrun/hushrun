@@ -773,7 +773,7 @@ fn begin_from_saved(
     let Some(Ok(relay)) = crate::cmd::build_relay::Relay::get_or_start(config) else {
         return Ok(session);
     };
-    match relay.begin_check(&current.folder, None, None, false, here.env) {
+    match relay.begin_check(&current.folder, None, None, here.env) {
         Ok(share) => {
             if let Err(err) = session.set_share(share) {
                 session.add_line(format!("build: sharing is off for this run: {err}"));
@@ -1480,12 +1480,16 @@ fn start_sharing(
     // B-77: a Gradle build's COMMAND is served hushrun's cache, and the check asks for its
     // Gradle manifest apart.
     let gradle = gradle_build(session, env);
-    let share = relay.begin_check(&current.folder, Some(check), go, gradle.is_some(), env)?;
+    let share = relay.begin_check(&current.folder, Some(check), go, env)?;
     if let Err(err) = session.set_share(share) {
         relay.end_check(&[]);
         return Err(Some(format!("build: sharing is off for this run: {err}")));
     }
     if let Some(build) = gradle {
+        relay.also_tool(
+            hushrun_build::model::Kind::Gradle,
+            hushrun_build::gradle::PLATFORM,
+        );
         give_gradle(session, &build, env);
     }
     // B-170: a Maven build that loads Apache's build cache extension is served hushrun's cache,
@@ -1493,7 +1497,10 @@ fn start_sharing(
     if let Some(build) = maven_build(session, env)
         && give_maven(session, &build, env)
     {
-        relay.also_maven();
+        relay.also_tool(
+            hushrun_build::model::Kind::Maven,
+            hushrun_build::maven::PLATFORM,
+        );
     }
     Ok(relay)
 }

@@ -310,7 +310,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
         let store = store.clone();
         move |request| match request {
             // As the relay's publish does: the block in the store, downloaded.
-            Request::GradleFetch { key, .. } => {
+            Request::ToolFetch { key, .. } => {
                 let description = json!({
                     "schema": crate::key::BLOCK_SCHEMA, "kind": "gradle/1", "step": key,
                     "class": "library", "gradle_key": GRADLE_KEY, "rustc_ms": 900,
@@ -348,7 +348,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
     let cache = machine.cache();
     let served = cache.get(GRADLE_KEY).unwrap();
     assert_eq!(entry::gunzip(&served, u64::MAX).unwrap(), canonical);
-    assert!(matches!(relay.asked()[0], Request::GradleFetch { .. }));
+    assert!(matches!(relay.asked()[0], Request::ToolFetch { .. }));
     let log = machine.log();
     assert!(log[0].downloaded && log[0].outcome == Outcome::Reused);
     assert_eq!(log[0].saved_ms, 900);
@@ -366,7 +366,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
         relay.asked().iter().any(|r| {
             matches!(
                 r,
-                Request::GradleBuilt { key, cost_ms: 1500 } if *key == other_key
+                Request::ToolBuilt { kind: Kind::Gradle, key, cost_ms: 1500 } if *key == other_key
             )
         })
     };
@@ -419,7 +419,8 @@ fn a_downloaded_block_that_isn_t_a_canonical_entry_is_reported_suspended_and_rem
     assert!(cache.get(GRADLE_KEY).is_none());
     assert!(relay.asked().iter().any(|r| matches!(
         r,
-        Request::GradleReport {
+        Request::ToolReport {
+            kind: Kind::Gradle,
             problem: Problem::Rejected,
             ..
         }

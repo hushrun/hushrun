@@ -432,7 +432,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
         let store = store.clone();
         let dir = machine.dir.path().to_path_buf();
         move |request| match request {
-            Request::MavenFetch { key, .. } => {
+            Request::ToolFetch { key, .. } => {
                 let (buildinfo, jar, zip) = (canonical(), jar(), zip());
                 let files: [(&str, &[u8]); 3] = [(BUILDINFO, &buildinfo), (JAR, &jar), (ZIP, &zip)];
                 publish_download(&store, &dir, &files, "protected/1", 900);
@@ -443,7 +443,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
     });
     let cache = machine.cache();
     assert_eq!(cache.get(&module()).unwrap(), canonical());
-    assert!(matches!(relay.asked()[0], Request::MavenFetch { .. }));
+    assert!(matches!(relay.asked()[0], Request::ToolFetch { .. }));
     assert_eq!(cache.file(&module(), JAR).unwrap(), jar());
     let log = machine.log();
     assert!(log[0].downloaded && log[0].outcome == Outcome::Reused);
@@ -476,7 +476,7 @@ fn in_a_run_that_shares_a_download_is_served_and_a_stored_entry_told_to_the_rela
     cache.put(&app, ZIP, &zip());
     cache.put(&app, BUILDINFO, buildinfo.as_bytes());
     let app_key = app.key();
-    assert!(relay.heard(|r| matches!(r, Request::MavenBuilt { key, .. } if *key == app_key)));
+    assert!(relay.heard(|r| matches!(r, Request::ToolBuilt { key, .. } if *key == app_key)));
 }
 
 // covers: B-172, B-174
@@ -493,7 +493,8 @@ fn a_downloaded_block_that_isn_t_whole_is_reported_suspended_and_removed() {
     assert!(cache.get(&module()).is_none());
     assert!(relay.asked().iter().any(|r| matches!(
         r,
-        Request::MavenReport {
+        Request::ToolReport {
+            kind: Kind::Maven,
             problem: Problem::Rejected,
             ..
         }
