@@ -163,7 +163,7 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     let err = String::from_utf8_lossy(&first.stderr).into_owned();
     assert!(first.status.success(), "{err}");
     assert!(
-        err.contains("packages: cargo: copied 1 files into "),
+        err.contains("packages: cargo: seeded 1 files into "),
         "{err}"
     );
     let seeded = home.join("registry/cache").join(&registry).join(&file);
@@ -221,15 +221,36 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     let err = String::from_utf8_lossy(&tampered.stderr).into_owned();
     assert!(!tampered.status.success(), "{err}");
     assert!(
-        err.contains(
-            "packages: cargo: left out 1 files whose bytes aren't the ones the lockfile pins"
-        ),
+        err.contains("packages: cargo: left out 1 files whose bytes changed since the bake"),
+        "{err}"
+    );
+    assert!(!seeded.exists());
+    // A store baked from other bytes under the crate's name, its rows true to them: Cargo.lock
+    // refuses them, and the build doesn't get them.
+    let forged = r.root.join("forged");
+    let at = forged.join("registry/cache").join(&registry);
+    std::fs::create_dir_all(&at).unwrap();
+    std::fs::write(at.join(&file), b"not the crate Cargo.lock pins").unwrap();
+    let forged_store = r.root.join("forged-packages");
+    let baked = r
+        .hushrun()
+        .args(["packages", "bake", "--no-sign", "--out"])
+        .arg(&forged_store)
+        .arg("--harvest")
+        .arg(format!("cargo={}", forged.display()))
+        .output()
+        .unwrap();
+    assert!(baked.status.success());
+    let forged_run = run("e", &forged_store);
+    let err = String::from_utf8_lossy(&forged_run.stderr).into_owned();
+    assert!(!forged_run.status.success(), "{err}");
+    assert!(
+        err.contains("packages: cargo: left out 1 files whose bytes changed since the bake"),
         "{err}"
     );
     assert!(!seeded.exists());
 
-    // `restore` seeds outside a run, in CI too, unsigned: Cargo.lock is the evidence. `env`
-    // exports nothing and says so.
+    // `restore` seeds outside a run, in CI too, unsigned: Cargo.lock is the evidence.
     std::fs::write(&part, {
         bytes[last] ^= 1;
         &bytes
@@ -246,18 +267,8 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     let out = String::from_utf8_lossy(&restore.stdout).into_owned();
     assert!(restore.status.success(), "{out}");
     assert!(
-        out.contains("packages: cargo: copied 1 files into "),
+        out.contains("packages: cargo: seeded 1 files into "),
         "{out}"
     );
     assert!(seeded.is_file());
-    let env = r
-        .hushrun()
-        .args(["packages", "env"])
-        .env("HUSHRUN_PACKAGES_LOWER", &store)
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&env.stdout), "");
-    assert!(
-        String::from_utf8_lossy(&env.stderr).contains("packages: cargo: nothing to export: `hushrun packages restore` copies its files into Cargo's cache"),
-    );
 }

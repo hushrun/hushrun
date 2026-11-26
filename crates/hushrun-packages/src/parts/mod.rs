@@ -4,6 +4,8 @@ pub mod cargo;
 pub mod go;
 pub mod gradle;
 pub mod maven;
+pub mod npm;
+pub mod pnpm;
 
 #[cfg(test)]
 mod tests;

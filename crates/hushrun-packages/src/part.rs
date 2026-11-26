@@ -1,18 +1,17 @@
 //! A part (K-10): one package manager's side of a package store: which files of a checkout are its
 //! manifest set, what of its cache a bake keeps, and how a run points the tool at it.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::store::{Row, VerifiedBy};
+use crate::store::VerifiedBy;
 
 /// The variables a reader sees: the run's own, before hushrun adds any.
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
 /// What a part's lockfiles pin: a key the part makes from a file of its cache (a crate's file
 /// name, a module and version), and the hashes the lockfiles write for it.
-pub type Locks = BTreeMap<String, Vec<String>>;
+pub type Locks = std::collections::BTreeMap<String, Vec<String>>;
 
 /// K-10: how a part reaches its tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,27 +22,28 @@ pub enum Reader {
     /// Mechanism A for Maven: one word that joins `MAVEN_OPTS`, merged with whatever else of
     /// hushrun builds that variable in the same run, after the person's words.
     MavenOpts(String),
-    /// Mechanism C: hushrun copies each file the lockfile still pins, checked against it, into
-    /// the tool's own cache at this folder ([`Part::seed`]).
-    Seed(PathBuf),
+    /// Mechanism C: hushrun copies the part's files into the tool's own cache, where
+    /// [`Part::seed_into`] says, before an install (`hushrun packages exec` and `restore`).
+    /// `hushrun run` gives the tool nothing: by the time a check runs, the install is done.
+    Seed,
     /// The tool is left alone, with this line (`packages: <part>: left alone: …`).
     LeftAlone(String),
 }
 
-/// What a seed did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Seeded {
-    /// Files copied into the tool's cache.
-    pub copied: usize,
-    /// Files the cache held already.
-    pub had: usize,
-    /// Files no lockfile of the checkout pins: left in the store.
-    pub unpinned: usize,
-    /// Files whose bytes aren't the ones the lockfile pins: never copied.
-    pub refused: usize,
-    /// What went wrong copying, if anything: the seed stopped there.
-    pub error: Option<String>,
+/// K-10, mechanism C: what a seed does with one file of a part, by its path under the part's
+/// folder the seed copies and its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    /// Copy it.
+    Copy,
+    /// The lockfile in the checkout doesn't name it now: leave it.
+    NotLocked,
+    /// Its bytes aren't what the lockfile says: leave it, with a line.
+    Changed,
 }
+
+/// What [`Part::admit`] gives a seed: for a file's path and bytes, what it does with it.
+pub type Admits = Box<dyn Fn(&str, &[u8]) -> Admit>;
 
 /// One package manager's part.
 pub trait Part: Sync {
@@ -66,19 +66,40 @@ pub trait Part: Sync {
     fn verified_by(&self) -> VerifiedBy;
     /// K-10: how the run whose variables are `env`, in `checkout`, reads the part at `dir`.
     fn reader(&self, dir: &Path, checkout: &Path, env: Env<'_>) -> Reader;
-    /// K-3: what the lockfiles among `manifests` (paths from `checkout`) pin.
+    /// K-10, mechanism C: the tool's own cache a seed copies into, for the run whose variables
+    /// are `env` in `checkout`, and the folder of the part whose files go there. Only a part whose
+    /// reader is [`Reader::Seed`] has one.
+    fn seed_into(
+        &self,
+        _checkout: &Path,
+        _env: Env<'_>,
+    ) -> Result<(PathBuf, &'static str), String> {
+        Err(format!("{} is read in place", self.tool()))
+    }
+    /// K-10, mechanism C: which files a seed copies, for the lockfiles `manifests` of `checkout`.
+    /// Every file, for a part a signature verifies.
+    fn admit(&self, _checkout: &Path, _manifests: &[String]) -> Admits {
+        Box::new(|_, _| Admit::Copy)
+    }
+    /// K-3: the lockfile's own hash of the file at `path`, as a lockfile writes it, where the file
+    /// is the artifact that hash is of.
+    fn locked(&self, _path: &str) -> Option<String> {
+        None
+    }
+    /// K-3: what the lockfiles among `manifests` (paths from `checkout`) pin, for a part whose
+    /// file's path doesn't name its hash ([`Part::locked_by`]).
     fn locks(&self, _checkout: &Path, _manifests: &[String]) -> Locks {
         Locks::new()
     }
-    /// K-3: the lockfile's own hash of the file at `path` (from the part's folder), when one of
-    /// `locks` is of that file.
-    fn locked(&self, _path: &str, _locks: &Locks) -> Option<String> {
-        None
+    /// K-3: the lockfile's own hash of the file at `path`, from `locks` where the part needs the
+    /// lockfile to say it, else from its path ([`Part::locked`]).
+    fn locked_by(&self, path: &str, _locks: &Locks) -> Option<String> {
+        self.locked(path)
     }
-    /// K-10, mechanism C: copies each of `rows` of the part at `dir` that `locks` pins, checked
-    /// against it, into `into`. Only a part whose reader seeds does anything.
-    fn seed(&self, _dir: &Path, _rows: &[Row], _into: &Path, _locks: &Locks) -> Seeded {
-        Seeded::default()
+    /// K-10, mechanism C: whether `hushrun run` seeds the part before COMMAND too, for a tool
+    /// that fetches as part of the check's own build (cargo), not in an install before it.
+    fn seeds_in_a_run(&self) -> bool {
+        false
     }
 }
 
@@ -88,6 +109,8 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::go::Go,
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
+    &crate::parts::npm::Npm,
+    &crate::parts::pnpm::Pnpm,
 ];
 
 /// The part named `name`.

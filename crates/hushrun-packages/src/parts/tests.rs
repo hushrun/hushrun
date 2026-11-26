@@ -193,7 +193,7 @@ fn a_row_is_locked_by_the_hash_its_lockfile_writes() {
     );
     assert_eq!(
         Cargo
-            .locked("cache/index.crates.io-x/itoa-1.0.11.crate", &locks)
+            .locked_by("index.crates.io-x/itoa-1.0.11.crate", &locks)
             .as_deref(),
         Some("49f1")
     );
@@ -205,86 +205,72 @@ fn a_row_is_locked_by_the_hash_its_lockfile_writes() {
     let locks = Go.locks(checkout.path(), &paths(&["go.mod", "go.sum"]));
     let at = "golang.org/x/text/@v/v0.14.0";
     assert_eq!(
-        Go.locked(&format!("{at}.zip"), &locks).as_deref(),
+        Go.locked_by(&format!("{at}.zip"), &locks).as_deref(),
         Some("h1:zip=")
     );
     assert_eq!(
-        Go.locked(&format!("{at}.mod"), &locks).as_deref(),
+        Go.locked_by(&format!("{at}.mod"), &locks).as_deref(),
         Some("h1:mod=")
     );
-    assert_eq!(Go.locked(&format!("{at}.info"), &locks), None);
+    assert_eq!(Go.locked_by(&format!("{at}.info"), &locks), None);
 }
 
 // covers: K-10
 #[test]
-fn cargo_s_seed_copies_only_the_bytes_cargo_lock_pins_and_never_twice() {
-    use crate::part::Seeded;
-    use crate::store::row_of;
-    let part = tempfile::tempdir().unwrap();
-    let crates = part.path().join("registry/cache/index.crates.io-x");
-    std::fs::create_dir_all(&crates).unwrap();
-    std::fs::write(crates.join("a-1.0.0.crate"), b"a").unwrap();
-    std::fs::write(crates.join("b-1.0.0.crate"), b"b, changed").unwrap();
-    std::fs::write(crates.join("c-1.0.0.crate"), b"c").unwrap();
-    let rows: Vec<_> = ["a", "b", "c"]
-        .iter()
-        .map(|n| {
-            let path = format!("registry/cache/index.crates.io-x/{n}-1.0.0.crate");
-            row_of(&part.path().join(&path), &path).unwrap().unwrap()
-        })
-        .collect();
+fn cargo_s_seed_admits_only_the_bytes_cargo_lock_pins_and_runs_in_a_run() {
+    use crate::part::Admit;
+    let checkout = tempfile::tempdir().unwrap();
     let sha = |b: &[u8]| hushrun_core::blocks::Hex32::sha256(b).to_string();
+    let entry = |name: &str, checksum: &str| {
+        format!(
+            "[[package]]\nname = \"{name}\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{checksum}\"\n\n"
+        )
+    };
     // a is pinned to its bytes, b to other bytes, c not at all.
-    let locks = Locks::from([
-        ("a-1.0.0.crate".to_string(), vec![sha(b"a")]),
-        ("b-1.0.0.crate".to_string(), vec![sha(b"b")]),
-    ]);
-    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        checkout.path().join("Cargo.lock"),
+        format!(
+            "version = 4\n\n{}{}",
+            entry("a", &sha(b"a")),
+            entry("b", &sha(b"b"))
+        ),
+    )
+    .unwrap();
+    let admit = Cargo.admit(checkout.path(), &paths(&["Cargo.lock"]));
+    assert_eq!(admit("index.crates.io-x/a-1.0.0.crate", b"a"), Admit::Copy);
     assert_eq!(
-        Cargo.seed(part.path(), &rows, home.path(), &locks),
-        Seeded {
-            copied: 1,
-            refused: 1,
-            unpinned: 1,
-            ..Seeded::default()
-        }
+        admit("index.crates.io-x/b-1.0.0.crate", b"b, changed"),
+        Admit::Changed
     );
-    let cache = home.path().join("registry/cache/index.crates.io-x");
-    assert_eq!(std::fs::read(cache.join("a-1.0.0.crate")).unwrap(), b"a");
-    assert!(!cache.join("b-1.0.0.crate").exists());
-    assert!(!cache.join("c-1.0.0.crate").exists());
     assert_eq!(
-        std::fs::read_dir(&cache).unwrap().count(),
-        1,
-        "no file left half written"
+        admit("index.crates.io-x/c-1.0.0.crate", b"c"),
+        Admit::NotLocked
     );
-    // Again: the cache holds it, nothing is copied or hashed.
-    assert_eq!(
-        Cargo.seed(part.path(), &rows, home.path(), &locks),
-        Seeded {
-            had: 1,
-            refused: 1,
-            unpinned: 1,
-            ..Seeded::default()
-        }
-    );
+    // Into the run's cargo home, at the same paths below `registry/cache`.
     let env = |name: &str| match name {
         "HOME" => Some(OsString::from("/home/dev")),
         _ => None,
     };
     assert_eq!(
-        Cargo.reader(part.path(), Path::new("/c"), &env),
-        Reader::Seed("/home/dev/.cargo".into())
+        Cargo.seed_into(Path::new("/c"), &env),
+        Ok(("/home/dev/.cargo/registry/cache".into(), "registry/cache"))
     );
     let env = |name: &str| (name == "CARGO_HOME").then(|| OsString::from("/opt/cargo"));
     assert_eq!(
-        Cargo.reader(part.path(), Path::new("/c"), &env),
-        Reader::Seed("/opt/cargo".into())
+        Cargo.seed_into(Path::new("/c"), &env),
+        Ok(("/opt/cargo/registry/cache".into(), "registry/cache"))
+    );
+    assert_eq!(
+        Cargo.reader(Path::new("/p"), Path::new("/c"), &env),
+        Reader::Seed
     );
     assert!(matches!(
-        Cargo.reader(part.path(), Path::new("/c"), &no_env),
+        Cargo.reader(Path::new("/p"), Path::new("/c"), &no_env),
         Reader::LeftAlone(_)
     ));
+    // Cargo fetches inside the check's own build: a run seeds it; npm installs before one.
+    assert!(Cargo.seeds_in_a_run());
+    assert!(!crate::parts::npm::Npm.seeds_in_a_run());
 }
 
 // covers: K-10
@@ -418,4 +404,124 @@ fn every_part_module_is_listed() {
         .collect();
     modules.sort();
     assert_eq!(listed, modules);
+}
+
+// covers: K-4, K-5, K-18
+#[test]
+fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {
+    use crate::parts::pnpm::Pnpm;
+    let tracked = [
+        "pnpm-lock.yaml",
+        "web/pnpm-lock.yaml",
+        "package.json",
+        "yarn.lock",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Pnpm.manifests(&tracked),
+        vec![
+            "pnpm-lock.yaml".to_string(),
+            "web/pnpm-lock.yaml".to_string()
+        ]
+    );
+    assert!(Pnpm.keep("v10/files/aa/0123"));
+    assert!(Pnpm.keep("v10/files/aa/0123-exec"));
+    assert!(Pnpm.keep("v10/index/e8/5973-ms@2.1.3.json"));
+    assert!(!Pnpm.keep("v10/projects/dabb"));
+    assert!(!Pnpm.keep("v10/tmp/x/y"));
+    assert!(!Pnpm.keep("v10/files"));
+    assert!(!Pnpm.keep("other/files/aa/x"));
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-ms@2.1.3.json").as_deref(),
+        Some("ms@2.1.3")
+    );
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-@types+node@26.6.6.json")
+            .as_deref(),
+        Some("@types+node@26.6.6")
+    );
+    assert_eq!(Pnpm.package("v10/files/aa/0123"), None);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Pnpm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_store_dir").then(|| "/s".into());
+    assert_eq!(
+        Pnpm.seed_into(Path::new("/c"), &named),
+        Ok((std::path::PathBuf::from("/s"), "store"))
+    );
+    assert!(Maven.seed_into(Path::new("/c"), &no_env).is_err());
+    let t = tempfile::tempdir().unwrap();
+    assert_eq!(Pnpm.harvest_root(t.path()), None);
+    std::fs::create_dir_all(t.path().join("v10/files")).unwrap();
+    assert_eq!(
+        Pnpm.harvest_root(t.path()),
+        Some((t.path().to_path_buf(), "store"))
+    );
+}
+
+// covers: K-3, K-4, K-5, K-19
+#[test]
+fn npm_keeps_only_tarballs_and_seeds_only_what_the_lockfile_names_by_its_bytes() {
+    use crate::part::Admit;
+    use crate::parts::npm::{Npm, locked_sha512};
+    use sha2_hw::Digest as _;
+    let tracked = [
+        "package-lock.json",
+        "a/npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Npm.manifests(&tracked),
+        vec![
+            "package-lock.json".to_string(),
+            "a/npm-shrinkwrap.json".to_string()
+        ]
+    );
+    let tarball = b"a tarball";
+    let hex: String = sha2_hw::Sha512::digest(tarball)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = format!(
+        "content-v2/sha512/{}/{}/{}",
+        &hex[..2],
+        &hex[2..4],
+        &hex[4..]
+    );
+    assert!(Npm.keep(&path));
+    assert!(!Npm.keep("index-v5/aa/bb/cc"));
+    assert!(!Npm.keep("content-v2/sha1/aa/bb/cc"));
+    assert!(!Npm.keep("_logs/x.log"));
+    let integrity = Npm.locked(&path).unwrap();
+    assert!(integrity.starts_with("sha512-"), "{integrity}");
+    // Every version of the lockfile: `packages` and nested `dependencies`.
+    let lock = format!(
+        "{{\"lockfileVersion\":3,\"packages\":{{\"node_modules/a\":{{\"integrity\":\"{integrity}\"}}}},\"dependencies\":{{\"b\":{{\"dependencies\":{{\"c\":{{\"integrity\":\"sha1-xx sha512-bad\"}}}}}}}}}}"
+    );
+    assert_eq!(
+        locked_sha512(&lock),
+        std::collections::BTreeSet::from([hex.clone()])
+    );
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("package-lock.json"), &lock).unwrap();
+    let admit = Npm.admit(t.path(), &["package-lock.json".to_string()]);
+    assert_eq!(admit(&path, tarball), Admit::Copy);
+    // A store whose rows were rewritten to match other bytes: the lockfile still catches it.
+    assert_eq!(admit(&path, b"another tarball"), Admit::Changed);
+    // A tarball the lockfile doesn't name now is left.
+    let other = format!("content-v2/sha512/00/00/{}", "0".repeat(124));
+    assert_eq!(admit(&other, b"x"), Admit::NotLocked);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Npm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_cache").then(|| "/c".into());
+    assert_eq!(
+        Npm.seed_into(Path::new("/x"), &named),
+        Ok((std::path::PathBuf::from("/c/_cacache"), "_cacache"))
+    );
 }

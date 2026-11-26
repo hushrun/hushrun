@@ -1,15 +1,16 @@
 //! The `cargo` part: the `.crate` files of a cargo home's `registry/cache`, seeded (mechanism C)
-//! into the run's own cargo home before COMMAND, each one only when its SHA-256 is the checksum a
-//! `Cargo.lock` of the checkout pins. Cargo unpacks them itself, as it unpacks what it downloads.
+//! into the run's own cargo home, by `hushrun run` before COMMAND too, each one only when its
+//! SHA-256 is the checksum a `Cargo.lock` of the checkout pins. Cargo unpacks them itself, as it unpacks what it downloads.
 //! Cargo checks no checksum of a file already in its cache, so hushrun checks it first. Git
 //! dependencies are left out: their checkouts are no registry's file and have no checksum.
 
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::part::{Env, Locks, Part, Reader, Seeded, file_name};
-use crate::store::{self, Kind, Row, VerifiedBy};
+use hushrun_core::blocks::Hex32;
+
+use crate::part::{Admit, Admits, Env, Locks, Part, Reader, file_name};
+use crate::store::VerifiedBy;
 
 /// The part's folder under which the crates are, as under a cargo home.
 pub const CACHE: &str = "registry/cache";
@@ -62,9 +63,26 @@ impl Part for Cargo {
 
     fn reader(&self, _dir: &Path, _checkout: &Path, env: Env<'_>) -> Reader {
         match cargo_home(env) {
-            Some(home) => Reader::Seed(home),
+            Some(_) => Reader::Seed,
             None => Reader::LeftAlone("neither CARGO_HOME nor HOME is set".to_string()),
         }
+    }
+
+    fn seed_into(&self, _checkout: &Path, env: Env<'_>) -> Result<(PathBuf, &'static str), String> {
+        cargo_home(env)
+            .map(|home| (home.join(CACHE), CACHE))
+            .ok_or_else(|| "neither CARGO_HOME nor HOME is set".to_string())
+    }
+
+    /// A crate a `Cargo.lock` of the checkout pins now, whose SHA-256 is that checksum. Cargo
+    /// checks none of a crate already in its cache, so this is the only check it gets.
+    fn admit(&self, checkout: &Path, manifests: &[String]) -> Admits {
+        let locks = self.locks(checkout, manifests);
+        Box::new(move |path, bytes| match locks.get(file_name(path)) {
+            Some(pinned) if pinned.contains(&Hex32::sha256(bytes).to_string()) => Admit::Copy,
+            Some(_) => Admit::Changed,
+            None => Admit::NotLocked,
+        })
     }
 
     fn locks(&self, checkout: &Path, manifests: &[String]) -> Locks {
@@ -83,41 +101,12 @@ impl Part for Cargo {
         locks
     }
 
-    fn locked(&self, path: &str, locks: &Locks) -> Option<String> {
+    fn locked_by(&self, path: &str, locks: &Locks) -> Option<String> {
         locks.get(file_name(path))?.first().cloned()
     }
 
-    fn seed(&self, dir: &Path, rows: &[Row], into: &Path, locks: &Locks) -> Seeded {
-        let mut seeded = Seeded::default();
-        for row in rows.iter().filter(|r| r.kind == Kind::File) {
-            let to = into.join(&row.path);
-            if fs::metadata(&to).is_ok_and(|m| m.len() > 0) {
-                seeded.had += 1;
-                continue;
-            }
-            let Some(pinned) = locks.get(file_name(&row.path)) else {
-                seeded.unpinned += 1;
-                continue;
-            };
-            let from = dir.join(&row.path);
-            match store::sha256_file(&from) {
-                Ok(sha) if pinned.contains(&sha.to_string()) => {}
-                Ok(_) => {
-                    seeded.refused += 1;
-                    continue;
-                }
-                Err(err) => {
-                    seeded.error = Some(format!("{}: {err}", from.display()));
-                    return seeded;
-                }
-            }
-            if let Err(err) = copy_into(&from, &to) {
-                seeded.error = Some(format!("{}: {err}", to.display()));
-                return seeded;
-            }
-            seeded.copied += 1;
-        }
-        seeded
+    fn seeds_in_a_run(&self) -> bool {
+        true
     }
 }
 
@@ -128,31 +117,6 @@ fn cargo_home(env: Env<'_>) -> Option<PathBuf> {
     }
     let home = env("HOME").or_else(|| env("USERPROFILE"))?;
     (!home.is_empty()).then(|| PathBuf::from(home).join(".cargo"))
-}
-
-/// Copies `from` to `to` through a file beside it, so that cargo never sees half a crate, and a
-/// second run seeding the same crate at once writes the same bytes.
-fn copy_into(from: &Path, to: &Path) -> std::io::Result<()> {
-    let parent = to
-        .parent()
-        .ok_or_else(|| std::io::Error::other("no folder"))?;
-    fs::create_dir_all(parent)?;
-    let mut name = OsString::from(".");
-    name.push(to.file_name().unwrap_or_default());
-    name.push(format!(".{}.hushrun", std::process::id()));
-    let temp = parent.join(name);
-    let copied = fs::copy(from, &temp).and_then(|_| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&temp, fs::Permissions::from_mode(0o644))?;
-        }
-        fs::rename(&temp, to)
-    });
-    if copied.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    copied
 }
 
 /// Whether `text` reads as a crate's version: three dot-separated numbers, then anything.

@@ -2,7 +2,7 @@
 
 - **Status:** proposed; being built
 - **Date:** 2026-11-26
-- **Rules:** K-4, K-5, K-6 and K-10 changed (`docs/spec/11-baked-packages.md`); K-3 and K-7 read
+- **Rules:** K-4, K-5, K-6 and K-10 changed (`docs/spec/11-baked-packages.md`); K-3, K-7 and K-18's seed read
 
 ## Context
 
@@ -14,15 +14,17 @@ hash, so neither part needs a signature.
 
 ## Decision
 
-1. **`cargo` is a seed (mechanism C).** The part holds the `.crate` files of a cargo home's
-   `registry/cache/<registry>/`, at the same paths. Before COMMAND starts, `hushrun run` copies
-   each one the run's cargo home lacks into it, and only when its SHA-256 is the `checksum` a
-   tracked `Cargo.lock` gives that name and version from a registry. A file is written beside
-   its place and renamed, so cargo never sees half a crate. Cargo unpacks it as it unpacks a
-   download, into the same `registry/src` path, so no compile sees a difference. hushrun sets no
-   variable and never names `CARGO_HOME`. `hushrun packages exec` seeds the same way, and
-   `hushrun packages restore` seeds for a setup script. Git dependencies are left out: a
-   checkout is no registry's file and has no checksum.
+1. **`cargo` is a seed (mechanism C), the seed ADR 0150 made for pnpm and npm.** The part holds
+   the `.crate` files of a cargo home's `registry/cache/<registry>/`, at the same paths. The seed
+   copies each one the run's cargo home lacks into it, and only when its SHA-256 is the
+   `checksum` a tracked `Cargo.lock` gives that name and version from a registry. Cargo unpacks it
+   as it unpacks a download, into the same `registry/src` path, so no compile sees a difference.
+   Unlike pnpm and npm, whose install runs before a check, cargo fetches inside the check's own
+   build, so **`hushrun run` seeds the `cargo` part before COMMAND starts** (a part says so with
+   `seeds_in_a_run`). After the first seed, a stamp makes later runs cost one `stat`.
+   `hushrun packages exec`, `env` and `restore` seed as they do for npm. hushrun sets no variable
+   and never names `CARGO_HOME`. Git dependencies are left out: a checkout is no registry's file
+   and has no checksum.
 2. **`go` is a registry (mechanism B).** The part holds `cache/download` of a module cache:
    each module's `.info`, `.mod` and `.zip`, nothing of Go's own notes. The reader sets one
    variable, `GOPROXY=file://<store>/parts/go/download,` followed by the `GOPROXY` Go would use
@@ -90,5 +92,5 @@ downloads, as today.
 
 - A sandbox's `cargo build` or `go test` downloads only what its store lacks.
 - A Cargo or Go store needs no signature to be read in CI.
-- A run with a `go` part runs `go env` once as it begins. A run with a `cargo` part stats one file
-  per crate, and hashes only the crates it copies.
+- A run with a `go` part runs `go env` once as it begins. A run with a `cargo` part stats its
+  stamp once it has seeded, and hashes only the crates it copies.

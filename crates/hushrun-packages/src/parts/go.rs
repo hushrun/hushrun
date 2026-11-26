@@ -103,7 +103,7 @@ impl Part for Go {
         locks
     }
 
-    fn locked(&self, path: &str, locks: &Locks) -> Option<String> {
+    fn locked_by(&self, path: &str, locks: &Locks) -> Option<String> {
         let (module, version, ext) = module_version(path)?;
         let key = match ext {
             "zip" => format!("{module}@{version}"),
