@@ -205,6 +205,11 @@ pub trait Part: Sync {
     fn seed_env(&self, _checkout: &Path, _dest: &Path) -> Vec<(String, OsString)> {
         Vec::new()
     }
+    /// K-10, mechanism C: what the tool needs in `dest`, where a seed copied files, that no file
+    /// holds: a store keeps files only, never an empty folder.
+    fn after_seed(&self, _dest: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
     /// K-3, K-5: for a part whose lockfile names each file by its SHA-256, the files the lockfiles
     /// `manifests` in `checkout` name. A bake keeps only these, and gives each row its `locked`.
     /// `None` for a part whose files the lockfile doesn't name so.
@@ -236,6 +241,7 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::pip::Pip,
     &crate::parts::pnpm::Pnpm,
     &crate::parts::poetry::Poetry,
+    &crate::parts::swiftpm::SwiftPm,
     &crate::parts::yarn::Yarn,
 ];
 

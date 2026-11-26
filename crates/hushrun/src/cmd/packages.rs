@@ -476,6 +476,12 @@ fn seed_all(
                 dest.display()
             )),
             Ok(done) => {
+                if let Err(err) = part.after_seed(&dest) {
+                    lines.push(format!(
+                        "packages: {name}: seeding {} stopped: {err}",
+                        dest.display()
+                    ));
+                }
                 if let Some((first, why)) = done.refused.first() {
                     lines.push(format!(
                         "packages: {name}: left out {} packages hushrun can't unpack, such as {first} ({why}): {} downloads them",

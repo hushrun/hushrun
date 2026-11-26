@@ -92,7 +92,9 @@ dependencies. For `gradle`: `settings.gradle`, `settings.gradle.kts`, every `bui
 `composer`: every `composer.lock`. For
 `nuget`: every `*.csproj`, `*.fsproj`, `*.vbproj`, `packages.lock.json`, `packages.config`,
 `Directory.Packages.props`, `Directory.Build.props`, `Directory.Build.targets`, `global.json` and
-NuGet.Config (its name in any case), and `.config/dotnet-tools.json`. Only files git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
+NuGet.Config (its name in any case), and `.config/dotnet-tools.json`. For
+`swiftpm`: every `Package.resolved`, `Package.swift` and `Package@swift-*.swift`. Only files
+git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
 resolved by something outside them (an init script, a property of the machine): the part's
 `inputs` would stay the same while what it downloads changed, and a bake would skip.
 
@@ -109,7 +111,10 @@ component; a `composer` part keeps only `files/<vendor>/<name>/<40 hex>.<type>`,
 and leaves out the rest of its cache (`repo/`, `vcs/`, `.htaccess`); a `nuget` part keeps only
 files under a package's `<id>/<version>/` folder (a version starts with a digit), the
 `.nupkg.metadata` NuGet needs to see the package included, and leaves out `*.lock` and every top
-folder whose name starts with a dot (`.tools`). *Rests
+folder whose name starts with a dot (`.tools`). A `swiftpm` part keeps the
+bare clones under `repositories/` of SwiftPM's cache and leaves out every file beside them
+(SwiftPM's locks), `*.lock`, `FETCH_HEAD`, `ORIG_HEAD`, `gc.log`, `gc.pid`, `tmp_*`, a clone's
+`hooks/` and `logs/`, and `objects/info/alternates`. *Rests
 on:* a released version's bytes never changing at its registry. *Breaks if:* a registry served
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
@@ -126,7 +131,13 @@ holds is this build's downloads and nothing a machine had before; a registry cre
 set for the tool stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the
 job already filled (a Gradle user home, a Maven local repository, a Composer cache, a NuGet global
 packages folder); a part harvested says
-`harvested` as its tool. Either way a part is taken only when the tool's cache holds files, and
+`harvested` as its tool. A part whose tool has a download-only command of its own is fetched by
+it, with or without `COMMAND`, unless `--no-build` or a `--harvest` names the part: for
+`swiftpm`, `swift package resolve --force-resolved-versions` in each package whose
+`Package.resolved` is beside its `Package.swift`, with `--cache-path` and `--scratch-path` at
+folders of the bake's own, run as `COMMAND` is, so that nothing of the checkout is written; its
+tool is `fetched by swift package resolve` (K-32). SwiftPM runs no install script; resolving builds
+and runs each package's manifest, as `swift build` does. Either way a part is taken only when the tool's cache holds files, and
 only the files K-5 keeps, each copied as `0644`, or `0755` when its owner may run it; a link is
 kept only when it stays inside the part. The bake then writes the rows and `packages.json`,
 checks the new folder by names and bytes (K-1), writes it through to the disk, and puts it in
@@ -225,7 +236,35 @@ the part is left alone, with a line (`packages: <part>: left alone: <VARIABLE> i
 for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARGS`,
 `.mvn/maven.config` or `.mvn/jvm.config`. A folder whose path holds white space, a quote or a
 backslash can't ride in `MAVEN_OPTS`, which is split into words: the `maven` part is left alone,
-with a line. Where a reader's variable is one another part of hushrun builds in the same run
+with a line.
+
+`swiftpm` is C, and verified by a signature (K-7): only `hushrun packages exec`, `env` and
+`restore` seed, and `hushrun run` gives COMMAND nothing for it. The seed copies each file of a
+clone a `Package.resolved` of the checkout pins (by its repository's name, the last component of
+the pin's location less `.git`; a local or registry package is no clone of SwiftPM's) into
+`repositories/` of SwiftPM's cache: `Library/Caches/org.swift.swiftpm` under
+`CFFIXED_USER_HOME`, else under `HOME`, on macOS (Foundation reads the home folder from
+`CFFIXED_USER_HOME` and the user's account, never from `HOME`);
+`$XDG_CACHE_HOME/org.swift.swiftpm`, else `~/.cache/org.swift.swiftpm`, on Linux; elsewhere the
+part is left alone, with a line. It copies as pnpm's seed does (K-18): never over a file that is
+there, each file hashed as it is copied and left out, with a line, when its bytes aren't its
+row's, written beside its place and renamed, and a stamp when nothing was left out. A store
+keeps no empty folder, so after a seed that copied anything, each clone in that folder gains the
+folders git reads a repository by (`refs/heads`, `refs/tags`, `objects/info`, `objects/pack`). A clone no
+lockfile pins now is left, with a count. A `Package.resolved` at the checkout's root of a version
+other than 1, 2 or 3 leaves the part alone, with a line; nothing of it is guessed. Nothing is set:
+no variable, no option. *Rests on:* SwiftPM fetching nothing for a pin whose revision its cached
+clone holds, and copying that clone into the package's `.build` (its `ifNeeded` update strategy;
+confirmed by CI's Swift on Linux and macOS, offline). *Breaks if:* a command named another cache
+with `--cache-path`, turned it off with `--disable-dependency-cache`, a Swift read another
+folder than these, or on macOS `HOME` named another folder than the user's account and
+`CFFIXED_USER_HOME` was unset: nothing is there, and SwiftPM downloads as it does today; or a file of a clone
+changed in a store nobody hashed whole: the seed leaves that file out, the clone lacks an object,
+and SwiftPM fails on it rather than download (in a run that may write what others trust, K-8 has
+left the whole part out first). Git checks no object against its name when it clones from a
+folder, so a lockfile's revision proves nothing of a clone's files: a signature does.
+
+Where a reader's variable is one another part of hushrun builds in the same run
 (`MAVEN_OPTS`, which the `maven/1` cache and the Maven test adapter write), there is one value,
 built once: the person's words, then the build cache's, then the reader's. A reader never names a
 variable an adapter or a build kind owns (`NODE_OPTIONS`, `PATH`, `PYTHONPATH`, `RUBYOPT`,
