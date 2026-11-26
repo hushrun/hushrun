@@ -107,8 +107,8 @@ on:* a released version's bytes never changing at its registry. *Breaks if:* a r
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
 
-**K-6 Baking.** `hushrun packages bake --out DIR [--only PART]... [--harvest PART=FOLDER]...
-[--max-bytes N] [-- COMMAND]` writes the package store of the repository it runs in. With
+**K-6 Baking.** `hushrun packages bake --out DIR | --tar FILE [--only PART]... [--harvest
+PART=FOLDER]... [--no-build] [--force] [--max-bytes N] [-- COMMAND]` writes the package store of the repository it runs in. With
 `COMMAND` (the check's own build, such as `./gradlew test` or `mvn -B verify`) it runs COMMAND
 the way a bake runs anything of the repository's (B-63's `in_bake`: hushrun's, CI's and signing
 credentials withheld, no result recorded, no baked store or package store read, nothing it
@@ -130,7 +130,18 @@ variables, a CI job's ID token, or unsigned with a line (`--no-sign`: unsigned).
 predicate type is `https://hushrun.com/attestations/baked-packages/v1` and its one subject is
 `packages.json` by the SHA-256 of its bytes; `packages.json` names every rows file, which names
 every file, so the statement covers every byte a tool reads. The signature,
-`packages.sigstore.json`, is written into the new folder before it is put in place. *Rests on:* each tool downloading into the cache folder the bake names. *Breaks
+`packages.sigstore.json`, is written into the new folder before it is put in place.
+
+Without `COMMAND`, or with `--no-build` (which takes no `COMMAND`), a part whose build files the
+checkout holds and no `--harvest` names is left out, with a line. **Nothing to bake:** when
+`--out` already holds a store with every part this bake would take, each from the same tool line
+and with the `inputs` the checkout has now, the bake changes nothing, says so and exits 0;
+`--force` bakes anyway. **`--tar FILE`** writes the store as one ustar archive whose every entry is
+under `hushrun-packages/`, so that `tar -x -C /` puts it where a run reads one: entries sorted by
+path as bytes, each folder above a file once, folders `0755`, files `0644`, or `0755` for a row of
+kind `exe`, a row of kind `link` as a link (`typeflag` `2`), owner and time 0, so the same store is
+the same bytes on any machine; a name too long for a ustar header fails the bake. With `--tar`
+alone, the store is baked into a folder beside the archive and removed after. *Rests on:* each tool downloading into the cache folder the bake names. *Breaks
 if:* a build downloaded through another cache (an init script naming another Gradle home): those
 files aren't in the part, and the tool downloads them in a run, as it does today.
 

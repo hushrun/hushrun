@@ -351,3 +351,95 @@ fn a_store_signed_by_a_signer_hushrun_yaml_names_is_read_in_ci_and_not_once_edit
     std::fs::write(&path, text.replace("\"baked_ms\": ", "\"baked_ms\":  ")).unwrap();
     assert_eq!(env(), "", "a store edited after signing is untrusted");
 }
+
+// covers: K-6
+#[test]
+fn no_build_force_and_tar() {
+    let r = fixture();
+    let cache = r.root.join("m2");
+    let jar = cache.join("g/n/1/n-1.jar");
+    std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+    std::fs::write(&jar, b"jar").unwrap();
+    let bake = |args: &[&str]| {
+        let out = r
+            .hushrun()
+            .args(["packages", "bake", "--no-sign"])
+            .args(args)
+            .env("SOURCE_DATE_EPOCH", "1700000000")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let store = r.root.join("packages");
+    let out = store.to_str().unwrap().to_string();
+    let harvest = format!("maven={}", cache.display());
+    // --no-build with no harvest: the part the build files name is left out, and nothing bakes.
+    let (ok, _, err) = bake(&["--no-build", "--out", &out]);
+    assert!(!ok);
+    assert!(
+        err.contains("packages: maven: left out: --no-build runs no build"),
+        "{err}"
+    );
+    // A bake, then the same again: nothing to bake, unless --force.
+    let (ok, said, err) = bake(&["--no-build", "--out", &out, "--harvest", &harvest]);
+    assert!(ok, "{err}");
+    assert!(said.contains("packages: baked 1 parts"), "{said}");
+    let (ok, said, _) = bake(&["--out", &out, "--harvest", &harvest]);
+    assert!(ok);
+    assert!(said.contains("packages: nothing to bake: "), "{said}");
+    let (ok, said, _) = bake(&["--out", &out, "--harvest", &harvest, "--force"]);
+    assert!(ok);
+    assert!(said.contains("packages: baked 1 parts"), "{said}");
+    // A build file changed: it bakes again.
+    r.write("core/pom.xml", "<project/>\n");
+    let (ok, said, _) = bake(&["--out", &out, "--harvest", &harvest]);
+    assert!(ok);
+    assert!(said.contains("packages: baked 1 parts"), "{said}");
+    // --tar alone: an archive under hushrun-packages/, the same bytes twice, that extracts to a
+    // store every file of which is its row's.
+    let tar = r.root.join("packages.tar");
+    let tar_arg = tar.to_str().unwrap().to_string();
+    let (ok, said, err) = bake(&["--tar", &tar_arg, "--harvest", &harvest]);
+    assert!(ok, "{err}");
+    assert!(
+        said.contains("`tar -x -C /` puts the store at /hushrun-packages"),
+        "{said}"
+    );
+    let first = std::fs::read(&tar).unwrap();
+    let (ok, _, _) = bake(&["--tar", &tar_arg, "--harvest", &harvest]);
+    assert!(ok);
+    assert_eq!(
+        std::fs::read(&tar).unwrap(),
+        first,
+        "the same store, the same bytes"
+    );
+    let into = r.root.join("extracted");
+    std::fs::create_dir_all(&into).unwrap();
+    let untar = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&tar)
+        .arg("-C")
+        .arg(&into)
+        .status()
+        .unwrap();
+    assert!(untar.success());
+    let verify = r
+        .hushrun()
+        .args(["packages", "verify"])
+        .env("HUSHRUN_PACKAGES_LOWER", into.join("hushrun-packages"))
+        .output()
+        .unwrap();
+    assert!(
+        verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(
+        !r.root.join(".packages.tar.store").exists(),
+        "the scratch folder is gone"
+    );
+}

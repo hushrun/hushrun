@@ -392,8 +392,19 @@ pub enum PackagesCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct PackagesBakeArgs {
     /// The folder to write the store to, replaced in one step.
-    #[arg(long, value_name = "DIR")]
-    pub out: std::path::PathBuf,
+    #[arg(long, value_name = "DIR", required_unless_present = "tar")]
+    pub out: Option<std::path::PathBuf>,
+    /// Also, or instead, write the store as one archive whose entries are under
+    /// `hushrun-packages/`, so `tar -x -C /` puts it where a run reads one. The same store is the
+    /// same bytes.
+    #[arg(long, value_name = "FILE")]
+    pub tar: Option<std::path::PathBuf>,
+    /// Run no build: take only the caches --harvest names, and leave out every other part.
+    #[arg(long, conflicts_with = "command")]
+    pub no_build: bool,
+    /// Bake even when --out already holds these parts for these build files.
+    #[arg(long)]
+    pub force: bool,
     /// Bake only this part (gradle, maven); repeat for more.
     #[arg(long = "only", value_name = "PART")]
     pub only: Vec<String>,

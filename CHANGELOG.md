@@ -61,6 +61,9 @@ project's new branch starts from what main's CI already ran.
     `hushrun packages exec -- COMMAND`; `hushrun packages env` prints them. A tool finds what
     the store lacks online, as before: hushrun sets no offline switch.
   - `hushrun packages status`, `verify` (every file against its row) and `restore`.
+  - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
+    same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
+    `--out` already holds these parts for these build files changes nothing, unless `--force`.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

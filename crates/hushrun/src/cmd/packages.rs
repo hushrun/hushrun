@@ -464,7 +464,29 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     }
     let wanted =
         |part: &dyn Part| args.only.is_empty() || args.only.iter().any(|o| o == part.name());
-    let out = absolute(&args.out);
+    // --tar alone bakes into a folder of its own beside the archive, removed after.
+    let (out, scratch) = match (&args.out, &args.tar) {
+        (Some(out), _) => (absolute(out), None),
+        (None, Some(tar)) => {
+            let tar = absolute(tar);
+            let dir = tar.with_file_name(format!(
+                ".{}.store",
+                tar.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+            ));
+            (dir.clone(), Some(Cleanup(vec![dir])))
+        }
+        (None, None) => return Err(Failure::usage(anyhow!("name --out DIR or --tar FILE"))),
+    };
+    // K-13's "nothing to do", on this machine: the store at --out holds the parts this bake would
+    // take, each for the build files the checkout has now, from the same tool line.
+    if !args.force
+        && args.tar.is_none()
+        && let Some(words) = already_baked(&context, &out, args, &harvests, &wanted)
+    {
+        println!("{words}");
+        return Ok(Exit::Ok);
+    }
     let lock = hushrun_build::baked::lock_bake(&out).map_err(|e| fail(e.to_string()))?;
     hushrun_build::baked::reconcile_marked(&out, &lock, store::PACKAGES_JSON)
         .map_err(|e| fail(e.to_string()))?;
@@ -490,6 +512,23 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
         )?;
     } else {
+        // No fetch: each part the checkout has build files for and no harvest names is left out.
+        for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+            if !part.manifests(&context.tracked).is_empty()
+                && !harvests.iter().any(|(h, _)| h.name() == part.name())
+            {
+                lines.push(format!(
+                    "packages: {}: left out: {}, and no --harvest names a {} cache",
+                    part.name(),
+                    if args.no_build {
+                        "--no-build runs no build".to_string()
+                    } else {
+                        format!("no build was named to fetch with (`-- COMMAND`, such as the check that runs {})", part.tool())
+                    },
+                    part.tool()
+                ));
+            }
+        }
         take_all(
             &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
         )?;
@@ -562,6 +601,20 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     sync_tree(&new);
     hushrun_build::baked::put_in_place(&new, &out).map_err(|e| fail(e.to_string()))?;
     drop(cleanup);
+    if let Some(tar) = &args.tar {
+        let tar = absolute(tar);
+        write_tar(&out, &tar).map_err(fail)?;
+        lines.push(format!(
+            "packages: wrote {}: `tar -x -C /` puts the store at /{}",
+            tar.display(),
+            hushrun_packages::tar::ROOT
+        ));
+    }
+    let shown = if scratch.is_some() {
+        args.tar.as_deref().map(absolute).unwrap_or_default()
+    } else {
+        out.clone()
+    };
     for part in &packages.parts {
         lines.push(format!(
             "packages: {}: {} files, {}, from {} ({})",
@@ -586,7 +639,7 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         "packages: baked {} parts, {}, to {}",
         packages.parts.len(),
         size(total),
-        out.display()
+        shown.display()
     ));
     if global.format == Format::Json {
         for line in &lines {
@@ -601,7 +654,7 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             "{}",
             json!({
                 "schema": "hushrun.packages-bake/v1",
-                "out": out.display().to_string(),
+                "out": shown.display().to_string(),
                 "identity": packages.identity.to_string(),
                 "parts": parts,
             })
@@ -613,7 +666,71 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         }
     }
     drop(lock);
+    if scratch.is_some()
+        && let (Some(parent), Some(name)) = (out.parent(), out.file_name())
+    {
+        let _ = fs::remove_file(parent.join(format!(".{}.bake.lock", name.to_string_lossy())));
+    }
+    drop(scratch);
     Ok(Exit::Ok)
+}
+
+/// K-6: the archive of the store at `folder`, written beside `tar` and renamed into place.
+fn write_tar(folder: &Path, tar: &Path) -> Result<(), String> {
+    let temp = tar.with_file_name(format!(
+        ".{}.{}",
+        hushrun_build::baked::unique("tar"),
+        "part"
+    ));
+    let written = (|| {
+        let mut file = std::io::BufWriter::new(fs::File::create(&temp)?);
+        hushrun_packages::tar::write(folder, &mut file)?;
+        file.into_inner().map_err(|e| e.into_error())?.sync_all()
+    })();
+    if let Err(err) = written.and_then(|()| fs::rename(&temp, tar)) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("packages: {}: {err}", tar.display()));
+    }
+    Ok(())
+}
+
+/// The line a bake says when the store at `out` already holds every part it would take, each for
+/// the build files the checkout has now and from the same tool line; `None` when it would bake.
+fn already_baked(
+    context: &Context,
+    out: &Path,
+    args: &PackagesBakeArgs,
+    harvests: &[(&'static dyn Part, PathBuf)],
+    wanted: &dyn Fn(&dyn Part) -> bool,
+) -> Option<String> {
+    let (old, _) = store::Packages::read_bytes(out).ok()?;
+    store::check_contents(out, Some(&old), Depth::Names).ok()?;
+    let tool_of = |part: &dyn Part| -> Option<String> {
+        if harvests.iter().any(|(h, _)| h.name() == part.name()) {
+            Some("harvested".to_string())
+        } else if !args.command.is_empty() && !part.manifests(&context.tracked).is_empty() {
+            Some(format!("fetched by `{}`", shell_words(&args.command)))
+        } else {
+            None
+        }
+    };
+    let mut taken = 0;
+    for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+        let Some(tool) = tool_of(part) else { continue };
+        taken += 1;
+        let entry = old.part(part.name())?;
+        let manifests = hashed(&context.checkout, &part.manifests(&context.tracked));
+        let now = store::inputs_digest(part.name(), &tool, &context.platform, &manifests);
+        if entry.tool != tool || entry.inputs != now {
+            return None;
+        }
+    }
+    (taken > 0).then(|| {
+        format!(
+            "packages: nothing to bake: {} already holds these parts for these build files (--force bakes)",
+            out.display()
+        )
+    })
 }
 
 /// Takes every part a fetch or a harvest gives, for the parts whose manifest set the checkout

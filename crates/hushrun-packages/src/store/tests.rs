@@ -391,3 +391,34 @@ fn packages_json_is_read_with_its_schema_first() {
             .contains("isn't its rows'")
     );
 }
+
+// covers: K-6
+#[cfg(unix)]
+#[test]
+fn a_store_as_an_archive_extracts_to_the_same_store() {
+    let (dir, _) = baked();
+    let mut bytes = Vec::new();
+    crate::tar::write(&store(&dir), &mut bytes).unwrap();
+    let mut again = Vec::new();
+    crate::tar::write(&store(&dir), &mut again).unwrap();
+    assert_eq!(bytes, again);
+    let archive = dir.path().join("store.tar");
+    fs::write(&archive, &bytes).unwrap();
+    let into = dir.path().join("x");
+    fs::create_dir_all(&into).unwrap();
+    let Ok(status) = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&into)
+        .status()
+    else {
+        eprintln!("tar isn't here: the archive isn't extracted");
+        return;
+    };
+    assert!(status.success());
+    // The executable and the link come back as such, and every file is its row's.
+    let extracted = into.join(crate::tar::ROOT);
+    let (packages, _) = Packages::read_bytes(&extracted).unwrap();
+    check_contents(&extracted, Some(&packages), Depth::Bytes).unwrap();
+}
