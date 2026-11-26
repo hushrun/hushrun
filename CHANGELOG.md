@@ -117,6 +117,12 @@ project's new branch starts from what main's CI already ran.
     Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
     and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
     from a store without rewriting `uv.lock`.
+- **Baked packages for NuGet** ([ADR 0154](docs/adr/0154-baked-packages-nuget.md)): a `nuget`
+  part, a global packages folder that `dotnet restore` reads in place as a fallback folder
+  through `NUGET_FALLBACK_PACKAGES`. A bake's build fetches into a `NUGET_PACKAGES` of its own;
+  `--harvest nuget=FOLDER` takes a filled global packages folder. Folders the person already
+  names in `NUGET_FALLBACK_PACKAGES`, or a NuGet.Config's fallback folders, which the variable
+  replaces, come first.
 - **Baked packages for Hex** ([ADR 0157](docs/adr/0157-baked-hex-packages.md)): a package store's
   `hex` part holds Hex's tarballs, baked by `hushrun packages bake --out DIR -- mix deps.get` with
   Hex's cache, `deps` and `_build` at the bake's own folders, so the checkout's are left as they
