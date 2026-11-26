@@ -1,8 +1,11 @@
 //! A part (K-10): one package manager's side of a package store: which files of a checkout are its
 //! manifest set, what of its cache a bake keeps, and how a run points the tool at it.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+use hushrun_core::blocks::Hex32;
 
 use crate::store::VerifiedBy;
 
@@ -41,8 +44,42 @@ pub enum Admit {
 /// What [`Part::admit`] gives a seed: for a file's path and bytes, what it does with it.
 pub type Admits = Box<dyn Fn(&str, &[u8]) -> Admit>;
 
-/// K-6: how a bake fetches a part with the tool's own download-only commands: `None` for a tool
-/// that has none, an error saying why it can't fetch here.
+/// K-3: the files a lockfile names by hash, by their SHA-256: the file's name where the lockfile
+/// gives one, and the hash as the lockfile writes it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Locked(BTreeMap<Hex32, (Option<String>, String)>);
+
+impl Locked {
+    /// Adds a file the lockfile names: `sha256` as 64 hex characters, `file` its name where the
+    /// lockfile gives one. A hash that isn't SHA-256's is left out.
+    pub fn add(&mut self, sha256: &str, file: Option<&str>) {
+        if let Some(hex) = Hex32::parse(&sha256.to_ascii_lowercase()) {
+            self.0
+                .insert(hex, (file.map(str::to_string), format!("sha256:{sha256}")));
+        }
+    }
+
+    /// The hash as the lockfile writes it, when it names a file of this name with these bytes.
+    pub fn of(&self, file: &str, sha256: &Hex32) -> Option<&str> {
+        let (named, written) = self.0.get(sha256)?;
+        named
+            .as_deref()
+            .is_none_or(|n| n == file)
+            .then_some(written.as_str())
+    }
+
+    /// What a seed does with the file at `path` whose bytes are `bytes`: copy it when the
+    /// lockfile names it with these bytes.
+    pub fn admit(&self, path: &str, bytes: &[u8]) -> Admit {
+        if self.of(file_name(path), &Hex32::sha256(bytes)).is_some() {
+            Admit::Copy
+        } else {
+            Admit::NotLocked
+        }
+    }
+}
+
+/// K-32: how a bake fetches a part with the tool's own download-only command.
 pub type Download = Option<Result<Vec<Vec<OsString>>, String>>;
 
 /// One package manager's part.
@@ -91,10 +128,22 @@ pub trait Part: Sync {
     fn after_seed(&self, _dest: &Path) -> std::io::Result<()> {
         Ok(())
     }
-    /// K-6: the tool's own download-only commands, which fetch the part into `into` from the
-    /// manifest set in `checkout`. A bake runs them with or without its COMMAND.
+    /// K-3, K-5: for a part whose lockfile names each file by its SHA-256, the files the lockfiles
+    /// `manifests` in `checkout` name. A bake keeps only these, and gives each row its `locked`.
+    /// `None` for a part whose files the lockfile doesn't name so.
+    fn lockfile(&self, _checkout: &Path, _manifests: &[String]) -> Option<Locked> {
+        None
+    }
+    /// K-32: the tool's own download-only commands, which fetch the part into `into` from the
+    /// manifest set in `checkout`. A bake runs them with or without its COMMAND. `None` for a tool
+    /// that has none, an error saying why it can't fetch here.
     fn download(&self, _checkout: &Path, _manifests: &[String], _into: &Path) -> Download {
         None
+    }
+    /// K-6: the variables a bake's COMMAND gets so that the tool downloads into `cache`, a folder
+    /// of the bake's own.
+    fn fetch_vars(&self, _cache: &Path) -> Vec<(&'static str, OsString)> {
+        Vec::new()
     }
 }
 
@@ -103,7 +152,9 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
     &crate::parts::npm::Npm,
+    &crate::parts::pip::Pip,
     &crate::parts::pnpm::Pnpm,
+    &crate::parts::poetry::Poetry,
     &crate::parts::swiftpm::SwiftPm,
 ];
 
@@ -129,6 +180,21 @@ pub(crate) fn file_name(path: &str) -> &str {
 /// Whether `path` has a component that ends in `-SNAPSHOT`.
 pub(crate) fn has_snapshot(path: &str) -> bool {
     path.split('/').any(|c| c.ends_with("-SNAPSHOT"))
+}
+
+/// K-3: the package a Python wheel or source archive is of, `name==version`, from its file name.
+pub(crate) fn python_package(path: &str) -> Option<String> {
+    let name = file_name(path);
+    let (name, version) = if let Some(stem) = name.strip_suffix(".whl") {
+        let mut words = stem.split('-');
+        (words.next()?, words.next()?)
+    } else {
+        let stem = [".tar.gz", ".zip", ".tar.bz2", ".tgz"]
+            .iter()
+            .find_map(|ext| name.strip_suffix(ext))?;
+        stem.rsplit_once('-')?
+    };
+    (!name.is_empty() && !version.is_empty()).then(|| format!("{name}=={version}"))
 }
 
 /// Whether a folder's path can ride in a variable that is split into words: no white space, no
