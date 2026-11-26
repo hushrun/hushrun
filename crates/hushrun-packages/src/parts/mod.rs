@@ -2,7 +2,9 @@
 
 pub mod gradle;
 pub mod maven;
+pub mod npm;
 pub mod nuget;
+pub mod pnpm;
 
 #[cfg(test)]
 mod tests;
