@@ -130,6 +130,10 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     );
     assert!(said.contains("packages: cargo: 1 files"), "{said}");
     assert!(said.contains("(Cargo.lock, Cargo.toml)"), "{said}");
+    assert!(
+        said.contains("the store is unsigned (--no-sign): every run reads it, since each file is checked against the lockfile"),
+        "{said}"
+    );
     // The row names the package and Cargo.lock's checksum.
     let rows = std::fs::read_to_string(store.join("rows/cargo.jsonl")).unwrap();
     assert!(
@@ -154,7 +158,6 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
             .env("HUSHRUN_PACKAGES_LOWER", store);
         cmd.output().unwrap()
     };
-    // Unsigned, it is still read in CI's place: Cargo.lock is the evidence.
     empty_cargo_home(&home, &registry);
     let first = run("b", &store);
     let err = String::from_utf8_lossy(&first.stderr).into_owned();
@@ -173,6 +176,31 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     let second = run("b", Path::new(""));
     let err = String::from_utf8_lossy(&second.stderr).into_owned();
     assert!(err.contains("b skipped"), "{err}");
+
+    // covers: K-10
+    // Nor does a block's: the crate a seed gave compiles to the blocks the same crate downloaded
+    // does, with build reuse on.
+    let keyed = |name: &str, store: &Path, home: &Path| {
+        let mut cmd = r.hushrun();
+        cmd.args(["run", name, "--", "cargo", "build", "--offline", "--locked"])
+            .env("HUSHRUN_BUILD", "on")
+            .env("CARGO_HOME", home)
+            .env("HUSHRUN_PACKAGES_LOWER", store);
+        String::from_utf8_lossy(&cmd.output().unwrap().stderr).into_owned()
+    };
+    let other = r.root.join("cargo-home-2");
+    let _ = std::fs::remove_dir_all(r.repo.join("target"));
+    empty_cargo_home(&other, &registry);
+    let err = keyed("k1", &store, &other);
+    assert!(err.contains("build: 2 crates built, none reused"), "{err}");
+    let _ = std::fs::remove_dir_all(r.repo.join("target"));
+    let _ = std::fs::remove_dir_all(&other);
+    empty_cargo_home(&other, &registry);
+    let downloaded = other.join("registry/cache").join(&registry);
+    std::fs::create_dir_all(&downloaded).unwrap();
+    std::fs::copy(crates.join(&file), downloaded.join(&file)).unwrap();
+    let err = keyed("k2", Path::new(""), &other);
+    assert!(err.contains("build: 2 of 2 crates reused"), "{err}");
 
     // Without the store the same offline build fails: the store is what it read.
     let _ = std::fs::remove_dir_all(&home);
@@ -200,7 +228,8 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     );
     assert!(!seeded.exists());
 
-    // `restore` seeds outside a run; `env` exports nothing and says so.
+    // `restore` seeds outside a run, in CI too, unsigned: Cargo.lock is the evidence. `env`
+    // exports nothing and says so.
     std::fs::write(&part, {
         bytes[last] ^= 1;
         &bytes
@@ -209,6 +238,7 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     let restore = r
         .hushrun()
         .args(["packages", "restore"])
+        .env("CI", "true")
         .env("CARGO_HOME", &home)
         .env("HUSHRUN_PACKAGES_LOWER", &store)
         .output()

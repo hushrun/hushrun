@@ -698,10 +698,17 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             }
         ));
     }
+    let needs_signature = packages
+        .parts
+        .iter()
+        .any(|p| p.verified_by == store::VerifiedBy::Signature);
     lines.push(match &signed_by {
         Ok(signer) => format!("packages: signed by {signer}"),
-        Err(why) => format!(
+        Err(why) if needs_signature => format!(
             "packages: the store is unsigned ({why}): a run reads its parts only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI"
+        ),
+        Err(why) => format!(
+            "packages: the store is unsigned ({why}): every run reads it, since each file is checked against the lockfile"
         ),
     });
     lines.push(format!(

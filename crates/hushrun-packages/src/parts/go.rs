@@ -120,7 +120,7 @@ impl Part for Go {
 pub struct Settings {
     /// `GOPROXY`, as Go reads it from its environment file or its own default.
     pub proxy: String,
-    /// The first of `GOSUMDB=off`, `GONOSUMDB` and `GOPRIVATE` that is set, if any.
+    /// The first of `GOSUMDB=off`, `GOPRIVATE` and `GONOSUMDB` that is set, if any.
     pub unchecked: Option<&'static str>,
 }
 
@@ -176,10 +176,11 @@ pub fn settings() -> Option<Settings> {
     };
     let unchecked = if *sumdb == "off" {
         Some("GOSUMDB=off")
+    } else if !private.is_empty() {
+        // Go's default GONOSUMDB is GOPRIVATE: name the one the person set.
+        Some("GOPRIVATE")
     } else if !nosumdb.is_empty() {
         Some("GONOSUMDB")
-    } else if !private.is_empty() {
-        Some("GOPRIVATE")
     } else {
         None
     };
