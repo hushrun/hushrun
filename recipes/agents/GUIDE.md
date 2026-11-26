@@ -176,6 +176,14 @@ test file fails twice though it passed on the same files it read, reuse of that 
 is suspended, and only a person turns it on again, with `hushrun tests resume CHECK`, which refuses
 a coding agent. Tell the person what the line said.
 
+A test can fail for reasons that aren't your change. When a test fails and hushrun adds that it may
+be flaky (it failed, then passed when it ran again; or it has failed and passed on the same files
+before), run that test once more before you edit code for it. If it passes, say so when you report
+back, and name the test. Don't delete, skip, retry-wrap or rewrite a test to get past it: tell the
+person it may be flaky. The check still failed, and its next run runs that test again. `hushrun
+why CHECK TEST_FILE` says how often it did this in the last 30 days, when the results server
+keeps that.
+
 ## Setting hushrun up
 
 `npx hushrun init --yes` applies init's changes without asking. Without `--yes`, and without a

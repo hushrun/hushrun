@@ -3,7 +3,7 @@ name: hushrun
 description: Use before every git push in a repository that uses hushrun, when hushrun's pre-push hook refuses a push, when a line starts with "hushrun:", and when asked to set hushrun up. hushrun skips a check that this exact code already passed, here and, once the repository shares its results, in CI, so running checks here first means CI doesn't run them again.
 compatibility: hushrun 0.11.0 or newer for `hushrun guide`, 0.14.0 or newer for `hushrun build`; everything else here works with any hushrun.
 metadata:
-  hushrun-skill: "3"
+  hushrun-skill: "4"
 ---
 
 # hushrun
@@ -31,7 +31,8 @@ CI's files run checks as `hushrun run …`.
 2. Run `hushrun ready`. It lists the checks this exact code hasn't passed yet, which CI would
    still run, and the commands that run them here, each in full, with the directory each runs in.
 3. Run those commands as printed, each on its own, so that each is the check CI looks for. If a
-   check fails, fix the code, not the check.
+   check fails, fix the code, not the check. When hushrun says a failed test may be flaky, run it
+   once more before you change code for it, and don't change the test: `hushrun guide` says more.
 4. Run `hushrun ready` again until it says the code is ready, then push.
 
 `hushrun ready --format json` gives the same answer as data: `next` holds the commands to run, and
@@ -78,8 +79,8 @@ is the repository's, the binary is theirs, and an update changes the tool you ar
 ## Reporting back
 
 Say which checks hushrun skipped because this code passed them before, which `hushrun ready` left
-to CI (`ci`), whether it said results stay on this machine, and anything hushrun said is out of
-date.
+to CI (`ci`), whether it said results stay on this machine, any test it said may be flaky, by
+name, and anything hushrun said is out of date.
 
 ## Setting hushrun up
 

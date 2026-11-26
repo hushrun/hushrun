@@ -42,6 +42,10 @@ project's new branch starts from what main's CI already ran.
   after the record's lines, so it can carry the history. `hushrun why NAME UNIT` adds `it has
   failed and passed on the same files <n> times in the last 30 days, last on <date>` from one
   `GET {base}/v0/units/flaky` (C-167); a server without it adds nothing.
+- **The agent's guide and skill say what to do with a test that may be flaky:** run it once more
+  before changing code for it, don't delete, skip or rewrite it, and name it when reporting back.
+  The skill is revision 4: `hushrun skill update` writes it, and `hushrun ready` says a copy of
+  revision 3 is older.
 - **No time limit decides what a build reuses** ([ADR 0144](docs/adr/0144-no-time-limit-decides-what-a-build-reuses.md)):
   what one machine reuses of another's no longer depends on how loaded either was.
   - **Uploads:** the end of a `hushrun run` waits for every upload the run built, on a person's

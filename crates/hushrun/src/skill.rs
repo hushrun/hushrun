@@ -17,7 +17,7 @@ pub const SKILL: &str = include_str!("../../../recipes/agents/SKILL.md");
 /// What `hushrun guide` prints, before what is true here.
 pub const GUIDE: &str = include_str!("../../../recipes/agents/GUIDE.md");
 /// This hushrun's revision of the skill: [`SKILL`] says it too.
-pub const REVISION: u32 = 3;
+pub const REVISION: u32 = 4;
 
 /// Each revision's text, by its SHA-256, with CRLF read as LF, as git may check it out on
 /// Windows. Append only: a copy of an older revision is `older` only while its hash is here. A
@@ -38,6 +38,11 @@ const REVISIONS: &[(u32, &str)] = &[
     (
         3,
         "7643edd808e16c93f7bea4d40108363a90a4dae2b8729ead5fbd6ba1d05b1fc5",
+    ),
+    // [ADR 0147] It holds what to do when hushrun says a failed test may be flaky.
+    (
+        4,
+        "2cb4799ef4bddd24255b8f1ea1dc6bbf1b70dfb5e37c8aab054e392f8e815dde",
     ),
 ];
 
