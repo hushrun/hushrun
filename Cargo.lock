@@ -1869,6 +1869,7 @@ dependencies = [
  "hushrun-digest",
  "hushrun-graph",
  "hushrun-ledger",
+ "hushrun-packages",
  "hushrun-reports",
  "hushrun-testkit",
  "hushrun-tlog",

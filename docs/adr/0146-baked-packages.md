@@ -2,7 +2,7 @@
 
 - **Status:** proposed; being built
 - **Date:** 2026-11-25
-- **Rules:** K-1 to K-5, K-7, K-8, K-10 to K-12 new (`docs/spec/11-baked-packages.md`); B-63, B-65 and B-67 read
+- **Rules:** K-1 to K-8 and K-10 to K-12 new (`docs/spec/11-baked-packages.md`); B-63, B-65 and B-67 read
 
 ## Context
 
@@ -76,6 +76,11 @@ on another platform.
 
 ## Consequences
 
-- The format, its digests and its check land first, with vectors and a reference in Python. The
-  readers, `hushrun packages`, and the Gradle and Maven parts follow in their own rules.
+- `hushrun packages bake` runs the check's own build with the tools' caches at its own folders,
+  or takes a cache the job filled (`--harvest`), since no Gradle or Maven command resolves
+  everything a build will ask for without running it. This release signs nothing: a store it
+  bakes is read with `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1`, outside CI. Signing, an image and a
+  pull come later.
+- `hushrun run` gives COMMAND the readers' variables whether build reuse is on or off. Where the
+  Maven test adapter or the `maven/1` cache builds `MAVEN_OPTS`, the tail joins that one value.
 - A program that lists a sandbox's folders sees one more, `/hushrun-packages`.

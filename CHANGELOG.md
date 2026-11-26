@@ -50,6 +50,15 @@ project's new branch starts from what main's CI already ran.
   K-3), its state for a run and what lets a run read it: a signature by a signer `hushrun.yaml`
   names, or `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1` outside CI (K-7, K-8, K-11, K-12). A run finds
   it at `HUSHRUN_PACKAGES_LOWER` or `/hushrun-packages`; `HUSHRUN_PACKAGES=off` turns it off.
+  - **`hushrun packages bake --out DIR -- COMMAND`** runs the check's own build with Gradle's user
+    home and Maven's local repository at folders of its own and keeps what they downloaded;
+    `--harvest gradle=FOLDER` or `--harvest maven=FOLDER` takes a cache the job already filled.
+    Unsigned in this release.
+  - **Readers:** Gradle reads its part in place through `GRADLE_RO_DEP_CACHE`, Maven through
+    `-Dmaven.repo.local.tail=` in `MAVEN_OPTS`, in `hushrun run` (build reuse on or off) and in
+    `hushrun packages exec -- COMMAND`; `hushrun packages env` prints them. A tool finds what
+    the store lacks online, as before: hushrun sets no offline switch.
+  - `hushrun packages status`, `verify` (every file against its row) and `restore`.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

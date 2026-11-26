@@ -130,6 +130,13 @@ fn run(cli: &Cli) -> ExitCode {
     if matches!(cli.command, Command::Ready(_) | Command::Run(_)) {
         cmd::hook::ensure(&cli.global);
     }
+    // `packages exec` exits with COMMAND's code.
+    if let Command::Packages(cli::PackagesArgs {
+        command: Some(cli::PackagesCommand::Exec { command }),
+    }) = &cli.command
+    {
+        return cmd::packages::exec(&cli.global, command);
+    }
     if let Command::Run(args) = &cli.command {
         // With a command after --, `run` wraps it, and exits with its code.
         if !args.command.is_empty() {
@@ -171,6 +178,8 @@ fn run(cli: &Cli) -> ExitCode {
         Command::Why(args) => cmd::why::run(&cli.global, args),
         // B-21: per user, no repository, no hook.
         Command::Build(args) => cmd::build::run(&cli.global, args),
+        // K-6 to K-12: per checkout, no hushrun.yaml needed.
+        Command::Packages(args) => cmd::packages::run(&cli.global, args),
         // C-15: setting up `hushrun run` needs no hushrun.yaml.
         Command::Init(args) if !args.pipeline() => cmd::setup::run(&cli.global, args),
         command => app::App::new(&cli.global).and_then(|app| match command {
@@ -204,6 +213,7 @@ fn run(cli: &Cli) -> ExitCode {
             | Command::Tests(_)
             | Command::Why(_)
             | Command::Build(_)
+            | Command::Packages(_)
             | Command::Approve(_) => {
                 unreachable!("handled above")
             }

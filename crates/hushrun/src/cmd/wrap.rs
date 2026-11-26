@@ -1119,6 +1119,8 @@ struct BuildRun<'a> {
     say: &'a Say,
     /// COMMAND's words and folder, for what the run says of its build folders at the end (B-50).
     command: Option<(Vec<String>, PathBuf)>,
+    /// K-10: what the package store gives COMMAND, with build reuse on or off.
+    packages: crate::cmd::packages::Given,
 }
 
 impl<'a> BuildRun<'a> {
@@ -1174,11 +1176,21 @@ impl<'a> BuildRun<'a> {
                 None
             }
         };
+        // K-10: the package store's readers, whatever build reuse does; a run that may write
+        // what others trust (CI, or one with a backend) hashes every file first (K-8).
+        let packages = crate::cmd::packages::given(
+            global,
+            crate::gitlab_job::in_ci(&Env::from_process()) || backend.is_some(),
+        );
+        for line in &packages.lines {
+            say.line(format_args!("{line}"));
+        }
         BuildRun {
             session,
             global,
             say,
             command: None,
+            packages,
         }
     }
 
@@ -1189,7 +1201,8 @@ impl<'a> BuildRun<'a> {
 
     /// What a start of COMMAND gets: the wrapper and the session; nothing without a session.
     fn env(&self) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-        self.session.as_ref().map(Session::env).unwrap_or_default()
+        self.packages
+            .merged(self.session.as_ref().map(Session::env).unwrap_or_default())
     }
 
     /// Sets the wrapper and the session on a start of COMMAND, when there is a session, and

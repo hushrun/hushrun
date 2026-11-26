@@ -107,6 +107,29 @@ on:* a released version's bytes never changing at its registry. *Breaks if:* a r
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
 
+**K-6 Baking.** `hushrun packages bake --out DIR [--only PART]... [--harvest PART=FOLDER]...
+[--max-bytes N] [-- COMMAND]` writes the package store of the repository it runs in. With
+`COMMAND` (the check's own build, such as `./gradlew test` or `mvn -B verify`) it runs COMMAND
+the way a bake runs anything of the repository's (B-63's `in_bake`: hushrun's, CI's and signing
+credentials withheld, no result recorded, no baked store or package store read, nothing it
+started outliving it), with Gradle's user home (`GRADLE_USER_HOME`) and Maven's local repository
+(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`) at folders of the bake's own, so that what the part
+holds is this build's downloads and nothing a machine had before; a registry credential the job
+set for the tool stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the
+job already filled (a Gradle user home, a Maven local repository); a part harvested says
+`harvested` as its tool. Either way a part is taken only when the tool's cache holds files, and
+only the files K-5 keeps, each copied as `0644`, or `0755` when its owner may run it; a link is
+kept only when it stays inside the part. The bake then writes the rows and `packages.json`,
+checks the new folder by names and bytes (K-1), writes it through to the disk, and puts it in
+place in one step under the folder's lock, as B-63 does (one bake of a folder at a time;
+`.<name>.bake.lock` beside it). `baked_ms` is `SOURCE_DATE_EPOCH` when it is set, so the same
+files bake to the same bytes. A store larger than `--max-bytes` (4 GiB unless given) fails the
+bake, naming its two largest parts and `--only`. A bake with nothing to take fails and says what
+it takes. This release writes no signature: a store it bakes is read only on the person's
+say-so (K-7). *Rests on:* each tool downloading into the cache folder the bake names. *Breaks
+if:* a build downloaded through another cache (an init script naming another Gradle home): those
+files aren't in the part, and the tool downloads them in a run, as it does today.
+
 **K-7 Trust and evidence.** What `packages.json` says is a claim. A run reads a part on evidence:
 
 | Part | Evidence | Who may read it |
@@ -172,7 +195,11 @@ built once: the person's words, then the build cache's, then the reader's. A rea
 variable an adapter or a build kind owns (`NODE_OPTIONS`, `PATH`, `PYTHONPATH`, `RUBYOPT`,
 `RUBYLIB`, `PHP_INI_SCAN_DIR`, `ERL_LIBS`, `ELIXIR_ERL_OPTIONS`, `BASH_ENV`, `MAKEFILES`,
 `VSTestTargets`, `GOFLAGS`, `RUSTC_WRAPPER`, `RUSTDOC`, `CARGO_HOME`, `GRADLE_USER_HOME`), and
-hushrun sets no offline switch. A variable a reader sets never enters a key: not a check's, not a
+hushrun sets no offline switch. `hushrun run` gives COMMAND the readers' variables whether build
+reuse is on or off (packages follow `HUSHRUN_PACKAGES`, not `hushrun build`), and lines for what
+it ignored; `hushrun packages exec -- COMMAND` gives them to a command outside a run, records
+nothing and exits with COMMAND's code; `hushrun packages env` prints them as `export` lines. A
+variable a reader sets never enters a key: not a check's, not a
 block's. *Rests on:* Gradle and Maven reading the second folder only for what their own cache
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
