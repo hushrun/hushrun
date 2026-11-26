@@ -272,9 +272,11 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/yarn4" --no-audit --no-fund --ignore-scripts @yarnpkg/cli-dist@4.12.0
           npm install --prefix "$RUNNER_TEMP/yarn1" --no-audit --no-fund --ignore-scripts yarn@1.22.22
           chmod +x "$RUNNER_TEMP/bun/node_modules/@oven/bun-linux-x64/bin/bun"
-          echo "HUSHRUN_TEST_BUN=$RUNNER_TEMP/bun/node_modules/@oven/bun-linux-x64/bin/bun" >> "$GITHUB_ENV"
-          echo "HUSHRUN_TEST_YARN=$RUNNER_TEMP/yarn4/node_modules/.bin/yarn" >> "$GITHUB_ENV"
-          echo "HUSHRUN_TEST_YARN1=$RUNNER_TEMP/yarn1/node_modules/.bin/yarn" >> "$GITHUB_ENV"
+          {
+            echo "HUSHRUN_TEST_BUN=$RUNNER_TEMP/bun/node_modules/@oven/bun-linux-x64/bin/bun"
+            echo "HUSHRUN_TEST_YARN=$RUNNER_TEMP/yarn4/node_modules/.bin/yarn"
+            echo "HUSHRUN_TEST_YARN1=$RUNNER_TEMP/yarn1/node_modules/.bin/yarn"
+          } >> "$GITHUB_ENV"
       # JavaScript: Node 22 and 24, pinned, from nodejs.org beside the Node 20 above, and Mocha 10
       # and 11, for the tests of the adapters for Node's test runner and Mocha (ADR 0107).
       - name: Install Node 22 and 24 and Mocha for the test-file tests
