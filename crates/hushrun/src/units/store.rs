@@ -55,10 +55,6 @@ pub struct UnitRecord {
     /// says: `test`, or `file` for a test file none of whose tests failed under a key of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<Level>,
-    /// \[C-160\] A unit's identity across edits, 64 lowercase hex. Nothing sets it yet: it waits
-    /// on a key the repository holds, so the server can't make one from a guessed name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
     /// \[C-161\] The unit failed, had a pass that counted under its key, and passed when it ran
     /// once more in the same run (C-34): `pass`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,7 +73,6 @@ impl UnitRecord {
             result: if passed { "pass" } else { "fail" }.into(),
             duration_ms,
             level: None,
-            id: None,
             again: None,
             retried: false,
         }

@@ -1710,7 +1710,7 @@ fn fitting(result: &RunResult, units: &[crate::units::store::UnitRecord], limit:
 }
 
 /// One result of a test file or a test as a run's body carries it: its key as 64 lowercase hex,
-/// and \[C-160 to C-162\] what it is, its identity, how its second run ended and whether the
+/// and \[C-160 to C-162\] what it is, how its second run ended and whether the
 /// runner retried it, each only when present.
 fn unit_json(unit: &crate::units::store::UnitRecord) -> serde_json::Value {
     let mut out =
@@ -1718,9 +1718,6 @@ fn unit_json(unit: &crate::units::store::UnitRecord) -> serde_json::Value {
     let fields = out.as_object_mut().expect("an object");
     if let Some(level) = unit.level {
         fields.insert("level".into(), json!(level));
-    }
-    if let Some(id) = &unit.id {
-        fields.insert("id".into(), json!(id));
     }
     if let Some(again) = unit.again {
         fields.insert("again".into(), json!(again));

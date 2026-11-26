@@ -369,7 +369,7 @@ fn a_server_hears_that_a_failed_test_file_passed_when_it_ran_again_and_no_name()
     assert_eq!(fails.len(), 1, "{body:#}");
     assert_eq!(fails[0]["level"], "file", "{body:#}");
     assert_eq!(fails[0]["again"], "pass", "{body:#}");
-    assert!(fails[0].get("retried").is_none() && fails[0].get("id").is_none());
+    assert!(fails[0].get("retried").is_none());
     assert_eq!(body["result"]["units"]["audited"], 1, "{body:#}");
     // \[C-33\] Hashes and words only: no test file's name or path is in any request.
     for q in results.raw_requests() {

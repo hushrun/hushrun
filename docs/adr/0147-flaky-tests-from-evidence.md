@@ -54,11 +54,13 @@ This ADR is the CLI's half: what it sends, and (the next step) what it says with
    second run gets a line that says to run it again before changing code for it, at most five
    lines and a count of the rest, and on GitHub the step summary lists them. No new request is
    made during a run, and nothing changes a verdict. `hushrun why` asks the server once, by the
-   keys it computes now, and adds a line when the unit did this (C-167). The counting line names no command yet:
-   the one that lists a repository's flaky tests by name is a later step.
-6. **`id` is reserved.** A unit result may carry `id`, an identity that survives edits. This
-   version sends none: making one that the server can't compute from a guessed test name needs a
-   key that the repository holds, which is a later decision.
+   keys it computes now, and adds a line when the unit did this (C-167). The counting line names
+   no command.
+6. **Flakes are counted by key, and there is no command that lists them.** By the owner's
+   decision of 2026-11-26, neither a `hushrun tests flaky` command nor a unit identity that
+   survives edits (a keyed hash under a line of `hushrun.yaml`) is built: the run's lines, the
+   step summary and `hushrun why` already name a flaky test wherever its name is. A unit's
+   history is its key's, so it starts again when a file the unit reads changes.
 7. **Names stay on the machine.** Every new field is a word, a flag, a count or a hash. No test
    name or path is sent.
 8. **Old and new.** A server from before these fields ignores them: a unit result's fields are
@@ -80,7 +82,11 @@ This ADR is the CLI's half: what it sends, and (the next step) what it says with
 - **The server infers the level** from which keys of a run failed together. It can't: a test's key
   and its file's are both hashes, and a file can fail with none of its tests (a collection error).
 - **Send names**, so the dashboard names flaky tests. No: names stay on the machine (C-33). A person
-  names them in a clone; that command is a later step.
-- **A plain hash of a test's name as `id`.** The server could confirm a guessed name with it.
+  sees its name in the run's lines, its step summary and `hushrun why`, on its own machine.
+- **An identity that survives edits**, so that history follows a test across changes to what it
+  reads, with a command that names a repository's flaky tests. Not built, by the owner's decision
+  of 2026-11-26: nothing needs it to name a flaky test where its name is, and it would cost a line
+  in `hushrun.yaml` that older versions refuse. A plain hash of a test's name would let the server
+  confirm a guessed name.
 - **Count a retried pass as a pass**, as Vitest does today. Nine adapters refuse to; this ADR keeps
   each adapter's rule and only says that the tries disagreed.

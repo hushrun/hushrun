@@ -25,7 +25,6 @@ project's new branch starts from what main's CI already ran.
   - `"retried": true` when the runner retried a test and its tries didn't end the same: Cargo
     under `cargo nextest run`, Gradle's test-retry plugin, Maven's `rerunFailingTestsCount` and
     `meson test --repeat`. Their result stays a fail;
-  - `id` is reserved for a unit's identity across edits, and not sent yet;
   - a run's result gains `units.audited`, how many of those that ran the plan's audit ran
     (`run-result.v0.schema.json`);
   - the facts an adapter writes (`hushrun.unit-facts/v1`) gain a test's `retried`.
