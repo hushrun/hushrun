@@ -3010,6 +3010,12 @@ fn a_slow_id_token_endpoint_holds_no_request_that_has_a_token_and_the_end_mints_
     // its expiry, from an endpoint that answers a renewal only after 20 seconds.
     let fake = FakeBuild::start();
     fake.set_id_token_seconds(61);
+    // The endpoint is slow from the start, before the check begins: `open`'s first mint is
+    // waited for (ADR 0144), and its token comes with less than a minute left, so one renewal
+    // starts at once and is as slow. The fake counts a token when the request comes, not when
+    // it answers: slowed only once `open` had answered, a renewal that began earlier on a slow
+    // machine was answered at once, and the requests below carried its token.
+    fake.delay(ID_TOKEN, Duration::from_secs(10));
     let m = machine();
     let relay = start(&fake, &m, |c| {
         with_id_token(&fake)(c);
@@ -3017,10 +3023,9 @@ fn a_slow_id_token_endpoint_holds_no_request_that_has_a_token_and_the_end_mints_
     });
     begin(&relay, &m);
     until("open", || answering(&relay));
-    fake.delay(ID_TOKEN, Duration::from_secs(20));
     // Each request carries the token held while a renewal runs: none waits for the endpoint.
     // Shown by what was sent, not by time: a request that waited for the renewal would carry
-    // the second token, which the endpoint issues only 20 seconds on.
+    // the second token, which the endpoint answers only 10 seconds on.
     for n in 0..4u8 {
         assert_eq!(
             ask(
@@ -3032,11 +3037,12 @@ fn a_slow_id_token_endpoint_holds_no_request_that_has_a_token_and_the_end_mints_
             Answer::None
         );
     }
-    // The end mints nothing: `close` carries the token held.
+    // The end mints nothing: `close` carries the token held. The one renewal is still on the
+    // wire, and no other began.
     relay.end_check(&[]);
     assert_eq!(fake.count(route::CLOSE), 1);
     let tokens = fake.id_tokens();
-    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens.len(), 2);
     let sent = bearers(&fake);
     assert!(sent.len() >= 6, "{sent:?}");
     assert!(
