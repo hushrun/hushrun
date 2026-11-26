@@ -90,6 +90,12 @@ project's new branch starts from what main's CI already ran.
   it installs without downloading it, to the same paths; `hushrun packages restore` does the copy
   alone. hushrun sets no variable for it. Where the Gemfile.lock has `CHECKSUMS`, each gem is
   checked against it and the part needs no signature; otherwise it is read as a signed part is.
+- **Composer in the package store** ([ADR 0155](docs/adr/0155-baked-packages-composer.md)):
+  `hushrun packages bake --out DIR -- composer install --download-only --no-scripts --no-plugins`
+  keeps the archives of Composer's cache, and `hushrun packages exec -- composer install` copies
+  into Composer's cache each archive `composer.lock` names now, so `vendor/` installs with no
+  registry to reach, the same `vendor/` a network install writes. Read on a signature, since a
+  lock's `shasum` is usually empty. `hushrun run` gives a check nothing for it: no key changes.
 - **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to
