@@ -94,6 +94,13 @@ project's new branch starts from what main's CI already ran.
   - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
+- **Baked packages for SwiftPM** ([ADR 0158](docs/adr/0158-swiftpm-packages.md)): a package
+  store's `swiftpm` part holds the bare clones of SwiftPM's cache, and `hushrun run` copies each
+  one a `Package.resolved` pins into the run's SwiftPM cache before COMMAND, hashing every file
+  as it copies, so that SwiftPM resolves the pinned revisions offline. A clone the cache holds is
+  left as it is. `hushrun packages bake` runs `swift package resolve` itself, no command needed;
+  `--harvest swiftpm=FOLDER` takes a filled cache. The part needs a signature, since git checks
+  no file of a clone it copies from a folder.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

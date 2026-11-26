@@ -88,7 +88,8 @@ checkout and, where it has none or the lockfile is optional, the build files tha
 dependencies. For `gradle`: `settings.gradle`, `settings.gradle.kts`, every `build.gradle` and
 `build.gradle.kts`, `gradle/libs.versions.toml`, `gradle/wrapper/gradle-wrapper.properties`,
 `gradle.lockfile` and `gradle/verification-metadata.xml`. For `maven`: every `pom.xml`,
-`.mvn/maven.config`, `.mvn/extensions.xml` and `.mvn/wrapper/maven-wrapper.properties`. Only files
+`.mvn/maven.config`, `.mvn/extensions.xml` and `.mvn/wrapper/maven-wrapper.properties`. For
+`swiftpm`: every `Package.resolved`, `Package.swift` and `Package@swift-*.swift`. Only files
 git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
 resolved by something outside them (an init script, a property of the machine): the part's
 `inputs` would stay the same while what it downloads changed, and a bake would skip.
@@ -102,7 +103,9 @@ Nothing else: a file the bake can't class is left out and counted in what the ba
 `gradle` part leaves out `*.lock`, `gc.properties` and every path with a `-SNAPSHOT` component; a
 `maven` part leaves out `_remote.repositories`, `*.lastUpdated`, `resolver-status.properties`,
 `*.lock`, `*.part`, every dot-folder (`.locks`, `.cache`) and every path with a `-SNAPSHOT`
-component. *Rests
+component. A `swiftpm` part keeps the bare clones under `repositories/` of SwiftPM's cache and
+leaves out every file beside them (SwiftPM's locks), `*.lock`, `FETCH_HEAD`, `ORIG_HEAD`,
+`gc.log`, `gc.pid`, `tmp_*`, a clone's `hooks/` and `logs/`, and `objects/info/alternates`. *Rests
 on:* a released version's bytes never changing at its registry. *Breaks if:* a registry served
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
@@ -117,7 +120,13 @@ started outliving it), with Gradle's user home (`GRADLE_USER_HOME`) and Maven's 
 holds is this build's downloads and nothing a machine had before; a registry credential the job
 set for the tool stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the
 job already filled (a Gradle user home, a Maven local repository); a part harvested says
-`harvested` as its tool. Either way a part is taken only when the tool's cache holds files, and
+`harvested` as its tool. A part whose tool has a download-only command of its own is fetched by
+it, with or without `COMMAND`, unless `--no-build` or a `--harvest` names the part: for
+`swiftpm`, `swift package resolve --force-resolved-versions` in each package whose
+`Package.resolved` is beside its `Package.swift`, with `--cache-path` and `--scratch-path` at
+folders of the bake's own, run as `COMMAND` is, so that nothing of the checkout is written; its
+tool says `fetched by SwiftPM's own download`. SwiftPM runs no install script; resolving builds
+and runs each package's manifest, as `swift build` does. Either way a part is taken only when the tool's cache holds files, and
 only the files K-5 keeps, each copied as `0644`, or `0755` when its owner may run it; a link is
 kept only when it stays inside the part. The bake then writes the rows and `packages.json`,
 checks the new folder by names and bytes (K-1), writes it through to the disk, and puts it in
@@ -204,7 +213,32 @@ the part is left alone, with a line (`packages: <part>: left alone: <VARIABLE> i
 for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARGS`,
 `.mvn/maven.config` or `.mvn/jvm.config`. A folder whose path holds white space, a quote or a
 backslash can't ride in `MAVEN_OPTS`, which is split into words: the `maven` part is left alone,
-with a line. Where a reader's variable is one another part of hushrun builds in the same run
+with a line.
+
+`swiftpm` is C, and verified by a signature: before COMMAND starts, `hushrun run` and `hushrun
+packages exec` copy each clone of the part that a `Package.resolved` of the checkout pins (by
+its repository's name, the last component of the pin's location less `.git`; a local or
+registry package isn't SwiftPM's clone) into `repositories/` of SwiftPM's cache:
+`~/Library/Caches/org.swift.swiftpm` on macOS, `$XDG_CACHE_HOME/org.swift.swiftpm`, else
+`~/.cache/org.swift.swiftpm`, on Linux; elsewhere the part is left alone, with a line. A clone
+the cache holds already is left as it is. Each clone is written into a folder beside its place
+and renamed into it when every file is there; a file under `objects/` is linked to the store's
+where the system lets it, any other copied, and each is hashed as SwiftPM will read it: a clone
+any file of which isn't its row's is not put in place, with a line, and SwiftPM downloads it. A
+seed that put every clone in place leaves `.hushrun-packages-<digest>` in the cache, the digest
+of what it copied and the pins, so that the next seed of the same store for the same lockfile
+costs one `stat`. A `Package.resolved` of a version other than 1, 2 or 3 is read for nothing,
+and the part is left alone, with a line. `hushrun packages restore` seeds outside a run;
+`hushrun packages env` exports nothing for it, with a line. Nothing is set: no variable, no
+option. *Rests on:* SwiftPM fetching nothing for a pin whose revision its cached clone holds,
+and copying that clone into the package's `.build` (SwiftPM's `ifNeeded` update strategy;
+confirmed by CI's Swift on Linux and macOS, offline). *Breaks if:* a command named another cache
+with `--cache-path`, turned it off with `--disable-dependency-cache`, or a Swift read another
+folder than these: nothing is in it, and SwiftPM downloads as it does today. Git checks no
+object against its name when it clones from a folder, so the lockfile's revision proves
+nothing of a clone's files: a signature does, and so does the seed's hash of each file.
+
+Where a reader's variable is one another part of hushrun builds in the same run
 (`MAVEN_OPTS`, which the `maven/1` cache and the Maven test adapter write), there is one value,
 built once: the person's words, then the build cache's, then the reader's. A reader never names a
 variable an adapter or a build kind owns (`NODE_OPTIONS`, `PATH`, `PYTHONPATH`, `RUBYOPT`,

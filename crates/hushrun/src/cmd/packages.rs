@@ -206,17 +206,18 @@ fn maven_opts(opts: Option<&str>, word: &str) -> String {
 }
 
 /// K-10: what the store a run here reads gives COMMAND. `may_write_trusted` is the run's
-/// authority. Nothing when no store is named.
-pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool) -> Given {
+/// authority; with `seed`, a part read by a seed is copied into its tool's cache now, before
+/// COMMAND starts. Nothing when no store is named.
+pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool, seed: bool) -> Given {
     // K-11: no store named, nothing to read: one `stat`.
     if state::named(&var).is_none() {
         return Given::default();
     }
     let context = Context::here(global);
-    given_by(&context, &context.state(may_write_trusted))
+    given_by(&context, &context.state(may_write_trusted), seed)
 }
 
-fn given_by(context: &Context, state: &State) -> Given {
+fn given_by(context: &Context, state: &State, seed: bool) -> Given {
     let mut given = Given {
         lines: state.lines(),
         ..Given::default()
@@ -237,12 +238,57 @@ fn given_by(context: &Context, state: &State) -> Given {
                 .vars
                 .extend(vars.into_iter().map(|(n, v)| (OsString::from(n), v))),
             Reader::MavenOpts(word) => given.maven = Some(word),
+            Reader::Seed(into) if seed => {
+                given
+                    .lines
+                    .extend(seed_part(context, read, part, &into, false));
+            }
+            Reader::Seed(_) => given.lines.push(format!(
+                "packages: {}: nothing to export: `hushrun packages restore` copies its files into {}'s cache",
+                part.name(),
+                part.tool()
+            )),
             Reader::LeftAlone(why) => given
                 .lines
                 .push(format!("packages: {}: left alone: {why}", part.name())),
         }
     }
     given
+}
+
+/// K-10, mechanism C: seeds `read` into the tool's cache at `into`, only what a lockfile of the
+/// checkout pins, each file checked against its row; the lines to say, always when `say_all`.
+fn seed_part(
+    context: &Context,
+    read: &state::ReadPart,
+    part: &dyn Part,
+    into: &Path,
+    say_all: bool,
+) -> Vec<String> {
+    let locks = part.locks(&context.checkout, &part.manifests(&context.tracked));
+    let seeded = part.seed(&read.dir, &read.rows, into, &locks);
+    let name = part.name();
+    let mut lines = Vec::new();
+    if let Some(why) = seeded.error {
+        lines.push(format!("packages: {name}: left alone: {why}"));
+    }
+    if seeded.copied > 0 || say_all {
+        lines.push(format!(
+            "packages: {name}: seeded {} files into {} ({} there already, {} no lockfile pins)",
+            seeded.copied,
+            into.display(),
+            seeded.had,
+            seeded.unpinned
+        ));
+    }
+    if seeded.refused > 0 {
+        lines.push(format!(
+            "packages: {name}: left out {} files whose bytes aren't their rows': {} downloads them",
+            seeded.refused,
+            part.tool()
+        ));
+    }
+    lines
 }
 
 /// The folder a `maven` part would be read from, for the `maven/1` cache's roots: an entry that
@@ -321,7 +367,7 @@ fn export_line(name: &OsString, value: &OsString) -> String {
 }
 
 fn env_command(global: &GlobalOpts) -> CmdResult {
-    let given = given(global, in_ci());
+    let given = given(global, in_ci(), false);
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -350,7 +396,7 @@ pub fn exec(global: &GlobalOpts, command: &[String]) -> ExitCode {
         eprintln!("error: name the command: `hushrun packages exec -- COMMAND`");
         return Exit::Usage.into();
     };
-    let given = given(global, in_ci());
+    let given = given(global, in_ci(), true);
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -381,6 +427,14 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
     };
     for read in &lower.parts {
         if !parts.is_empty() && !parts.contains(&read.entry.part) {
+            continue;
+        }
+        if let Some(part) = part::by_name(&read.entry.part)
+            && let Reader::Seed(into) = part.reader(&read.dir, &context.checkout, &var)
+        {
+            for line in seed_part(&context, read, part, &into, true) {
+                println!("{line}");
+            }
             continue;
         }
         println!(
@@ -494,14 +548,47 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     let cleanup = Cleanup(vec![new.clone()]);
     let mut lines = Vec::new();
     let mut metas = Vec::new();
-    // The fetch: COMMAND, with each tool's cache at a folder of the bake's own (K-6).
+    // The fetch: each tool's own download-only commands, then COMMAND, with each tool's cache at
+    // a folder of the bake's own (K-6).
+    let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
+    let _cache = Cleanup(vec![cache.clone()]);
     let mut fetched: Vec<(&'static dyn Part, PathBuf, String)> = Vec::new();
+    let mut cannot: Vec<&'static str> = Vec::new();
+    for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+        if args.no_build || harvests.iter().any(|(h, _)| h.name() == part.name()) {
+            continue;
+        }
+        let manifests = part.manifests(&context.tracked);
+        if manifests.is_empty() {
+            continue;
+        }
+        let into = fetch_cache(&cache, part);
+        match part.download(&context.checkout, &manifests, &into) {
+            None => {}
+            Some(Err(why)) => {
+                cannot.push(part.name());
+                lines.push(format!("packages: {}: left out: {why}", part.name()));
+            }
+            Some(Ok(commands)) => {
+                fs::create_dir_all(&into).map_err(|e| fail(e.to_string()))?;
+                for command in &commands {
+                    let words: Vec<String> = command
+                        .iter()
+                        .map(|w| w.to_string_lossy().into_owned())
+                        .collect();
+                    run_fetch(&context.checkout, &words, &cache).map_err(fail)?;
+                }
+                fetched.push((part, into, download_tool(part)));
+            }
+        }
+    }
     if !args.command.is_empty() {
-        let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
-        let _cache = Cleanup(vec![cache.clone()]);
         run_fetch(&context.checkout, &args.command, &cache).map_err(fail)?;
         let words = shell_words(&args.command);
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+            if fetched.iter().any(|(p, _, _)| p.name() == part.name()) {
+                continue;
+            }
             fetched.push((
                 part,
                 fetch_cache(&cache, part),
@@ -512,10 +599,13 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
         )?;
     } else {
-        // No fetch: each part the checkout has build files for and no harvest names is left out.
+        // No fetch: each part the checkout has build files for and no harvest or download takes
+        // is left out.
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
             if !part.manifests(&context.tracked).is_empty()
                 && !harvests.iter().any(|(h, _)| h.name() == part.name())
+                && !fetched.iter().any(|(p, _, _)| p.name() == part.name())
+                && !cannot.contains(&part.name())
             {
                 lines.push(format!(
                     "packages: {}: left out: {}, and no --harvest names a {} cache",
@@ -706,9 +796,15 @@ fn already_baked(
     let (old, _) = store::Packages::read_bytes(out).ok()?;
     store::check_contents(out, Some(&old), Depth::Names).ok()?;
     let tool_of = |part: &dyn Part| -> Option<String> {
+        let manifests = part.manifests(&context.tracked);
         if harvests.iter().any(|(h, _)| h.name() == part.name()) {
             Some("harvested".to_string())
-        } else if !args.command.is_empty() && !part.manifests(&context.tracked).is_empty() {
+        } else if !args.no_build
+            && !manifests.is_empty()
+            && let Some(Ok(_)) = part.download(&context.checkout, &manifests, Path::new(""))
+        {
+            Some(download_tool(part))
+        } else if !args.command.is_empty() && !manifests.is_empty() {
             Some(format!("fetched by `{}`", shell_words(&args.command)))
         } else {
             None
@@ -911,6 +1007,12 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
 
 fn shell_words(command: &[String]) -> String {
     command.join(" ")
+}
+
+/// K-2: the tool line of a part a bake fetched with the tool's own download-only commands: its
+/// words without the bake's folders, so that the same checkout bakes the same `inputs`.
+fn download_tool(part: &dyn Part) -> String {
+    format!("fetched by {}'s own download", part.tool())
 }
 
 /// When the store was baked: `SOURCE_DATE_EPOCH` when set, else now.

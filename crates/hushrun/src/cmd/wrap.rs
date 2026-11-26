@@ -1212,7 +1212,7 @@ impl<'a> BuildRun<'a> {
         } else {
             in_ci || relay.is_some()
         };
-        let packages = crate::cmd::packages::given(global, may_write_trusted);
+        let packages = crate::cmd::packages::given(global, may_write_trusted, true);
         for line in &packages.lines {
             say.line(format_args!("{line}"));
         }

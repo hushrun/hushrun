@@ -1,13 +1,22 @@
 //! A part (K-10): one package manager's side of a package store: which files of a checkout are its
 //! manifest set, what of its cache a bake keeps, and how a run points the tool at it.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::store::VerifiedBy;
+use crate::store::{Row, VerifiedBy};
 
 /// The variables a reader sees: the run's own, before hushrun adds any.
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
+
+/// What a part's lockfiles pin: a key the part makes from a file of its cache, and what the
+/// lockfiles write for it.
+pub type Locks = BTreeMap<String, Vec<String>>;
+
+/// K-6: how a bake fetches a part with the tool's own download-only commands: `None` for a tool
+/// that has none, an error saying why it can't fetch here.
+pub type Download = Option<Result<Vec<Vec<OsString>>, String>>;
 
 /// K-10: how a part reaches its tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,8 +27,26 @@ pub enum Reader {
     /// Mechanism A for Maven: one word that joins `MAVEN_OPTS`, merged with whatever else of
     /// hushrun builds that variable in the same run, after the person's words.
     MavenOpts(String),
+    /// Mechanism C: hushrun copies each file the lockfile still pins, checked, into the tool's
+    /// own cache at this folder ([`Part::seed`]).
+    Seed(PathBuf),
     /// The tool is left alone, with this line (`packages: <part>: left alone: …`).
     LeftAlone(String),
+}
+
+/// What a seed did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Seeded {
+    /// Files copied or linked into the tool's cache.
+    pub copied: usize,
+    /// Files the cache held already.
+    pub had: usize,
+    /// Files no lockfile of the checkout pins: left in the store.
+    pub unpinned: usize,
+    /// Files whose bytes aren't their row's: never copied.
+    pub refused: usize,
+    /// Why the seed left the part alone or stopped, if it did.
+    pub error: Option<String>,
 }
 
 /// One package manager's part.
@@ -43,10 +70,28 @@ pub trait Part: Sync {
     fn verified_by(&self) -> VerifiedBy;
     /// K-10: how the run whose variables are `env`, in `checkout`, reads the part at `dir`.
     fn reader(&self, dir: &Path, checkout: &Path, env: Env<'_>) -> Reader;
+    /// K-3: what the lockfiles among `manifests` (paths from `checkout`) pin.
+    fn locks(&self, _checkout: &Path, _manifests: &[String]) -> Locks {
+        Locks::new()
+    }
+    /// K-10, mechanism C: copies each of `rows` of the part at `dir` that `locks` pins, checked
+    /// against its row, into `into`. Only a part whose reader seeds does anything.
+    fn seed(&self, _dir: &Path, _rows: &[Row], _into: &Path, _locks: &Locks) -> Seeded {
+        Seeded::default()
+    }
+    /// K-6: the tool's own download-only commands, which fetch the part into `into` from the
+    /// manifest set in `checkout`. A bake runs them with or without its COMMAND.
+    fn download(&self, _checkout: &Path, _manifests: &[String], _into: &Path) -> Download {
+        None
+    }
 }
 
 /// Every part this hushrun knows, by name.
-pub static ALL: &[&dyn Part] = &[&crate::parts::gradle::Gradle, &crate::parts::maven::Maven];
+pub static ALL: &[&dyn Part] = &[
+    &crate::parts::gradle::Gradle,
+    &crate::parts::maven::Maven,
+    &crate::parts::swiftpm::SwiftPm,
+];
 
 /// The part named `name`.
 pub fn by_name(name: &str) -> Option<&'static dyn Part> {
