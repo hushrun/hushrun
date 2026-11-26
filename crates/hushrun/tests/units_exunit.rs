@@ -15,6 +15,8 @@
 
 #[path = "common/exunit.rs"]
 mod ex;
+#[path = "common/hex.rs"]
+mod hex;
 #[path = "common/in_process.rs"]
 mod in_process;
 #[path = "common/repo.rs"]
@@ -376,5 +378,189 @@ fn mix_test_in_a_form_hushrun_doesnt_read_is_left_alone_and_says_why() {
             .contains("`mix test --stale` chooses test files from its own earlier runs"),
         "{}",
         ran.said()
+    );
+}
+
+/// \[ADR 0157\] The shop with a dependency from Hex, `leaf`, which a module and its test file
+/// call, its `mix.lock` written by a network install from `server` and committed; `tests` its
+/// mode.
+fn shop_with_leaf(h: &hex::Hex, server: &hex::Server, tests: &str) -> Repo {
+    let mut files = shop(tests);
+    files.retain(|(path, _)| path != "mix.exs");
+    files.push(file("mix.exs", &hex::mix_exs("shop", &[("leaf", "1.0.0")])));
+    files.push(file(
+        "lib/shop/leafy.ex",
+        "defmodule Shop.Leafy do\n  def version, do: Leaf.version()\nend\n",
+    ));
+    files.push(file(
+        "test/leafy_test.exs",
+        &test_file("Shop.LeafyTest", "assert Shop.Leafy.version() == \"1.0.0\""),
+    ));
+    let mut r = repo(&files).clear(hex::Hex::CLEARED);
+    for (name, value) in h.vars(server) {
+        r = r.give(name, value);
+    }
+    r
+}
+
+/// `mix deps.get` in `r` with Hex's cache at `home`, from nothing: no `deps/`, no `_build`.
+fn deps_get(r: &Repo, h: &hex::Hex, home: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(r.repo.join("deps"));
+    let _ = std::fs::remove_dir_all(r.repo.join("_build"));
+    let out = r
+        .command(&h.mix.to_string_lossy())
+        .arg("deps.get")
+        .env("HEX_HOME", home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Seeds the tarballs of the Hex cache `from` into the empty Hex cache `into`, as a run seeds a
+/// store's `hex` part: each one `r`'s `mix.lock` pins.
+fn seed(r: &Repo, from: &std::path::Path, into: &std::path::Path) {
+    use hushrun_packages::part::Part as _;
+    use hushrun_packages::parts::hex::Hex as HexPart;
+    let rows: Vec<hushrun_packages::store::Row> = std::fs::read_dir(from.join("packages/hexpm"))
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            let bytes = std::fs::read(e.path()).unwrap();
+            hushrun_packages::store::Row {
+                path: format!("packages/hexpm/{}", e.file_name().to_string_lossy()),
+                kind: hushrun_packages::store::Kind::File,
+                bytes: bytes.len() as u64,
+                sha256: hushrun_core::blocks::Hex32::sha256(&bytes),
+                target: None,
+                package: None,
+                locked: None,
+            }
+        })
+        .collect();
+    use hushrun_core::blocks::Hex32;
+    use hushrun_packages::store::{Class, PartEntry, RowsFile, VerifiedBy};
+    // As a store's part: its folder holds the cache's `packages/hexpm/`.
+    let read = hushrun_packages::state::ReadPart {
+        entry: PartEntry {
+            part: "hex".into(),
+            class: Class::Download,
+            tool: "fetched".into(),
+            runtime: None,
+            inputs: Hex32::sha256(b"inputs"),
+            manifests: vec!["mix.lock".into()],
+            identity: Hex32::sha256(b"identity"),
+            rows: RowsFile {
+                sha256: Hex32::sha256(b"rows"),
+                bytes: 0,
+                count: rows.len() as u64,
+            },
+            bytes: 0,
+            verified_by: VerifiedBy::Lockfile,
+        },
+        rows,
+        dir: from.to_path_buf(),
+        behind: false,
+    };
+    let manifests = ["mix.lock".to_string()];
+    let (dest, under) = HexPart
+        .seed_into(&r.repo, &|name: &str| {
+            (name == "HEX_HOME").then(|| into.as_os_str().to_os_string())
+        })
+        .unwrap();
+    let admit = HexPart.admit(&r.repo, &manifests);
+    let seeded =
+        hushrun_packages::seed::seed(&read, under, &dest, &*admit, HexPart.links()).unwrap();
+    assert_eq!((seeded.copied, seeded.changed.len()), (1, 0), "{seeded:?}");
+}
+
+// covers: C-115, K-10
+#[test]
+fn a_seeded_install_leaves_every_key_as_a_network_install_does() {
+    if !has_mix() {
+        return;
+    }
+    let Some(h) = hex::hex() else { return };
+    let registry = tempfile::tempdir().unwrap();
+    let public = hex::repository(&h, registry.path(), &[hex::Package::plain("leaf", "1.0.0")]);
+    let server = hex::Server::start(&public);
+    let units = [
+        "test/cart_test.exs",
+        "test/greet_test.exs",
+        "test/leafy_test.exs",
+        "test/plugin_test.exs",
+        "test/price_test.exs",
+        "test/tax_test.exs",
+    ];
+    // Every test file runs each time and records what it read: a network install's reads, then
+    // a seeded install's, from no deps/ and no _build, with every tarball refused.
+    let r = shop_with_leaf(&h, &server, "observe");
+    let net = r.root.join("net-hex");
+    deps_get(&r, &h, &net);
+    hushrun_testkit::git::commit_all(&r.repo, "lock");
+    let first = run(&r, MIX_TEST);
+    assert_eq!(first.code, 0, "{}", first.said());
+    let reads_net: Vec<Vec<String>> = units.iter().map(|u| read_by(&r, u)).collect();
+    assert!(
+        reads_net[2].contains(&"lib/shop/leafy.ex".to_string()),
+        "{:?}",
+        reads_net[2]
+    );
+    let seeded = r.root.join("seeded-hex");
+    seed(&r, &net, &seeded);
+    server.tarballs_asked();
+    server.refuse_tarballs(true);
+    deps_get(&r, &h, &seeded);
+    assert_eq!(server.tarballs_asked(), Vec::<String>::new());
+    let second = run(&r, MIX_TEST);
+    assert_eq!(second.code, 0, "{}", second.said());
+    assert_eq!(
+        modules_ran(&second.stdout).len(),
+        units.len(),
+        "{}",
+        second.stdout
+    );
+    let reads_seeded: Vec<Vec<String>> = units.iter().map(|u| read_by(&r, u)).collect();
+    // What only the install could change is the same: the unit that calls the dependency reads
+    // the same files, and no unit reads a file of deps/ or _build. (A unit's reads also hold what
+    // ran while it ran, which another test file's module can join in one run and not the next, so
+    // the other units are compared by their own files.)
+    assert_eq!(reads_seeded[2], reads_net[2]);
+    for (unit, (net, seeded)) in units.iter().zip(reads_net.iter().zip(&reads_seeded)) {
+        for reads in [net, seeded] {
+            assert!(reads.contains(&unit.to_string()), "{unit}: {reads:?}");
+            assert!(
+                reads
+                    .iter()
+                    .all(|p| !p.starts_with("deps/") && !p.starts_with("_build/")),
+                "{unit}: {reads:?}"
+            );
+        }
+    }
+    // With reuse, after a network install and then a seeded one, every pass holds: nothing runs
+    // but an audit's check.
+    server.refuse_tarballs(false);
+    let r = shop_with_leaf(&h, &server, "{mode: reuse, always: []}");
+    let net = r.root.join("net-hex");
+    deps_get(&r, &h, &net);
+    hushrun_testkit::git::commit_all(&r.repo, "lock");
+    let first = run(&r, MIX_TEST);
+    assert_eq!(first.code, 0, "{}", first.said());
+    assert_eq!(modules_ran(&first.stdout).len(), units.len());
+    let seeded = r.root.join("seeded-hex");
+    seed(&r, &net, &seeded);
+    server.refuse_tarballs(true);
+    deps_get(&r, &h, &seeded);
+    let second = run(&r, MIX_TEST);
+    assert_eq!(second.code, 0, "{}", second.said());
+    assert!(
+        modules_ran(&second.stdout).len() <= 1,
+        "{:?}\n{}",
+        modules_ran(&second.stdout),
+        second.said()
     );
 }

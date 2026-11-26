@@ -310,7 +310,7 @@ impl Part for Yarn {
         if under == V1 {
             std::fs::create_dir_all(dest)?;
         }
-        crate::seed::seed(read, under, dest, admit)
+        crate::seed::seed(read, under, dest, admit, self.links())
     }
 
     fn seed_env(&self, checkout: &Path, dest: &Path) -> Vec<(String, OsString)> {

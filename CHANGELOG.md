@@ -157,6 +157,15 @@ project's new branch starts from what main's CI already ran.
   against the lockfile, so any run reads them unsigned, CI included. `bake -- COMMAND` runs the
   fetch with `CARGO_HOME` and `GOMODCACHE` at its own folders; `--harvest cargo=FOLDER` and
   `--harvest go=FOLDER` take a filled cargo home or module cache.
+- **Baked packages for Hex** ([ADR 0157](docs/adr/0157-baked-hex-packages.md)): a package store's
+  `hex` part holds Hex's tarballs, baked by `hushrun packages bake --out DIR -- mix deps.get` with
+  Hex's cache, `deps` and `_build` at the bake's own folders, so the checkout's are left as they
+  were. `hushrun packages exec`, `env` and `restore` put each tarball whose SHA-256 is `mix.lock`'s
+  outer checksum into the run's Hex cache, and `mix deps.get` then unpacks `deps/` with no tarball
+  downloaded; `mix deps.compile` runs as before. Checked against the lockfile, the part is read
+  unsigned by any run, CI included. A `mix.lock` in a form hushrun doesn't read leaves the part
+  out, with a line. The seed is pnpm's and npm's, which may now link a part's files where the part
+  allows it (Hex's) instead of copying them.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

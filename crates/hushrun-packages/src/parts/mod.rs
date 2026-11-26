@@ -6,6 +6,7 @@ pub mod cargo;
 pub mod composer;
 pub mod go;
 pub mod gradle;
+pub mod hex;
 pub mod maven;
 pub mod npm;
 pub mod nuget;

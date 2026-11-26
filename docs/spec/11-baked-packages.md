@@ -518,6 +518,53 @@ another platform only: the command downloads none, and the part is left out.
 own, not the files it downloaded; it takes no file from `UV_FIND_LINKS` that `uv.lock` names at an
 index; and an index named by `UV_DEFAULT_INDEX` or `UV_INDEX_URL` rewrites `uv.lock` (confirmed
 with uv 0.13.10).
+`hex` is C. Its folder holds `packages/hexpm/<name>-<version>.tar`, the tarballs of Hex's own
+repository as Hex caches them, and nothing else of the cache: not `cache.bin` (Hex's registry
+cache, in Hex's own format), not a file Hex is writing, not another repository's folder (an
+organization's). Its manifest set is every `mix.lock` and `mix.exs`. A bake's fetch, such as `mix
+deps.get`, runs with `HEX_HOME` at a folder of the bake's own and with `MIX_DEPS_PATH` and
+`MIX_BUILD_PATH` at two more, discarded after it, so that the checkout's `deps` and `_build` are
+left as they were and no `_build` is ever baked (a copied `_build` holds another checkout's paths);
+`mix deps.get` runs no dependency's code, neither its `mix.exs` nor its compile. It is verified by
+the lockfile: a row's `locked` is the outer checksum `mix.lock` gives that package from `hexpm`,
+the eighth field of its `:hex` entry and the SHA-256 of the tarball. `mix.lock` is read one entry a
+line, as Mix writes it; a lockfile in another form, or a `:hex` entry of other than eight fields
+(the lockfile of a Hex older than 0.21, which has no outer checksum), gives no hashes, and the bake
+leaves the part out and a seed leaves it alone, each with a line. Only `hushrun packages exec`,
+`env` and `restore` seed it (K-50), as they seed `pnpm` and `npm`; `hushrun run` gives COMMAND
+nothing for it, since by the time a check runs the install is done. The seed goes into
+`packages/hexpm` of the cache Hex uses: `HEX_HOME`; else, when `MIX_XDG` is `1` or `true`, `hex`
+under `XDG_CACHE_HOME` or `~/.cache`; else `~/.hex`. A relative or empty folder leaves the part
+alone, with a line. A tarball is put only when `mix.lock` pins its SHA-256, and as a link to the
+store's file where the file system allows one. Nothing is set: hushrun never names `HEX_HOME`, a
+variable of Mix's or `ERL_LIBS`. `mix deps.get` then unpacks `deps/` from the cache, and `mix
+deps.compile` runs as it does without the store, every time. Hex checks each cached tarball
+against `mix.lock`'s outer checksum itself and downloads the package again when they differ. Hex
+still fetches each package's registry record (signed, a few KB), so a seeded install needs Hex's
+repository reachable; with no network it fails as it does without the store. *Rests on:* `mix
+deps.get` taking a cached tarball whose SHA-256 is the lockfile's outer checksum without
+downloading it, and replacing a cached file rather than writing into it (confirmed with Hex 2.7.0,
+Elixir 1.18.4 and Erlang/OTP 27.3.4, against a repository that refused every tarball). *Breaks
+if:* a Hex version kept its tarballs in another folder or under other names: the seed puts them
+where Hex doesn't look, and Hex downloads as it does today; `mix.lock` took a newer form: the part
+is left out, with a line; Hex wrote into a cached file in place: a linked file would change the
+store's, which a run's check by bytes and `hushrun packages verify` find.
+
+**K-50 A seed.** A part read by a seed (K-10's mechanism C) puts each of its files into the tool's
+own cache, at the same path below it, when `hushrun packages exec`, `env` or `restore` runs. A
+file the cache holds already is never written over. Each other file is read and its SHA-256
+checked against its row and then against what the part's lockfile pins; a file whose bytes aren't
+its row's or the lockfile's is never put, with one line, and the tool downloads its package; a
+file no lockfile names now stays in the store. A file is written beside its place and renamed in,
+so the tool never sees half of one: a copy, `0644` (`0755` for a row of kind `exe`), or, for a
+part whose tool replaces a file of its cache and never writes into one (`hex`), a hard link to
+the store's file where the file system allows one, whose bytes are the ones checked. A seed that
+left nothing out writes `.hushrun-packages-<part identity>` in the folder it seeds, and the next
+seed of the same part reads that stamp and nothing else: one `stat`. *Rests on:* SHA-256, and a
+linking part's tool replacing a cached file rather than writing into it. *Breaks if:* that tool
+wrote into a cached file in place: through a link it would change the store's file, which a run's
+check by bytes and `hushrun packages verify` find; a person removed a seeded file after the
+stamp: the tool downloads it, as it does today.
 
 **K-45 The `bundler` part.** The part holds the `.gem` files of a gem cache and nothing else of
 it: `parts/bundler/cache/<name>-<version>[-<platform>].gem`. Not a git source's clone
