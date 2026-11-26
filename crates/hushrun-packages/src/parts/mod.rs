@@ -2,6 +2,8 @@
 
 pub mod gradle;
 pub mod maven;
+pub mod pip;
+pub mod poetry;
 
 #[cfg(test)]
 mod tests;
