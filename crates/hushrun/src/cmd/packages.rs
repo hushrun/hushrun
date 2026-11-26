@@ -237,6 +237,8 @@ fn given_by(context: &Context, state: &State) -> Given {
                 .vars
                 .extend(vars.into_iter().map(|(n, v)| (OsString::from(n), v))),
             Reader::MavenOpts(word) => given.maven = Some(word),
+            // K-10: a seed is an install's, never a run's: COMMAND gets nothing from it.
+            Reader::Seed => {}
             Reader::LeftAlone(why) => given
                 .lines
                 .push(format!("packages: {}: left alone: {why}", part.name())),
@@ -321,7 +323,15 @@ fn export_line(name: &OsString, value: &OsString) -> String {
 }
 
 fn env_command(global: &GlobalOpts) -> CmdResult {
-    let given = given(global, in_ci());
+    let mut given = Given::default();
+    if state::named(&var).is_some() {
+        let context = Context::here(global);
+        let state = context.state(in_ci());
+        given = given_by(&context, &state);
+        let (lines, vars) = seed_all(&context, &state, &[]);
+        given.lines.extend(lines);
+        given.vars.extend(vars);
+    }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -350,7 +360,15 @@ pub fn exec(global: &GlobalOpts, command: &[String]) -> ExitCode {
         eprintln!("error: name the command: `hushrun packages exec -- COMMAND`");
         return Exit::Usage.into();
     };
-    let given = given(global, in_ci());
+    let mut given = Given::default();
+    if state::named(&var).is_some() {
+        let context = Context::here(global);
+        let state = context.state(in_ci());
+        given = given_by(&context, &state);
+        let (lines, vars) = seed_all(&context, &state, &[]);
+        given.lines.extend(lines);
+        given.vars.extend(vars);
+    }
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -383,13 +401,112 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
         if !parts.is_empty() && !parts.contains(&read.entry.part) {
             continue;
         }
+        if part::by_name(&read.entry.part)
+            .is_some_and(|p| p.reader(&read.dir, &context.checkout, &var) == Reader::Seed)
+        {
+            continue;
+        }
         println!(
             "packages: {}: read in place, nothing to seed ({} files)",
             read.entry.part,
             read.rows.len()
         );
     }
+    let (lines, vars) = seed_all(&context, &state, parts);
+    for line in lines {
+        println!("{line}");
+    }
+    for (name, value) in &vars {
+        println!(
+            "packages: an install reads what was seeded with {}={} (`hushrun packages exec` and `env` give it)",
+            name.to_string_lossy(),
+            value.to_string_lossy()
+        );
+    }
     Ok(Exit::Ok)
+}
+
+/// K-10, mechanism C: seeds every part of the store whose reader is a seed (of `only`, when it
+/// names any) into the tool's own cache, and says what it did; with the variables an install
+/// needs to read what was seeded.
+fn seed_all(
+    context: &Context,
+    state: &State,
+    only: &[String],
+) -> (Vec<String>, Vec<(OsString, OsString)>) {
+    let mut lines = Vec::new();
+    let mut vars = Vec::new();
+    let Some(lower) = state.lower() else {
+        return (lines, vars);
+    };
+    for read in &lower.parts {
+        if !only.is_empty() && !only.contains(&read.entry.part) {
+            continue;
+        }
+        let Some(part) = part::by_name(&read.entry.part) else {
+            continue;
+        };
+        if part.reader(&read.dir, &context.checkout, &var) != Reader::Seed {
+            continue;
+        }
+        let name = part.name();
+        let (dest, under) = match part.seed_into(&context.checkout, &var) {
+            Ok(found) => found,
+            Err(why) => {
+                lines.push(format!("packages: {name}: left alone: {why}"));
+                continue;
+            }
+        };
+        let admit = part.admit(&context.checkout, &part.manifests(&context.tracked));
+        let seeded = part.seed(read, under, &dest, &*admit);
+        if seeded.is_ok() {
+            vars.extend(
+                part.seed_env(&context.checkout, &dest)
+                    .into_iter()
+                    .map(|(n, v)| (OsString::from(n), v)),
+            );
+        }
+        match seeded {
+            Ok(done) if done.stamped => lines.push(format!(
+                "packages: {name}: seeded already into {}",
+                dest.display()
+            )),
+            Ok(done) => {
+                if let Some((first, why)) = done.refused.first() {
+                    lines.push(format!(
+                        "packages: {name}: left out {} packages hushrun can't unpack, such as {first} ({why}): {} downloads them",
+                        done.refused.len(),
+                        part.tool()
+                    ));
+                }
+                lines.push(format!(
+                    "packages: {name}: seeded {} files into {} ({} there already)",
+                    done.copied,
+                    dest.display(),
+                    done.there
+                ));
+                if done.not_locked > 0 {
+                    lines.push(format!(
+                        "packages: {name}: left out {} files no lockfile here names now",
+                        done.not_locked
+                    ));
+                }
+                if !done.changed.is_empty() {
+                    lines.push(format!(
+                        "packages: {name}: left out {} files whose bytes changed since the bake, such as {}: {} downloads what they were of",
+                        done.changed.len(),
+                        done.changed[0],
+                        part.tool()
+                    ));
+                }
+            }
+            Err(err) => lines.push(format!(
+                "packages: {name}: seeding {} stopped: {err}",
+                dest.display()
+            )),
+        }
+    }
+    (lines, vars)
 }
 
 fn verify() -> CmdResult {
@@ -514,8 +631,10 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     } else {
         // No fetch: each part the checkout has build files for and no harvest names is left out.
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
-            if !part.manifests(&context.tracked).is_empty()
+            let manifests = part.manifests(&context.tracked);
+            if !manifests.is_empty()
                 && !harvests.iter().any(|(h, _)| h.name() == part.name())
+                && part.downloads(&context.checkout, &manifests).is_none()
             {
                 lines.push(format!(
                     "packages: {}: left out: {}, and no --harvest names a {} cache",
@@ -533,6 +652,7 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
         )?;
     }
+    take_downloads(&context, &new, &harvests, &wanted, &mut metas, &mut lines)?;
     if metas.is_empty() {
         for line in &lines {
             eprintln!("hushrun: {line}");
@@ -545,6 +665,15 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         ));
     }
     let baked_ms = baked_ms();
+    // K-3: the lockfile's own hash of each file, for the parts whose path alone doesn't say it.
+    let locked_by: Vec<(String, part::LockedBy)> = metas
+        .iter()
+        .filter_map(|m| {
+            let p = part::by_name(&m.part)?;
+            let by = p.locked_by(&context.checkout, &p.manifests(&context.tracked))?;
+            Some((m.part.clone(), by))
+        })
+        .collect();
     let packages = hushrun_packages::write::seal(
         &new,
         &StoreMeta {
@@ -554,11 +683,14 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         },
         &metas,
         &|name, path| {
-            let package = part::by_name(name).and_then(|p| {
-                let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
-                p.package(inner)
+            let found = part::by_name(name);
+            let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
+            let locked = found.and_then(|p| p.locked(inner)).or_else(|| {
+                let (_, by) = locked_by.iter().find(|(n, _)| n == name)?;
+                let bytes = fs::read(store::part_dir(&new, name).join(path)).ok()?;
+                by(inner, &bytes)
             });
-            (package, None)
+            (found.and_then(|p| p.package(inner)), locked)
         },
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -706,8 +838,11 @@ fn already_baked(
     let (old, _) = store::Packages::read_bytes(out).ok()?;
     store::check_contents(out, Some(&old), Depth::Names).ok()?;
     let tool_of = |part: &dyn Part| -> Option<String> {
+        let manifests = part.manifests(&context.tracked);
         if harvests.iter().any(|(h, _)| h.name() == part.name()) {
             Some("harvested".to_string())
+        } else if let Some(Ok(_)) = part.downloads(&context.checkout, &manifests) {
+            Some(DOWNLOADED.to_string())
         } else if !args.command.is_empty() && !part.manifests(&context.tracked).is_empty() {
             Some(format!("fetched by `{}`", shell_words(&args.command)))
         } else {
@@ -731,6 +866,138 @@ fn already_baked(
             out.display()
         )
     })
+}
+
+/// K-20: the tool line of a part a bake downloads by its lockfile.
+const DOWNLOADED: &str = "the registry, by the lockfile";
+
+/// K-20: takes each part whose lockfile names its packages' URLs and hashes (Bun's), and that no
+/// harvest or fetch gave: hushrun downloads each package, with no tool run, into
+/// `new/parts/<part>/`. A package whose bytes aren't the lockfile's hash is left out, with a line.
+fn take_downloads(
+    context: &Context,
+    new: &Path,
+    harvests: &[(&'static dyn Part, PathBuf)],
+    wanted: &dyn Fn(&dyn Part) -> bool,
+    metas: &mut Vec<PartMeta>,
+    lines: &mut Vec<String>,
+) -> Result<(), Failure> {
+    for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+        let name = part.name();
+        if harvests.iter().any(|(h, _)| h.name() == name) || metas.iter().any(|m| m.part == name) {
+            continue;
+        }
+        let manifests = part.manifests(&context.tracked);
+        let downloads = match part.downloads(&context.checkout, &manifests) {
+            None => continue,
+            Some(Err(why)) => {
+                lines.push(format!("packages: {name}: left out: {why}"));
+                continue;
+            }
+            Some(Ok(downloads)) => downloads,
+        };
+        for (count, why) in &downloads.left_out {
+            lines.push(format!("packages: {name}: left out {count} packages {why}"));
+        }
+        let dir = store::part_dir(new, name);
+        let failed = fetch_packages(&downloads.list, &dir)
+            .map_err(|e| Failure::new(Exit::Unexpected, anyhow!("packages: {name}: {e}")))?;
+        if let Some((package, why)) = failed.first() {
+            lines.push(format!(
+                "packages: {name}: left out {} packages the registry didn't serve as the lockfile hashes them, such as {package} ({why})",
+                failed.len()
+            ));
+        }
+        if failed.len() == downloads.list.len() {
+            let _ = fs::remove_dir_all(&dir);
+            continue;
+        }
+        metas.push(PartMeta {
+            part: name.to_string(),
+            class: Class::Download,
+            tool: DOWNLOADED.to_string(),
+            runtime: None,
+            manifests: hashed(&context.checkout, &manifests),
+            verified_by: part.verified_by(),
+        });
+    }
+    Ok(())
+}
+
+/// K-20, K-17: downloads each of `list` into `dir` at its path, eight at a time, each checked
+/// against its lockfile hash before it is written. A request ends on an answer, a failure, or 30
+/// seconds in which no byte came. Returns the packages left out, with why.
+fn fetch_packages(list: &[part::Download], dir: &Path) -> Result<Vec<(String, String)>, String> {
+    use futures_util::StreamExt as _;
+    use hushrun_packages::lockfile::{integrity_hex, sha512_hex};
+    if list.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("hushrun/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("building the HTTP client: {e}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("starting the I/O runtime: {e}"))?;
+    let fetched: Vec<(usize, Result<Vec<u8>, String>)> = runtime.block_on(
+        futures_util::stream::iter(list.iter().enumerate())
+            .map(|(i, download)| {
+                let client = &client;
+                async move {
+                    let got = async {
+                        let response = client
+                            .get(&download.url)
+                            .send()
+                            .await
+                            .map_err(|e| e.without_url().to_string())?;
+                        let status = response.status();
+                        if !status.is_success() {
+                            return Err(status.to_string());
+                        }
+                        let bytes = response
+                            .bytes()
+                            .await
+                            .map_err(|e| e.without_url().to_string())?;
+                        Ok(bytes.to_vec())
+                    }
+                    .await;
+                    (i, got)
+                }
+            })
+            .buffer_unordered(8)
+            .collect(),
+    );
+    let mut failed = Vec::new();
+    for (i, got) in fetched {
+        let download = &list[i];
+        let bytes = match got {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                failed.push((download.package.clone(), why));
+                continue;
+            }
+        };
+        if integrity_hex(&download.locked).as_deref() != Some(sha512_hex(&bytes).as_str()) {
+            failed.push((
+                download.package.clone(),
+                "its bytes aren't the lockfile's hash".to_string(),
+            ));
+            continue;
+        }
+        let to = dir.join(&download.path);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        normalize_mode(&to).map_err(|e| e.to_string())?;
+    }
+    failed.sort();
+    Ok(failed)
 }
 
 /// Takes every part a fetch or a harvest gives, for the parts whose manifest set the checkout
@@ -770,13 +1037,30 @@ fn take_all(
     }
     for (part, folder, tool) in sources {
         let manifests = part.manifests(&context.tracked);
+        if let Some(why) = part.lockfile_unread(&context.checkout, &manifests) {
+            lines.push(format!("packages: {}: left out: {why}", part.name()));
+            continue;
+        }
+        // A fetch that left the cache of a tool the checkout uses empty: an install that found
+        // everything in place (Yarn 1 with `node_modules` up to date) downloads nothing.
+        let empty = |lines: &mut Vec<String>| {
+            if tool != "harvested" && !manifests.is_empty() {
+                lines.push(format!(
+                    "packages: {}: left out: the fetch downloaded nothing into {}'s cache (an install that finds everything in place downloads nothing: bake before the install, or from a clean checkout)",
+                    part.name(),
+                    part.tool()
+                ));
+            }
+        };
         let Some((root, under)) = part.harvest_root(&folder) else {
+            empty(lines);
             continue;
         };
         let dest = new.join(store::PARTS).join(part.name()).join(under);
         let (kept, left) = copy_kept(&root, &dest, part).map_err(|e| fail(e.to_string()))?;
         if kept == 0 {
             let _ = fs::remove_dir_all(new.join(store::PARTS).join(part.name()));
+            empty(lines);
             continue;
         }
         if left > 0 {
@@ -875,8 +1159,8 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 }
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
-/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
-/// and Maven's local repository at folders of the bake's own under `cache`.
+/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
+/// Maven's local repository and Yarn's cache or mirror at folders of the bake's own under `cache`.
 fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
@@ -889,17 +1173,16 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
     );
     let mut built = std::process::Command::new(program);
     built.args(args);
-    let built = crate::cmd::bake_build::in_bake(
-        built,
+    let mut env = vec![
+        ("GRADLE_USER_HOME", gradle.into_os_string()),
+        (opts, OsString::from(maven_opts)),
+        (hushrun_packages::LOWER, OsString::new()),
+    ];
+    env.extend(hushrun_packages::parts::yarn::fetch_env(
         checkout,
-        &[],
-        None,
-        &[
-            ("GRADLE_USER_HOME", gradle.into_os_string()),
-            (opts, OsString::from(maven_opts)),
-            (hushrun_packages::LOWER, OsString::new()),
-        ],
-    );
+        &fetch_cache(cache, &hushrun_packages::parts::yarn::Yarn),
+    ));
+    let built = crate::cmd::bake_build::in_bake(built, checkout, &[], None, &env);
     crate::cmd::bake_build::run_in_bake(built, None).map_err(|ended| {
         format!(
             "packages: the fetch `{}` {}",

@@ -94,6 +94,9 @@ zeroize = "1.8"
 # hushrun-core's `pack` feature, which the binary turns on: never hushrun-build, the wrapper's
 # crate, and never the backend, which reads the wire types without it.
 zstd = { version = "0.13.3", default-features = false }
+# \[K-20\] A Bun part holds npm tarballs, gzip streams a seed unpacks into Bun's cache: through
+# zlib-rs, which the binary already builds (C-38), so only flate2's reading of gzip is new.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # \[C-38\] A hint's bytes are a zlib stream: pure Rust, which the binary already builds for gix
 # (gix-zlib), so the release targets gain no crate and no C code.
 zlib-rs = { version = "0.6.8", default-features = false, features = ["std"] }

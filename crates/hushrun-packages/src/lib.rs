@@ -15,11 +15,14 @@
 //!
 //! Nothing here opens a network connection or decides by a clock.
 
+pub mod lockfile;
 pub mod part;
 pub mod parts;
+pub mod seed;
 pub mod state;
 pub mod store;
 pub mod tar;
+pub mod tgz;
 pub mod write;
 
 /// The variable that names a package store a run reads (K-11). Set and empty: none.
