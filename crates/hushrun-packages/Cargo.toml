@@ -19,6 +19,7 @@ hushrun-build.workspace = true
 hushrun-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1dc.workspace = true
 sha2-hw.workspace = true
 
 [dev-dependencies]
