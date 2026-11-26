@@ -2,6 +2,7 @@
 
 pub mod gradle;
 pub mod maven;
+pub mod pnpm;
 
 #[cfg(test)]
 mod tests;

@@ -185,3 +185,58 @@ fn every_part_module_is_listed() {
     modules.sort();
     assert_eq!(listed, modules);
 }
+
+// covers: K-4, K-5, K-18
+#[test]
+fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {
+    use crate::parts::pnpm::Pnpm;
+    let tracked = [
+        "pnpm-lock.yaml",
+        "web/pnpm-lock.yaml",
+        "package.json",
+        "yarn.lock",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Pnpm.manifests(&tracked),
+        vec![
+            "pnpm-lock.yaml".to_string(),
+            "web/pnpm-lock.yaml".to_string()
+        ]
+    );
+    assert!(Pnpm.keep("v10/files/aa/0123"));
+    assert!(Pnpm.keep("v10/files/aa/0123-exec"));
+    assert!(Pnpm.keep("v10/index/e8/5973-ms@2.1.3.json"));
+    assert!(!Pnpm.keep("v10/projects/dabb"));
+    assert!(!Pnpm.keep("v10/tmp/x/y"));
+    assert!(!Pnpm.keep("v10/files"));
+    assert!(!Pnpm.keep("other/files/aa/x"));
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-ms@2.1.3.json").as_deref(),
+        Some("ms@2.1.3")
+    );
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-@types+node@26.6.6.json")
+            .as_deref(),
+        Some("@types+node@26.6.6")
+    );
+    assert_eq!(Pnpm.package("v10/files/aa/0123"), None);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Pnpm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_store_dir").then(|| "/s".into());
+    assert_eq!(
+        Pnpm.seed_into(Path::new("/c"), &named),
+        Ok((std::path::PathBuf::from("/s"), "store"))
+    );
+    assert!(Maven.seed_into(Path::new("/c"), &no_env).is_err());
+    let t = tempfile::tempdir().unwrap();
+    assert_eq!(Pnpm.harvest_root(t.path()), None);
+    std::fs::create_dir_all(t.path().join("v10/files")).unwrap();
+    assert_eq!(
+        Pnpm.harvest_root(t.path()),
+        Some((t.path().to_path_buf(), "store"))
+    );
+}

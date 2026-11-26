@@ -219,3 +219,30 @@ block's. *Rests on:* Gradle and Maven reading the second folder only for what th
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
+
+**K-18 The `pnpm` part.** The part holds pnpm's content-addressed store as `store-dir` names it:
+`parts/pnpm/store/v<N>/files/…` (each file named by the SHA-512 of its bytes) and
+`store/v<N>/index/…` (one index a package, which lists its files), and nothing else of the store:
+not `tmp/`, not `projects/` (links to the checkouts that installed from it), not a lock. Its
+manifest set is every tracked `pnpm-lock.yaml`. A bake's fetch (`hushrun packages bake --out DIR
+-- pnpm fetch`) runs with `npm_config_store_dir` at a folder of the bake's own; `--harvest
+pnpm=FOLDER` takes a `store-dir` a job already filled (the folder `pnpm store path` names is its
+`v<N>` folder). A row of an index carries its package as pnpm writes it (`ms@2.1.3`, a scope's
+`/` as `+`) and no `locked`: the lockfile's `integrity` hashes a package's tarball, which the
+store doesn't keep, so nothing in `pnpm-lock.yaml` hashes what the part holds, and the part is
+verified by a signature (K-7). Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed: `hushrun run` gives COMMAND nothing for it, since by the time a
+check runs the install is done. The seed copies each file of the part into the store pnpm uses
+(`npm_config_store_dir` or `NPM_CONFIG_STORE_DIR` when set, else the parent of the folder
+`pnpm store path` names in the checkout), never over a file that is there, each file hashed as it
+is copied and left out, with a line, when its bytes aren't its row's; pnpm then downloads what it
+was of. A file is written beside its place and renamed, so pnpm never sees half of one. A seed
+that left nothing out writes `.hushrun-packages-<part identity>` in that store, and the next seed
+of the same part looks at nothing else. The seed never sets `NODE_OPTIONS` or any other variable,
+and never uses pnpm's global virtual store: `node_modules` is pnpm's own, with links inside the
+checkout, as an install from the network makes it. *Rests on:* pnpm installing from its store,
+with a frozen lockfile, every package whose index and files are there, and checking each file
+against its index as it imports it (confirmed with pnpm 10.28.0, store `v10`, an empty store and
+a registry nobody answers). *Breaks if:* pnpm changed its store's layout (a new `v<N>`: the part
+seeds a folder that pnpm doesn't read, and pnpm downloads as it does today), or a lockfile
+changed since the bake (the packages it adds are downloaded).
