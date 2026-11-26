@@ -164,6 +164,7 @@ pub trait Part: Sync {
 /// Every part this hushrun knows, by name.
 pub static ALL: &[&dyn Part] = &[
     &crate::parts::cargo::Cargo,
+    &crate::parts::composer::Composer,
     &crate::parts::go::Go,
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
