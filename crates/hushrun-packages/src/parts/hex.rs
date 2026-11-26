@@ -73,7 +73,7 @@ impl Part for Hex {
 
     /// A tarball `mix.lock` pins now, whose SHA-256 is its outer checksum.
     fn admit(&self, checkout: &Path, manifests: &[String]) -> Admits {
-        let locks = self.locks(checkout, manifests).unwrap_or_default();
+        let locks = self.read_locks(checkout, manifests).unwrap_or_default();
         Box::new(move |path, bytes| match locks.get(file_name(path)) {
             Some(pinned) if pinned.contains(&Hex32::sha256(bytes).to_string()) => Admit::Copy,
             Some(_) => Admit::Changed,
@@ -85,7 +85,7 @@ impl Part for Hex {
         true
     }
 
-    fn locks(&self, checkout: &Path, manifests: &[String]) -> Result<Locks, String> {
+    fn read_locks(&self, checkout: &Path, manifests: &[String]) -> Result<Locks, String> {
         let mut locks = Locks::new();
         for path in manifests.iter().filter(|p| file_name(p) == "mix.lock") {
             let Ok(text) = fs::read_to_string(checkout.join(path)) else {
@@ -105,9 +105,9 @@ impl Part for Hex {
 
     /// Each tarball `mix.lock` pins, by its outer checksum: a bake keeps only these, and gives each
     /// its `locked`. A lockfile in a form this part doesn't read pins nothing here; a bake leaves
-    /// the part out for it, with a line ([`Part::locks`]).
+    /// the part out for it, with a line ([`Part::read_locks`]).
     fn lockfile(&self, checkout: &Path, manifests: &[String]) -> Option<Locked> {
-        let locks = self.locks(checkout, manifests).ok()?;
+        let locks = self.read_locks(checkout, manifests).ok()?;
         let mut locked = Locked::default();
         for (file, hashes) in &locks {
             for sha256 in hashes {

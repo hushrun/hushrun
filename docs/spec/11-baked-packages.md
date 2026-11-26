@@ -93,8 +93,9 @@ dependencies. For `gradle`: `settings.gradle`, `settings.gradle.kts`, every `bui
 `nuget`: every `*.csproj`, `*.fsproj`, `*.vbproj`, `packages.lock.json`, `packages.config`,
 `Directory.Packages.props`, `Directory.Build.props`, `Directory.Build.targets`, `global.json` and
 NuGet.Config (its name in any case), and `.config/dotnet-tools.json`. For
-`swiftpm`: every `Package.resolved`, `Package.swift` and `Package@swift-*.swift`. Only files
-git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
+`swiftpm`: every `Package.resolved`, `Package.swift` and `Package@swift-*.swift`. For `cargo`: every `Cargo.lock` and `Cargo.toml`. For `go`:
+every `go.mod`, `go.sum`, `go.work` and `go.work.sum`. Only files git tracks count. *Rests on:*
+those files deciding what the tool downloads. *Breaks if:* a build
 resolved by something outside them (an init script, a property of the machine): the part's
 `inputs` would stay the same while what it downloads changed, and a bake would skip.
 
@@ -111,7 +112,11 @@ component; a `composer` part keeps only `files/<vendor>/<name>/<40 hex>.<type>`,
 and leaves out the rest of its cache (`repo/`, `vcs/`, `.htaccess`); a `nuget` part keeps only
 files under a package's `<id>/<version>/` folder (a version starts with a digit), the
 `.nupkg.metadata` NuGet needs to see the package included, and leaves out `*.lock` and every top
-folder whose name starts with a dot (`.tools`). A `swiftpm` part keeps the
+folder whose name starts with a dot (`.tools`). A `cargo` part keeps only
+`registry/cache/<registry>/<name>-<version>.crate` (a git dependency's checkout is no registry's
+file and has no checksum); a `go` part keeps only `download/<module>/@v/<version>.info`, `.mod`
+and `.zip`, leaving out `list`, `*.lock`, `*.ziphash`, `*.partial`, temporary files and the
+checksum database's `sumdb/`. A `swiftpm` part keeps the
 bare clones under `repositories/` of SwiftPM's cache and leaves out every file beside them
 (SwiftPM's locks), `*.lock`, `FETCH_HEAD`, `ORIG_HEAD`, `gc.log`, `gc.pid`, `tmp_*`, a clone's
 `hooks/` and `logs/`, and `objects/info/alternates`. *Rests
@@ -125,12 +130,13 @@ PART=FOLDER]... [--no-build] [--force] [--max-bytes N] [-- COMMAND]` writes the 
 the way a bake runs anything of the repository's (B-63's `in_bake`: hushrun's, CI's and signing
 credentials withheld, no result recorded, no baked store or package store read, nothing it
 started outliving it), with Gradle's user home (`GRADLE_USER_HOME`), Maven's local repository
-(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`), Composer's cache (`COMPOSER_CACHE_DIR`) and
-NuGet's global packages folder (`NUGET_PACKAGES`) at folders of the bake's own, so that what the part
-holds is this build's downloads and nothing a machine had before; a registry credential the job
-set for the tool stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the
-job already filled (a Gradle user home, a Maven local repository, a Composer cache, a NuGet global
-packages folder); a part harvested says
+(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`), Composer's cache (`COMPOSER_CACHE_DIR`), NuGet's
+global packages folder (`NUGET_PACKAGES`), the cargo home (`CARGO_HOME`) and Go's module cache
+(`GOMODCACHE`) at folders of the bake's own, so that what the part holds is this build's
+downloads and nothing a machine had before; a registry credential the job set for the tool
+stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the job already
+filled (a Gradle user home, a Maven local repository, a Composer cache, a NuGet global packages
+folder, a cargo home, a Go module cache, as `go env GOMODCACHE` names it); a part harvested says
 `harvested` as its tool. A part whose tool has a download-only command of its own is fetched by
 it, with or without `COMMAND`, unless `--no-build` or a `--harvest` names the part: for
 `swiftpm`, `swift package resolve --force-resolved-versions` in each package whose
@@ -237,6 +243,26 @@ for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARG
 backslash can't ride in `MAVEN_OPTS`, which is split into words: the `maven` part is left alone,
 with a line.
 
+`cargo` is C: it seeds as K-18 says of a seed (each file hashed as it is copied and checked
+against its row, never over a file that is there, written beside and renamed, a stamp when it left
+nothing out), into the `registry/cache` of the run's cargo home (`CARGO_HOME`, else `~/.cargo`), at
+the same paths, and only a `.crate` whose SHA-256 is the `checksum` a `Cargo.lock` of the checkout
+gives that name and version from a registry. Cargo unpacks it as it unpacks a download; it checks
+no checksum of a file already in its cache (confirmed with Cargo 1.94), so a file whose bytes
+aren't the ones a lockfile pins is never copied, with a line, and one no lockfile pins stays in
+the store. Cargo fetches inside the check's own build, so `hushrun run` seeds the `cargo` part
+before COMMAND starts too, as `hushrun packages exec`, `env` and `restore` do. Nothing is set:
+hushrun never names `CARGO_HOME`. The part's registry folders are the baking cargo's
+(`index.crates.io-<hash>`); a cargo that names its folder otherwise finds nothing there and
+downloads, as today. `go` is B: `GOPROXY=file://<store>/parts/go/download,` then the `GOPROXY` Go would
+use without it (`go env GOPROXY`, run with `GOTOOLCHAIN=local` outside any module, so that its
+environment file and its own default count), so that a module the part lacks comes from where it
+came before. Go checks each module it takes from the part against `go.sum`, or the checksum
+database when `go.sum` lacks it, as it checks a download. Where Go would take a module `go.sum`
+lacks unchecked (`GOSUMDB=off`, `GOPRIVATE` or `GONOSUMDB`, as `go env` says), or a store's
+folder holds a character a `file://` address can't, the `go` part is left alone, with a line.
+`GOPROXY` is the one variable it sets; `GOFLAGS` is never read or set.
+
 `swiftpm` is C, and verified by a signature (K-7): only `hushrun packages exec`, `env` and
 `restore` seed, and `hushrun run` gives COMMAND nothing for it. The seed copies each file of a
 clone a `Package.resolved` of the checkout pins (by its repository's name, the last component of
@@ -276,7 +302,9 @@ nothing and exits with COMMAND's code; `hushrun packages env` prints them as `ex
 variable a reader sets never enters a key: not a check's, not a
 block's. *Rests on:* Gradle and Maven reading the second folder only for what their own cache
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
-an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
+an empty cache, offline); on Go serving a `file://` proxy read-only and checking it against
+`go.sum` (confirmed with Go 1.24.7 and 1.27.4); on Cargo unpacking a `.crate` from its cache as
+it unpacks a download (confirmed with Cargo 1.94). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names. For `nuget`, *rests on:*
 NuGet reading a fallback folder only for packages its global packages folder lacks, writing
 nothing to it, and seeing a package only where its `.nupkg.metadata` is (confirmed with the .NET
