@@ -10,11 +10,10 @@
 //! own cache either way, and turns a remote that fails off for the rest of the build.
 
 use std::collections::HashSet;
-use std::io::{BufReader, BufWriter};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hushrun_core::Digest;
@@ -22,7 +21,7 @@ use serde_json::json;
 
 use super::entry::Checked;
 use super::{ENTRY, Local};
-use crate::cache::http::{self, Body, Unread};
+use crate::cache::http::{self, Body};
 use crate::model::{Class, Kind, Mode, NotStored, Outcome};
 use crate::origin::Origin;
 use crate::relay::{self, Answer, Problem, Request};
@@ -34,11 +33,7 @@ use crate::store::{NewFile, Store};
 /// waits the same, whatever its task costs.
 const RELAY_WAIT: Duration = relay::WAIT;
 /// The most bytes a `PUT`'s body may hold: a larger entry stays in Gradle's own cache.
-pub const MOST_BODY: u64 = 512 << 20;
-/// How long a connection may sit between requests.
-const IDLE: Duration = Duration::from_secs(120);
-/// Connections served at once: Gradle opens one per worker that asks.
-const MOST_CONNECTIONS: usize = 64;
+pub const MOST_BODY: u64 = crate::cache::service::MOST_BODY;
 
 /// The cache for one check's session.
 pub struct Cache {
@@ -51,66 +46,24 @@ pub struct Cache {
     first_reuses: Mutex<HashSet<Digest>>,
 }
 
-/// The listener while it serves: dropping it stops it.
-#[derive(Debug)]
-pub struct Running {
-    stop: Arc<AtomicBool>,
-    address: Option<SocketAddr>,
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // Wakes the accepting thread, which then sees the flag.
-        if let Some(address) = self.address {
-            let _ = TcpStream::connect_timeout(&address, Duration::from_millis(200));
-        }
-    }
-}
+pub use crate::cache::service::Running;
 
 /// Serves `cache` on `listener` until the returned handle is dropped.
 pub fn start(listener: TcpListener, cache: Cache) -> std::io::Result<Running> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let address = listener.local_addr().ok();
-    let cache = Arc::new(cache);
-    let serving = stop.clone();
-    std::thread::Builder::new()
-        .name("hushrun-gradle-cache".into())
-        .spawn(move || accept(listener, cache, serving))?;
-    Ok(Running { stop, address })
+    crate::cache::service::start(listener, cache)
 }
 
-fn accept(listener: TcpListener, cache: Arc<Cache>, stop: Arc<AtomicBool>) {
-    let open = Arc::new(AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            return;
-        }
-        let Ok(stream) = stream else {
-            continue;
-        };
-        // Only this machine: the listener is on the loopback, and a peer elsewhere is refused.
-        if !stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback()) {
-            continue;
-        }
-        if open.fetch_add(1, Ordering::SeqCst) >= MOST_CONNECTIONS {
-            open.fetch_sub(1, Ordering::SeqCst);
-            let mut out = &stream;
-            let _ = http::write(&mut out, 503, b"", false, true, &headers(503, b""));
-            continue;
-        }
-        let cache = cache.clone();
-        let done = open.clone();
-        let stop = stop.clone();
-        let spawned = std::thread::Builder::new()
-            .name("hushrun-gradle-request".into())
-            .spawn(move || {
-                cache.connection(stream, &stop);
-                done.fetch_sub(1, Ordering::SeqCst);
-            });
-        if spawned.is_err() {
-            open.fetch_sub(1, Ordering::SeqCst);
-        }
+impl crate::cache::service::Answers for Cache {
+    fn name(&self) -> &'static str {
+        "gradle"
+    }
+
+    fn answer(&self, request: &http::Request) -> (u16, Vec<u8>) {
+        Cache::answer(self, request)
+    }
+
+    fn headers(&self, status: u16, body: &[u8]) -> Vec<(&'static str, &'static str)> {
+        headers(status, body)
     }
 }
 
@@ -122,47 +75,6 @@ impl Cache {
             expected: http::basic(super::USER, token),
             relay_down: AtomicBool::new(false),
             first_reuses: Mutex::new(HashSet::new()),
-        }
-    }
-
-    fn connection(&self, stream: TcpStream, stop: &AtomicBool) {
-        let _ = stream.set_read_timeout(Some(IDLE));
-        let _ = stream.set_write_timeout(Some(IDLE));
-        let _ = stream.set_nodelay(true);
-        let Ok(reading) = stream.try_clone() else {
-            return;
-        };
-        let mut input = BufReader::new(reading);
-        let mut output = BufWriter::new(&stream);
-        loop {
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            let request = match http::read(&mut input, &mut output, MOST_BODY) {
-                Ok(request) => request,
-                Err(Unread::Gone) => return,
-                Err(Unread::Bad(status)) => {
-                    let _ =
-                        http::write(&mut output, status, b"", false, true, &headers(status, b""));
-                    return;
-                }
-            };
-            // ADR 0144: `102 Processing` each heartbeat while a `GET` is worked on.
-            let (status, body) = http::answer_alive(&request, &stream, || self.answer(&request));
-            let head = request.method == "HEAD";
-            if http::write(
-                &mut output,
-                status,
-                &body,
-                head,
-                request.close,
-                &headers(status, &body),
-            )
-            .is_err()
-                || request.close
-            {
-                return;
-            }
         }
     }
 

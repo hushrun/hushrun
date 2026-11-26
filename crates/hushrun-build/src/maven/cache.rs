@@ -14,10 +14,9 @@
 //! local copy either way.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{self, BufReader, BufWriter};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,7 +25,7 @@ use serde_json::json;
 
 use super::buildinfo::{self, Checked};
 use super::{BUILDINFO, Local, Module, REPORT};
-use crate::cache::http::{self, Body, Unread};
+use crate::cache::http::{self, Body};
 use crate::model::{Class, Kind, Mode, NotStored, Outcome};
 use crate::origin::Origin;
 use crate::relay::{self, Answer, Problem, Request};
@@ -38,14 +37,10 @@ use crate::store::{Block, NewFile, Store};
 /// waits the same, whatever its module costs.
 const RELAY_WAIT: Duration = relay::WAIT;
 /// The most bytes one `PUT`'s body may hold.
-pub const MOST_BODY: u64 = 512 << 20;
+pub const MOST_BODY: u64 = crate::cache::service::MOST_BODY;
 /// The most bytes held for modules whose entry isn't whole yet: what comes beyond it stays in the
 /// extension's own cache.
 pub const MOST_PENDING: u64 = 512 << 20;
-/// How long a connection may sit between requests.
-const IDLE: Duration = Duration::from_secs(120);
-/// Connections served at once: Maven opens one per thread that asks.
-const MOST_CONNECTIONS: usize = 64;
 
 /// The cache for one check's session.
 pub struct Cache {
@@ -87,67 +82,11 @@ impl Parts {
     }
 }
 
-/// The listener while it serves: dropping it stops it.
-#[derive(Debug)]
-pub struct Running {
-    stop: Arc<AtomicBool>,
-    address: Option<SocketAddr>,
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // Wakes the accepting thread, which then sees the flag.
-        if let Some(address) = self.address {
-            let _ = TcpStream::connect_timeout(&address, Duration::from_millis(200));
-        }
-    }
-}
+pub use crate::cache::service::Running;
 
 /// Serves `cache` on `listener` until the returned handle is dropped.
-pub fn start(listener: TcpListener, cache: Cache) -> io::Result<Running> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let address = listener.local_addr().ok();
-    let cache = Arc::new(cache);
-    let serving = stop.clone();
-    std::thread::Builder::new()
-        .name("hushrun-maven-cache".into())
-        .spawn(move || accept(listener, cache, serving))?;
-    Ok(Running { stop, address })
-}
-
-fn accept(listener: TcpListener, cache: Arc<Cache>, stop: Arc<AtomicBool>) {
-    let open = Arc::new(AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            return;
-        }
-        let Ok(stream) = stream else {
-            continue;
-        };
-        // Only this machine: the listener is on the loopback, and a peer elsewhere is refused.
-        if !stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback()) {
-            continue;
-        }
-        if open.fetch_add(1, Ordering::SeqCst) >= MOST_CONNECTIONS {
-            open.fetch_sub(1, Ordering::SeqCst);
-            let mut out = &stream;
-            let _ = http::write(&mut out, 503, b"", false, true, headers(503, b""));
-            continue;
-        }
-        let cache = cache.clone();
-        let done = open.clone();
-        let stop = stop.clone();
-        let spawned = std::thread::Builder::new()
-            .name("hushrun-maven-request".into())
-            .spawn(move || {
-                cache.connection(stream, &stop);
-                done.fetch_sub(1, Ordering::SeqCst);
-            });
-        if spawned.is_err() {
-            open.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
+pub fn start(listener: TcpListener, cache: Cache) -> std::io::Result<Running> {
+    crate::cache::service::start(listener, cache)
 }
 
 /// The headers of Maven's answer of `status` with `body`: a file's type.
@@ -156,6 +95,20 @@ fn headers(status: u16, body: &[u8]) -> &'static [(&'static str, &'static str)] 
         &[("Content-Type", "application/octet-stream")]
     } else {
         &[]
+    }
+}
+
+impl crate::cache::service::Answers for Cache {
+    fn name(&self) -> &'static str {
+        "maven"
+    }
+
+    fn answer(&self, request: &http::Request) -> (u16, Vec<u8>) {
+        Cache::answer(self, request)
+    }
+
+    fn headers(&self, status: u16, body: &[u8]) -> Vec<(&'static str, &'static str)> {
+        headers(status, body).to_vec()
     }
 }
 
@@ -178,48 +131,6 @@ impl Cache {
     /// it skips tests.
     pub fn skips_tests(&self) -> Arc<Mutex<Option<String>>> {
         self.skips_tests.clone()
-    }
-
-    fn connection(&self, stream: TcpStream, stop: &AtomicBool) {
-        let _ = stream.set_read_timeout(Some(IDLE));
-        let _ = stream.set_write_timeout(Some(IDLE));
-        let _ = stream.set_nodelay(true);
-        let Ok(reading) = stream.try_clone() else {
-            return;
-        };
-        let mut input = BufReader::new(reading);
-        let mut output = BufWriter::new(&stream);
-        loop {
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            let request = match http::read(&mut input, &mut output, MOST_BODY) {
-                Ok(request) => request,
-                Err(Unread::Gone) => return,
-                Err(Unread::Bad(status)) => {
-                    let _ =
-                        http::write(&mut output, status, b"", false, true, headers(status, b""));
-                    return;
-                }
-            };
-            // ADR 0144: `102 Processing` each heartbeat while a `GET` is worked on, so that the
-            // extension's client never times out on a download that is only slow.
-            let (status, body) = http::answer_alive(&request, &stream, || self.answer(&request));
-            let head = request.method == "HEAD";
-            if http::write(
-                &mut output,
-                status,
-                &body,
-                head,
-                request.close,
-                headers(status, &body),
-            )
-            .is_err()
-                || request.close
-            {
-                return;
-            }
-        }
     }
 
     /// One request's status and body (B-170, B-171).

@@ -67,6 +67,19 @@ pub enum NotBegun {
     Unusable(String),
 }
 
+/// The cache of a build tool a run serves (B-77, B-170): what COMMAND gets for it, and its
+/// listener, which stops when the session drops it.
+#[derive(Debug)]
+struct ToolService {
+    kind: crate::model::Kind,
+    /// What COMMAND gets for the tool: Gradle's script, URL and token; Maven's `MAVEN_OPTS`.
+    env: Vec<(OsString, OsString)>,
+    /// Where the cache learns why this run keeps nothing it builds, once the run knows: the
+    /// property by which COMMAND's Maven skips tests (B-175).
+    keeps_nothing: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    _running: crate::cache::service::Running,
+}
+
 /// One run's session.
 #[derive(Debug)]
 pub struct Session {
@@ -95,16 +108,8 @@ pub struct Session {
     cc_maps_setting: bool,
     /// Which manifest the run leaves in the store when it ends (B-63), when it is a check's.
     slot: Option<crate::manifests::Slot>,
-    /// What COMMAND gets for Gradle (B-77): the script, the cache's URL and its token.
-    gradle_env: Vec<(OsString, OsString)>,
-    /// hushrun's Gradle cache while it serves (B-77): it stops with the session.
-    gradle_cache: Option<crate::gradle::cache::Running>,
-    /// What COMMAND gets for Maven (B-170): `MAVEN_OPTS` with the cache's properties.
-    maven_env: Vec<(OsString, OsString)>,
-    /// hushrun's Maven cache while it serves (B-170): it stops with the session.
-    maven_cache: Option<crate::maven::cache::Running>,
-    /// Where the cache learns that COMMAND's Maven skips tests (B-175).
-    maven_skips: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// The caches of build tools this run serves (B-77, B-170), each stopping with the session.
+    tools: Vec<ToolService>,
     /// What COMMAND gets for TypeScript (B-100): `NODE_OPTIONS` with the hook, and `HUSHRUN_TSC`.
     tsc_env: Vec<(OsString, OsString)>,
 }
@@ -1727,11 +1732,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         cc_programs: None,
         cc_maps_setting: settings.cc_maps,
         slot: None,
-        gradle_env: Vec::new(),
-        gradle_cache: None,
-        maven_env: Vec::new(),
-        maven_cache: None,
-        maven_skips: None,
+        tools: Vec::new(),
         tsc_env: Vec::new(),
     })
 }
@@ -1868,8 +1869,9 @@ impl Session {
             env.push((crate::go::GOCACHEPROG.into(), go.value.clone().into()));
         }
         env.extend(self.cc_env.iter().cloned());
-        env.extend(self.gradle_env.iter().cloned());
-        env.extend(self.maven_env.iter().cloned());
+        for tool in &self.tools {
+            env.extend(tool.env.iter().cloned());
+        }
         env.extend(self.tsc_env.iter().cloned());
         if let Some(xcconfig) = &self.xcode {
             env.push((
@@ -1909,7 +1911,7 @@ impl Session {
         let url = bound.url();
         let token = bound.endpoint.token.clone();
         let cache = crate::gradle::cache::Cache::new(self.current.clone(), &token);
-        self.gradle_cache = Some(crate::gradle::cache::start(bound.listener, cache)?);
+        let running = crate::cache::service::start(bound.listener, cache)?;
         let mut gradle_env: Vec<(OsString, OsString)> = Vec::new();
         if env(crate::gradle::SCRIPT_VARIABLE).is_none_or(|v| v.is_empty()) {
             gradle_env.push((
@@ -1919,13 +1921,24 @@ impl Session {
         }
         gradle_env.push((crate::gradle::CACHE_VARIABLE.into(), url.clone().into()));
         gradle_env.push((crate::gradle::TOKEN_VARIABLE.into(), token.into()));
-        self.gradle_env = gradle_env;
+        self.set_tool(ToolService {
+            kind: crate::model::Kind::Gradle,
+            env: gradle_env,
+            keeps_nothing: None,
+            _running: running,
+        });
         Ok(url)
     }
 
-    /// Whether the run serves Gradle hushrun's cache (B-77).
-    pub fn serves_gradle(&self) -> bool {
-        self.gradle_cache.is_some()
+    /// The service of the tool cache of `kind`, in place of any the run had.
+    fn set_tool(&mut self, service: ToolService) {
+        self.tools.retain(|tool| tool.kind != service.kind);
+        self.tools.push(service);
+    }
+
+    /// Whether the run serves hushrun's cache to the build tool of `kind` (B-77, B-170).
+    pub fn serves(&self, kind: crate::model::Kind) -> bool {
+        self.tools.iter().any(|tool| tool.kind == kind)
     }
 
     /// B-170: serves Maven's build cache extension hushrun's cache for this run, on a port and
@@ -1943,8 +1956,8 @@ impl Session {
         self.current.maven = Some(run);
         write_current(&self.current)?;
         let cache = crate::maven::cache::Cache::new(self.current.clone(), &token);
-        self.maven_skips = Some(cache.skips_tests());
-        self.maven_cache = Some(crate::maven::cache::start(listener, cache)?);
+        let keeps_nothing = Some(cache.skips_tests());
+        let running = crate::cache::service::start(listener, cache)?;
         let mut opts = env(crate::maven::OPTS_VARIABLE)
             .map(|v| v.to_string_lossy().trim().to_string())
             .unwrap_or_default();
@@ -1952,20 +1965,25 @@ impl Session {
             opts.push(' ');
         }
         opts.push_str(&crate::maven::properties(&url));
-        self.maven_env = vec![(crate::maven::OPTS_VARIABLE.into(), opts.into())];
+        self.set_tool(ToolService {
+            kind: crate::model::Kind::Maven,
+            env: vec![(crate::maven::OPTS_VARIABLE.into(), opts.into())],
+            keeps_nothing,
+            _running: running,
+        });
         Ok(url)
-    }
-
-    /// Whether the run serves Maven hushrun's cache (B-170).
-    pub fn serves_maven(&self) -> bool {
-        self.maven_cache.is_some()
     }
 
     /// B-175: Maven skips tests in this run, by `property` (`skipTests` or `maven.test.skip`) in
     /// `place` (COMMAND, `MAVEN_OPTS`, a file of `.mvn`): the cache keeps none of the modules it
     /// builds, and the run says so once. Nothing when the run doesn't serve Maven.
     pub fn maven_skips_tests(&mut self, property: &str, place: &str) {
-        let Some(skips) = &self.maven_skips else {
+        let Some(skips) = self
+            .tools
+            .iter()
+            .find(|tool| tool.kind == crate::model::Kind::Maven)
+            .and_then(|tool| tool.keeps_nothing.as_ref())
+        else {
             return;
         };
         if let Ok(mut skips) = skips.lock() {
