@@ -219,3 +219,59 @@ block's. *Rests on:* Gradle and Maven reading the second folder only for what th
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
+
+`pip` is B: `PIP_FIND_LINKS=<store>/parts/pip`, a flat folder of the wheels and source archives
+a requirements file with hashes names. Its manifest set (K-4) is every `requirements*.txt`,
+`*-requirements.txt` and `.txt` file in a `requirements` folder; its part keeps a file only when
+one of them names its SHA-256 (`--hash=sha256:`), which is the row's `locked`. A bake fetches it
+with pip's own download (K-30), `python3 -m pip download --no-deps --require-hashes` once per
+requirements file that has hashes; one that has none fetches nothing. pip checks every file
+against the requirements file's hashes, so the part is `verified_by: lockfile`. The part is left
+alone, with a line, when `PIP_FIND_LINKS` is set, when a pip configuration file pip reads names
+`find-links` (the variable would replace it), and when the folder's path holds white space, which
+pip splits the variable on. *Rests on:* pip installing from the part when its index can't be
+reached (confirmed with pip 26.2.2, a read-only part, an empty cache, no network). *Breaks if:*
+the index can be reached: pip prefers the index's copy of a file whose hash equals the part's,
+and downloads it, so the part saves nothing there; it is never wrong.
+
+`poetry` is C, a seed (K-31) into Poetry's cache: `POETRY_CACHE_DIR`, else the platform's
+(`$XDG_CACHE_HOME/pypoetry` or `~/.cache/pypoetry`, `~/Library/Caches/pypoetry` on macOS,
+`%LOCALAPPDATA%\pypoetry\Cache` on Windows). Its part is `artifacts/` of a Poetry cache, each file
+at the folder Poetry names by the file's URL and hash; its manifest set is every `poetry.lock`;
+its part keeps a file only when a `poetry.lock` names that file's name with its SHA-256, so a
+wheel Poetry built from a source archive in that folder is left out. A bake fetches it with
+COMMAND, `POETRY_CACHE_DIR` at a folder of the bake's own. Poetry checks each file of its cache
+against `poetry.lock` before it installs it. The part is left alone, with a line, when
+`POETRY_CACHE_DIR` isn't an absolute path, and when the project's `poetry.toml` or the person's
+Poetry `config.toml` names `cache-dir`, which hushrun doesn't read. *Rests on:* Poetry installing
+a file its cache holds at that folder without downloading it (confirmed with Poetry 2.5.2: no
+file downloaded, and a seeded file changed in place refused). *Breaks if:* Poetry changed how it
+names that folder: the seeded files sit where Poetry never looks, and it downloads as today.
+
+`uv` has no part. uv reads no second cache; its cache holds unpacked wheels in a layout of its
+own, not the files it downloaded; it takes no file from `UV_FIND_LINKS` that `uv.lock` names at
+an index; and an index named by `UV_DEFAULT_INDEX` or `UV_INDEX_URL` rewrites `uv.lock`
+(confirmed with uv 0.13.10).
+
+**K-30 A part the tool's own download fetches.** Where a tool has a command that downloads what
+a part's manifest set names and runs nothing else of the repository's (pip's `download`), a bake
+runs it for that part, with or without COMMAND, into a folder of the bake's own, the way it runs
+COMMAND (K-6), and takes the part from that folder; `--no-build` runs it not, and a part
+`--harvest` names isn't fetched. The part's `tool` is `fetched by` and the command's program
+and subcommand, such as `python3 -m pip download`. A manifest set the command can't fetch from leaves the part out, with
+a line that says why. *Rests on:* the command downloading for the machine the bake runs on, as
+the store's `platform` says. *Breaks if:* a requirements file named packages for another
+platform only: the command downloads none, and the part is left out.
+
+**K-31 A seed.** A part read by a seed (K-10, C) is copied into the tool's cache before COMMAND
+starts, in `hushrun run`, `hushrun packages exec` and `env`, and by `hushrun packages restore`.
+Each row but a link is copied only when the lockfile in the checkout now names its file, by
+name where the lockfile gives one and by SHA-256, with the row's `locked`; and only when the
+store's file hashes to the row's SHA-256, which the seed checks as it copies. A row the
+lockfile names no more is left out and counted; a file whose bytes differ is left out, with a
+line naming it. A file already at its place in the cache is left as it is, unhashed: the tool
+checks its own cache against the lockfile. A copy is written beside its place and renamed into
+it, as `0644`. The seed writes nowhere else, and never into the store. *Rests on:* the tool
+checking each file of its cache against the lockfile before it uses it. *Breaks if:* a file was
+put at its place in the cache by something else with other bytes: the seed leaves it, and the
+tool refuses it as it would today.

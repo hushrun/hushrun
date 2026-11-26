@@ -88,7 +88,7 @@ mod tests {
         }
     }
 
-    // covers: K-10
+    // covers: K-10, K-31
     #[test]
     fn a_seed_copies_only_what_the_lockfile_names_with_the_bytes_it_hashes() {
         let part = tempfile::tempdir().unwrap();

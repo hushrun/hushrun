@@ -88,7 +88,7 @@ fn said(out: &Output) -> String {
     )
 }
 
-// covers: K-6, K-10, K-3, K-5
+// covers: K-6, K-10, K-3, K-5, K-31
 #[test]
 fn a_part_baked_from_poetry_install_seeds_poetrys_cache() {
     let Some((_, bin)) = pip() else { return };
