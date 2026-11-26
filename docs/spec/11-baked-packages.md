@@ -246,3 +246,26 @@ against its index as it imports it (confirmed with pnpm 10.28.0, store `v10`, an
 a registry nobody answers). *Breaks if:* pnpm changed its store's layout (a new `v<N>`: the part
 seeds a folder that pnpm doesn't read, and pnpm downloads as it does today), or a lockfile
 changed since the bake (the packages it adds are downloaded).
+
+**K-19 The `npm` part.** The part holds the tarballs of npm's cache and nothing else of it:
+`parts/npm/_cacache/content-v2/sha512/<2 hex>/<2 hex>/<124 hex>`, each file's path the SHA-512
+of its bytes. Not `index-v5/` (it names the registry's URLs and the times of the bake's
+requests), not `_logs/`, not another hash's folder. Its manifest set is every tracked
+`package-lock.json` and `npm-shrinkwrap.json`. A bake's fetch (`hushrun packages bake --out DIR --
+npm ci --ignore-scripts`) runs with `npm_config_cache` at a folder of the bake's own;
+`--harvest npm=FOLDER` takes a cache folder a job already filled (the one `npm config get cache`
+names). Each row carries `locked`, `sha512-<base64>` of its path, as `package-lock.json` writes
+the `integrity` of that tarball. The part is verified by the lockfile (K-7): a run reads it with
+no signature and no say-so. Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
+the `_cacache` of the cache npm uses (`npm_config_cache` or `NPM_CONFIG_CACHE` when set, else what
+`npm config get cache` names in the checkout) only a tarball whose SHA-512 an `integrity` of a
+lockfile in the checkout names now (any version of the lockfile: `packages` and nested
+`dependencies`), and only when the SHA-512 of its bytes is that hash. A tarball no lockfile names
+now is left, with a count; one whose bytes aren't its row's or its name's is left with a line, and
+npm downloads it or fails without a registry. A seed that left anything out writes no stamp, so
+the next lockfile can name what it left. *Rests on:* npm reading a tarball from its cache by the
+lockfile's `integrity`, with no index entry and no request, when the lockfile has `integrity` and
+`resolved` (confirmed with npm 10.9 and `npm ci`, an empty cache and a registry nobody answers).
+*Breaks if:* npm stopped reading its cache by hash (a seed then saves nothing, and npm downloads
+as it does today), or a lockfile held only `sha1` hashes (nothing is seeded).

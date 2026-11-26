@@ -9,6 +9,7 @@ use std::path::Path;
 
 use hushrun_core::blocks::Hex32;
 
+use crate::part::Admit;
 use crate::state::ReadPart;
 use crate::store::Kind;
 
@@ -22,6 +23,8 @@ pub struct Seeded {
     /// Files whose bytes aren't their row's any more: not copied. The tool downloads what they
     /// were of.
     pub changed: Vec<String>,
+    /// Files the lockfile in the checkout doesn't name now: not copied.
+    pub not_locked: usize,
     /// The stamp was there: nothing was looked at.
     pub stamped: bool,
 }
@@ -32,7 +35,13 @@ pub fn stamp_name(read: &ReadPart) -> String {
 }
 
 /// Copies every file of `read` under its folder `under` into `dest`, at the same path below it.
-pub fn seed(read: &ReadPart, under: &str, dest: &Path) -> io::Result<Seeded> {
+/// `admit` says, for each file by its path below `under` and its bytes, whether it is copied.
+pub fn seed(
+    read: &ReadPart,
+    under: &str,
+    dest: &Path,
+    admit: &dyn Fn(&str, &[u8]) -> Admit,
+) -> io::Result<Seeded> {
     let stamp = dest.join(stamp_name(read));
     if fs::symlink_metadata(&stamp).is_ok() {
         return Ok(Seeded {
@@ -59,6 +68,17 @@ pub fn seed(read: &ReadPart, under: &str, dest: &Path) -> io::Result<Seeded> {
             done.changed.push(row.path.clone());
             continue;
         }
+        match admit(rest, &bytes) {
+            Admit::Copy => {}
+            Admit::NotLocked => {
+                done.not_locked += 1;
+                continue;
+            }
+            Admit::Changed => {
+                done.changed.push(row.path.clone());
+                continue;
+            }
+        }
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -79,7 +99,8 @@ pub fn seed(read: &ReadPart, under: &str, dest: &Path) -> io::Result<Seeded> {
         fs::rename(&temp, &to)?;
         done.copied += 1;
     }
-    if done.changed.is_empty() {
+    // A file the lockfile doesn't name may be named by the next one: no stamp then.
+    if done.changed.is_empty() && done.not_locked == 0 {
         fs::create_dir_all(dest)?;
         fs::write(&stamp, b"")?;
     }
@@ -135,6 +156,7 @@ mod tests {
     // covers: K-10, K-18
     #[test]
     fn a_seed_copies_what_is_missing_checks_every_byte_and_stamps_once() {
+        let all = |_: &str, _: &[u8]| Admit::Copy;
         let t = tempfile::tempdir().unwrap();
         let part = t.path().join("part");
         let dest = t.path().join("cache");
@@ -150,7 +172,7 @@ mod tests {
         fs::write(dest.join("v10/files/bb/two"), b"mine").unwrap();
         // One byte of one file flipped after the bake: the seed catches it and copies the rest.
         fs::write(part.join("store/v10/files/aa/one"), b"onE").unwrap();
-        let done = seed(&r, "store", &dest).unwrap();
+        let done = seed(&r, "store", &dest, &all).unwrap();
         assert_eq!(done.copied, 1);
         assert_eq!(done.there, 1);
         assert_eq!(done.changed, vec!["store/v10/files/aa/one".to_string()]);
@@ -163,8 +185,8 @@ mod tests {
         );
         // Put right, the next seed copies it and stamps; the one after looks at nothing.
         fs::write(part.join("store/v10/files/aa/one"), b"one").unwrap();
-        let done = seed(&r, "store", &dest).unwrap();
+        let done = seed(&r, "store", &dest, &all).unwrap();
         assert_eq!((done.copied, done.there, done.stamped), (1, 2, false));
-        assert!(seed(&r, "store", &dest).unwrap().stamped);
+        assert!(seed(&r, "store", &dest, &all).unwrap().stamped);
     }
 }

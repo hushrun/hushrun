@@ -1,8 +1,8 @@
-# 0150. pnpm in the package store
+# 0150. pnpm and npm in the package store
 
 - **Status:** proposed; being built
 - **Date:** 2026-11-26
-- **Rules:** K-18 new (`docs/spec/11-baked-packages.md`); K-6, K-7 and K-10 read
+- **Rules:** K-18 and K-19 new (`docs/spec/11-baked-packages.md`); K-6, K-7 and K-10 read
 
 ## Context
 
@@ -37,10 +37,18 @@ missing.
    `pnpm store path` says in the checkout, which reads the project's `.npmrc`, the user's and the
    platform's default. One start of pnpm, only in `exec` and `restore`.
 
+6. **npm's part is its cache's tarballs, verified by the lockfile.** `_cacache/content-v2/sha512/…`
+   names each tarball by its own SHA-512, which is `package-lock.json`'s `integrity` of it. So the
+   part needs no signature: the seed copies a tarball only when a lockfile in the checkout names
+   its hash now and its bytes hash to it. npm reads a tarball from its cache by that hash, with no
+   index entry (`index-v5/` is left out: it holds the registry's URLs and request times) and no
+   request. The same seed as pnpm's, the same reasons not to read in place: npm writes into its
+   cache as it installs.
+
 ## Consequences
 
-- An install from an empty store with no registry to reach works: measured with pnpm 10.28.0,
-  `downloaded 0`. A file whose bytes changed since the bake is left out with a line, and pnpm then
+- An install from an empty store or cache with no registry to reach works: measured with pnpm
+  10.28.0 (`downloaded 0`) and npm 10.9 (`npm ci`). A file whose bytes changed since the bake is left out with a line, and pnpm then
   downloads its package, or fails where it can't.
 - A bake's `pnpm fetch` leaves the checkout's `node_modules` pointing at the bake's own store,
   which the bake removes; a bake job should not install in that checkout after it.

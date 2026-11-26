@@ -26,6 +26,21 @@ pub enum Reader {
     LeftAlone(String),
 }
 
+/// K-10, mechanism C: what a seed does with one file of a part, by its path under the part's
+/// folder the seed copies and its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    /// Copy it.
+    Copy,
+    /// The lockfile in the checkout doesn't name it now: leave it.
+    NotLocked,
+    /// Its bytes aren't what the lockfile says: leave it, with a line.
+    Changed,
+}
+
+/// What [`Part::admit`] gives a seed: for a file's path and bytes, what it does with it.
+pub type Admits = Box<dyn Fn(&str, &[u8]) -> Admit>;
+
 /// One package manager's part.
 pub trait Part: Sync {
     /// Its name, the part's folder's and rows file's.
@@ -57,12 +72,23 @@ pub trait Part: Sync {
     ) -> Result<(PathBuf, &'static str), String> {
         Err(format!("{} is read in place", self.tool()))
     }
+    /// K-10, mechanism C: which files a seed copies, for the lockfiles `manifests` of `checkout`.
+    /// Every file, for a part a signature verifies.
+    fn admit(&self, _checkout: &Path, _manifests: &[String]) -> Admits {
+        Box::new(|_, _| Admit::Copy)
+    }
+    /// K-3: the lockfile's own hash of the file at `path`, as a lockfile writes it, where the file
+    /// is the artifact that hash is of.
+    fn locked(&self, _path: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Every part this hushrun knows, by name.
 pub static ALL: &[&dyn Part] = &[
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
+    &crate::parts::npm::Npm,
     &crate::parts::pnpm::Pnpm,
 ];
 

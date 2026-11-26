@@ -240,3 +240,68 @@ fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {
         Some((t.path().to_path_buf(), "store"))
     );
 }
+
+// covers: K-3, K-4, K-5, K-19
+#[test]
+fn npm_keeps_only_tarballs_and_seeds_only_what_the_lockfile_names_by_its_bytes() {
+    use crate::part::Admit;
+    use crate::parts::npm::{Npm, locked_sha512};
+    use sha2_hw::Digest as _;
+    let tracked = [
+        "package-lock.json",
+        "a/npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Npm.manifests(&tracked),
+        vec![
+            "package-lock.json".to_string(),
+            "a/npm-shrinkwrap.json".to_string()
+        ]
+    );
+    let tarball = b"a tarball";
+    let hex: String = sha2_hw::Sha512::digest(tarball)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = format!(
+        "content-v2/sha512/{}/{}/{}",
+        &hex[..2],
+        &hex[2..4],
+        &hex[4..]
+    );
+    assert!(Npm.keep(&path));
+    assert!(!Npm.keep("index-v5/aa/bb/cc"));
+    assert!(!Npm.keep("content-v2/sha1/aa/bb/cc"));
+    assert!(!Npm.keep("_logs/x.log"));
+    let integrity = Npm.locked(&path).unwrap();
+    assert!(integrity.starts_with("sha512-"), "{integrity}");
+    // Every version of the lockfile: `packages` and nested `dependencies`.
+    let lock = format!(
+        "{{\"lockfileVersion\":3,\"packages\":{{\"node_modules/a\":{{\"integrity\":\"{integrity}\"}}}},\"dependencies\":{{\"b\":{{\"dependencies\":{{\"c\":{{\"integrity\":\"sha1-xx sha512-bad\"}}}}}}}}}}"
+    );
+    assert_eq!(
+        locked_sha512(&lock),
+        std::collections::BTreeSet::from([hex.clone()])
+    );
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("package-lock.json"), &lock).unwrap();
+    let admit = Npm.admit(t.path(), &["package-lock.json".to_string()]);
+    assert_eq!(admit(&path, tarball), Admit::Copy);
+    // A store whose rows were rewritten to match other bytes: the lockfile still catches it.
+    assert_eq!(admit(&path, b"another tarball"), Admit::Changed);
+    // A tarball the lockfile doesn't name now is left.
+    let other = format!("content-v2/sha512/00/00/{}", "0".repeat(124));
+    assert_eq!(admit(&other, b"x"), Admit::NotLocked);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Npm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_cache").then(|| "/c".into());
+    assert_eq!(
+        Npm.seed_into(Path::new("/x"), &named),
+        Ok((std::path::PathBuf::from("/c/_cacache"), "_cacache"))
+    );
+}
