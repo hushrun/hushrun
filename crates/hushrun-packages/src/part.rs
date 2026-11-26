@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use hushrun_core::blocks::Hex32;
-
 use crate::store::VerifiedBy;
 
 /// The variables a reader sees: the run's own, before hushrun adds any.
@@ -21,32 +19,28 @@ pub enum Reader {
     /// Mechanism A for Maven: one word that joins `MAVEN_OPTS`, merged with whatever else of
     /// hushrun builds that variable in the same run, after the person's words.
     MavenOpts(String),
-    /// Mechanism C: a run copies these files into the tool's own cache, each checked first
-    /// (K-45).
-    Seed(Seed),
+    /// Mechanism C: hushrun copies the part's files into the tool's own cache, where
+    /// [`Part::seed_into`] says, before an install (`hushrun packages exec` and `restore`).
+    /// `hushrun run` gives the tool nothing: by the time a check runs, the install is done.
+    Seed,
     /// The tool is left alone, with this line (`packages: <part>: left alone: …`).
     LeftAlone(String),
 }
 
-/// K-45: what a run seeds: the files the lockfile names now, and the tool's own cache they go to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Seed {
-    /// The tool's own cache folder.
-    pub into: PathBuf,
-    /// The files, each once.
-    pub files: Vec<SeedFile>,
+/// K-10, mechanism C: what a seed does with one file of a part, by its path under the part's
+/// folder the seed copies and its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    /// Copy it.
+    Copy,
+    /// The lockfile in the checkout doesn't name it now: leave it.
+    NotLocked,
+    /// Its bytes aren't what the lockfile says: leave it, with a line.
+    Changed,
 }
 
-/// K-45: one file a run seeds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedFile {
-    /// Its row's path, from the part's folder.
-    pub path: String,
-    /// Its name in the tool's cache folder: one plain name.
-    pub name: String,
-    /// The SHA-256 the lockfile in the checkout gives it now, when it gives one.
-    pub sha256: Option<Hex32>,
-}
+/// What [`Part::admit`] gives a seed: for a file's path and bytes, what it does with it.
+pub type Admits = Box<dyn Fn(&str, &[u8]) -> Admit>;
 
 /// K-6: a command that fetches a part by itself, without the check's build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,13 +85,41 @@ pub trait Part: Sync {
         Vec::new()
     }
     /// K-3: each kept file's `locked`, by its path from the harvest root, as the lockfiles of
-    /// `manifests` (path and text) write it.
-    fn locked(&self, manifests: &[(String, String)]) -> BTreeMap<String, String> {
+    /// `manifests` (path and text) write it, where only they know it ([`Part::locked`] reads a
+    /// path alone).
+    fn locked_in(&self, manifests: &[(String, String)]) -> BTreeMap<String, String> {
         let _ = manifests;
         BTreeMap::new()
     }
     /// K-10: how the run whose variables are `env`, in `checkout`, reads the part at `dir`.
     fn reader(&self, dir: &Path, checkout: &Path, env: Env<'_>) -> Reader;
+    /// K-10, mechanism C: the tool's own cache a seed copies into, for the run whose variables
+    /// are `env` in `checkout`, and the folder of the part whose files go there. Only a part whose
+    /// reader is [`Reader::Seed`] has one.
+    fn seed_into(
+        &self,
+        _checkout: &Path,
+        _env: Env<'_>,
+    ) -> Result<(PathBuf, &'static str), String> {
+        Err(format!("{} is read in place", self.tool()))
+    }
+    /// K-10, mechanism C: which files a seed copies, for the lockfiles `manifests` of `checkout`.
+    /// Every file, for a part a signature verifies.
+    fn admit(&self, _checkout: &Path, _manifests: &[String]) -> Admits {
+        Box::new(|_, _| Admit::Copy)
+    }
+    /// K-10, mechanism C: [`Part::admit`] for a part whose `packages.json` says `verified_by`,
+    /// for a part whose class follows its lockfiles: one a lockfile verifies admits no file the
+    /// lockfile doesn't hash.
+    fn admit_for(&self, checkout: &Path, manifests: &[String], verified_by: VerifiedBy) -> Admits {
+        let _ = verified_by;
+        self.admit(checkout, manifests)
+    }
+    /// K-3: the lockfile's own hash of the file at `path`, as a lockfile writes it, where the file
+    /// is the artifact that hash is of.
+    fn locked(&self, _path: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Every part this hushrun knows, by name.
@@ -105,6 +127,8 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::bundler::Bundler,
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
+    &crate::parts::npm::Npm,
+    &crate::parts::pnpm::Pnpm,
 ];
 
 /// The part named `name`.

@@ -1,213 +1,192 @@
-//! K-45: a seed (K-10's C). A run links, or else copies, each file the lockfile in the checkout
-//! names from a part into the tool's own cache, before the tool runs: never over a file already
-//! there, never a file whose bytes aren't its row's, and, for a part a lockfile verifies, never
-//! one the lockfile doesn't hash to those very bytes. A stamp in the cache folder, named for the
-//! store and holding a digest of what was seeded, lets the next seed of the same files stop at
-//! one read.
+//! K-10, mechanism C: a seed. hushrun copies a part's files into the tool's own cache, each file
+//! hashed as it is copied and checked against its row, never over a file that is there, then the
+//! tool installs as usual. A stamp in the cache (`.hushrun-packages-<part identity>`) makes the
+//! second seed of the same part cost one `stat`.
 
-use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read as _, Write as _};
+use std::io;
 use std::path::Path;
 
 use hushrun_core::blocks::Hex32;
-use sha2_hw::{Digest as _, Sha256};
 
-use crate::part::Seed;
-use crate::store::{Kind, Row, VerifiedBy};
+use crate::part::Admit;
+use crate::state::ReadPart;
+use crate::store::Kind;
 
 /// What a seed did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Seeded {
-    /// Files copied into the tool's cache.
+    /// Files copied into the cache.
     pub copied: usize,
-    /// Files the tool's cache held already: left as they are.
-    pub present: usize,
-    /// Files the lockfile names that the part lacks: the tool downloads them.
-    pub lacking: usize,
-    /// Files not seeded, and why, one line each.
-    pub refused: Vec<String>,
-    /// The stamp said these very files were seeded already: nothing was looked at.
+    /// Files the cache had already.
+    pub there: usize,
+    /// Files whose bytes aren't their row's any more: not copied. The tool downloads what they
+    /// were of.
+    pub changed: Vec<String>,
+    /// Files the lockfile in the checkout doesn't name now: not copied.
+    pub not_locked: usize,
+    /// The stamp was there: nothing was looked at.
     pub stamped: bool,
 }
 
-impl Seeded {
-    /// What a run says: nothing when every file it could seed was seeded.
-    pub fn lines(&self, part: &str) -> Vec<String> {
-        match self.refused.as_slice() {
-            [] => Vec::new(),
-            [one] => vec![format!("packages: {part}: not seeded: {one}")],
-            [first, rest @ ..] => vec![format!(
-                "packages: {part}: {} files not seeded: {first}, and {} more",
-                rest.len() + 1,
-                rest.len()
-            )],
-        }
-    }
+/// The stamp a seed of `read` leaves in `dest`.
+pub fn stamp_name(read: &ReadPart) -> String {
+    format!(".hushrun-packages-{}", read.entry.identity)
 }
 
-/// The stamp's name in the tool's cache folder, for the store whose identity is `store`.
-pub fn stamp_name(store: &Hex32) -> String {
-    format!(".hushrun-packages-{store}")
-}
-
-/// Seeds `seed.files` from the part at `dir`, whose rows are `rows`, into `seed.into`, for the
-/// store whose identity is `store`. An error is the tool's cache folder that can't be made or
-/// written.
+/// Copies every file of `read` under its folder `under` into `dest`, at the same path below it.
+/// `admit` says, for each file by its path below `under` and its bytes, whether it is copied.
 pub fn seed(
-    dir: &Path,
-    rows: &[Row],
-    verified_by: VerifiedBy,
-    seed: &Seed,
-    store: &Hex32,
+    read: &ReadPart,
+    under: &str,
+    dest: &Path,
+    admit: &dyn Fn(&str, &[u8]) -> Admit,
 ) -> io::Result<Seeded> {
-    let stamp = seed.into.join(stamp_name(store));
-    let wanted = wanted_digest(seed);
-    if fs::read_to_string(&stamp).is_ok_and(|had| had.trim() == wanted.to_string()) {
+    let stamp = dest.join(stamp_name(read));
+    if fs::symlink_metadata(&stamp).is_ok() {
         return Ok(Seeded {
             stamped: true,
             ..Seeded::default()
         });
     }
-    let by_path: HashMap<&str, &Row> = rows.iter().map(|r| (r.path.as_str(), r)).collect();
-    let mut out = Seeded::default();
-    let mut made = false;
-    for file in &seed.files {
-        let Some(row) = by_path.get(file.path.as_str()) else {
-            out.lacking += 1;
+    let prefix = format!("{under}/");
+    let mut done = Seeded::default();
+    for row in &read.rows {
+        let Some(rest) = row.path.strip_prefix(&prefix) else {
             continue;
         };
-        let refuse = match file.sha256 {
-            _ if row.kind == Kind::Link => Some("it is a link in the store"),
-            _ if !is_plain_name(&file.name) => Some("its name isn't one file's"),
-            Some(locked) if locked != row.sha256 => {
-                Some("the lockfile here hashes other bytes than the store holds")
-            }
-            None if verified_by == VerifiedBy::Lockfile => Some(
-                "the lockfile here has no hash of it, and only the lockfile verifies this part",
-            ),
-            _ => None,
-        };
-        if let Some(why) = refuse {
-            out.refused.push(format!("{}: {why}", file.name));
+        if row.kind == Kind::Link {
             continue;
         }
-        let to = seed.into.join(&file.name);
+        let to = dest.join(rest);
         if fs::symlink_metadata(&to).is_ok() {
-            out.present += 1;
+            done.there += 1;
             continue;
         }
-        if !made {
-            fs::create_dir_all(&seed.into)?;
-            made = true;
+        let bytes = fs::read(read.dir.join(&row.path))?;
+        if Hex32::sha256(&bytes) != row.sha256 {
+            done.changed.push(row.path.clone());
+            continue;
         }
-        match copy_checked(&dir.join(&row.path), &seed.into, &file.name, row.sha256)? {
-            Copied::Yes => out.copied += 1,
-            Copied::There => out.present += 1,
-            Copied::OtherBytes => out.refused.push(format!(
-                "{}: the store's file isn't the bytes its row hashes",
-                file.name
-            )),
+        match admit(rest, &bytes) {
+            Admit::Copy => {}
+            Admit::NotLocked => {
+                done.not_locked += 1;
+                continue;
+            }
+            Admit::Changed => {
+                done.changed.push(row.path.clone());
+                continue;
+            }
         }
-    }
-    // Only a seed that left nothing out is stamped: one that refused a file says so every time.
-    if out.refused.is_empty() && (made || seed.into.is_dir()) {
-        let temp = seed
-            .into
-            .join(format!(".stamp.{}.hushrun-seed", std::process::id()));
-        if fs::write(&temp, format!("{wanted}\n")).is_ok() {
-            let _ = fs::rename(&temp, &stamp);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
         }
-    }
-    Ok(out)
-}
-
-/// What a seed was asked for, as one digest: each file's row path, name and the lockfile's hash.
-fn wanted_digest(seed: &Seed) -> Hex32 {
-    let mut hasher = Sha256::new();
-    hasher.update(b"hushrun.packages-seed/v1\0");
-    for file in &seed.files {
-        hasher.update(file.path.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(file.name.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(
-            file.sha256
-                .map(|h| h.to_string())
+        // Written beside, then renamed: a tool never sees half a file.
+        let temp = to.with_file_name(format!(
+            ".{}.hushrun-seed",
+            to.file_name()
+                .map(|n| n.to_string_lossy())
                 .unwrap_or_default()
-                .as_bytes(),
-        );
-        hasher.update(b"\0");
-    }
-    Hex32(hasher.finalize().into())
-}
-
-enum Copied {
-    Yes,
-    There,
-    OtherBytes,
-}
-
-/// Puts `from` at `into/name` when its SHA-256 is `want`: a hard link to the store's file where
-/// the file system allows one, else a copy through a file of its own in `into`, hashed as it is
-/// written. Either way it is linked into place, so a file another process put there first stays.
-fn copy_checked(from: &Path, into: &Path, name: &str, want: Hex32) -> io::Result<Copied> {
-    if crate::store::sha256_file(from)? != want {
-        return Ok(Copied::OtherBytes);
-    }
-    let to = into.join(name);
-    match fs::hard_link(from, &to) {
-        Ok(()) => return Ok(Copied::Yes),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(Copied::There),
-        // Another file system, a read-only store, a file of another owner: copy it.
-        Err(_) => {}
-    }
-    let temp = into.join(format!(".{name}.{}.hushrun-seed", std::process::id()));
-    let written = (|| -> io::Result<Hex32> {
-        let mut src = fs::File::open(from)?;
-        let mut dst = fs::File::create(&temp)?;
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; 1 << 16];
-        loop {
-            let n = src.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            dst.write_all(&buf[..n])?;
+        ));
+        fs::write(&temp, &bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = if row.kind == Kind::Exe { 0o755 } else { 0o644 };
+            fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
         }
-        dst.flush()?;
-        Ok(Hex32(hasher.finalize().into()))
-    })();
-    let result = match written {
-        Ok(got) if got == want => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                fs::set_permissions(&temp, fs::Permissions::from_mode(0o644))?;
-            }
-            match fs::hard_link(&temp, &to) {
-                Ok(()) => Ok(Copied::Yes),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(Copied::There),
-                Err(e) => Err(e),
-            }
-        }
-        Ok(_) => Ok(Copied::OtherBytes),
-        Err(e) => Err(e),
-    };
-    let _ = fs::remove_file(&temp);
-    result
-}
-
-/// One file's name: no separator, not `.` or `..`, no control character.
-fn is_plain_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name
-            .chars()
-            .any(|c| matches!(c, '/' | '\\') || c.is_control())
+        fs::rename(&temp, &to)?;
+        done.copied += 1;
+    }
+    // A file the lockfile doesn't name may be named by the next one: no stamp then.
+    if done.changed.is_empty() && done.not_locked == 0 {
+        fs::create_dir_all(dest)?;
+        fs::write(&stamp, b"")?;
+    }
+    Ok(done)
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::store::{Class, PartEntry, Row, RowsFile, VerifiedBy};
+
+    fn read(dir: &Path, files: &[(&str, &[u8])]) -> ReadPart {
+        let rows = files
+            .iter()
+            .map(|(path, bytes)| {
+                let at = dir.join(path);
+                fs::create_dir_all(at.parent().unwrap()).unwrap();
+                fs::write(&at, bytes).unwrap();
+                Row {
+                    path: path.to_string(),
+                    kind: Kind::File,
+                    bytes: bytes.len() as u64,
+                    sha256: Hex32::sha256(bytes),
+                    target: None,
+                    package: None,
+                    locked: None,
+                }
+            })
+            .collect();
+        ReadPart {
+            entry: PartEntry {
+                part: "pnpm".into(),
+                class: Class::Download,
+                tool: "pnpm".into(),
+                runtime: None,
+                inputs: Hex32::sha256(b"i"),
+                manifests: vec![],
+                identity: Hex32::sha256(b"id"),
+                rows: RowsFile {
+                    sha256: Hex32::sha256(b"r"),
+                    bytes: 0,
+                    count: 0,
+                },
+                bytes: 0,
+                verified_by: VerifiedBy::Signature,
+            },
+            rows,
+            dir: dir.to_path_buf(),
+            behind: false,
+        }
+    }
+
+    // covers: K-10, K-18
+    #[test]
+    fn a_seed_copies_what_is_missing_checks_every_byte_and_stamps_once() {
+        let all = |_: &str, _: &[u8]| Admit::Copy;
+        let t = tempfile::tempdir().unwrap();
+        let part = t.path().join("part");
+        let dest = t.path().join("cache");
+        let r = read(
+            &part,
+            &[
+                ("store/v10/files/aa/one", b"one"),
+                ("store/v10/files/bb/two", b"two"),
+                ("store/v10/index/cc/x-ms@2.1.3.json", b"{}"),
+            ],
+        );
+        fs::create_dir_all(dest.join("v10/files/bb")).unwrap();
+        fs::write(dest.join("v10/files/bb/two"), b"mine").unwrap();
+        // One byte of one file flipped after the bake: the seed catches it and copies the rest.
+        fs::write(part.join("store/v10/files/aa/one"), b"onE").unwrap();
+        let done = seed(&r, "store", &dest, &all).unwrap();
+        assert_eq!(done.copied, 1);
+        assert_eq!(done.there, 1);
+        assert_eq!(done.changed, vec!["store/v10/files/aa/one".to_string()]);
+        assert!(!dest.join("v10/files/aa/one").exists());
+        assert_eq!(fs::read(dest.join("v10/files/bb/two")).unwrap(), b"mine");
+        assert!(dest.join("v10/index/cc/x-ms@2.1.3.json").is_file());
+        assert!(
+            !dest.join(stamp_name(&r)).exists(),
+            "no stamp over a changed file"
+        );
+        // Put right, the next seed copies it and stamps; the one after looks at nothing.
+        fs::write(part.join("store/v10/files/aa/one"), b"one").unwrap();
+        let done = seed(&r, "store", &dest, &all).unwrap();
+        assert_eq!((done.copied, done.there, done.stamped), (1, 2, false));
+        assert!(seed(&r, "store", &dest, &all).unwrap().stamped);
+    }
+}

@@ -168,8 +168,8 @@ pub enum Command {
     /// `./gradlew test` or `mvn -B verify`) with Gradle's and Maven's caches at folders of its
     /// own, and keeps what they downloaded; `--harvest gradle=$HOME/.gradle` or
     /// `--harvest maven=$HOME/.m2/repository` takes a cache the job already filled. Bundler's part
-    /// fetches itself with `bundle cache --no-install`, and a run puts each gem into the gem cache
-    /// Bundler already uses before COMMAND starts, checked first against Gemfile.lock. A run reads
+    /// fetches itself with `bundle cache --no-install`, and `hushrun packages exec` copies each gem into the
+    /// gem cache Bundler already uses before COMMAND starts, checked first against Gemfile.lock. A run reads
     /// the store at HUSHRUN_PACKAGES_LOWER, or /hushrun-packages; `hushrun packages exec --
     /// COMMAND` gives it to a command outside `hushrun run`. A store nothing signed is read only
     /// with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI. hushrun never sets a tool's offline

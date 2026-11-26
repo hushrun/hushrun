@@ -345,7 +345,7 @@ fn a_seed_refuses_what_the_lockfile_or_the_store_no_longer_vouches_for() {
     // Seeded again: nothing is written over.
     let out = restore(&r.root.join("a"), &[]);
     assert!(
-        out.contains("seeded into") && out.contains("already"),
+        out.contains("packages: bundler: seeded already into"),
         "{out}"
     );
     // Its stamp gone, a seed again finds both there and writes over neither.
@@ -377,7 +377,7 @@ fn a_seed_refuses_what_the_lockfile_or_the_store_no_longer_vouches_for() {
     assert!(
         out.contains("seeded 1 files")
             && out.contains(
-                "tiny-1.0.0.gem: the lockfile here hashes other bytes than the store holds"
+                "left out 1 files whose bytes changed since the bake, such as cache/tiny-1.0.0.gem"
             ),
         "{out}"
     );
@@ -394,10 +394,7 @@ fn a_seed_refuses_what_the_lockfile_or_the_store_no_longer_vouches_for() {
     }
     std::fs::write(&gem, &bytes).unwrap();
     let out = restore(&r.root.join("c"), &[]);
-    assert!(
-        out.contains("other-2.0.0.gem: the store's file isn't the bytes its row hashes"),
-        "{out}"
-    );
+    assert!(out.contains("such as cache/other-2.0.0.gem"), "{out}");
     let seeded = all_files(&r.root.join("c"));
     assert!(
         seeded.iter().any(|f| f.ends_with("tiny-1.0.0.gem"))

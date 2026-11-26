@@ -3,6 +3,8 @@
 pub mod bundler;
 pub mod gradle;
 pub mod maven;
+pub mod npm;
+pub mod pnpm;
 
 #[cfg(test)]
 mod tests;

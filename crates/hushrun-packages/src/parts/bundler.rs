@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use hushrun_core::blocks::Hex32;
 
-use crate::part::{Env, Fetch, Part, Reader, Seed, SeedFile, file_name};
+use crate::part::{Admit, Admits, Env, Fetch, Part, Reader, file_name};
 use crate::store::VerifiedBy;
 
 /// The part's folder under which the `.gem` files are.
@@ -122,7 +122,7 @@ impl Part for Bundler {
         }
     }
 
-    fn locked(&self, manifests: &[(String, String)]) -> BTreeMap<String, String> {
+    fn locked_in(&self, manifests: &[(String, String)]) -> BTreeMap<String, String> {
         let mut out: BTreeMap<String, Option<String>> = BTreeMap::new();
         for (_, text) in lockfiles(manifests) {
             for gem in gems(text) {
@@ -142,22 +142,57 @@ impl Part for Bundler {
             .collect()
     }
 
-    fn reader(&self, _dir: &Path, checkout: &Path, env: Env<'_>) -> Reader {
+    fn reader(&self, _dir: &Path, _checkout: &Path, _env: Env<'_>) -> Reader {
+        Reader::Seed
+    }
+
+    fn seed_into(&self, checkout: &Path, env: Env<'_>) -> Result<(PathBuf, &'static str), String> {
         let start = std::env::current_dir().unwrap_or_else(|_| checkout.to_path_buf());
-        let Some((gemfile_dir, lockfile)) = lockfile_for(&start, checkout, env) else {
-            return Reader::LeftAlone("no Gemfile here".into());
-        };
-        let Ok(text) = std::fs::read_to_string(&lockfile) else {
-            return Reader::LeftAlone(format!("{} can't be read", lockfile.display()));
-        };
-        let files = seed_files(&text);
-        if files.is_empty() {
-            return Reader::LeftAlone(format!("{} names no gem", lockfile.display()));
+        let (gemfile_dir, _) =
+            lockfile_for(&start, checkout, env).ok_or_else(|| "no Gemfile here".to_string())?;
+        Ok((cache_dir(&gemfile_dir)?, CACHE))
+    }
+
+    fn admit(&self, checkout: &Path, manifests: &[String]) -> Admits {
+        self.admit_for(checkout, manifests, VerifiedBy::Lockfile)
+    }
+
+    fn admit_for(&self, checkout: &Path, manifests: &[String], verified_by: VerifiedBy) -> Admits {
+        // Each gem the lockfiles' GEM sections name now, with the SHA-256 their CHECKSUMS give
+        // it; two lockfiles that hash one gem differently admit neither.
+        let mut named: BTreeMap<String, Result<Option<Hex32>, ()>> = BTreeMap::new();
+        for manifest in manifests {
+            if !matches!(file_name(manifest), "Gemfile.lock" | "gems.locked") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(checkout.join(manifest)) else {
+                continue;
+            };
+            for gem in gems(&text) {
+                let hash = gem
+                    .locked
+                    .as_deref()
+                    .and_then(|l| l.strip_prefix("sha256="))
+                    .and_then(Hex32::parse);
+                named
+                    .entry(gem.file)
+                    .and_modify(|had| match (&*had, hash) {
+                        (Ok(None), Some(h)) => *had = Ok(Some(h)),
+                        (Ok(Some(a)), Some(b)) if *a != b => *had = Err(()),
+                        _ => {}
+                    })
+                    .or_insert(Ok(hash));
+            }
         }
-        match cache_dir(&gemfile_dir) {
-            Ok(into) => Reader::Seed(Seed { into, files }),
-            Err(why) => Reader::LeftAlone(why),
-        }
+        Box::new(move |path, bytes| match named.get(path) {
+            None => Admit::NotLocked,
+            Some(Err(())) => Admit::Changed,
+            Some(Ok(Some(hash))) if Hex32::sha256(bytes) == *hash => Admit::Copy,
+            Some(Ok(Some(_))) => Admit::Changed,
+            // Named with no hash: only a signature vouches for the bytes.
+            Some(Ok(None)) if verified_by == VerifiedBy::Signature => Admit::Copy,
+            Some(Ok(None)) => Admit::NotLocked,
+        })
     }
 }
 
@@ -246,23 +281,6 @@ fn gem_file(entry: &str) -> Option<(String, &str)> {
                 .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '/' | '\\'))
     };
     (plain(name) && plain(version)).then(|| (format!("{name}-{version}.gem"), rest.trim()))
-}
-
-/// What a run seeds from a lockfile: every gem it names, from the part's `cache/` folder, with the
-/// hash its `CHECKSUMS` gives.
-pub fn seed_files(lockfile: &str) -> Vec<SeedFile> {
-    gems(lockfile)
-        .into_iter()
-        .map(|gem| SeedFile {
-            path: format!("{CACHE}/{}", gem.file),
-            sha256: gem
-                .locked
-                .as_deref()
-                .and_then(|l| l.strip_prefix("sha256="))
-                .and_then(Hex32::parse),
-            name: gem.file,
-        })
-        .collect()
 }
 
 /// The folder of the Gemfile Bundler reads from `start` and its lockfile: `BUNDLE_GEMFILE`'s, or

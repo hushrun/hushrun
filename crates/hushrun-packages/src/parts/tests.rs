@@ -223,7 +223,7 @@ BUNDLED WITH
   4.0.18
 ";
 
-// covers: K-10
+// covers: K-10, K-45
 #[test]
 fn bundler_names_its_manifest_set_and_keeps_only_downloaded_gems() {
     use crate::parts::bundler::Bundler;
@@ -282,10 +282,10 @@ fn bundler_names_its_manifest_set_and_keeps_only_downloaded_gems() {
     assert_eq!(Bundler.harvest_root(t.path()), None);
 }
 
-// covers: K-10
+// covers: K-10, K-45
 #[test]
 fn bundler_is_verified_by_its_lockfile_only_where_it_has_checksums() {
-    use crate::parts::bundler::{Bundler, gems, seed_files};
+    use crate::parts::bundler::{Bundler, gems};
     use crate::store::VerifiedBy;
     let with = ("Gemfile.lock".to_string(), LOCK.to_string());
     let without = (
@@ -318,7 +318,7 @@ fn bundler_is_verified_by_its_lockfile_only_where_it_has_checksums() {
             ("rack-3.1.8.gem".to_string(), true),
         ]
     );
-    let locked = Bundler.locked(std::slice::from_ref(&with));
+    let locked = Bundler.locked_in(std::slice::from_ref(&with));
     assert_eq!(
         locked.get("rack-3.1.8.gem").map(String::as_str),
         Some("sha256=d3fbcbca43dc2b43c9c6d7dfbac01667ae58643c42cea10013d0da970218a1b1")
@@ -335,16 +335,41 @@ fn bundler_is_verified_by_its_lockfile_only_where_it_has_checksums() {
     );
     assert!(
         !Bundler
-            .locked(&[with, other])
+            .locked_in(&[with, other])
             .contains_key("rack-3.1.8.gem")
     );
-    let files = seed_files(LOCK);
-    assert_eq!(files[2].path, "cache/rack-3.1.8.gem");
-    assert_eq!(files[2].name, "rack-3.1.8.gem");
-    assert!(files[2].sha256.is_some() && files[1].sha256.is_none());
+    // What a seed admits: a gem the lockfile hashes, by those bytes; one it names with no hash,
+    // only for a part a signature verifies; one it doesn't name, never.
+    use crate::part::Admit;
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("Gemfile.lock"), LOCK).unwrap();
+    let manifests = paths(&["Gemfile", "Gemfile.lock"]);
+    let strict = Bundler.admit(t.path(), &manifests);
+    let signed = Bundler.admit_for(t.path(), &manifests, VerifiedBy::Signature);
+    assert_eq!(
+        strict("rack-3.1.8.gem", b"x"),
+        Admit::Changed,
+        "other bytes than CHECKSUMS hash"
+    );
+    assert_eq!(
+        strict("racc-1.8.1.gem", b"x"),
+        Admit::NotLocked,
+        "no hash, a lockfile part"
+    );
+    assert_eq!(
+        signed("racc-1.8.1.gem", b"x"),
+        Admit::Copy,
+        "no hash, a signed part"
+    );
+    assert_eq!(
+        signed("x-0.1.0.gem", b"x"),
+        Admit::NotLocked,
+        "a git source's gem"
+    );
+    assert_eq!(strict("bundler-4.0.18.gem", b"x"), Admit::NotLocked);
 }
 
-// covers: K-10
+// covers: K-10, K-45
 #[test]
 fn bundler_seeds_from_the_gemfile_bundler_reads() {
     use crate::parts::bundler::{Bundler, lockfile_for};
@@ -369,13 +394,13 @@ fn bundler_seeds_from_the_gemfile_bundler_reads() {
     // No Gemfile up to the checkout's root: left alone, and no ruby is asked.
     let empty = tempfile::tempdir().unwrap();
     assert_eq!(lockfile_for(empty.path(), empty.path(), &no_env), None);
-    assert!(matches!(
+    assert_eq!(
         Bundler.reader(Path::new("/p"), empty.path(), &no_env),
-        Reader::LeftAlone(_)
-    ));
+        Reader::Seed
+    );
 }
 
-// covers: K-6
+// covers: K-6, K-45
 #[test]
 fn bundler_fetches_by_itself_and_installs_nothing() {
     use crate::parts::bundler::Bundler;
@@ -414,5 +439,125 @@ fn bundler_fetches_by_itself_and_installs_nothing() {
         crate::parts::gradle::Gradle
             .fetch(checkout, &paths(&["build.gradle"]), cache)
             .is_empty()
+    );
+}
+
+// covers: K-4, K-5, K-18
+#[test]
+fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {
+    use crate::parts::pnpm::Pnpm;
+    let tracked = [
+        "pnpm-lock.yaml",
+        "web/pnpm-lock.yaml",
+        "package.json",
+        "yarn.lock",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Pnpm.manifests(&tracked),
+        vec![
+            "pnpm-lock.yaml".to_string(),
+            "web/pnpm-lock.yaml".to_string()
+        ]
+    );
+    assert!(Pnpm.keep("v10/files/aa/0123"));
+    assert!(Pnpm.keep("v10/files/aa/0123-exec"));
+    assert!(Pnpm.keep("v10/index/e8/5973-ms@2.1.3.json"));
+    assert!(!Pnpm.keep("v10/projects/dabb"));
+    assert!(!Pnpm.keep("v10/tmp/x/y"));
+    assert!(!Pnpm.keep("v10/files"));
+    assert!(!Pnpm.keep("other/files/aa/x"));
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-ms@2.1.3.json").as_deref(),
+        Some("ms@2.1.3")
+    );
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-@types+node@26.6.6.json")
+            .as_deref(),
+        Some("@types+node@26.6.6")
+    );
+    assert_eq!(Pnpm.package("v10/files/aa/0123"), None);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Pnpm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_store_dir").then(|| "/s".into());
+    assert_eq!(
+        Pnpm.seed_into(Path::new("/c"), &named),
+        Ok((std::path::PathBuf::from("/s"), "store"))
+    );
+    assert!(Maven.seed_into(Path::new("/c"), &no_env).is_err());
+    let t = tempfile::tempdir().unwrap();
+    assert_eq!(Pnpm.harvest_root(t.path()), None);
+    std::fs::create_dir_all(t.path().join("v10/files")).unwrap();
+    assert_eq!(
+        Pnpm.harvest_root(t.path()),
+        Some((t.path().to_path_buf(), "store"))
+    );
+}
+
+// covers: K-3, K-4, K-5, K-19
+#[test]
+fn npm_keeps_only_tarballs_and_seeds_only_what_the_lockfile_names_by_its_bytes() {
+    use crate::part::Admit;
+    use crate::parts::npm::{Npm, locked_sha512};
+    use sha2_hw::Digest as _;
+    let tracked = [
+        "package-lock.json",
+        "a/npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Npm.manifests(&tracked),
+        vec![
+            "package-lock.json".to_string(),
+            "a/npm-shrinkwrap.json".to_string()
+        ]
+    );
+    let tarball = b"a tarball";
+    let hex: String = sha2_hw::Sha512::digest(tarball)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = format!(
+        "content-v2/sha512/{}/{}/{}",
+        &hex[..2],
+        &hex[2..4],
+        &hex[4..]
+    );
+    assert!(Npm.keep(&path));
+    assert!(!Npm.keep("index-v5/aa/bb/cc"));
+    assert!(!Npm.keep("content-v2/sha1/aa/bb/cc"));
+    assert!(!Npm.keep("_logs/x.log"));
+    let integrity = Npm.locked(&path).unwrap();
+    assert!(integrity.starts_with("sha512-"), "{integrity}");
+    // Every version of the lockfile: `packages` and nested `dependencies`.
+    let lock = format!(
+        "{{\"lockfileVersion\":3,\"packages\":{{\"node_modules/a\":{{\"integrity\":\"{integrity}\"}}}},\"dependencies\":{{\"b\":{{\"dependencies\":{{\"c\":{{\"integrity\":\"sha1-xx sha512-bad\"}}}}}}}}}}"
+    );
+    assert_eq!(
+        locked_sha512(&lock),
+        std::collections::BTreeSet::from([hex.clone()])
+    );
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("package-lock.json"), &lock).unwrap();
+    let admit = Npm.admit(t.path(), &["package-lock.json".to_string()]);
+    assert_eq!(admit(&path, tarball), Admit::Copy);
+    // A store whose rows were rewritten to match other bytes: the lockfile still catches it.
+    assert_eq!(admit(&path, b"another tarball"), Admit::Changed);
+    // A tarball the lockfile doesn't name now is left.
+    let other = format!("content-v2/sha512/00/00/{}", "0".repeat(124));
+    assert_eq!(admit(&other, b"x"), Admit::NotLocked);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Npm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_cache").then(|| "/c".into());
+    assert_eq!(
+        Npm.seed_into(Path::new("/x"), &named),
+        Ok((std::path::PathBuf::from("/c/_cacache"), "_cacache"))
     );
 }

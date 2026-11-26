@@ -74,14 +74,22 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
-- **Baked packages for Bundler** ([ADR 0156](docs/adr/0156-baked-packages-bundler.md), K-45): a
-  store gains a `bundler` part, the `.gem` files the Gemfile.lock names. `hushrun packages bake`
-  fetches them itself with `bundle cache --no-install`, which runs no gem's install script. Before
-  COMMAND starts, a run links or copies each gem into the gem cache Bundler already uses, so
-  `bundle install` installs it without downloading it, to the same paths. hushrun sets no
-  variable for it. Where the Gemfile.lock has `CHECKSUMS`, each gem is checked against it and the
-  part needs no signature; otherwise it is read as a signed part is. `hushrun packages restore`
-  seeds and says what it did.
+- **pnpm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-18): `hushrun
+  packages bake --out DIR -- pnpm fetch` keeps pnpm's store as a part, and `hushrun packages exec --
+  pnpm install --frozen-lockfile` copies it into the store pnpm uses before the install, every file
+  checked as it is copied, so a sandbox installs with no registry to reach. `hushrun packages
+  restore` does the copy alone. `hushrun run` gives a check nothing for it: no key changes.
+- **npm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-19): `hushrun
+  packages bake --out DIR -- npm ci --ignore-scripts` keeps the tarballs of npm's cache, and
+  `hushrun packages exec -- npm ci` copies into npm's cache each tarball the lockfile names now,
+  checked against its `integrity`. The lockfile is the evidence, so an unsigned store is read.
+- **Bundler in the package store** ([ADR 0156](docs/adr/0156-baked-packages-bundler.md), K-45):
+  `hushrun packages bake` keeps the `.gem` files a Gemfile.lock names as a part, fetched by
+  `bundle cache --no-install`, which runs no gem's install script. `hushrun packages exec --
+  bundle install` copies each gem the lockfile names into the gem cache Bundler already uses, so
+  it installs without downloading it, to the same paths; `hushrun packages restore` does the copy
+  alone. hushrun sets no variable for it. Where the Gemfile.lock has `CHECKSUMS`, each gem is
+  checked against it and the part needs no signature; otherwise it is read as a signed part is.
 - **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to

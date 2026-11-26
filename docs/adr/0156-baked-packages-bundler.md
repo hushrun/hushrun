@@ -2,8 +2,8 @@
 
 - **Status:** proposed; being built
 - **Date:** 2026-11-26
-- **Rules:** K-10 gains `bundler`'s paragraph; K-45 new (`docs/spec/11-baked-packages.md`); K-3,
-  K-6 and K-7 read
+- **Rules:** K-45 new, the `bundler` part (`docs/spec/11-baked-packages.md`); K-3, K-6, K-7 and
+  K-10 read; the seed is ADR 0150's
 
 ## Context
 
@@ -21,33 +21,34 @@ no reader sets `GEM_PATH`, and a gem must load from the same path with and witho
 ## Decision
 
 1. **`bundler` is C, a seed.** A part holds the `.gem` files directly in a gem cache, as
-   `cache/<name>-<version>[-<platform>].gem`. Before COMMAND starts, a run puts each gem the
-   lockfile names into `<Bundler.bundle_path>/cache`: the folder where Bundler's `fetch_gem`
-   looks before it downloads, and where it would have saved the download. Gems therefore install
+   `cache/<name>-<version>[-<platform>].gem`. `hushrun packages exec` and `restore` copy each
+   gem the lockfile names into `<Bundler.bundle_path>/cache`, before the install;
+   `hushrun run` gives COMMAND nothing for it, since by then the install is done (ADR 0150). That
+   folder is where Bundler's `fetch_gem` looks before it downloads, and where it would have saved
+   the download. Gems therefore install
    to the same paths as they do today, and load from the same paths. hushrun sets no variable:
    not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_CACHE_PATH`, `RUBYOPT`, `RUBYLIB` or
    Bootsnap's, whose cache therefore stays as the person has it.
 2. **Bundler says where its path is.** That path follows `BUNDLE_PATH`, `.bundle/config`,
-   deployment, `path.system` and `GEM_HOME`. So the run asks the `ruby` on `PATH`, from the
+   deployment, `path.system` and `GEM_HOME`. So the seed asks the `ruby` on `PATH`, from the
    Gemfile's folder (`require "bundler"; Bundler.bundle_path`), with `RUBYOPT` unset so that a
-   `-rbundler/setup` there doesn't need the gems the seed is for. The question is asked only when
-   the store has a `bundler` part the run reads and a Gemfile.lock names a gem. When Bundler's
-   global gem cache is on, the part is left alone with a line, since Bundler then looks only
-   under `~/.bundle/cache/gems/<source>`.
+   `-rbundler/setup` there doesn't need the gems the seed is for. When Bundler's global gem cache
+   is on, the part is left alone with a line, since Bundler then looks only under
+   `~/.bundle/cache/gems/<source>`.
 3. **A lockfile verifies the part only where it has `CHECKSUMS`.** When every lockfile of the
    manifest set has a `CHECKSUMS` section, the part is verified by `lockfile`: it holds only the
    files those lockfiles hash, and each row's `locked` is the lockfile's `sha256=<hex>`. A run
    seeds a file only when the lockfile in the checkout gives it that same hash, and needs no
    signature. Otherwise the part is verified by `signature`, as Gradle's and Maven's are.
-4. **A seed links, else copies, and checks every file (K-45).** Each file is hashed as it is
-   read. It is hard-linked from the store where the file system allows; otherwise it is copied
-   through a file of the seed's own and hashed again as it is written. It is linked into place
-   only when the hash is its row's, and never over a file already there. A file the lockfile
-   hashes differently is never put there: Bundler would refuse it with a "mismatched checksums"
-   error instead of downloading it again, so a stale seed would break an install that passes
-   today. A seed that left nothing out leaves a stamp, `.hushrun-packages-<store identity>`,
-   holding a digest of the files it was asked for; the next seed of the same files reads it and
-   stops there.
+4. **The seed is ADR 0150's.** It copies each file, hashed as it is read and checked against its
+   row, written beside its place and renamed, never over a file already there, and leaves a stamp
+   (`.hushrun-packages-<part identity>`) when it left nothing out. The part says what it admits: a
+   gem the `GEM` section of a lockfile in the checkout names now and, where its `CHECKSUMS` hashes
+   it, only when the SHA-256 of its bytes is that hash. A gem named with no hash is admitted only
+   for a part a signature verifies (`Part::admit_for`, given the part's `verified_by`). A file the
+   lockfile hashes differently is never copied: Bundler would refuse it with a "mismatched
+   checksums" error instead of downloading it again, so a stale seed would break an install that
+   passes today.
 5. **The part fetches itself with `bundle cache --no-install`**, for each lockfile of the
    manifest set, run as a bake runs COMMAND, with or without COMMAND. It downloads each gem and
    installs none, so no gem's install script runs in a bake. `BUNDLE_PATH` and an absolute
@@ -55,9 +56,9 @@ no reader sets `GEM_PATH`, and a gem must load from the same path with and witho
    `BUNDLE_FROZEN=true` keeps the lockfile as it is, and the global gem cache is off. COMMAND gets
    no Bundler variable. `--harvest bundler=FOLDER` takes a gem home (`cache/`) or a `BUNDLE_PATH`
    (`ruby/<version>/cache/`) instead.
-6. **One seed function** (`hushrun_packages::seed::seed`) and one reader (`Reader::Seed`) serve
-   any part that is C. PR #76 (Cargo and Go) adds a seed too: whichever merges second folds its
-   copy into the other's, so the repository keeps one.
+6. **Additive to the shared code:** `Part::fetch` (a part that fetches itself), `verified_by_for`
+   (a class that follows the lockfiles), `locked_in` (`locked` hashes only the lockfiles know)
+   and `admit_for`, each with a default that keeps every other part as it was.
 
 ## What was confirmed by running the tool
 
@@ -104,10 +105,9 @@ so an extension is still compiled at install; that is a `bundler-built` part's j
   ("Updating files in …"). The write succeeded here only because the container runs as root; for
   any other user it fails the install, and either way it writes into the store, which K-10's
   "Breaks if" forbids. So A is dropped.
-- **The stamp holds a digest of the files asked for**, not only the store's name. With the
-  store's name alone, a lockfile changed by one gem the store holds would never be seeded. A
-  second seed costs one small read, not one `stat`. The `ruby` question of decision 2 comes
-  before it and costs more than either.
+- **"Link, else copy":** the seed is ADR 0150's, which copies. A link would share one file
+  between the store and Bundler's cache, so a tool or a person writing either in place would
+  change both. Only one seed is kept in the repository, so this part doesn't add its own.
 - **The keys test is in `packages_bundler.rs`, not `units_ruby.rs`.** It checks the path the
   adapter's reads are made of: Ruby loads `tiny.rb` from the same file whether the gem was
   downloaded or seeded. `units_ruby.rs` runs on the adapter's own gem folders, which have no
@@ -128,12 +128,9 @@ so an extension is still compiled at install; that is a `bundler-built` part's j
 
 ## Consequences
 
-- A run whose store has a `bundler` part starts one `ruby` process, before COMMAND, when a
-  Gemfile.lock names a gem.
-- A seeded gem is a file in Bundler's cache, as a downloaded one would be, or a hard link to the
-  store's. A run never removes it, and the next install finds it. A tool that rewrote a linked
-  file in place would change the store's too; K-1's check by sizes or K-8's hash finds that, and
-  Bundler checks the file against `CHECKSUMS` where the part is verified by the lockfile.
+- A seed of a `bundler` part starts one `ruby` process, to find Bundler's path.
+- A seeded gem is a file in Bundler's cache, as a downloaded one would be. Nothing removes it, and
+  the next install finds it.
 - A bake of a Ruby repository needs `bundle` on `PATH`, and no COMMAND.
 - A sandbox image that carries the store and runs `bundle install` downloads only the gems the
   store lacks.

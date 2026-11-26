@@ -220,51 +220,84 @@ lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
 refuses it, and a run's check by names finds a file no row names.
 
-`bundler` is C, a seed (K-45), into the gem cache Bundler already uses. Its manifest set is every
-`Gemfile`, `Gemfile.lock`, `gems.rb`, `gems.locked` and `*.gemspec`. A part holds only the `.gem`
-files directly in a gem cache (`cache/` of a gem home, `ruby/<version>/cache/` of a
-`BUNDLE_PATH`), as `cache/<name>-<version>[-<platform>].gem`: never a git source's clone
-(`cache/bundler/git`), an installed gem, a built extension or a spec. A row's `package` is `<name>
-(<version>)` and its `locked` the lockfile's `sha256=<hex>` from `CHECKSUMS`. A part is verified by
-`lockfile` only when every lockfile of its manifest set has a `CHECKSUMS` section, and then holds
-only the files they hash; otherwise by `signature`. The part fetches itself, unless `--harvest`
-names it or `--no-build` is given, with or without `COMMAND`: for each lockfile of its manifest
-set the bake runs `bundle cache --no-install` in that lockfile's folder, as it runs `COMMAND`,
-with `BUNDLE_GEMFILE` naming its Gemfile, `BUNDLE_PATH` and `BUNDLE_CACHE_PATH` at folders of the
-bake's own, `BUNDLE_FROZEN=true` and `BUNDLE_GLOBAL_GEM_CACHE=false`. It downloads each gem and
-installs none, so no gem's install script runs in a bake, and it writes nothing into the
-checkout; with no `bundle` on `PATH` the part is left out, with a line. `COMMAND` gets no Bundler variable. A run seeds each gem the `GEM` sections of the
-lockfile Bundler reads from the run's folder name (`BUNDLE_GEMFILE`'s, or the nearest `Gemfile` or
-`gems.rb` up to the checkout's root) into `<Bundler.bundle_path>/cache`, the folder the `ruby` on
-`PATH` names when asked with `RUBYOPT` unset, so that `bundle install` installs each gem where it
-would after a download, and a gem loads from the same path with and without the store. hushrun sets
-no variable for it: not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_CACHE_PATH`, `RUBYOPT`,
-`RUBYLIB` or Bootsnap's. The part is left alone, with a line, when no Gemfile is found, its lockfile
-names no gem, there is no `ruby`, or Bundler's global gem cache is on. *Rests on:* Bundler taking
+**K-18 The `pnpm` part.** The part holds pnpm's content-addressed store as `store-dir` names it:
+`parts/pnpm/store/v<N>/files/…` (each file named by the SHA-512 of its bytes) and
+`store/v<N>/index/…` (one index a package, which lists its files), and nothing else of the store:
+not `tmp/`, not `projects/` (links to the checkouts that installed from it), not a lock. Its
+manifest set is every tracked `pnpm-lock.yaml`. A bake's fetch (`hushrun packages bake --out DIR
+-- pnpm fetch`) runs with `npm_config_store_dir` at a folder of the bake's own; `--harvest
+pnpm=FOLDER` takes a `store-dir` a job already filled (the folder `pnpm store path` names is its
+`v<N>` folder). A row of an index carries its package as pnpm writes it (`ms@2.1.3`, a scope's
+`/` as `+`) and no `locked`: the lockfile's `integrity` hashes a package's tarball, which the
+store doesn't keep, so nothing in `pnpm-lock.yaml` hashes what the part holds, and the part is
+verified by a signature (K-7). Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed: `hushrun run` gives COMMAND nothing for it, since by the time a
+check runs the install is done. The seed copies each file of the part into the store pnpm uses
+(`npm_config_store_dir` or `NPM_CONFIG_STORE_DIR` when set, else the parent of the folder
+`pnpm store path` names in the checkout), never over a file that is there, each file hashed as it
+is copied and left out, with a line, when its bytes aren't its row's; pnpm then downloads what it
+was of. A file is written beside its place and renamed, so pnpm never sees half of one. A seed
+that left nothing out writes `.hushrun-packages-<part identity>` in that store, and the next seed
+of the same part looks at nothing else. The seed never sets `NODE_OPTIONS` or any other variable,
+and never uses pnpm's global virtual store: `node_modules` is pnpm's own, with links inside the
+checkout, as an install from the network makes it. *Rests on:* pnpm installing from its store,
+with a frozen lockfile, every package whose index and files are there, and checking each file
+against its index as it imports it (confirmed with pnpm 10.28.0, store `v10`, an empty store and
+a registry nobody answers). *Breaks if:* pnpm changed its store's layout (a new `v<N>`: the part
+seeds a folder that pnpm doesn't read, and pnpm downloads as it does today), or a lockfile
+changed since the bake (the packages it adds are downloaded).
+
+**K-19 The `npm` part.** The part holds the tarballs of npm's cache and nothing else of it:
+`parts/npm/_cacache/content-v2/sha512/<2 hex>/<2 hex>/<124 hex>`, each file's path the SHA-512
+of its bytes. Not `index-v5/` (it names the registry's URLs and the times of the bake's
+requests), not `_logs/`, not another hash's folder. Its manifest set is every tracked
+`package-lock.json` and `npm-shrinkwrap.json`. A bake's fetch (`hushrun packages bake --out DIR --
+npm ci --ignore-scripts`) runs with `npm_config_cache` at a folder of the bake's own;
+`--harvest npm=FOLDER` takes a cache folder a job already filled (the one `npm config get cache`
+names). Each row carries `locked`, `sha512-<base64>` of its path, as `package-lock.json` writes
+the `integrity` of that tarball. The part is verified by the lockfile (K-7): a run reads it with
+no signature and no say-so. Its reader is C, a seed, and only `hushrun packages exec` and
+`hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
+the `_cacache` of the cache npm uses (`npm_config_cache` or `NPM_CONFIG_CACHE` when set, else what
+`npm config get cache` names in the checkout) only a tarball whose SHA-512 an `integrity` of a
+lockfile in the checkout names now (any version of the lockfile: `packages` and nested
+`dependencies`), and only when the SHA-512 of its bytes is that hash. A tarball no lockfile names
+now is left, with a count; one whose bytes aren't its row's or its name's is left with a line, and
+npm downloads it or fails without a registry. A seed that left anything out writes no stamp, so
+the next lockfile can name what it left. *Rests on:* npm reading a tarball from its cache by the
+lockfile's `integrity`, with no index entry and no request, when the lockfile has `integrity` and
+`resolved` (confirmed with npm 10.9 and `npm ci`, an empty cache and a registry nobody answers).
+*Breaks if:* npm stopped reading its cache by hash (a seed then saves nothing, and npm downloads
+as it does today), or a lockfile held only `sha1` hashes (nothing is seeded).
+
+**K-45 The `bundler` part.** The part holds the `.gem` files of a gem cache and nothing else of
+it: `parts/bundler/cache/<name>-<version>[-<platform>].gem`. Not a git source's clone
+(`cache/bundler/git`), an installed gem, a built extension or a spec. Its manifest set is every
+tracked `Gemfile`, `Gemfile.lock`, `gems.rb`, `gems.locked` and `*.gemspec`. A row's `package` is
+`<name> (<version>)`, and its `locked` is the lockfile's `sha256=<hex>` from `CHECKSUMS`. The part
+is verified by the lockfile (K-7) only when every lockfile of its manifest set has a `CHECKSUMS`
+section, and it then holds only the files they hash; otherwise by a signature. The part fetches
+itself, with or without `COMMAND`, unless `--harvest bundler=FOLDER` names a gem home (`cache/`)
+or a `BUNDLE_PATH` (`ruby/<version>/cache/`) or `--no-build` is given: for each lockfile of its
+manifest set the bake runs `bundle cache --no-install` in that lockfile's folder, as it runs
+`COMMAND`, with `BUNDLE_GEMFILE` naming its Gemfile, `BUNDLE_PATH` and `BUNDLE_CACHE_PATH` at
+folders of the bake's own, `BUNDLE_FROZEN=true` and `BUNDLE_GLOBAL_GEM_CACHE=false`. It downloads
+each gem and installs none, so no gem's install script runs in a bake, and it writes nothing into
+the checkout. With no `bundle` on `PATH` the part is left out, with a line; `COMMAND` gets no
+Bundler variable. Its reader is C, a seed, and only `hushrun packages exec` and `hushrun packages
+restore` seed; `hushrun run` gives COMMAND nothing for it. The seed copies into
+`<Bundler.bundle_path>/cache`, where Bundler looks for a gem before it downloads one, the folder
+the `ruby` on `PATH` names when asked from the folder of the Gemfile Bundler reads
+(`BUNDLE_GEMFILE`'s, or the nearest `Gemfile` or `gems.rb` up to the checkout's root) with
+`RUBYOPT` unset. So `bundle install` installs each gem where it would after a download, and a gem
+loads from the same path with and without the store. It copies only a gem the `GEM` section of a
+lockfile in the checkout names now, and when that lockfile's `CHECKSUMS` hashes it, only when the
+SHA-256 of its bytes is that hash; a gem named with no hash only for a part a signature verifies.
+hushrun sets no variable for it: not `GEM_HOME`, `GEM_PATH`, `BUNDLE_PATH`, `BUNDLE_CACHE_PATH`,
+`RUBYOPT`, `RUBYLIB` or Bootsnap's. The part is left alone, with a line, when no Gemfile is found,
+there is no `ruby`, or Bundler's global gem cache is on. *Rests on:* Bundler taking
 `<path>/cache/<file>` as the download, and checking it against `CHECKSUMS` itself (confirmed with
 Bundler 4.0.18 and Ruby 3.3.6). *Breaks if:* a `.bundle/config` in the checkout names Bundler's
-path or app cache: it outranks the bake's variables, the fetch's gems go there, and the part is
-left out; or a run's `.bundle/config` turns the global gem cache on, which the run's question to
-`ruby` sees, so the part is left alone.
-
-**K-45 A seed.** Where a part is C, `hushrun run`, `hushrun packages exec` and `env`, before
-COMMAND starts, and `hushrun packages restore`, put each file the lockfile in the checkout names
-now from the part into the tool's own cache folder. A file the part lacks is left to the tool to
-download. A file is put there only when its row is a file, its name in the cache is one plain name
-(no separator, not `.` or `..`), the lockfile's hash of it, where it gives one, is its row's
-SHA-256, its bytes hash to its row's SHA-256 as the seed reads them, and, for a part verified by
-`lockfile`, the lockfile gives one. It is a hard link to the store's file where the file system
-allows one, else a copy through a file of the seed's own in the cache folder, hashed again as it is
-written; either is linked into place, and a file the cache already holds, under that name, is
-never written over. A file refused for any of these is left out, with one line for the part; a
-cache folder that can't be made or written leaves the part alone, with a line. A seed that left
-nothing out writes a stamp in the cache folder, `.hushrun-packages-<store identity>`, holding a
-digest of the files it was asked for (each one's row path, name and the lockfile's hash); the next
-seed asked for the same files by the same store reads the stamp and nothing else. A seed sets no
-variable and enters no key. `restore` says how many files it put there, how many the cache held
-already and how many the part lacks, or that the stamp answered. *Rests on:* the tool taking a
-file in its own cache as the download, with the same bytes. *Breaks if:* a seeded file is a link to
-the store's and something writes it in place, the tool or a person: the store's file changes with
-it, which K-1's check by sizes or K-8's hash finds, and the tool checks it against its lockfile
-where the part is verified by one; or the tool's cache folder is one another user may write: what
-a seed puts there, they can change, as they can what the tool downloads there.
+path or app cache during the bake: it outranks the bake's variables, the gems go there, and the
+part is left out; or the global gem cache is on, which the question to `ruby` sees: the part is
+left alone.
