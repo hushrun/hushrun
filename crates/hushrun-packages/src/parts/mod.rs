@@ -5,6 +5,7 @@ pub mod composer;
 pub mod gradle;
 pub mod maven;
 pub mod npm;
+pub mod nuget;
 pub mod pip;
 pub mod pnpm;
 pub mod poetry;

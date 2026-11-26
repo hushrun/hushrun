@@ -127,6 +127,12 @@ project's new branch starts from what main's CI already ran.
     Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
     and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
     from a store without rewriting `uv.lock`.
+- **Baked packages for NuGet** ([ADR 0154](docs/adr/0154-baked-packages-nuget.md)): a `nuget`
+  part, a global packages folder that `dotnet restore` reads in place as a fallback folder
+  through `NUGET_FALLBACK_PACKAGES`. A bake's build fetches into a `NUGET_PACKAGES` of its own;
+  `--harvest nuget=FOLDER` takes a filled global packages folder. Folders the person already
+  names in `NUGET_FALLBACK_PACKAGES`, or a NuGet.Config's fallback folders, which the variable
+  replaces, come first.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
