@@ -179,7 +179,7 @@ fn configs_fallbacks(checkout: &Path, env: Env<'_>) -> Result<Vec<String>, Strin
         let Some(section) = section(&text).map_err(|()| cant("markup it doesn't read"))? else {
             continue;
         };
-        let (items, cleared) = items(section).map_err(|what| cant(what))?;
+        let (items, cleared) = items(section).map_err(cant)?;
         let dir = config.parent().unwrap_or(Path::new("/"));
         for (key, value) in items {
             if keys.contains(&key) {
@@ -222,8 +222,11 @@ fn section(text: &str) -> Result<Option<&str>, ()> {
     Ok(Some(&rest[..close]))
 }
 
+/// A config's fallback folders by key, in its order.
+type Items = Vec<(String, String)>;
+
 /// A section's `<add key value />` items after its last `<clear />`, and whether it had one.
-fn items(section: &str) -> Result<(Vec<(String, String)>, bool), &'static str> {
+fn items(section: &str) -> Result<(Items, bool), &'static str> {
     let mut out = Vec::new();
     let mut cleared = false;
     let mut rest = section;
