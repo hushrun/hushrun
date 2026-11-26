@@ -208,6 +208,10 @@ fn maven_opts(opts: Option<&str>, word: &str) -> String {
 /// K-10: what the store a run here reads gives COMMAND. `may_write_trusted` is the run's
 /// authority. Nothing when no store is named.
 pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool) -> Given {
+    // K-11: no store named, nothing to read: one `stat`.
+    if state::named(&var).is_none() {
+        return Given::default();
+    }
     let context = Context::here(global);
     given_by(&context, &context.state(may_write_trusted))
 }

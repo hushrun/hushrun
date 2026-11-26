@@ -1182,13 +1182,20 @@ impl<'a> BuildRun<'a> {
             .as_ref()
             .and_then(|session| session.current().share.relay().cloned())
             .zip(crate::cmd::build_relay::Relay::running());
-        let packages = crate::cmd::packages::given(
-            global,
+        // Only a run that would read a store nothing verifies waits for its server's answer, as
+        // the baked store's does; any other with a relay counts as one that may write it.
+        let in_ci = crate::gitlab_job::in_ci(&Env::from_process());
+        let accepting =
+            hushrun_ci::var_os(hushrun_packages::LOWER_UNTRUSTED).is_some_and(|v| v == "1");
+        let may_write_trusted = if accepting {
             hushrun_build::baked::authority(
-                crate::gitlab_job::in_ci(&Env::from_process()),
+                in_ci,
                 relay.as_ref().map(|(_, relay)| relay.writes_trusted()),
-            ),
-        );
+            )
+        } else {
+            in_ci || relay.is_some()
+        };
+        let packages = crate::cmd::packages::given(global, may_write_trusted);
         for line in &packages.lines {
             say.line(format_args!("{line}"));
         }
