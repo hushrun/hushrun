@@ -179,7 +179,7 @@ fn all_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-// covers: K-6, K-10
+// covers: K-6, K-10, K-50
 #[test]
 fn a_baked_hex_part_is_seeded_and_mix_deps_get_downloads_no_tarball() {
     let Some(w) = world() else { return };

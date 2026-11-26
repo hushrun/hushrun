@@ -873,6 +873,17 @@ signed is read only with `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1`, and never in CI. 
 write what others trust hashes every file first; elsewhere a run checks names and sizes, and
 `hushrun packages verify` hashes every file. `HUSHRUN_PACKAGES=off` turns it off.
 
+Hex's packages are seeded instead: before the command, a run puts each tarball `mix.lock` pins
+into Hex's own cache (`HEX_HOME`, else `~/.hex`), checked against the lockfile, and `mix deps.get`
+unpacks `deps/` from there; `mix deps.compile` runs as usual. Hex still fetches each package's
+registry record, so its repository must be reachable.
+
+```sh
+hushrun packages bake --out /hushrun-packages -- mix deps.get
+# In the sandbox's setup, before mix deps.get:
+hushrun packages restore
+```
+
 ## Compiled code
 
 A check that runs can still skip compiling what this machine already compiled from the same

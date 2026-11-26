@@ -165,7 +165,7 @@ mod tests {
         }
     }
 
-    // covers: K-10
+    // covers: K-50
     #[test]
     fn a_seed_puts_what_the_lockfile_pins_never_over_a_file_and_stamps_once() {
         let t = tempfile::tempdir().unwrap();
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(done.copied, 0);
     }
 
-    // covers: K-10
+    // covers: K-50
     #[cfg(unix)]
     #[test]
     fn a_seed_links_where_it_can_and_the_link_is_the_stores_file() {

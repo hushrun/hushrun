@@ -94,6 +94,16 @@ project's new branch starts from what main's CI already ran.
   - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
+- **Baked packages for Hex** ([ADR 0157](docs/adr/0157-baked-hex-packages.md)): a package
+  store's `hex` part holds Hex's tarballs, baked by `hushrun packages bake --out DIR -- mix
+  deps.get` with Hex's cache, `deps` and `_build` at the bake's own folders, so the checkout's are
+  left as they were. `hushrun run`, `hushrun packages exec` and `hushrun packages restore` put each
+  tarball whose SHA-256 is `mix.lock`'s outer checksum into the run's Hex cache, and `mix deps.get`
+  then unpacks `deps/` with no tarball downloaded; `mix deps.compile` runs as before. Checked
+  against the lockfile, the part is read unsigned by any run, CI included. A `mix.lock` in a form
+  hushrun doesn't read leaves the part out, with a line. The seed is one for every part: linked
+  where it can be, else copied, never over a file, hashed as it is put, and once every file is in
+  place a stamp of the store makes the next seed one `stat`.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
