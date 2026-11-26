@@ -229,7 +229,7 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
     let saved = changed.units["savedMs"].clone();
     assert_eq!(
         changed.units,
-        json!({"total": 5, "ran": 3, "reused": 2, "savedMs": saved})
+        json!({"total": 5, "ran": 3, "reused": 2, "savedMs": saved, "audited": 1})
     );
     // Gradle didn't run the reused classes: two of other's three wrote no report.
     let ran_in_other = ["A", "B", "C"]

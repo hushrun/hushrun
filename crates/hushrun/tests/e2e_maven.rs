@@ -64,7 +64,7 @@ fn a_run_says_what_it_reuses_records_it_and_hushrun_why_tells_a_class_by_its_fil
     let units = r.newest_result()["units"].clone();
     assert_eq!(
         units,
-        json!({"total": 6, "ran": 4, "reused": 2, "savedMs": units["savedMs"]})
+        json!({"total": 6, "ran": 4, "reused": 2, "savedMs": units["savedMs"], "audited": 1})
     );
     // \[C-37\] `hushrun why` knows a class by the name the store keeps, the reused ones too.
     let said = why(&r, PRICE_TEST);
