@@ -131,7 +131,7 @@ fn a_store_seeds_an_empty_cargo_home_with_the_crates_cargo_lock_pins() {
     assert!(said.contains("packages: cargo: 1 files"), "{said}");
     assert!(said.contains("(Cargo.lock, Cargo.toml)"), "{said}");
     assert!(
-        said.contains("the store is unsigned (--no-sign): every run reads it, since each file is checked against the lockfile"),
+        said.contains("the store is unsigned (--no-sign): each part is checked against its lockfile, so any run reads it"),
         "{said}"
     );
     // The row names the package and Cargo.lock's checksum.
