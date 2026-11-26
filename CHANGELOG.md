@@ -94,6 +94,12 @@ project's new branch starts from what main's CI already ran.
   - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
+- **Baked packages for NuGet** ([ADR 0154](docs/adr/0154-baked-packages-nuget.md)): a `nuget`
+  part, a global packages folder that `dotnet restore` reads in place as a fallback folder
+  through `NUGET_FALLBACK_PACKAGES`. A bake's build fetches into a `NUGET_PACKAGES` of its own;
+  `--harvest nuget=FOLDER` takes a filled global packages folder. Folders the person already
+  names in `NUGET_FALLBACK_PACKAGES` come first; a NuGet.Config that names fallback folders,
+  which the variable would replace, keeps the part out, with a line.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
