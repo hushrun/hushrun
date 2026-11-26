@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::part::Part as _;
 use crate::part::{self, Reader};
-use crate::parts::{gradle::Gradle, maven::Maven};
+use crate::parts::{gradle::Gradle, maven::Maven, nuget::Nuget};
 
 fn paths(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -184,4 +184,138 @@ fn every_part_module_is_listed() {
         .collect();
     modules.sort();
     assert_eq!(listed, modules);
+}
+
+// covers: K-4
+#[test]
+fn nugets_manifest_set_is_its_projects_lockfiles_and_configs() {
+    let tracked = paths(&[
+        "Calc.sln",
+        "nuget.config",
+        "global.json",
+        "Directory.Packages.props",
+        "Directory.Build.props",
+        ".config/dotnet-tools.json",
+        "src/Calc/Calc.csproj",
+        "src/Calc/packages.lock.json",
+        "src/Calc/Ops.cs",
+        "src/Fs/Fs.fsproj",
+        "src/Vb/Vb.vbproj",
+        "legacy/packages.config",
+        "legacy/NuGet.Config",
+    ]);
+    assert_eq!(
+        Nuget.manifests(&tracked),
+        paths(&[
+            "nuget.config",
+            "global.json",
+            "Directory.Packages.props",
+            "Directory.Build.props",
+            ".config/dotnet-tools.json",
+            "src/Calc/Calc.csproj",
+            "src/Calc/packages.lock.json",
+            "src/Fs/Fs.fsproj",
+            "src/Vb/Vb.vbproj",
+            "legacy/packages.config",
+            "legacy/NuGet.Config",
+        ])
+    );
+}
+
+// covers: K-5
+#[test]
+fn a_nuget_harvest_keeps_package_folders_and_their_mark() {
+    for kept in [
+        "newtonsoft.json/13.0.3/newtonsoft.json.13.0.3.nupkg",
+        "newtonsoft.json/13.0.3/newtonsoft.json.13.0.3.nupkg.sha512",
+        "newtonsoft.json/13.0.3/newtonsoft.json.nuspec",
+        // NuGet's mark that the folder is complete, and the package's signature: dot files a
+        // package's folder needs.
+        "newtonsoft.json/13.0.3/.nupkg.metadata",
+        "newtonsoft.json/13.0.3/.signature.p7s",
+        "newtonsoft.json/13.0.3/lib/net6.0/Newtonsoft.Json.dll",
+        "xunit/2.9.2-beta.1/xunit.nuspec",
+    ] {
+        assert!(Nuget.keep(kept), "{kept}");
+    }
+    for left in [
+        ".tools/dotnet-ef/8.0.0/x.dll",
+        "newtonsoft.json/13.0.3",
+        "newtonsoft.json/tmp1a2b.c3d/newtonsoft.json.13.0.3.nupkg",
+        "newtonsoft.json/13.0.3/x.lock",
+        "stray.txt",
+    ] {
+        assert!(!Nuget.keep(left), "{left}");
+    }
+    assert_eq!(
+        Nuget
+            .package("newtonsoft.json/13.0.3/lib/net6.0/Newtonsoft.Json.dll")
+            .as_deref(),
+        Some("newtonsoft.json/13.0.3")
+    );
+    assert_eq!(Nuget.package("newtonsoft.json/13.0.3"), None);
+}
+
+// covers: K-10
+#[test]
+fn nugets_reader_joins_the_persons_fallback_folders_and_never_drops_a_configs() {
+    let checkout = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().as_os_str().to_owned();
+    let dir = Path::new("/hushrun-packages/parts/nuget");
+    let ours = "/hushrun-packages/parts/nuget/packages";
+    let only_home = |name: &str| (name == "HOME").then(|| home_path.clone());
+    assert_eq!(
+        Nuget.reader(dir, checkout.path(), &only_home),
+        Reader::InPlace(vec![("NUGET_FALLBACK_PACKAGES".into(), ours.into())])
+    );
+    // The variable replaces every folder a config names: the person's own come first.
+    let theirs = |name: &str| match name {
+        "NUGET_FALLBACK_PACKAGES" => Some(OsString::from("/mine;/theirs;")),
+        _ => None,
+    };
+    assert_eq!(
+        Nuget.reader(dir, checkout.path(), &theirs),
+        Reader::InPlace(vec![(
+            "NUGET_FALLBACK_PACKAGES".into(),
+            format!("/mine;/theirs;{ours}").into()
+        )])
+    );
+    let already = |name: &str| {
+        (name == "NUGET_FALLBACK_PACKAGES").then(|| OsString::from(format!("/mine;{ours}")))
+    };
+    assert_eq!(
+        Nuget.reader(dir, checkout.path(), &already),
+        Reader::InPlace(vec![(
+            "NUGET_FALLBACK_PACKAGES".into(),
+            format!("/mine;{ours}").into()
+        )])
+    );
+    // A config that names fallback folders, the checkout's or the user's: the part is left alone.
+    let user = home.path().join(".nuget/NuGet");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(
+        user.join("NuGet.Config"),
+        "<configuration><fallbackPackageFolders><add key=\"a\" value=\"/f\" /></fallbackPackageFolders></configuration>\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        Nuget.reader(dir, checkout.path(), &only_home),
+        Reader::LeftAlone(why) if why.contains("names fallback folders, which NUGET_FALLBACK_PACKAGES would replace")
+    ));
+    std::fs::remove_file(user.join("NuGet.Config")).unwrap();
+    std::fs::write(
+        checkout.path().join("NuGet.Config"),
+        "<configuration><fallbackPackageFolders><clear /></fallbackPackageFolders></configuration>\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        Nuget.reader(dir, checkout.path(), &only_home),
+        Reader::LeftAlone(_)
+    ));
+    // A folder with a `;` can't ride in the variable, which NuGet splits on it.
+    assert!(matches!(
+        Nuget.reader(Path::new("/tmp/a;b/parts/nuget"), Path::new("/nonexistent-c"), &no_env),
+        Reader::LeftAlone(why) if why.contains("has a `;`")
+    ));
 }

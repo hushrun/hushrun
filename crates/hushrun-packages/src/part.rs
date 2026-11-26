@@ -46,7 +46,11 @@ pub trait Part: Sync {
 }
 
 /// Every part this hushrun knows, by name.
-pub static ALL: &[&dyn Part] = &[&crate::parts::gradle::Gradle, &crate::parts::maven::Maven];
+pub static ALL: &[&dyn Part] = &[
+    &crate::parts::gradle::Gradle,
+    &crate::parts::maven::Maven,
+    &crate::parts::nuget::Nuget,
+];
 
 /// The part named `name`.
 pub fn by_name(name: &str) -> Option<&'static dyn Part> {
