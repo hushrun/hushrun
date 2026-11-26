@@ -206,17 +206,18 @@ fn maven_opts(opts: Option<&str>, word: &str) -> String {
 }
 
 /// K-10: what the store a run here reads gives COMMAND. `may_write_trusted` is the run's
-/// authority. Nothing when no store is named.
-pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool) -> Given {
+/// authority; with `seed`, a part read by a seed is copied into its tool's cache now, before
+/// COMMAND starts. Nothing when no store is named.
+pub(crate) fn given(global: &GlobalOpts, may_write_trusted: bool, seed: bool) -> Given {
     // K-11: no store named, nothing to read: one `stat`.
     if state::named(&var).is_none() {
         return Given::default();
     }
     let context = Context::here(global);
-    given_by(&context, &context.state(may_write_trusted))
+    given_by(&context, &context.state(may_write_trusted), seed)
 }
 
-fn given_by(context: &Context, state: &State) -> Given {
+fn given_by(context: &Context, state: &State, seed: bool) -> Given {
     let mut given = Given {
         lines: state.lines(),
         ..Given::default()
@@ -237,12 +238,49 @@ fn given_by(context: &Context, state: &State) -> Given {
                 .vars
                 .extend(vars.into_iter().map(|(n, v)| (OsString::from(n), v))),
             Reader::MavenOpts(word) => given.maven = Some(word),
+            Reader::Seed(into) if seed => given.lines.extend(seed_part(context, read, part, &into)),
+            Reader::Seed(_) => given.lines.push(format!(
+                "packages: {}: nothing to export: `hushrun packages restore` copies its files into {}'s cache",
+                part.name(),
+                part.tool()
+            )),
             Reader::LeftAlone(why) => given
                 .lines
                 .push(format!("packages: {}: left alone: {why}", part.name())),
         }
     }
     given
+}
+
+/// K-10, mechanism C: seeds `read` into the tool's cache at `into`, each file only when a
+/// lockfile of the checkout pins its bytes; the lines to say.
+fn seed_part(
+    context: &Context,
+    read: &state::ReadPart,
+    part: &dyn Part,
+    into: &Path,
+) -> Vec<String> {
+    let locks = part.locks(&context.checkout, &part.manifests(&context.tracked));
+    let seeded = part.seed(&read.dir, &read.rows, into, &locks);
+    let name = part.name();
+    let mut lines = Vec::new();
+    if seeded.copied > 0 {
+        lines.push(format!(
+            "packages: {name}: copied {} files into {}",
+            seeded.copied,
+            into.display()
+        ));
+    }
+    if seeded.refused > 0 {
+        lines.push(format!(
+            "packages: {name}: left out {} files whose bytes aren't the ones the lockfile pins",
+            seeded.refused
+        ));
+    }
+    if let Some(why) = seeded.error {
+        lines.push(format!("packages: {name}: stopped copying: {why}"));
+    }
+    lines
 }
 
 /// The folder a `maven` part would be read from, for the `maven/1` cache's roots: an entry that
@@ -321,7 +359,7 @@ fn export_line(name: &OsString, value: &OsString) -> String {
 }
 
 fn env_command(global: &GlobalOpts) -> CmdResult {
-    let given = given(global, in_ci());
+    let given = given(global, in_ci(), false);
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -350,7 +388,7 @@ pub fn exec(global: &GlobalOpts, command: &[String]) -> ExitCode {
         eprintln!("error: name the command: `hushrun packages exec -- COMMAND`");
         return Exit::Usage.into();
     };
-    let given = given(global, in_ci());
+    let given = given(global, in_ci(), true);
     for line in &given.lines {
         eprintln!("hushrun: {line}");
     }
@@ -381,6 +419,22 @@ fn restore(global: &GlobalOpts, parts: &[String]) -> CmdResult {
     };
     for read in &lower.parts {
         if !parts.is_empty() && !parts.contains(&read.entry.part) {
+            continue;
+        }
+        if let Some(part) = part::by_name(&read.entry.part)
+            && let Reader::Seed(into) = part.reader(&read.dir, &context.checkout, &var)
+        {
+            let lines = seed_part(&context, read, part, &into);
+            if lines.is_empty() {
+                println!(
+                    "packages: {}: {}'s cache holds every file the lockfile pins already",
+                    part.name(),
+                    part.tool()
+                );
+            }
+            for line in lines {
+                println!("{line}");
+            }
             continue;
         }
         println!(
@@ -545,6 +599,17 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         ));
     }
     let baked_ms = baked_ms();
+    // K-3: each part's lockfiles, for its rows' `locked`.
+    let locks: Vec<(&str, part::Locks)> = metas
+        .iter()
+        .filter_map(|m| {
+            let part = part::by_name(&m.part)?;
+            Some((
+                part.name(),
+                part.locks(&context.checkout, &part.manifests(&context.tracked)),
+            ))
+        })
+        .collect();
     let packages = hushrun_packages::write::seal(
         &new,
         &StoreMeta {
@@ -554,11 +619,15 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         },
         &metas,
         &|name, path| {
-            let package = part::by_name(name).and_then(|p| {
-                let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
-                p.package(inner)
-            });
-            (package, None)
+            let Some(part) = part::by_name(name) else {
+                return (None, None);
+            };
+            let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
+            let locked = locks
+                .iter()
+                .find(|(n, _)| *n == name)
+                .and_then(|(_, locks)| part.locked(inner, locks));
+            (part.package(inner), locked)
         },
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -875,8 +944,9 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 }
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
-/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home
-/// and Maven's local repository at folders of the bake's own under `cache`.
+/// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
+/// Maven's local repository, the cargo home and Go's module cache at folders of the bake's own
+/// under `cache`.
 fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
@@ -897,6 +967,14 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
         &[
             ("GRADLE_USER_HOME", gradle.into_os_string()),
             (opts, OsString::from(maven_opts)),
+            (
+                "CARGO_HOME",
+                fetch_cache(cache, &hushrun_packages::parts::cargo::Cargo).into_os_string(),
+            ),
+            (
+                "GOMODCACHE",
+                fetch_cache(cache, &hushrun_packages::parts::go::Go).into_os_string(),
+            ),
             (hushrun_packages::LOWER, OsString::new()),
         ],
     );
