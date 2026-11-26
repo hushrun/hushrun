@@ -183,6 +183,16 @@ pub trait Part: Sync {
     fn fetch_vars(&self, _cache: &Path) -> Vec<(&'static str, OsString)> {
         Vec::new()
     }
+    /// K-3: [`Part::locks`], or an error, naming the lockfile, when one is in a form the part
+    /// doesn't read, which leaves the part out of a bake and a seed rather than guess.
+    fn read_locks(&self, checkout: &Path, manifests: &[String]) -> Result<Locks, String> {
+        Ok(self.locks(checkout, manifests))
+    }
+    /// K-50: whether a seed may put a hard link to the store's file in the tool's cache rather
+    /// than a copy: only for a tool that replaces a file of its cache and never writes into one.
+    fn links(&self) -> bool {
+        false
+    }
 }
 
 /// Every part this hushrun knows, by name.
@@ -192,6 +202,7 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::composer::Composer,
     &crate::parts::go::Go,
     &crate::parts::gradle::Gradle,
+    &crate::parts::hex::Hex,
     &crate::parts::maven::Maven,
     &crate::parts::npm::Npm,
     &crate::parts::nuget::Nuget,
