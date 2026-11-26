@@ -291,11 +291,12 @@ fn poetry_keeps_the_files_its_lockfile_hashes_and_never_a_built_wheel() {
     assert!(locked.of("six-1.16.0-py2.py3-none-any.whl", &six).is_some());
     // The same bytes under another name are no file the lockfile names.
     assert!(locked.of("six-1.16.0-cp313-none-any.whl", &six).is_none());
-    let key = "11/e9/4b/1f155708335621cfc5e1dc8f2ab6eaf871488879d097ee3298480667f5";
-    assert!(Poetry.keep(&format!("{key}/six-1.16.0-py2.py3-none-any.whl")));
+    // The folder Poetry names by a file's URL and hash: 64 hex characters split 2/2/2/58.
+    let folder = format!("11/e9/4b/{}", "a".repeat(58));
+    assert!(Poetry.keep(&format!("{folder}/six-1.16.0-py2.py3-none-any.whl")));
     for left in [
         "six-1.16.0-py2.py3-none-any.whl".to_string(),
-        format!("{key}/six-1.16.0-py2.py3-none-any.whl.lock"),
+        format!("{folder}/six-1.16.0-py2.py3-none-any.whl.lock"),
         "11/e9/4b/zz/six-1.16.0.tar.gz".to_string(),
     ] {
         assert!(!Poetry.keep(&left), "{left}");
