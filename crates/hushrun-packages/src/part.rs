@@ -152,6 +152,8 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::bun::Bun,
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
+    &crate::parts::npm::Npm,
+    &crate::parts::pnpm::Pnpm,
     &crate::parts::yarn::Yarn,
 ];
 

@@ -84,6 +84,15 @@ project's new branch starts from what main's CI already ran.
   and `hushrun packages exec -- yarn install` copies in each file `yarn.lock` still hashes, into
   Yarn 4's cache or into a mirror beside Yarn 1's cache that the install is pointed at. A Yarn 2 or
   3 lockfile isn't read.
+- **pnpm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-18): `hushrun
+  packages bake --out DIR -- pnpm fetch` keeps pnpm's store as a part, and `hushrun packages exec --
+  pnpm install --frozen-lockfile` copies it into the store pnpm uses before the install, every file
+  checked as it is copied, so a sandbox installs with no registry to reach. `hushrun packages
+  restore` does the copy alone. `hushrun run` gives a check nothing for it: no key changes.
+- **npm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-19): `hushrun
+  packages bake --out DIR -- npm ci --ignore-scripts` keeps the tarballs of npm's cache, and
+  `hushrun packages exec -- npm ci` copies into npm's cache each tarball the lockfile names now,
+  checked against its `integrity`. The lockfile is the evidence, so an unsigned store is read.
 - **Baked packages, the format** ([ADR 0149](docs/adr/0149-baked-packages.md)): a package store,
   a folder beside the baked store that holds a repository's downloaded packages, one part per
   package manager in the tool's own cache layout, every file listed with its SHA-256 (K-1 to

@@ -235,7 +235,7 @@ mod tests {
         }
     }
 
-    // covers: K-10
+    // covers: K-10, K-18
     #[test]
     fn a_seed_copies_what_is_missing_checks_every_byte_and_stamps_once() {
         let all = |_: &str, _: &[u8]| Admit::Copy;

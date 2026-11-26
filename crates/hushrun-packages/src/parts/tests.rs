@@ -185,3 +185,123 @@ fn every_part_module_is_listed() {
     modules.sort();
     assert_eq!(listed, modules);
 }
+
+// covers: K-4, K-5, K-18
+#[test]
+fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {
+    use crate::parts::pnpm::Pnpm;
+    let tracked = [
+        "pnpm-lock.yaml",
+        "web/pnpm-lock.yaml",
+        "package.json",
+        "yarn.lock",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Pnpm.manifests(&tracked),
+        vec![
+            "pnpm-lock.yaml".to_string(),
+            "web/pnpm-lock.yaml".to_string()
+        ]
+    );
+    assert!(Pnpm.keep("v10/files/aa/0123"));
+    assert!(Pnpm.keep("v10/files/aa/0123-exec"));
+    assert!(Pnpm.keep("v10/index/e8/5973-ms@2.1.3.json"));
+    assert!(!Pnpm.keep("v10/projects/dabb"));
+    assert!(!Pnpm.keep("v10/tmp/x/y"));
+    assert!(!Pnpm.keep("v10/files"));
+    assert!(!Pnpm.keep("other/files/aa/x"));
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-ms@2.1.3.json").as_deref(),
+        Some("ms@2.1.3")
+    );
+    assert_eq!(
+        Pnpm.package("v10/index/e8/5973-@types+node@26.6.6.json")
+            .as_deref(),
+        Some("@types+node@26.6.6")
+    );
+    assert_eq!(Pnpm.package("v10/files/aa/0123"), None);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Pnpm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_store_dir").then(|| "/s".into());
+    assert_eq!(
+        Pnpm.seed_into(Path::new("/c"), &named),
+        Ok((std::path::PathBuf::from("/s"), "store"))
+    );
+    assert!(Maven.seed_into(Path::new("/c"), &no_env).is_err());
+    let t = tempfile::tempdir().unwrap();
+    assert_eq!(Pnpm.harvest_root(t.path()), None);
+    std::fs::create_dir_all(t.path().join("v10/files")).unwrap();
+    assert_eq!(
+        Pnpm.harvest_root(t.path()),
+        Some((t.path().to_path_buf(), "store"))
+    );
+}
+
+// covers: K-3, K-4, K-5, K-19
+#[test]
+fn npm_keeps_only_tarballs_and_seeds_only_what_the_lockfile_names_by_its_bytes() {
+    use crate::part::Admit;
+    use crate::parts::npm::{Npm, locked_sha512};
+    use sha2_hw::Digest as _;
+    let tracked = [
+        "package-lock.json",
+        "a/npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+    ]
+    .map(String::from);
+    assert_eq!(
+        Npm.manifests(&tracked),
+        vec![
+            "package-lock.json".to_string(),
+            "a/npm-shrinkwrap.json".to_string()
+        ]
+    );
+    let tarball = b"a tarball";
+    let hex: String = sha2_hw::Sha512::digest(tarball)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = format!(
+        "content-v2/sha512/{}/{}/{}",
+        &hex[..2],
+        &hex[2..4],
+        &hex[4..]
+    );
+    assert!(Npm.keep(&path));
+    assert!(!Npm.keep("index-v5/aa/bb/cc"));
+    assert!(!Npm.keep("content-v2/sha1/aa/bb/cc"));
+    assert!(!Npm.keep("_logs/x.log"));
+    let integrity = Npm.locked(&path).unwrap();
+    assert!(integrity.starts_with("sha512-"), "{integrity}");
+    // Every version of the lockfile: `packages` and nested `dependencies`.
+    let lock = format!(
+        "{{\"lockfileVersion\":3,\"packages\":{{\"node_modules/a\":{{\"integrity\":\"{integrity}\"}}}},\"dependencies\":{{\"b\":{{\"dependencies\":{{\"c\":{{\"integrity\":\"sha1-xx sha512-bad\"}}}}}}}}}}"
+    );
+    assert_eq!(
+        locked_sha512(&lock),
+        std::collections::BTreeSet::from([hex.clone()])
+    );
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("package-lock.json"), &lock).unwrap();
+    let admit = Npm.admit(t.path(), &["package-lock.json".to_string()]);
+    assert_eq!(admit(&path, tarball), Admit::Copy);
+    // A store whose rows were rewritten to match other bytes: the lockfile still catches it.
+    assert_eq!(admit(&path, b"another tarball"), Admit::Changed);
+    // A tarball the lockfile doesn't name now is left.
+    let other = format!("content-v2/sha512/00/00/{}", "0".repeat(124));
+    assert_eq!(admit(&other, b"x"), Admit::NotLocked);
+    let no_env = |_: &str| None;
+    assert_eq!(
+        Npm.reader(Path::new("/p"), Path::new("/c"), &no_env),
+        Reader::Seed
+    );
+    let named = |name: &str| (name == "npm_config_cache").then(|| "/c".into());
+    assert_eq!(
+        Npm.seed_into(Path::new("/x"), &named),
+        Ok((std::path::PathBuf::from("/c/_cacache"), "_cacache"))
+    );
+}
