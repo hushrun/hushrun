@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # .cursor/Dockerfile for Cursor's cloud agents: hushrun, and the repository's newest baked store
-# in /hushrun, where runs read it. HUSHRUN_REGISTRY_TOKEN is a build secret (a pull token from the
-# dashboard's Shared store page): it is used by this one step and kept in no layer.
+# in /hushrun, where runs read it. HUSHRUN_REGISTRY_TOKEN is a build secret (a pull token made on
+# the repository's page in the dashboard, under Shared store, Baked images): it is used by this one
+# step and kept in no layer.
 FROM mcr.microsoft.com/devcontainers/base:ubuntu
 
 RUN curl --proto '=https' --tlsv1.2 -LsSf \

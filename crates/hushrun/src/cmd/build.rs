@@ -753,6 +753,22 @@ fn bake(global: &GlobalOpts, place: &Place, args: &BuildBakeArgs) -> CmdResult {
             output::print(text)
         }
     };
+    // On a CI runner, a bake that names a registry says what it published, for a later step to
+    // pull or build a template from by digest.
+    if let Some(published) = published.as_ref().filter(|p| p.registry) {
+        let outputs = bake_outputs(
+            &baked.manifest.to_string(),
+            published.reference.split('@').next().unwrap_or_default(),
+            published.skipped.is_none().then_some(&published.digest),
+            &published.tags,
+        );
+        crate::ci::Ci::from_process(global)
+            .outputs(&outputs)
+            .map_err(|e| failed(format!("writing the GitHub step outputs: {e}")))?;
+        if let Some(file) = env("HUSHRUN_BAKE_ENV").filter(|f| !f.is_empty()) {
+            write_bake_env(&folder, std::path::Path::new(&file), &outputs).map_err(failed)?;
+        }
+    }
     if global.format == Format::Json {
         say(&serde_json::to_string(&json!({
             "out": out,
@@ -1793,6 +1809,69 @@ fn current_branch(folder: &std::path::Path) -> Option<String> {
 }
 
 /// The image a bake published, as `--format json` writes it.
+/// A bake's step outputs: `hushrun-image` (the repository, with no tag), `hushrun-image-digest`
+/// (empty when nothing was published), `hushrun-image-tag` (the moving tag it moved, else the
+/// fixed tag), `hushrun-image-published` and `hushrun-manifest`.
+fn bake_outputs(
+    manifest: &str,
+    image: &str,
+    digest: Option<&hushrun_core::digest::Digest>,
+    tags: &[String],
+) -> output::Outputs {
+    let tag = tags
+        .iter()
+        .rev()
+        .find(|t| t.ends_with("-latest"))
+        .or(tags.first())
+        .cloned()
+        .unwrap_or_default();
+    let mut outputs = output::Outputs::new();
+    outputs.set("hushrun-image", image);
+    outputs.set(
+        "hushrun-image-digest",
+        digest.map(ToString::to_string).unwrap_or_default(),
+    );
+    outputs.set("hushrun-image-tag", tag);
+    outputs.set("hushrun-image-published", digest.is_some().to_string());
+    outputs.set("hushrun-manifest", manifest);
+    outputs
+}
+
+/// GitLab: the bake's outputs as `KEY=value` lines (`HUSHRUN_IMAGE=…`) in `file`, which must be
+/// inside the project's folder, for `artifacts: reports: dotenv`.
+fn write_bake_env(
+    folder: &std::path::Path,
+    file: &std::path::Path,
+    outputs: &output::Outputs,
+) -> Result<(), String> {
+    let project = hushrun_ci::var("CI_PROJECT_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| folder.to_path_buf());
+    let path = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        folder.join(file)
+    };
+    let inside = path
+        .components()
+        .all(|c| !matches!(c, std::path::Component::ParentDir))
+        && path.starts_with(&project);
+    if !inside {
+        return Err(format!(
+            "HUSHRUN_BAKE_ENV names {}, which is outside the project's folder {}: the bake's outputs went nowhere",
+            path.display(),
+            project.display()
+        ));
+    }
+    let mut text = String::new();
+    for (key, value) in outputs.iter() {
+        let name = key.replace('-', "_").to_ascii_uppercase();
+        text.push_str(&format!("{name}={value}\n"));
+    }
+    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
 fn image_json(published: &crate::cmd::build_relay::bake_image::Published) -> Value {
     let uploaded = |digest: &str| {
         published
@@ -3036,6 +3115,54 @@ pub(crate) fn size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{SystemTime, baked_at, blocks, resolved, size};
+
+    // covers: B-244
+    #[test]
+    fn a_bakes_step_outputs_name_the_image_by_its_whole_digest() {
+        let digest = hushrun_core::digest::Digest::of(b"image");
+        let tags = vec![
+            "hushrun-linux-x64-0123456789abcdef".to_string(),
+            "hushrun-linux-x64-latest".to_string(),
+        ];
+        let image = "r.example.com/acme/app";
+        let got = |digest, tags: &[String]| {
+            let outputs = super::bake_outputs("m", image, digest, tags);
+            outputs
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            got(Some(&digest), &tags),
+            [
+                "hushrun-image=r.example.com/acme/app".to_string(),
+                format!("hushrun-image-digest={digest}"),
+                "hushrun-image-tag=hushrun-linux-x64-latest".into(),
+                "hushrun-image-published=true".into(),
+                "hushrun-manifest=m".into(),
+            ]
+        );
+        // Off the default branch only the fixed tag moves; a bake the limit held publishes none.
+        assert_eq!(
+            got(Some(&digest), &tags[..1])[2],
+            "hushrun-image-tag=hushrun-linux-x64-0123456789abcdef"
+        );
+        let held = got(None, &[]);
+        assert_eq!(held[1], "hushrun-image-digest=");
+        assert_eq!(held[3], "hushrun-image-published=false");
+        // GitLab's file: the same values, by uppercase names, only inside the project.
+        let dir = tempfile::tempdir().unwrap();
+        let outputs = super::bake_outputs("m", image, Some(&digest), &tags);
+        super::write_bake_env(dir.path(), std::path::Path::new("bake.env"), &outputs).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("bake.env")).unwrap();
+        assert!(
+            text.contains(&format!("HUSHRUN_IMAGE_DIGEST={digest}\n")),
+            "{text}"
+        );
+        assert!(text.contains("HUSHRUN_IMAGE_PUBLISHED=true\n"), "{text}");
+        let outside = super::write_bake_env(dir.path(), std::path::Path::new("../x.env"), &outputs);
+        assert!(outside.unwrap_err().contains("outside the project"));
+    }
 
     // covers: B-70
     #[test]

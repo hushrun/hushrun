@@ -253,6 +253,30 @@ pub trait Registry: Send + Sync + fmt::Debug {
         Err(ArtifactError::Unsupported("reading blobs".into()))
     }
 
+    /// \[B-240\] A blob's bytes written to `out` as they arrive, hashed on the way and checked
+    /// against `digest`; refused past `most` bytes. Returns how many bytes it wrote. On an
+    /// error, what `out` holds is no blob. By default, [`Registry::pull_blob`]'s bytes, written.
+    async fn pull_blob_to(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        most: u64,
+        out: &mut (dyn std::io::Write + Send),
+    ) -> Result<u64, ArtifactError> {
+        let bytes = self.pull_blob(repository, digest, most).await?;
+        let actual = Digest::of(&bytes);
+        if actual != *digest {
+            return Err(ArtifactError::DigestMismatch {
+                what: repository.at_digest(digest),
+                expected: digest.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+        out.write_all(&bytes)
+            .map_err(|e| ArtifactError::Invalid(format!("writing {digest}: {e}")))?;
+        Ok(bytes.len() as u64)
+    }
+
     /// \[B-67\] The OCI referrers API's answer for `digest`, an image index, or `None` when the
     /// registry has no such API (it then keeps referrers under the tag schema's tag).
     async fn referrers(

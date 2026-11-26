@@ -34,6 +34,7 @@ fn platform() -> String {
 }
 
 pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
+    use hushrun_artifact::credentials::{Credential, DockerConfig};
     let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("build pull: {why}"));
     let usage = |why: String| Failure::new(Exit::Usage, anyhow!("build pull: {why}"));
     let dest = args
@@ -51,70 +52,228 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
     if args.insecure {
         insecure.push(image.host.clone());
     }
+    // A session reads results, not the registry: said plainly when the registry refuses one.
+    let session = matches!(&credential, Credential::Basic { password, .. }
+        if password.starts_with(crate::session::PREFIX));
+    // Another registry, with no hushrun credential for it: docker's, as `bake --oci` reads them.
+    let theirs = matches!(credential, Credential::Anonymous)
+        && image.host != crate::hosted::registry_host(&crate::hosted::origin());
+    let (docker, credentials) = if theirs {
+        (
+            DockerConfig::load().map_err(|e| failed(e.to_string()))?,
+            Vec::new(),
+        )
+    } else {
+        (
+            DockerConfig::default(),
+            vec![(image.host.clone(), credential)],
+        )
+    };
     let artifacts = hushrun_artifact::Artifacts::connect_with(
-        hushrun_artifact::credentials::DockerConfig::default(),
+        docker,
         &hushrun_artifact::Options {
             insecure_registries: insecure,
-            credentials: vec![(image.host.clone(), credential)],
+            credentials,
         },
     )
     .map_err(|e| failed(e.to_string()))?;
-    let Some((digest, layers)) = artifacts
-        .pull_layers(&image, &tag, MOST_LAYER)
-        .map_err(|e| failed(format!("{image}:{tag}: {e}")))?
-    else {
+    let refused = |e: hushrun_artifact::ArtifactError| {
+        if session && matches!(e, hushrun_artifact::ArtifactError::Denied { .. }) {
+            return failed(format!(
+                "{image}:{tag}: this sandbox holds a session, which reads results and not the registry: set HUSHRUN_REGISTRY_TOKEN to a pull token an owner or admin makes for this repository"
+            ));
+        }
+        failed(format!("{image}:{tag}: {e}"))
+    };
+    let Some(manifest) = artifacts.tagged(&image, &tag).map_err(refused)? else {
         return Err(failed(format!(
             "{image} has no {tag}: no baked store of this repository for this platform yet"
         )));
     };
-    // Unpacked beside the destination, so the swap is a rename on one file system.
+    let label = artifacts.label(&image, &manifest).map_err(refused)?;
+    let mut pulled = Pulled {
+        image: image.to_string(),
+        tag: tag.clone(),
+        digest: manifest.digest().to_string(),
+        manifest: label.as_ref().map(|l| l.manifest.clone()),
+        platform: label.as_ref().map(|l| l.platform.clone()),
+        to: dest.clone(),
+        state: State::Resolved,
+        downloaded: 0,
+        signer: None,
+    };
+    if args.resolve {
+        return said(global, &pulled);
+    }
+    // B-240: the destination holds this store already: the image's label names the manifest its
+    // `baked.json` has, and it passes the check a run makes as it begins.
+    if !args.force
+        && let Some(manifest) = &pulled.manifest
+        && holds(&dest, manifest)
+    {
+        pulled.state = State::AlreadyThere;
+        return said(global, &pulled);
+    }
+    // Unpacked beside the destination, so the swap is a rename on one file system; the layers
+    // go to files there as they arrive, and each goes once it is unpacked.
     let parent = dest
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    fs::create_dir_all(parent)
-        .map_err(|e| failed(format!("creating {}: {e}", parent.display())))?;
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
     let name = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "hushrun".into());
+    fs::create_dir_all(&parent)
+        .map_err(|e| failed(format!("creating {}: {e}", parent.display())))?;
     let staging = parent.join(format!(".{name}.pull-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&staging);
-    let result = (|| -> Result<String, String> {
+    let downloads = parent.join(format!(".{name}.layers-{}", std::process::id()));
+    let clean = || {
+        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(&downloads);
+    };
+    clean();
+    let result = (|| -> Result<(u64, Option<String>), String> {
+        let layers = artifacts
+            .pull_layers(&image, &manifest, MOST_LAYER, &downloads)
+            .map_err(|e| refused(e).error.to_string())
+            .map_err(|e| e.trim_start_matches("build pull: ").to_string())?;
+        let mut downloaded = 0;
         for layer in &layers {
-            untar(layer, &staging).map_err(|e| format!("unpacking {image}:{tag}: {e}"))?;
+            downloaded += fs::metadata(layer).map(|m| m.len()).unwrap_or(0);
+            let file =
+                fs::File::open(layer).map_err(|e| format!("reading {}: {e}", layer.display()))?;
+            untar(io::BufReader::new(file), &staging)
+                .map_err(|e| format!("unpacking {image}:{tag}: {e}"))?;
+            let _ = fs::remove_file(layer);
         }
         let store = staging.join(STORE_ROOT);
         let baked = Baked::read(&store).map_err(|why| format!("{tag}: {}", why.0))?;
         baked::check_contents(&store, Some(&baked), Depth::Bytes)
             .map_err(|why| format!("{tag}: {why}"))?;
-        signature(global, &store)
+        let signer = signature(global, &store, args.require_signed, &dest)?;
+        Ok((downloaded, signer))
     })();
-    let said = match result {
-        Ok(said) => said,
+    let (downloaded, signer) = match result {
+        Ok(done) => done,
         Err(why) => {
-            let _ = fs::remove_dir_all(&staging);
+            clean();
             return Err(failed(why));
         }
     };
     swap(&staging.join(STORE_ROOT), &dest).map_err(|e| {
-        let _ = fs::remove_dir_all(&staging);
+        clean();
         failed(format!("putting it at {}: {e}", dest.display()))
     })?;
-    let _ = fs::remove_dir_all(&staging);
-    if global.quiet == 0 {
-        eprintln!(
-            "hushrun: pulled {image}:{tag} ({}) into {}: {said}",
-            short(&digest.to_string()),
-            dest.display()
-        );
+    clean();
+    pulled.state = State::Pulled;
+    pulled.downloaded = downloaded;
+    pulled.signer = signer;
+    said(global, &pulled)
+}
+
+/// What a pull did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    Pulled,
+    AlreadyThere,
+    Resolved,
+}
+
+/// What a pull read: the image, its tag, the digest the tag names, the store's manifest and
+/// platform (from the image's label), where the store goes, and what it did.
+struct Pulled {
+    image: String,
+    tag: String,
+    digest: String,
+    manifest: Option<String>,
+    platform: Option<String>,
+    to: PathBuf,
+    state: State,
+    downloaded: u64,
+    /// Who signed the store, when `hushrun.yaml` names signers; `None` when it names none.
+    signer: Option<String>,
+}
+
+/// Whether `dest` holds the store whose manifest identity is `manifest`: its `baked.json` says so,
+/// and it passes B-63's check by names, as a run checks a store when it begins.
+fn holds(dest: &Path, manifest: &str) -> bool {
+    Baked::read(dest).is_ok_and(|baked| {
+        baked.manifest.to_string() == manifest
+            && baked::check_contents(dest, Some(&baked), Depth::Names).is_ok()
+    })
+}
+
+/// Says what happened: a line on stderr (the reference on stdout for `--resolve`), and with
+/// `--format json` `hushrun.build-pull/v1` on stdout; on GitHub Actions, the step's outputs.
+fn said(global: &GlobalOpts, pulled: &Pulled) -> CmdResult {
+    use crate::output::Format;
+    let (image, tag, digest, to) = (
+        &pulled.image,
+        &pulled.tag,
+        &pulled.digest,
+        pulled.to.display(),
+    );
+    let mut outputs = crate::output::Outputs::new();
+    outputs.set("hushrun-image-digest", digest);
+    outputs.set(
+        "hushrun-manifest",
+        pulled.manifest.clone().unwrap_or_default(),
+    );
+    crate::ci::Ci::from_process(global)
+        .outputs(&outputs)
+        .map_err(|e| anyhow!("build pull: writing the GitHub step outputs: {e}"))?;
+    let json = global.format == Format::Json;
+    if json {
+        let mut value = serde_json::json!({
+            "schema": "hushrun.build-pull/v1",
+            "image": image,
+            "tag": tag,
+            "digest": digest,
+            "manifest": pulled.manifest,
+            "platform": pulled.platform,
+            "state": match pulled.state {
+                State::Pulled => "pulled",
+                State::AlreadyThere => "already_there",
+                State::Resolved => "resolved",
+            },
+        });
+        if pulled.state != State::Resolved {
+            value["to"] = to.to_string().into();
+            value["downloaded_bytes"] = pulled.downloaded.into();
+            value["signature"] = if pulled.signer.is_some() {
+                "named"
+            } else {
+                "not_checked"
+            }
+            .into();
+            value["signed_by"] = pulled.signer.clone().into();
+        }
+        crate::output::print_json(&value)?;
+    }
+    match pulled.state {
+        State::Resolved if !json => crate::output::print(&format!("{image}@{digest}\n"))?,
+        State::Resolved => {}
+        _ if global.quiet > 0 => {}
+        State::AlreadyThere => {
+            eprintln!(
+                "hushrun: {to} holds {image}:{tag} ({digest}) already: nothing was downloaded"
+            )
+        }
+        State::Pulled => {
+            let trust = match &pulled.signer {
+                Some(signer) => format!("signed by {signer}"),
+                None => UNSIGNED.to_string(),
+            };
+            eprintln!("hushrun: pulled {image}:{tag} ({digest}) into {to}: {trust}")
+        }
     }
     Ok(Exit::Ok)
 }
 
-fn short(digest: &str) -> String {
-    digest.chars().take(19).collect()
-}
+/// What the line says of a store when `hushrun.yaml` names no signer of baked stores.
+const UNSIGNED: &str = "hushrun.yaml names no signer of baked stores, so a run reuses it as the backend vouches, or with HUSHRUN_BUILD_LOWER_UNTRUSTED=1";
 
 /// The image to pull and the credential to pull it with: `--image`, else the repository's on its
 /// backend's registry; a pull token, else the backend's credential here, else none.
@@ -195,10 +354,15 @@ fn image_and_credential(
     Ok((image, token.map_or(Credential::Anonymous, basic)))
 }
 
-/// B-67: what the store's signature says, checked when `hushrun.yaml` names signers of baked
-/// stores: one that doesn't verify is refused. Without signers, it says the store is unsigned
-/// here, which a run then reads as B-63 says.
-fn signature(global: &GlobalOpts, store: &Path) -> Result<String, String> {
+/// B-67: who signed the store, checked when `hushrun.yaml` names signers of baked stores: one
+/// that doesn't verify is refused. Without signers, `None`, which a run then reads as B-63 says,
+/// unless `required` (`--require-signed`), which refuses it and leaves `dest` as it was.
+fn signature(
+    global: &GlobalOpts,
+    store: &Path,
+    required: bool,
+    dest: &Path,
+) -> Result<Option<String>, String> {
     use crate::context::{Content, Source};
     let signers = Content::open(global, Source::Repo(hushrun_vcs::Snapshot::Worktree))
         .ok()
@@ -213,11 +377,13 @@ fn signature(global: &GlobalOpts, store: &Path) -> Result<String, String> {
                 root.as_ref(),
             )
             .map_err(|why| format!("its signature doesn't verify: {why}"))?;
-            Ok(format!("signed by {}", verified.signer))
+            Ok(Some(verified.signer.to_string()))
         }
-        _ => Ok(
-            "hushrun.yaml names no signer of baked stores, so a run reuses it as the backend vouches, or with HUSHRUN_BUILD_LOWER_UNTRUSTED=1".into(),
-        ),
+        _ if required => Err(format!(
+            "hushrun.yaml names no signer of baked stores, and --require-signed was given: {} is as it was. hushrun init --bake prints the lines to add",
+            dest.display()
+        )),
+        _ => Ok(None),
     }
 }
 
@@ -240,17 +406,20 @@ fn swap(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Unpacks the tar `bytes` into `into`: regular files and folders under `hushrun/` only, with no
-/// `..`, no absolute path and nothing else (links, devices); ustar's prefix, GNU's long names and
-/// PAX's `path` read.
-fn untar(bytes: &[u8], into: &Path) -> io::Result<()> {
+/// Unpacks the tar read from `from` into `into`, a file at a time: regular files and folders
+/// under `hushrun/` only, with no `..`, no absolute path and nothing else (links, devices);
+/// ustar's prefix, GNU's long names and PAX's `path` read.
+fn untar(mut from: impl io::Read, into: &Path) -> io::Result<()> {
     let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_string());
-    let mut at = 0usize;
+    // A long name or a PAX header is read whole, and none is larger than this.
+    const MOST_HEADER: u64 = 1 << 20;
     let mut long_name: Option<String> = None;
-    while at + 512 <= bytes.len() {
-        let header = &bytes[at..at + 512];
-        if header.iter().all(|b| *b == 0) {
-            break;
+    let mut header = [0u8; 512];
+    loop {
+        match read_block(&mut from, &mut header)? {
+            false => break,
+            true if header.iter().all(|b| *b == 0) => break,
+            true => {}
         }
         let field = |from: usize, len: usize| {
             let raw = &header[from..from + len];
@@ -258,15 +427,9 @@ fn untar(bytes: &[u8], into: &Path) -> io::Result<()> {
             String::from_utf8_lossy(&raw[..end]).into_owned()
         };
         let size = u64::from_str_radix(field(124, 12).trim(), 8).map_err(|_| bad("a size"))?;
-        let size = usize::try_from(size).map_err(|_| bad("a size"))?;
+        let padding = size.div_ceil(512) * 512 - size;
         let kind = header[156];
-        let data_at = at + 512;
-        let data_end = data_at.checked_add(size).ok_or_else(|| bad("a size"))?;
-        if data_end > bytes.len() {
-            return Err(bad("a file runs past the layer"));
-        }
-        let data = &bytes[data_at..data_end];
-        at = data_at + size.div_ceil(512) * 512;
+        let mut data = io::Read::take(&mut from, size);
         let name = match long_name.take() {
             Some(name) => name,
             None => {
@@ -279,44 +442,84 @@ fn untar(bytes: &[u8], into: &Path) -> io::Result<()> {
                 }
             }
         };
-        match kind {
+        let small = |data: &mut dyn io::Read| -> io::Result<Vec<u8>> {
+            if size > MOST_HEADER {
+                return Err(bad("a header larger than 1 MiB"));
+            }
+            let mut bytes = Vec::new();
+            data.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        };
+        let relative = match kind {
             // GNU's long name, for the next entry.
             b'L' => {
+                let bytes = small(&mut data)?;
                 long_name = Some(
-                    String::from_utf8_lossy(data)
+                    String::from_utf8_lossy(&bytes)
                         .trim_end_matches('\0')
                         .to_string(),
                 );
-                continue;
+                None
             }
             // PAX: its `path`, for the next entry; the rest isn't read.
             b'x' => {
-                long_name = pax_path(data);
-                continue;
+                long_name = pax_path(&small(&mut data)?);
+                None
             }
-            b'g' => continue,
-            _ => {}
-        }
-        let relative = safe(&name).ok_or_else(|| bad("a path outside the store"))?;
-        if relative.components().next().map(|c| c.as_os_str()) != Some(STORE_ROOT.as_ref()) {
-            // Anything else the image holds isn't the store's.
-            continue;
-        }
-        let path = into.join(&relative);
-        match kind {
-            b'0' | 0 => {
+            b'g' => None,
+            _ => {
+                let relative = safe(&name).ok_or_else(|| bad("a path outside the store"))?;
+                // Anything else the image holds isn't the store's.
+                (relative.components().next().map(|c| c.as_os_str()) == Some(STORE_ROOT.as_ref()))
+                    .then_some(relative)
+            }
+        };
+        match (kind, relative) {
+            (b'0' | 0, Some(relative)) => {
+                let path = into.join(&relative);
                 if let Some(parent) = path.parent() {
                     make_dirs(parent)?;
                 }
-                fs::write(&path, data)?;
+                let mut file = fs::File::create(&path)?;
+                io::copy(&mut data, &mut file)?;
                 // Whatever the umask: a baked store others could write isn't one (B-63).
                 set_mode(&path, 0o644)?;
             }
-            b'5' => make_dirs(&path)?,
-            _ => return Err(bad("an entry that is neither a file nor a folder")),
+            (b'5', Some(relative)) => make_dirs(&into.join(relative))?,
+            (_, Some(_)) => return Err(bad("an entry that is neither a file nor a folder")),
+            (_, None) => {}
+        }
+        // What wasn't read (an entry that isn't the store's), then the padding.
+        io::copy(&mut data, &mut io::sink())?;
+        if data.limit() > 0 {
+            return Err(bad("a file runs past the layer"));
+        }
+        let skipped = io::copy(&mut io::Read::take(&mut from, padding), &mut io::sink())?;
+        if skipped < padding {
+            return Err(bad("a file runs past the layer"));
         }
     }
     Ok(())
+}
+
+/// Reads one 512-byte block; `false` at the end of the layer, an error part of the way in.
+fn read_block(from: &mut impl io::Read, block: &mut [u8; 512]) -> io::Result<bool> {
+    let mut read = 0;
+    while read < block.len() {
+        match from.read(&mut block[read..]) {
+            Ok(0) if read == 0 => return Ok(false),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a header runs past the layer",
+                ));
+            }
+            Ok(n) => read += n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(true)
 }
 
 /// `path` and its missing parents, each `0755` whatever the umask.
@@ -398,7 +601,7 @@ mod tests {
         tar.extend(entry("ignored", b'0', b"hint"));
         tar.extend(entry("etc/passwd", b'0', b"not the store's"));
         tar.extend([0u8; 1024]);
-        untar(&tar, dir.path()).unwrap();
+        untar(&tar[..], dir.path()).unwrap();
         assert_eq!(
             fs::read(dir.path().join("hushrun/baked.json")).unwrap(),
             b"{}"
@@ -411,8 +614,14 @@ mod tests {
             entry("/hushrun/x", b'0', b"x"),
             entry("hushrun/link", b'2', b""),
         ] {
-            assert!(untar(&bad, dir.path()).is_err());
+            assert!(untar(&bad[..], dir.path()).is_err());
         }
+        // A layer that ends part of the way into an entry, or a header, stops it.
+        let file = entry("hushrun/cut", b'0', &[7; 600]);
+        assert!(untar(&file[..700], dir.path()).is_err());
+        assert!(untar(&file[..100], dir.path()).is_err());
+        assert!(untar(&file[..], dir.path()).is_ok());
+        assert_eq!(fs::read(dir.path().join("hushrun/cut")).unwrap(), [7; 600]);
         assert_eq!(
             pax_path(b"30 path=hushrun/a/very/long/name\n"),
             Some("hushrun/a/very/long/name".into())
