@@ -1562,6 +1562,7 @@ fn give_maven(session: &mut Session, build: &Path, env: &dyn Fn(&str) -> Option<
     {
         roots.push(resolved.to_string_lossy().into_owned());
     }
+    roots.extend(crate::cmd::packages::maven_part_dir(env));
     let repository = env("HOME").map(|home| {
         PathBuf::from(home)
             .join(".m2")

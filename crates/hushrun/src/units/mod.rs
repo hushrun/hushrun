@@ -936,11 +936,22 @@ impl Observer {
         if let Some((_, build)) = env.iter().find(|(name, _)| name == opts)
             && let Some((_, ours)) = self.variables.iter_mut().find(|(name, _)| name == opts)
         {
-            *ours = hushrun_build::maven::with_cache_properties(
+            let mut opts = hushrun_build::maven::with_cache_properties(
                 &ours.to_string_lossy(),
                 &build.to_string_lossy(),
-            )
-            .into();
+            );
+            // K-10: and the package store's tail, once.
+            for word in build
+                .to_string_lossy()
+                .split_whitespace()
+                .filter(|w| w.starts_with("-Dmaven.repo.local.tail="))
+            {
+                if !opts.split_whitespace().any(|w| w == word) {
+                    opts.push(' ');
+                    opts.push_str(word);
+                }
+            }
+            *ours = opts.trim().to_string().into();
         }
         self.compile_env = env;
     }

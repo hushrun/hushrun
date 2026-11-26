@@ -2111,3 +2111,69 @@ fn kotest_specs_are_left_out_whole_when_what_they_read_is_unchanged() {
         );
     }
 }
+
+/// `from` copied to `to`, every file, never through a link, less Gradle's locks (as a package
+/// store's `gradle` part holds them, K-5).
+fn copy_modules(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let kind = entry.file_type().unwrap();
+        let name = entry.file_name();
+        let lock = name.to_string_lossy().ends_with(".lock") || name == "gc.properties";
+        if kind.is_dir() {
+            copy_modules(&entry.path(), &to.join(&name));
+        } else if kind.is_file() && !lock {
+            std::fs::copy(entry.path(), to.join(&name)).unwrap();
+        }
+    }
+}
+
+// covers: K-10
+#[test]
+fn a_package_store_read_through_gradle_ro_dep_cache_changes_no_units_key_or_reads() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let mut files = build(Framework::Junit4, &["app"], "{mode: reuse, unit: test}");
+    files.push(file(
+        "app/src/test/java/shop/app/CartTest.java",
+        "package shop.app;\nimport org.junit.*;\npublic class CartTest { @Test public void total() {} }\n",
+    ));
+    let r = repo(&files);
+    // The first run downloads nothing: the tests' user home holds JUnit.
+    let first = run(&r, &command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}", first.said());
+    let before = r.map()["units"].clone();
+    assert!(before.get(CART).is_some(), "{before:#}");
+    // The same check with an empty user home and only a package store underneath, as `hushrun
+    // run` gives Gradle one: every unit's key and reads are the same, so nothing runs again.
+    let store = r.root.join("packages/parts/gradle");
+    copy_modules(
+        &Path::new(&gradle_user_home().unwrap()).join("caches/modules-2"),
+        &store.join("modules-2"),
+    );
+    let empty = r.root.join("empty-home");
+    let second = run(
+        &r,
+        &command(&gradle, &[]),
+        &[
+            ("GRADLE_RO_DEP_CACHE", store.to_str().unwrap()),
+            ("GRADLE_USER_HOME", empty.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(second.code, 0, "{}", second.said());
+    assert_eq!(
+        r.map()["units"],
+        before,
+        "the store changed a unit's key or reads"
+    );
+    // Planned as passed on the same key: a lone unit is the one the audit runs anyway.
+    assert!(
+        second
+            .said()
+            .contains("already passed on the files it read"),
+        "{}",
+        second.said()
+    );
+}
