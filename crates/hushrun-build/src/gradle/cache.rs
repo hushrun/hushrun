@@ -21,8 +21,8 @@ use hushrun_core::Digest;
 use serde_json::json;
 
 use super::entry::Checked;
-use super::http::{self, Body, Unread};
 use super::{ENTRY, Local};
+use crate::cache::http::{self, Body, Unread};
 use crate::model::{Class, Kind, Mode, NotStored, Outcome};
 use crate::origin::Origin;
 use crate::relay::{self, Answer, Problem, Request};
@@ -96,7 +96,7 @@ fn accept(listener: TcpListener, cache: Arc<Cache>, stop: Arc<AtomicBool>) {
         if open.fetch_add(1, Ordering::SeqCst) >= MOST_CONNECTIONS {
             open.fetch_sub(1, Ordering::SeqCst);
             let mut out = &stream;
-            let _ = http::write(&mut out, 503, b"", false, true);
+            let _ = http::write(&mut out, 503, b"", false, true, &headers(503, b""));
             continue;
         }
         let cache = cache.clone();
@@ -142,14 +142,23 @@ impl Cache {
                 Ok(request) => request,
                 Err(Unread::Gone) => return,
                 Err(Unread::Bad(status)) => {
-                    let _ = http::write(&mut output, status, b"", false, true);
+                    let _ =
+                        http::write(&mut output, status, b"", false, true, &headers(status, b""));
                     return;
                 }
             };
             // ADR 0144: `102 Processing` each heartbeat while a `GET` is worked on.
             let (status, body) = http::answer_alive(&request, &stream, || self.answer(&request));
             let head = request.method == "HEAD";
-            if http::write(&mut output, status, &body, head, request.close).is_err()
+            if http::write(
+                &mut output,
+                status,
+                &body,
+                head,
+                request.close,
+                &headers(status, &body),
+            )
+            .is_err()
                 || request.close
             {
                 return;
@@ -564,6 +573,19 @@ fn gradle_entry(outcome: Outcome, key: &Digest, task: &str) -> Entry {
         gradle: Some(GradleEntry::default()),
         maven: None,
         tsc: None,
+    }
+}
+
+/// The headers of Gradle's answer of `status` with `body`: an entry's type, and the realm of a
+/// refused credential.
+fn headers(status: u16, body: &[u8]) -> Vec<(&'static str, &'static str)> {
+    match status {
+        200 if !body.is_empty() => vec![(
+            "Content-Type",
+            "application/vnd.gradle.build-cache-artifact.v2",
+        )],
+        401 => vec![("WWW-Authenticate", "Basic realm=\"hushrun\"")],
+        _ => Vec::new(),
     }
 }
 

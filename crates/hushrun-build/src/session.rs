@@ -1901,7 +1901,7 @@ impl Session {
         &mut self,
         run: crate::gradle::GradleRun,
         script: &Path,
-        bound: crate::gradle::endpoint::Bound,
+        bound: crate::cache::endpoint::Bound,
         env: &dyn Fn(&str) -> Option<OsString>,
     ) -> std::io::Result<String> {
         self.current.gradle = Some(run);
@@ -1938,8 +1938,8 @@ impl Session {
         run: crate::maven::MavenRun,
         env: &dyn Fn(&str) -> Option<OsString>,
     ) -> std::io::Result<String> {
-        let (listener, token) = crate::maven::cache::bind()?;
-        let url = crate::maven::cache::url(&listener, &token)?;
+        let (listener, token) = crate::cache::endpoint::for_run()?;
+        let url = crate::cache::endpoint::run_url(&listener, &token)?;
         self.current.maven = Some(run);
         write_current(&self.current)?;
         let cache = crate::maven::cache::Cache::new(self.current.clone(), &token);

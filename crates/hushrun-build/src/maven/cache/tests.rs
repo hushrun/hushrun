@@ -507,12 +507,12 @@ fn a_downloaded_block_that_isn_t_whole_is_reported_suspended_and_removed() {
 #[test]
 fn maven_s_requests_over_one_kept_connection_are_answered() {
     let machine = Machine::new(false);
-    let (listener, token) = match bind() {
+    let (listener, token) = match crate::cache::endpoint::for_run() {
         Ok(bound) => bound,
         Err(_) => return,
     };
     assert_eq!(token.len(), 64);
-    let url = url(&listener, &token).unwrap();
+    let url = crate::cache::endpoint::run_url(&listener, &token).unwrap();
     assert!(url.starts_with("http://127.0.0.1:") && url.ends_with(&token));
     let address = listener.local_addr().unwrap();
     let mut current = machine.session.current().clone();

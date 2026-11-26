@@ -14,8 +14,8 @@
 //! local copy either way.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{self, BufReader, BufWriter, Read as _, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::io::{self, BufReader, BufWriter};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ use serde_json::json;
 
 use super::buildinfo::{self, Checked};
 use super::{BUILDINFO, Local, Module, REPORT};
-use crate::gradle::http::{self, Body, Unread};
+use crate::cache::http::{self, Body, Unread};
 use crate::model::{Class, Kind, Mode, NotStored, Outcome};
 use crate::origin::Origin;
 use crate::relay::{self, Answer, Problem, Request};
@@ -104,32 +104,6 @@ impl Drop for Running {
     }
 }
 
-/// B-170: a listener on `127.0.0.1` at a port the system picks, and a token of 64 hex
-/// characters from `/dev/urandom`, both for this run alone.
-pub fn bind() -> io::Result<(TcpListener, String)> {
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
-    let mut bytes = [0u8; 32];
-    fill_random(&mut bytes)?;
-    let token = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok((listener, token))
-}
-
-/// The URL Maven is given for `listener` and `token`.
-pub fn url(listener: &TcpListener, token: &str) -> io::Result<String> {
-    let port = listener.local_addr()?.port();
-    Ok(format!("http://127.0.0.1:{port}/{token}"))
-}
-
-#[cfg(unix)]
-fn fill_random(out: &mut [u8]) -> io::Result<()> {
-    std::fs::File::open("/dev/urandom")?.read_exact(out)
-}
-
-#[cfg(not(unix))]
-fn fill_random(_out: &mut [u8]) -> io::Result<()> {
-    Err(io::Error::other("no Maven cache on this platform"))
-}
-
 /// Serves `cache` on `listener` until the returned handle is dropped.
 pub fn start(listener: TcpListener, cache: Cache) -> io::Result<Running> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -158,7 +132,7 @@ fn accept(listener: TcpListener, cache: Arc<Cache>, stop: Arc<AtomicBool>) {
         if open.fetch_add(1, Ordering::SeqCst) >= MOST_CONNECTIONS {
             open.fetch_sub(1, Ordering::SeqCst);
             let mut out = &stream;
-            let _ = respond(&mut out, 503, b"", false, true);
+            let _ = http::write(&mut out, 503, b"", false, true, headers(503, b""));
             continue;
         }
         let cache = cache.clone();
@@ -176,42 +150,13 @@ fn accept(listener: TcpListener, cache: Arc<Cache>, stop: Arc<AtomicBool>) {
     }
 }
 
-/// Writes one answer: its status, its length, and its body unless it answers a `HEAD`.
-pub fn respond(
-    out: &mut impl Write,
-    status: u16,
-    body: &[u8],
-    head: bool,
-    close: bool,
-) -> io::Result<()> {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        431 => "Request Header Fields Too Large",
-        501 => "Not Implemented",
-        503 => "Service Unavailable",
-        505 => "HTTP Version Not Supported",
-        _ => "Error",
-    };
-    let mut text = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n",
-        body.len()
-    );
+/// The headers of Maven's answer of `status` with `body`: a file's type.
+fn headers(status: u16, body: &[u8]) -> &'static [(&'static str, &'static str)] {
     if status == 200 && !body.is_empty() {
-        text.push_str("Content-Type: application/octet-stream\r\n");
+        &[("Content-Type", "application/octet-stream")]
+    } else {
+        &[]
     }
-    if close {
-        text.push_str("Connection: close\r\n");
-    }
-    text.push_str("\r\n");
-    out.write_all(text.as_bytes())?;
-    if !head {
-        out.write_all(body)?;
-    }
-    out.flush()
 }
 
 impl Cache {
@@ -252,7 +197,8 @@ impl Cache {
                 Ok(request) => request,
                 Err(Unread::Gone) => return,
                 Err(Unread::Bad(status)) => {
-                    let _ = respond(&mut output, status, b"", false, true);
+                    let _ =
+                        http::write(&mut output, status, b"", false, true, headers(status, b""));
                     return;
                 }
             };
@@ -260,7 +206,17 @@ impl Cache {
             // extension's client never times out on a download that is only slow.
             let (status, body) = http::answer_alive(&request, &stream, || self.answer(&request));
             let head = request.method == "HEAD";
-            if respond(&mut output, status, &body, head, request.close).is_err() || request.close {
+            if http::write(
+                &mut output,
+                status,
+                &body,
+                head,
+                request.close,
+                headers(status, &body),
+            )
+            .is_err()
+                || request.close
+            {
                 return;
             }
         }

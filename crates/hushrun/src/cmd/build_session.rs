@@ -1663,7 +1663,7 @@ fn give_gradle(session: &mut Session, build: &Path, env: &dyn Fn(&str) -> Option
         user_home: user_home.as_ref().map(|p| p.to_string_lossy().into_owned()),
     };
     let started = hushrun_build::gradle::install_script(&current.store).and_then(|script| {
-        let bound = hushrun_build::gradle::endpoint::bind(&current.store)?;
+        let bound = hushrun_build::gradle::bind(&current.store)?;
         let stable = bound.stable;
         session.set_gradle(run, &script, bound, env).map(|_| stable)
     });

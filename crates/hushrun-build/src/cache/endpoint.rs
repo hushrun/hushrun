@@ -1,11 +1,13 @@
-//! B-77: where hushrun's Gradle cache listens, the same from run to run: a port on the loopback
-//! and a token, kept in the store's `gradle/endpoint.json` (mode 0600), made once. Gradle's
-//! configuration cache records every variable a settings script reads, so a port that changed
-//! each run would make Gradle configure every build again.
+//! Where a build tool's cache listens, in one of two forms.
 //!
-//! The port is this store's: a second `hushrun run` that finds it taken (another run of the same
-//! store at the same time) listens on a port of the system's choosing for that run, and says so,
-//! since that run and the next configure again.
+//! - **Kept in the store** (B-77, Gradle's): a port on the loopback and a token, kept in the
+//!   store's `<tool>/endpoint.json` (mode 0600), made once. Gradle's configuration cache records
+//!   every variable a settings script reads, so a port that changed each run would make Gradle
+//!   configure every build again. The port is this store's: a second `hushrun run` that finds it
+//!   taken (another run of the same store at the same time) listens on a port of the system's
+//!   choosing for that run, and says so, since that run and the next configure again.
+//! - **Made for the run** (B-170, Maven's): a port the system picks and a token from
+//!   `/dev/urandom`, for one run alone, where the tool prints the URL that carries the token.
 
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -13,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The file, under the store's `gradle/` folder.
+/// The file, under the tool's folder in the store.
 const FILE: &str = "endpoint.json";
 
 /// Where a port is picked from when the file is made: above the ports services register, below
@@ -28,33 +30,35 @@ pub struct Endpoint {
     pub token: String,
 }
 
-/// A listener for the run, and what Gradle is told.
+/// A listener for the run, and what the tool is told.
 pub struct Bound {
     pub listener: TcpListener,
     pub endpoint: Endpoint,
     /// The store's own port: `false` when it was taken and the system chose one.
     pub stable: bool,
+    /// The cache's path on the port, such as Gradle's `/cache/`.
+    pub path: &'static str,
 }
 
 impl Bound {
-    /// The URL Gradle is given: the cache's path on the port it listens on.
+    /// The URL the tool is given: the cache's path on the port it listens on.
     pub fn url(&self) -> String {
         let port = self
             .listener
             .local_addr()
             .map_or(self.endpoint.port, |a| a.port());
-        format!("http://127.0.0.1:{port}{}", super::PATH)
+        format!("http://127.0.0.1:{port}{}", self.path)
     }
 }
 
-/// The store's endpoint file.
-pub fn path(store: &Path) -> PathBuf {
-    store.join("gradle").join(FILE)
+/// The endpoint file of the tool whose folder in the store is `folder`.
+pub fn path(store: &Path, folder: &str) -> PathBuf {
+    store.join(folder).join(FILE)
 }
 
-/// The store's endpoint, made when there is none or it can't be read.
-pub fn load_or_make(store: &Path) -> io::Result<Endpoint> {
-    let file = path(store);
+/// The store's endpoint for `folder`, made when there is none or it can't be read.
+pub fn load_or_make(store: &Path, folder: &str) -> io::Result<Endpoint> {
+    let file = path(store, folder);
     if let Ok(bytes) = std::fs::read(&file)
         && let Ok(endpoint) = serde_json::from_slice::<Endpoint>(&bytes)
         && PORTS.contains(&endpoint.port)
@@ -86,15 +90,17 @@ pub fn load_or_make(store: &Path) -> io::Result<Endpoint> {
     }
 }
 
-/// Listens for the store's endpoint: on its port, else on one the system picks.
-pub fn bind(store: &Path) -> io::Result<Bound> {
-    let endpoint = load_or_make(store)?;
+/// Listens for the store's endpoint for `folder`: on its port, else on one the system picks. The
+/// tool is given `path` on that port.
+pub fn bind(store: &Path, folder: &str, path: &'static str) -> io::Result<Bound> {
+    let endpoint = load_or_make(store, folder)?;
     let own = SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port));
     match TcpListener::bind(own) {
         Ok(listener) => Ok(Bound {
             listener,
             endpoint,
             stable: true,
+            path,
         }),
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
             let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
@@ -102,10 +108,28 @@ pub fn bind(store: &Path) -> io::Result<Bound> {
                 listener,
                 endpoint,
                 stable: false,
+                path,
             })
         }
         Err(err) => Err(err),
     }
+}
+
+/// B-170: a listener on `127.0.0.1` at a port the system picks, and a token of 64 hex
+/// characters from `/dev/urandom`, both for this run alone.
+pub fn for_run() -> io::Result<(TcpListener, String)> {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let mut bytes = [0u8; 32];
+    fill_random(&mut bytes)?;
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok((listener, token))
+}
+
+/// The URL of a cache made for the run: `token` as the first segment of the path, for a tool
+/// that has no header to carry it.
+pub fn run_url(listener: &TcpListener, token: &str) -> io::Result<String> {
+    let port = listener.local_addr()?.port();
+    Ok(format!("http://127.0.0.1:{port}/{token}"))
 }
 
 #[cfg(unix)]
@@ -115,7 +139,7 @@ fn fill_random(out: &mut [u8]) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn fill_random(_out: &mut [u8]) -> io::Result<()> {
-    Err(io::Error::other("no Gradle cache on this platform"))
+    Err(io::Error::other("no build tool's cache on this platform"))
 }
 
 /// Writes `bytes` to `file` whole, readable by this user alone.
@@ -146,37 +170,37 @@ mod tests {
     #[test]
     fn the_endpoint_is_made_once_and_kept_private() {
         let dir = tempfile::tempdir().unwrap();
-        let first = load_or_make(dir.path()).unwrap();
-        let again = load_or_make(dir.path()).unwrap();
+        let first = load_or_make(dir.path(), "gradle").unwrap();
+        let again = load_or_make(dir.path(), "gradle").unwrap();
         assert_eq!(first, again);
         assert!(PORTS.contains(&first.port));
         assert_eq!(first.token.len(), 64);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(path(dir.path()))
+            let mode = std::fs::metadata(path(dir.path(), "gradle"))
                 .unwrap()
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         // A file that can't be read is made again.
-        std::fs::write(path(dir.path()), b"{").unwrap();
-        assert_ne!(load_or_make(dir.path()).unwrap(), first);
+        std::fs::write(path(dir.path(), "gradle"), b"{").unwrap();
+        assert_ne!(load_or_make(dir.path(), "gradle").unwrap(), first);
     }
 
     // covers: B-77
     #[test]
     fn a_taken_port_gives_a_port_of_the_system_s_for_the_run() {
         let dir = tempfile::tempdir().unwrap();
-        let first = match bind(dir.path()) {
+        let first = match bind(dir.path(), "gradle", "/cache/") {
             Ok(bound) => bound,
             // The loopback may be closed to tests in some sandboxes.
             Err(_) => return,
         };
         assert!(first.stable);
         assert!(first.url().ends_with("/cache/"));
-        let second = bind(dir.path()).unwrap();
+        let second = bind(dir.path(), "gradle", "/cache/").unwrap();
         assert!(!second.stable);
         assert_ne!(
             second.listener.local_addr().unwrap().port(),
