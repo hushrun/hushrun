@@ -204,6 +204,9 @@ say so instead of trying to sign in, which `HUSHRUN_AGENT` refuses anyway.
 - `hushrun flush` sends the results that waited on this machine while the backend was out of
   reach. Run it before you finish. `hushrun fetch` is for a sandbox's setup script: it keeps the
   newest result of each check, and compiled code, for runs that later have no network.
+  `hushrun packages exec -- COMMAND` runs an install or a build with each package manager pointed
+  at the repository's baked packages, when the sandbox has a package store; `hushrun packages
+  status` says whether it has one.
   `hushrun login --session`, in a sandbox, swaps the sandbox's credential for a short session.
 - `hushrun build pull` puts the repository's baked store at `/hushrun` for a sandbox whose image
   is fixed. It belongs in a setup step or a hook a person wrote: don't run it to "fix" a slow build.

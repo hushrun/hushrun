@@ -1,0 +1,92 @@
+{
+  "covers": [
+    "K-2"
+  ],
+  "about": "A package store's three digests (K-2), checked by crates/hushrun-packages and by tools/refpackages.py.",
+  "vectors": [
+    {
+      "name": "empty",
+      "parts": [],
+      "inputs": [],
+      "expected": {
+        "store": "cb509ca871379930265282479f202c6371e09d984769778a6496a3914c898e08"
+      }
+    },
+    {
+      "name": "two parts, rows out of order, a link and a non-ASCII path",
+      "parts": [
+        {
+          "part": "maven",
+          "class": "download",
+          "runtime": null,
+          "rows": [
+            {
+              "path": "repository/junit/junit/4.13.2/junit-4.13.2.pom",
+              "kind": "file",
+              "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+            },
+            {
+              "path": "repository/junit/junit/4.13.2/junit-4.13.2.jar",
+              "kind": "file",
+              "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            }
+          ]
+        },
+        {
+          "part": "gradle",
+          "class": "download",
+          "runtime": null,
+          "rows": [
+            {
+              "path": "modules-2/files-2.1/é/b",
+              "kind": "exe",
+              "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+            },
+            {
+              "path": "modules-2/files-2.1/a",
+              "kind": "link",
+              "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+            }
+          ]
+        },
+        {
+          "part": "pnpm-built",
+          "class": "built",
+          "runtime": "node 22 linux-x64",
+          "rows": []
+        }
+      ],
+      "inputs": [
+        {
+          "part": "maven",
+          "tool": "Apache Maven 3.9.11",
+          "platform": "linux-x64",
+          "manifests": [
+            {
+              "path": "pom.xml",
+              "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+            },
+            {
+              "path": "app/pom.xml",
+              "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+            }
+          ]
+        },
+        {
+          "part": "gradle",
+          "tool": "harvested",
+          "platform": "macos-arm64",
+          "manifests": []
+        }
+      ],
+      "expected": {
+        "part:maven": "e1840b0aec30f4fe7acd6c72a2e24e3c9e9b07b07f9f8ed39724f6fc71c51d38",
+        "part:gradle": "7ad30341aab3da01f654eba4fae60d51231dcb9f68fef0b47cbe214502f6b43d",
+        "part:pnpm-built": "52c9fab488752d5e8d5deff300b1a300bab81d597bb6048a318aa3cef1b050ce",
+        "store": "b44cccd45fab33d44a01ebb8550cec330223c10dc2b12ba012af795f0b8529cc",
+        "inputs:maven": "ab0aaeca14873cd2d8747f95ab0910858a9b311c701bd2ea26c9eb27510cce9e",
+        "inputs:gradle": "c4727186646fa57c866c6f59edaf02a28a9c892abd09902686ac15e188550ca5"
+      }
+    }
+  ]
+}

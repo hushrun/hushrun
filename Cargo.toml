@@ -38,6 +38,7 @@ hushrun-tlog = { path = "crates/hushrun-tlog" }
 hushrun-reports = { path = "crates/hushrun-reports" }
 hushrun-build = { path = "crates/hushrun-build" }
 hushrun-graph = { path = "crates/hushrun-graph" }
+hushrun-packages = { path = "crates/hushrun-packages" }
 
 anyhow = "1.0.100"
 base64 = "0.23"

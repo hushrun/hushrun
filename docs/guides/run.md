@@ -849,6 +849,30 @@ hushrun: unit: 3 of 41 tests run, in 2 of 12 test files; 38 already passed on th
   read by every spec file and always runs. `--parallel` and `--watch` run as written.
 - What a test reads is its test file's list (`reads: test` runs as `reads: file`).
 
+## Packages a sandbox starts with
+
+A sandbox that starts from an image with compiled code still downloads its dependencies: a
+Gradle or Maven build fills its cache from nothing. A **package store** holds those downloads,
+one part per package manager in the tool's own layout, and each tool reads its part in place
+beside its own cache: Gradle through `GRADLE_RO_DEP_CACHE`, Maven as
+`-Dmaven.repo.local.tail=` in `MAVEN_OPTS`. Nothing is copied, and what the store lacks is
+downloaded as usual.
+
+```sh
+# Bake: run the check's own build with the tools' caches at the bake's own folders.
+hushrun packages bake --out /hushrun-packages -- ./gradlew test
+# Or take a cache the job already filled.
+hushrun packages bake --out /hushrun-packages --harvest maven=$HOME/.m2/repository
+# Read: hushrun run does it; outside a run, exec or env.
+hushrun packages exec -- mvn -B verify
+eval "$(hushrun packages env)"
+```
+
+A run reads `/hushrun-packages`, or the folder `HUSHRUN_PACKAGES_LOWER` names. A store nothing
+signed is read only with `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1`, and never in CI. A run that may
+write what others trust hashes every file first; elsewhere a run checks names and sizes, and
+`hushrun packages verify` hashes every file. `HUSHRUN_PACKAGES=off` turns it off.
+
 ## Compiled code
 
 A check that runs can still skip compiling what this machine already compiled from the same

@@ -1596,7 +1596,14 @@ pub fn put_in_place(new: &Path, out: &Path) -> io::Result<()> {
 /// `out`'s lock (which the type asks for): a store renamed aside (`old`) while `out` is missing
 /// goes back; every other leftover (`.<name>.bake-…`) is removed. With the lock held, no live
 /// bake has any.
-pub fn reconcile(out: &Path, _held: &BakeLock) -> io::Result<()> {
+pub fn reconcile(out: &Path, held: &BakeLock) -> io::Result<()> {
+    reconcile_marked(out, held, BAKED_JSON)
+}
+
+/// [`reconcile`] for a folder whose kind holds `marker` at its top (`baked.json` for a baked
+/// store, `packages.json` for a package store, K-6): a folder renamed aside goes back only when
+/// it holds one.
+pub fn reconcile_marked(out: &Path, _held: &BakeLock, marker: &str) -> io::Result<()> {
     let (parent, name) = parent_and_name(out)?;
     let Ok(entries) = fs::read_dir(&parent) else {
         return Ok(());
@@ -1611,7 +1618,7 @@ pub fn reconcile(out: &Path, _held: &BakeLock) -> io::Result<()> {
     for path in leftovers {
         let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
         let old = file.is_some_and(|f| f.starts_with(&format!("{prefix}old.")));
-        if old && fs::symlink_metadata(out).is_err() && path.join(BAKED_JSON).is_file() {
+        if old && fs::symlink_metadata(out).is_err() && path.join(marker).is_file() {
             fs::rename(&path, out)?;
         } else {
             let _ = fs::remove_dir_all(&path);

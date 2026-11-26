@@ -1596,6 +1596,86 @@ pub(crate) fn verify_store(
     })
 }
 
+/// The predicate type of a package store's signature, over `packages.json` (K-7).
+pub(crate) const PACKAGES_PREDICATE: &str = "https://hushrun.com/attestations/baked-packages/v1";
+
+/// K-7: what a package store's signature, verified, says.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedPackages {
+    /// Who signed it.
+    pub(crate) signer: String,
+    /// The SHA-256 of the `packages.json` it covers.
+    pub(crate) packages_json: Hex32,
+    /// When that `packages.json` says it was baked.
+    pub(crate) baked_ms: u64,
+    /// A keyless signature's timestamp, in milliseconds.
+    pub(crate) signed_ms: Option<i64>,
+}
+
+/// K-7: [`verify_store`]'s check for a package store: the bundle beside `packages.json` verifies
+/// by one of `signers`, and its statement is the package store statement for exactly this
+/// `packages.json`, its one subject. `Err` says why not.
+pub(crate) fn verify_packages(
+    folder: &Path,
+    signers: &[BakedSigner],
+    root: Option<&TrustedRoot>,
+) -> Result<VerifiedPackages, String> {
+    use hushrun_packages::store::{PACKAGES_JSON, Packages, SIGNATURE as PACKAGES_SIGNATURE};
+    if signers.is_empty() {
+        return Err("hushrun.yaml names no signer of baked stores (build: baked: signers:)".into());
+    }
+    let path = folder.join(PACKAGES_SIGNATURE);
+    let meta =
+        fs::symlink_metadata(&path).map_err(|_| format!("there is no {PACKAGES_SIGNATURE}"))?;
+    if !meta.is_file() || meta.len() > MOST_SIGNATURE {
+        return Err(format!("{PACKAGES_SIGNATURE} is not a signature"));
+    }
+    let bytes = fs::read(&path).map_err(|e| format!("{PACKAGES_SIGNATURE}: {e}"))?;
+    let (signer, signed_ms) = signed_by(&bytes, signers, root)?;
+    let payload = statement_payload(&bytes)?;
+    let statement: Value =
+        serde_json::from_slice(&payload).map_err(|_| "its statement isn't JSON".to_string())?;
+    if statement["_type"] != STATEMENT_TYPE || statement["predicateType"] != PACKAGES_PREDICATE {
+        return Err("it is no signature of a package store".into());
+    }
+    let (packages, digest) = Packages::read_bytes(folder).map_err(|why| why.0)?;
+    let subjects = statement["subject"].as_array().cloned().unwrap_or_default();
+    let names_it = subjects.len() == 1
+        && subjects[0]["name"] == PACKAGES_JSON
+        && subjects[0]["digest"]["sha256"] == digest.to_string().as_str();
+    if !names_it {
+        return Err(format!("it was made for another {PACKAGES_JSON}"));
+    }
+    Ok(VerifiedPackages {
+        signer,
+        packages_json: digest,
+        baked_ms: packages.baked_ms,
+        signed_ms,
+    })
+}
+
+/// K-6: signs the package store in `folder` as it is: `packages.sigstore.json` beside its
+/// `packages.json`, a statement whose one subject is that file by the SHA-256 of its bytes. It names
+/// every rows file, which names every file: the signature covers every byte a tool reads.
+pub(crate) fn sign_packages(folder: &Path, signing: &Signing) -> Result<(), String> {
+    use hushrun_packages::store::{PACKAGES_JSON, Packages, SIGNATURE as PACKAGES_SIGNATURE};
+    let (packages, digest) = Packages::read_bytes(folder).map_err(|why| why.0)?;
+    let statement = serde_json::to_vec(&json!({
+        "_type": STATEMENT_TYPE,
+        "subject": [{"name": PACKAGES_JSON, "digest": {"sha256": digest.to_string()}}],
+        "predicateType": PACKAGES_PREDICATE,
+        "predicate": {
+            "repository": packages.repository,
+            "identity": packages.identity.to_string(),
+            "platform": packages.platform,
+        },
+    }))
+    .expect("statements serialize");
+    let bundle = sign(signing, &statement)?;
+    let path = folder.join(PACKAGES_SIGNATURE);
+    fs::write(&path, bundle).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// B-67: the events a keyless signature's run may have been started by for it to count: a push,
 /// a schedule, a run by hand (GitHub's `workflow_dispatch`, GitLab's `web`), and the run after
 /// another workflow (`workflow_run`: the job `hushrun init --bake` writes, whose condition, in the

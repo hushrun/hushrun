@@ -1119,6 +1119,8 @@ struct BuildRun<'a> {
     say: &'a Say,
     /// COMMAND's words and folder, for what the run says of its build folders at the end (B-50).
     command: Option<(Vec<String>, PathBuf)>,
+    /// K-10: what the package store gives COMMAND, with build reuse on or off.
+    packages: crate::cmd::packages::Given,
 }
 
 impl<'a> BuildRun<'a> {
@@ -1174,11 +1176,35 @@ impl<'a> BuildRun<'a> {
                 None
             }
         };
+        // K-10: the package store's readers, whatever build reuse does; a run that may write
+        // what others trust (CI, or a relay whose server lets it) hashes every file first (K-8).
+        let relay = session
+            .as_ref()
+            .and_then(|session| session.current().share.relay().cloned())
+            .zip(crate::cmd::build_relay::Relay::running());
+        // Only a run that would read a store nothing verifies waits for its server's answer, as
+        // the baked store's does; any other with a relay counts as one that may write it.
+        let in_ci = crate::gitlab_job::in_ci(&Env::from_process());
+        let accepting =
+            hushrun_ci::var_os(hushrun_packages::LOWER_UNTRUSTED).is_some_and(|v| v == "1");
+        let may_write_trusted = if accepting {
+            hushrun_build::baked::authority(
+                in_ci,
+                relay.as_ref().map(|(_, relay)| relay.writes_trusted()),
+            )
+        } else {
+            in_ci || relay.is_some()
+        };
+        let packages = crate::cmd::packages::given(global, may_write_trusted);
+        for line in &packages.lines {
+            say.line(format_args!("{line}"));
+        }
         BuildRun {
             session,
             global,
             say,
             command: None,
+            packages,
         }
     }
 
@@ -1189,7 +1215,8 @@ impl<'a> BuildRun<'a> {
 
     /// What a start of COMMAND gets: the wrapper and the session; nothing without a session.
     fn env(&self) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-        self.session.as_ref().map(Session::env).unwrap_or_default()
+        self.packages
+            .merged(self.session.as_ref().map(Session::env).unwrap_or_default())
     }
 
     /// Sets the wrapper and the session on a start of COMMAND, when there is a session, and
