@@ -480,3 +480,62 @@ fn a_build_that_skips_tests_shares_none_of_its_modules() {
     );
     assert_eq!(maven_blocks(&fake), 0, "{err}");
 }
+
+// covers: K-10
+#[test]
+fn a_module_built_with_a_package_stores_tail_has_the_same_block_key() {
+    if online() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let Some(a) = Machine::new(dir.path(), "a", None, true) else {
+        return;
+    };
+    let (code, out, err) = a.run(&fake, &["package"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        maven_line(&err).contains("2 modules: 2 built and stored"),
+        "{err}"
+    );
+    // B, another checkout, an empty repository of its own and no tail on its command line: only
+    // a package store harvested from the tests' repository, which `hushrun run` gives Maven in
+    // the one MAVEN_OPTS the build cache's properties ride on (K-10).
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), true).unwrap();
+    let store = b.root.join("packages");
+    let baked = b
+        .hushrun(&fake)
+        .args(["packages", "bake", "--no-sign", "--out"])
+        .arg(&store)
+        .arg("--harvest")
+        .arg(format!("maven={}", b.m2.display()))
+        .output()
+        .unwrap();
+    assert!(
+        baked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baked.stderr)
+    );
+    let output = b
+        .hushrun(&fake)
+        .args(["run", "build", "--force", "--", &b.mvn, "-B", "-o"])
+        .arg(format!(
+            "-Dmaven.repo.local={}",
+            b.root.join("m2").display()
+        ))
+        .arg("package")
+        .env("HUSHRUN_PACKAGES_LOWER", &store)
+        .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
+        .output()
+        .unwrap();
+    let (out, err) = (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    );
+    assert!(output.status.success(), "{out}\n{err}");
+    // Both modules come from what A built: the tail's folder is in no block's key.
+    assert!(
+        maven_line(&err).contains("2 modules: 2 from hushrun's cache (2 from the shared store)"),
+        "{out}\n{err}"
+    );
+}

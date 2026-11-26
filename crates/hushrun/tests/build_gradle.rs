@@ -301,3 +301,92 @@ fn a_settings_file_without_the_line_is_said_and_shares_nothing() {
     assert_eq!(gradle_blocks(&fake), 0);
     assert!(!fake.opens().iter().any(|o| o.kind == "gradle/1"));
 }
+
+// covers: K-10
+#[test]
+fn a_task_whose_classpath_comes_from_a_package_store_has_the_same_block_key() {
+    if !have_gradle() {
+        return;
+    }
+    // A dependency from the tests' Gradle user home, which CI fills; without one, nothing to read.
+    let Some(home) = std::env::var_os("HUSHRUN_TEST_GRADLE_USER_HOME").filter(|h| !h.is_empty())
+    else {
+        assert!(
+            std::env::var("HUSHRUN_TEST_TOOLS").as_deref() != Ok("required"),
+            "HUSHRUN_TEST_GRADLE_USER_HOME is missing, and HUSHRUN_TEST_TOOLS=required"
+        );
+        eprintln!("note: skipping: no HUSHRUN_TEST_GRADLE_USER_HOME");
+        return;
+    };
+    let modules = Path::new(&home).join("caches");
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None, true);
+    std::fs::write(
+        a.repo.join("build.gradle"),
+        "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies { implementation 'junit:junit:4.13.2' }\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "a dependency");
+    // A reads JUnit from the tests' user home as a read-only cache of its own.
+    let mut cmd = a.hushrun(&fake);
+    cmd.args([
+        "run",
+        "build",
+        "--force",
+        "--",
+        "gradle",
+        "--console=plain",
+        "--no-daemon",
+    ])
+    .arg("compileJava")
+    .env("GRADLE_RO_DEP_CACHE", &modules);
+    let output = cmd.output().unwrap();
+    let err = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() && err.contains("Could not resolve") {
+        eprintln!("note: skipping: the tests' Gradle user home lacks junit:junit:4.13.2");
+        return;
+    }
+    assert!(output.status.success(), "{err}");
+    assert!(gradle_line(&err).contains("1 run and stored"), "{err}");
+    // B, another checkout and an empty Gradle user home, reads JUnit from a package store, which
+    // `hushrun run` gives Gradle at another path: the task comes from what A ran.
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), true);
+    let store = b.root.join("packages");
+    let baked = b
+        .hushrun(&fake)
+        .args(["packages", "bake", "--no-sign", "--out"])
+        .arg(&store)
+        .arg("--harvest")
+        .arg(format!("gradle={}", Path::new(&home).display()))
+        .output()
+        .unwrap();
+    assert!(
+        baked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baked.stderr)
+    );
+    let mut cmd = b.hushrun(&fake);
+    cmd.args([
+        "run",
+        "build",
+        "--force",
+        "--",
+        "gradle",
+        "--console=plain",
+        "--no-daemon",
+    ])
+    .arg("compileJava")
+    .env("HUSHRUN_PACKAGES_LOWER", &store)
+    .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1");
+    let output = cmd.output().unwrap();
+    let (out, err) = (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    );
+    assert!(output.status.success(), "{out}\n{err}");
+    assert!(
+        out.contains("> Task :compileJava FROM-CACHE"),
+        "{out}\n{err}"
+    );
+}
