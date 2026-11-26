@@ -117,6 +117,12 @@ project's new branch starts from what main's CI already ran.
     Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
     and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
     from a store without rewriting `uv.lock`.
+- **Baked packages for NuGet** ([ADR 0154](docs/adr/0154-baked-packages-nuget.md)): a `nuget`
+  part, a global packages folder that `dotnet restore` reads in place as a fallback folder
+  through `NUGET_FALLBACK_PACKAGES`. A bake's build fetches into a `NUGET_PACKAGES` of its own;
+  `--harvest nuget=FOLDER` takes a filled global packages folder. Folders the person already
+  names in `NUGET_FALLBACK_PACKAGES`, or a NuGet.Config's fallback folders, which the variable
+  replaces, come first.
 - **Baked packages for Cargo and Go** ([ADR 0152](docs/adr/0152-cargo-and-go-packages.md)): a
   package store's `cargo` part holds `.crate` files, and `hushrun run` copies each one the run's
   cargo home lacks into it before COMMAND, only when its SHA-256 is the checksum `Cargo.lock`

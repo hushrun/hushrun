@@ -169,6 +169,7 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
     &crate::parts::npm::Npm,
+    &crate::parts::nuget::Nuget,
     &crate::parts::pip::Pip,
     &crate::parts::pnpm::Pnpm,
     &crate::parts::poetry::Poetry,
