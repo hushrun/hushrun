@@ -130,6 +130,13 @@ project's new branch starts from what main's CI already ran.
   `--harvest nuget=FOLDER` takes a filled global packages folder. Folders the person already
   names in `NUGET_FALLBACK_PACKAGES`, or a NuGet.Config's fallback folders, which the variable
   replaces, come first.
+- **Baked packages for SwiftPM** ([ADR 0158](docs/adr/0158-swiftpm-packages.md)): a package
+  store's `swiftpm` part holds the bare clones of SwiftPM's cache, and `hushrun packages
+  restore`, `exec` and `env` copy each one a `Package.resolved` pins into the user's SwiftPM
+  cache, hashing every file as they copy it, so that SwiftPM resolves the pinned revisions
+  offline. A file the cache holds is left as it is. `hushrun packages bake` runs `swift package
+  resolve` itself, no command needed; `--harvest swiftpm=FOLDER` takes a filled cache. The part
+  needs a signature, since git checks no file of a clone it copies from a folder.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
