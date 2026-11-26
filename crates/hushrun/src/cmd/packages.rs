@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use anyhow::anyhow;
 use hushrun_core::blocks::Hex32;
-use hushrun_packages::part::{self, Part, Reader};
+use hushrun_packages::part::{self, Locked, Part, Reader};
 use hushrun_packages::state::{self, Here, Signed, State};
 use hushrun_packages::store::{self, Class, Depth, PartEntry};
 use hushrun_packages::write::{PartMeta, StoreMeta};
@@ -578,22 +578,58 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     let cleanup = Cleanup(vec![new.clone()]);
     let mut lines = Vec::new();
     let mut metas = Vec::new();
-    // The fetch: COMMAND, with each tool's cache at a folder of the bake's own (K-6).
+    // The fetch: each tool's own download-only command, then COMMAND, with each tool's cache at
+    // a folder of the bake's own (K-6).
+    let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
+    let _cache = Cleanup(vec![cache.clone()]);
+    // Each part whose tool the fetch doesn't name already says where it downloads.
+    let mut vars = Vec::new();
+    for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+        match part.fetch_vars(&fetch_cache(&cache, part), &var) {
+            Ok(given) => vars.extend(given),
+            Err(why) if !part.manifests(&context.tracked).is_empty() => {
+                lines.push(format!("packages: {}: not fetched: {why}", part.name()));
+            }
+            Err(_) => {}
+        }
+    }
     let mut fetched: Vec<(&'static dyn Part, PathBuf, String)> = Vec::new();
-    if !args.command.is_empty() {
-        let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
-        let _cache = Cleanup(vec![cache.clone()]);
-        // Each part whose tool the fetch doesn't name already says where it downloads.
-        let mut vars = Vec::new();
-        for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
-            match part.fetch_env(&fetch_cache(&cache, part), &var) {
-                Ok(given) => vars.extend(given),
-                Err(why) => lines.push(format!("packages: {}: not fetched: {why}", part.name())),
+    let mut cannot: Vec<&'static str> = Vec::new();
+    for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+        if args.no_build || harvests.iter().any(|(h, _)| h.name() == part.name()) {
+            continue;
+        }
+        let manifests = part.manifests(&context.tracked);
+        if manifests.is_empty() {
+            continue;
+        }
+        let into = fetch_cache(&cache, part);
+        match part.download(&context.checkout, &manifests, &into) {
+            None => {}
+            Some(Err(why)) => {
+                cannot.push(part.name());
+                lines.push(format!("packages: {}: left out: {why}", part.name()));
+            }
+            Some(Ok(commands)) => {
+                fs::create_dir_all(&into).map_err(|e| fail(e.to_string()))?;
+                for command in &commands {
+                    let words: Vec<String> = command
+                        .iter()
+                        .map(|w| w.to_string_lossy().into_owned())
+                        .collect();
+                    run_fetch(&context.checkout, &words, &cache, &vars).map_err(fail)?;
+                }
+                fetched.push((part, into, download_tool(&commands)));
             }
         }
+    }
+    if !args.command.is_empty() {
         run_fetch(&context.checkout, &args.command, &cache, &vars).map_err(fail)?;
         let words = shell_words(&args.command);
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+            if fetched.iter().any(|(p, _, _)| p.name() == part.name()) {
+                continue;
+            }
             fetched.push((
                 part,
                 fetch_cache(&cache, part),
@@ -604,10 +640,13 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             &context, &new, &fetched, &harvests, &wanted, &mut metas, &mut lines,
         )?;
     } else {
-        // No fetch: each part the checkout has build files for and no harvest names is left out.
+        // No fetch: each part the checkout has build files for and no harvest or download takes
+        // is left out.
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
             if !part.manifests(&context.tracked).is_empty()
                 && !harvests.iter().any(|(h, _)| h.name() == part.name())
+                && !fetched.iter().any(|(p, _, _)| p.name() == part.name())
+                && !cannot.contains(&part.name())
             {
                 lines.push(format!(
                     "packages: {}: left out: {}, and no --harvest names a {} cache",
@@ -637,6 +676,20 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         ));
     }
     let baked_ms = baked_ms();
+    // K-3: a part its lockfile verifies gives each row the lockfile's own hash of its file.
+    let lockeds: Vec<(String, Locked)> = metas
+        .iter()
+        .filter(|m| m.verified_by == store::VerifiedBy::Lockfile)
+        .filter_map(|m| {
+            let part = part::by_name(&m.part)?;
+            let manifests: Vec<String> = m.manifests.iter().map(|(p, _)| p.clone()).collect();
+            Some((
+                m.part.clone(),
+                part.lockfile(&context.checkout, &manifests)?,
+            ))
+        })
+        .collect();
+    let parts_dir = new.join(store::PARTS);
     let packages = hushrun_packages::write::seal(
         &new,
         &StoreMeta {
@@ -648,10 +701,15 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         &|name, path| {
             let found = part::by_name(name);
             let inner = path.split_once('/').map_or(path, |(_, rest)| rest);
-            (
-                found.and_then(|p| p.package(inner)),
-                found.and_then(|p| p.locked(inner)),
-            )
+            // K-3: a part's own `locked` by its path, else its lockfile's hash of these bytes.
+            let locked = found.and_then(|p| p.locked(inner)).or_else(|| {
+                let (_, lockfile) = lockeds.iter().find(|(n, _)| n == name)?;
+                let sha256 = store::sha256_file(&parts_dir.join(name).join(path)).ok()?;
+                lockfile
+                    .of(path.rsplit('/').next().unwrap_or(path), &sha256)
+                    .map(str::to_string)
+            });
+            (found.and_then(|p| p.package(inner)), locked)
         },
     )
     .map_err(|e| fail(e.to_string()))?;
@@ -731,11 +789,11 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
                 .all(|p| p.verified_by == store::VerifiedBy::Lockfile) =>
         {
             format!(
-                "packages: the store is unsigned ({why}): every part is checked against a lockfile as it is read, so any run reads it"
+                "packages: the store is unsigned ({why}): each part is checked against its lockfile, so any run reads it"
             )
         }
         Err(why) => format!(
-            "packages: the store is unsigned ({why}): a run reads the parts a lockfile verifies, and the others only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI"
+            "packages: the store is unsigned ({why}): a run reads its parts a lockfile doesn't verify only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI"
         ),
     });
     lines.push(format!(
@@ -809,9 +867,15 @@ fn already_baked(
     let (old, _) = store::Packages::read_bytes(out).ok()?;
     store::check_contents(out, Some(&old), Depth::Names).ok()?;
     let tool_of = |part: &dyn Part| -> Option<String> {
+        let manifests = part.manifests(&context.tracked);
         if harvests.iter().any(|(h, _)| h.name() == part.name()) {
             Some("harvested".to_string())
-        } else if !args.command.is_empty() && !part.manifests(&context.tracked).is_empty() {
+        } else if let Some(Ok(commands)) = (!args.no_build && !manifests.is_empty())
+            .then(|| part.download(&context.checkout, &manifests, Path::new("")))
+            .flatten()
+        {
+            Some(download_tool(&commands))
+        } else if !args.command.is_empty() && !manifests.is_empty() {
             Some(format!("fetched by `{}`", shell_words(&args.command)))
         } else {
             None
@@ -877,9 +941,20 @@ fn take_all(
             continue;
         };
         let dest = new.join(store::PARTS).join(part.name()).join(under);
-        let (kept, left) = copy_kept(&root, &dest, part).map_err(|e| fail(e.to_string()))?;
+        // K-5: a part its lockfile verifies keeps only the files the lockfile hashes.
+        let locked = part.lockfile(&context.checkout, &manifests);
+        let (kept, left) =
+            copy_kept(&root, &dest, part, locked.as_ref()).map_err(|e| fail(e.to_string()))?;
         if kept == 0 {
             let _ = fs::remove_dir_all(new.join(store::PARTS).join(part.name()));
+            if locked.is_some() {
+                lines.push(format!(
+                    "packages: {}: left out: its lockfile ({}) hashes none of the {left} files {} holds",
+                    part.name(),
+                    manifests.join(", "),
+                    folder.display()
+                ));
+            }
             continue;
         }
         if left > 0 {
@@ -907,9 +982,14 @@ fn take_all(
     Ok(())
 }
 
-/// Copies every file under `root` the part keeps into `dest`, never following a link out; returns
-/// how many it kept and how many it left out.
-fn copy_kept(root: &Path, dest: &Path, part: &dyn Part) -> std::io::Result<(usize, usize)> {
+/// Copies every file under `root` the part keeps into `dest`, never following a link out, and when
+/// `locked` is given only a file it hashes; returns how many it kept and how many it left out.
+fn copy_kept(
+    root: &Path,
+    dest: &Path,
+    part: &dyn Part,
+    locked: Option<&Locked>,
+) -> std::io::Result<(usize, usize)> {
     let mut kept = 0;
     let mut left = 0;
     let mut stack = vec![(root.to_path_buf(), String::new())];
@@ -934,6 +1014,17 @@ fn copy_kept(root: &Path, dest: &Path, part: &dyn Part) -> std::io::Result<(usiz
             if !part.keep(&path) || !store::is_row_path(&path) {
                 left += 1;
                 continue;
+            }
+            if let Some(locked) = locked {
+                let name = path.rsplit('/').next().unwrap_or(&path);
+                if !kind.is_file()
+                    || locked
+                        .of(name, &store::sha256_file(&entry.path())?)
+                        .is_none()
+                {
+                    left += 1;
+                    continue;
+                }
             }
             let to = dest.join(&path);
             if let Some(parent) = to.parent() {
@@ -985,7 +1076,7 @@ fn run_fetch(
     checkout: &Path,
     command: &[String],
     cache: &Path,
-    vars: &[(String, OsString)],
+    vars: &[(&'static str, OsString)],
 ) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
@@ -1010,7 +1101,7 @@ fn run_fetch(
         (hushrun_packages::parts::npm::CACHE, npm.into_os_string()),
         (hushrun_packages::LOWER, OsString::new()),
     ];
-    extra.extend(vars.iter().map(|(n, v)| (n.as_str(), v.clone())));
+    extra.extend(vars.iter().cloned());
     let built = crate::cmd::bake_build::in_bake(built, checkout, &[], None, &extra);
     crate::cmd::bake_build::run_in_bake(built, None).map_err(|ended| {
         format!(
@@ -1023,6 +1114,21 @@ fn run_fetch(
 
 fn shell_words(command: &[String]) -> String {
     command.join(" ")
+}
+
+/// A part's tool line when the tool's own download-only command fetched it: its words up to the
+/// subcommand, such as `python3 -m pip download`.
+fn download_tool(commands: &[Vec<OsString>]) -> String {
+    let words: Vec<String> = commands
+        .first()
+        .map(|c| {
+            c.iter()
+                .map(|w| w.to_string_lossy().into_owned())
+                .take_while(|w| !w.starts_with('-') || w == "-m")
+                .collect()
+        })
+        .unwrap_or_default();
+    format!("fetched by `{}`", words.join(" "))
 }
 
 /// When the store was baked: `SOURCE_DATE_EPOCH` when set, else now.

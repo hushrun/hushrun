@@ -186,6 +186,205 @@ fn every_part_module_is_listed() {
     assert_eq!(listed, modules);
 }
 
+// covers: K-4, K-30, K-31
+#[test]
+fn pip_and_poetry_name_their_manifest_sets() {
+    use crate::parts::{pip::Pip, poetry::Poetry};
+    let tracked = paths(&[
+        "requirements.txt",
+        "requirements-dev.txt",
+        "ci-requirements.txt",
+        "requirements/test.txt",
+        "docs/requirements.in",
+        "notes.txt",
+        "poetry.lock",
+        "tools/poetry.lock",
+        "pyproject.toml",
+        "uv.lock",
+    ]);
+    assert_eq!(
+        Pip.manifests(&tracked),
+        paths(&[
+            "requirements.txt",
+            "requirements-dev.txt",
+            "ci-requirements.txt",
+            "requirements/test.txt",
+        ])
+    );
+    assert_eq!(
+        Poetry.manifests(&tracked),
+        paths(&["poetry.lock", "tools/poetry.lock"])
+    );
+}
+
+const SIX: &str = "8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254";
+const SIX_SDIST: &str = "1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926";
+
+// covers: K-3, K-5, K-30, K-32
+#[test]
+fn pip_keeps_the_files_a_requirements_file_hashes() {
+    use crate::parts::pip::{Pip, hashes};
+    let text = format!(
+        "# a comment --hash=sha256:{SIX_SDIST}\nsix==1.16.0 \\\n    --hash=sha256:{SIX} \\\n    --hash sha256:{SIX_SDIST}\nidna==3.7 --hash=sha512:00\n"
+    );
+    assert_eq!(hashes(&text), [SIX, SIX_SDIST]);
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("requirements.txt"), &text).unwrap();
+    std::fs::write(checkout.path().join("requirements-dev.txt"), "pytest\n").unwrap();
+    let manifests = paths(&["requirements.txt", "requirements-dev.txt"]);
+    let locked = Pip.lockfile(checkout.path(), &manifests).unwrap();
+    let six = hushrun_core::blocks::Hex32::parse(SIX).unwrap();
+    assert_eq!(
+        locked.of("six-1.16.0-py2.py3-none-any.whl", &six),
+        Some(format!("sha256:{SIX}").as_str())
+    );
+    // A download names the hashed file alone; a requirements file with no hashes fetches nothing.
+    let Some(Ok(commands)) = Pip.download(checkout.path(), &manifests, Path::new("/d")) else {
+        panic!("pip downloads")
+    };
+    assert_eq!(commands.len(), 1);
+    assert!(commands[0].contains(&OsString::from("--require-hashes")));
+    assert!(commands[0].contains(&OsString::from("requirements.txt")));
+    assert!(matches!(
+        Pip.download(
+            checkout.path(),
+            &paths(&["requirements-dev.txt"]),
+            Path::new("/d")
+        ),
+        Some(Err(_))
+    ));
+    assert!(Pip.keep("six-1.16.0-py2.py3-none-any.whl"));
+    assert!(Pip.keep("six-1.16.0.tar.gz"));
+    assert!(!Pip.keep("sub/six-1.16.0.tar.gz"));
+    assert!(!Pip.keep("notes.txt"));
+    assert_eq!(
+        Pip.package("six-1.16.0-py2.py3-none-any.whl").as_deref(),
+        Some("six==1.16.0")
+    );
+    assert_eq!(
+        Pip.package("python-dateutil-2.9.0.tar.gz").as_deref(),
+        Some("python-dateutil==2.9.0")
+    );
+}
+
+// covers: K-3, K-5, K-31
+#[test]
+fn poetry_keeps_the_files_its_lockfile_hashes_and_never_a_built_wheel() {
+    use crate::parts::poetry::{Poetry, files};
+    let lock = format!(
+        "[[package]]\nname = \"six\"\nversion = \"1.16.0\"\nfiles = [\n    {{file = \"six-1.16.0-py2.py3-none-any.whl\", hash = \"sha256:{SIX}\"}},\n    {{file = \"six-1.16.0.tar.gz\", hash = \"sha256:{SIX_SDIST}\"}},\n]\n"
+    );
+    assert_eq!(
+        files(&lock),
+        [
+            (
+                "six-1.16.0-py2.py3-none-any.whl".to_string(),
+                SIX.to_string()
+            ),
+            ("six-1.16.0.tar.gz".to_string(), SIX_SDIST.to_string()),
+        ]
+    );
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("poetry.lock"), &lock).unwrap();
+    let locked = Poetry
+        .lockfile(checkout.path(), &paths(&["poetry.lock"]))
+        .unwrap();
+    let six = hushrun_core::blocks::Hex32::parse(SIX).unwrap();
+    assert!(locked.of("six-1.16.0-py2.py3-none-any.whl", &six).is_some());
+    // The same bytes under another name are no file the lockfile names.
+    assert!(locked.of("six-1.16.0-cp313-none-any.whl", &six).is_none());
+    // A seed copies only what the lockfile names with these bytes.
+    let admit = Poetry.admit(checkout.path(), &paths(&["poetry.lock"]));
+    assert_eq!(
+        admit(
+            "aa/bb/cc/dd/six-1.16.0-py2.py3-none-any.whl",
+            b"other bytes"
+        ),
+        crate::part::Admit::NotLocked
+    );
+    // The folder Poetry names by a file's URL and hash: 64 hex characters split 2/2/2/58.
+    let folder = format!("11/e9/4b/{}", "a".repeat(58));
+    assert!(Poetry.keep(&format!("{folder}/six-1.16.0-py2.py3-none-any.whl")));
+    for left in [
+        "six-1.16.0-py2.py3-none-any.whl".to_string(),
+        format!("{folder}/six-1.16.0-py2.py3-none-any.whl.lock"),
+        "11/e9/4b/zz/six-1.16.0.tar.gz".to_string(),
+    ] {
+        assert!(!Poetry.keep(&left), "{left}");
+    }
+}
+
+// covers: K-10, K-30, K-31
+#[test]
+fn the_python_readers() {
+    use crate::parts::{pip::Pip, poetry::Poetry};
+    let home = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let h = home.path().to_path_buf();
+    let env = move |name: &str| (name == "HOME").then(|| h.clone().into_os_string());
+    let dir = Path::new("/hushrun-packages/parts/pip");
+    assert_eq!(
+        Pip.reader(dir, checkout.path(), &env),
+        Reader::InPlace(vec![("PIP_FIND_LINKS".into(), dir.into())])
+    );
+    let set = |name: &str| (name == "PIP_FIND_LINKS").then(|| OsString::from("/mine"));
+    assert_eq!(
+        Pip.reader(dir, checkout.path(), &set),
+        Reader::LeftAlone("PIP_FIND_LINKS is set already".into())
+    );
+    // A pip configuration file's find-links would be replaced: the part is left alone.
+    std::fs::create_dir_all(home.path().join(".config/pip")).unwrap();
+    std::fs::write(
+        home.path().join(".config/pip/pip.conf"),
+        "[global]\nfind-links = /wheels\n",
+    )
+    .unwrap();
+    if cfg!(unix) {
+        assert!(matches!(
+            Pip.reader(dir, checkout.path(), &env),
+            Reader::LeftAlone(why) if why.starts_with("find-links is set already")
+        ));
+    }
+    assert!(matches!(
+        Pip.reader(
+            Path::new("/my packages/parts/pip"),
+            checkout.path(),
+            &no_env
+        ),
+        Reader::LeftAlone(_)
+    ));
+    // Poetry: seeded into its cache's artifacts/, POETRY_CACHE_DIR's or the platform's.
+    let named = |name: &str| (name == "POETRY_CACHE_DIR").then(|| OsString::from("/pc"));
+    assert_eq!(Poetry.reader(dir, checkout.path(), &named), Reader::Seed);
+    assert_eq!(
+        Poetry.seed_into(checkout.path(), &named),
+        Ok(("/pc/artifacts".into(), "artifacts"))
+    );
+    let relative = |name: &str| (name == "POETRY_CACHE_DIR").then(|| OsString::from("pc"));
+    assert!(matches!(
+        Poetry.reader(dir, checkout.path(), &relative),
+        Reader::LeftAlone(_)
+    ));
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            Poetry.seed_into(checkout.path(), &env),
+            Ok((home.path().join(".cache/pypoetry/artifacts"), "artifacts"))
+        );
+    }
+    // A cache-dir the project's poetry.toml names: hushrun doesn't read it, and leaves Poetry alone.
+    std::fs::write(checkout.path().join("poetry.toml"), "cache-dir = \"/x\"\n").unwrap();
+    assert!(matches!(
+        Poetry.reader(dir, checkout.path(), &env),
+        Reader::LeftAlone(why) if why.starts_with("cache-dir is set already")
+    ));
+    assert_eq!(
+        Poetry
+            .fetch_vars(Path::new("/bake/poetry"), &no_env)
+            .unwrap(),
+        [("POETRY_CACHE_DIR", OsString::from("/bake/poetry"))]
+    );
+}
+
 // covers: K-4, K-5, K-18
 #[test]
 fn pnpm_keeps_a_stores_files_and_indexes_and_names_each_index_s_package() {

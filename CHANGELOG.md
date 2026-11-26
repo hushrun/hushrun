@@ -103,13 +103,20 @@ project's new branch starts from what main's CI already ran.
   - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
-- **Baked packages for vcpkg** ([ADR 0159](docs/adr/0159-baked-packages-vcpkg-conan.md)): a
-  `vcpkg` part holds vcpkg's asset cache, which `hushrun packages bake -- vcpkg install
-  --only-downloads` fills, and vcpkg reads it as one more asset source through
-  `X_VCPKG_ASSET_SOURCES`. vcpkg checks every file against its portfile's SHA-512, so any run
-  reads the part, signed or not. An asset source of the person's leaves it alone, with a line,
-  since vcpkg reads only one. There is no Conan part: `conan cache restore` writes what its archive
-  says, outside the cache too.
+  - **pip and Poetry** ([ADR 0153](docs/adr/0153-baked-python-packages.md)): a `pip` part holds
+    the files a requirements file with hashes names, fetched by `pip download` with no build to
+    name, and pip reads it through `PIP_FIND_LINKS` when it can't reach its index. A `poetry`
+    part holds Poetry's downloads, fetched by the bake's COMMAND; `hushrun packages exec`, `env`
+    and `restore` copy each file `poetry.lock` still names, after checking its hash, into
+    Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
+    and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
+    from a store without rewriting `uv.lock`.
+  - **vcpkg** ([ADR 0159](docs/adr/0159-baked-packages-vcpkg-conan.md)): a `vcpkg` part holds
+    vcpkg's asset cache, which `hushrun packages bake -- vcpkg install --only-downloads` fills,
+    and vcpkg reads it as one more asset source through `X_VCPKG_ASSET_SOURCES`. vcpkg checks
+    every file against its portfile's SHA-512, so any run reads the part, signed or not. An asset
+    source of the person's leaves it alone, with a line, since vcpkg reads only one. There is no
+    Conan part: `conan cache restore` writes what its archive says, outside the cache too.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

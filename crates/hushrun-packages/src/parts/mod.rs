@@ -3,7 +3,9 @@
 pub mod gradle;
 pub mod maven;
 pub mod npm;
+pub mod pip;
 pub mod pnpm;
+pub mod poetry;
 pub mod vcpkg;
 
 #[cfg(test)]

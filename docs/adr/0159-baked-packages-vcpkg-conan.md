@@ -28,8 +28,9 @@ names for C and C++.
    `vcpkg install --only-downloads`. The bake gives it `X_VCPKG_ASSET_SOURCES` with its own folder
    as a `readwrite` source, and `VCPKG_DOWNLOADS` and `VCPKG_BINARY_SOURCES=clear`, so that a
    machine's downloads folder or binary cache can't keep a source out of the part. `--harvest
-   vcpkg=FOLDER` takes an asset cache vcpkg filled the same way. A part says, through a new
-   method with a default (`Part::fetch_env`), what its fetch needs; Gradle and Maven need none.
+   vcpkg=FOLDER` takes an asset cache vcpkg filled the same way. A part says what its fetch
+   needs through `Part::fetch_vars`, which `poetry` brought; it now also sees the job's
+   variables, and may refuse with a line, since vcpkg's must keep the person's words.
 4. **A person's own asset source leaves the part alone**, with a line. vcpkg reads at most one
    asset source and refuses to start with two. Words that name none (`clear`, `x-block-origin`)
    are kept, before the part's.

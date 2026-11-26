@@ -53,7 +53,11 @@ impl Part for Vcpkg {
         cache.is_dir().then(|| (cache.to_path_buf(), ASSETS))
     }
 
-    fn fetch_env(&self, cache: &Path, env: Env<'_>) -> Result<Vec<(String, OsString)>, String> {
+    fn fetch_vars(
+        &self,
+        cache: &Path,
+        env: Env<'_>,
+    ) -> Result<Vec<(&'static str, OsString)>, String> {
         let person = person_words(env)?;
         let assets = cache.join(ASSETS);
         let url = url_of(&assets)
@@ -61,11 +65,11 @@ impl Part for Vcpkg {
         fs::create_dir_all(&assets).map_err(|e| format!("{}: {e}", assets.display()))?;
         Ok(vec![
             (
-                VARIABLE.to_string(),
+                VARIABLE,
                 joined(person.as_deref(), &format!("x-azurl,{url},,readwrite")).into(),
             ),
-            (DOWNLOADS.to_string(), cache.join("downloads").into()),
-            (BINARY_SOURCES.to_string(), "clear".into()),
+            (DOWNLOADS, cache.join("downloads").into()),
+            (BINARY_SOURCES, "clear".into()),
         ])
     }
 
@@ -242,19 +246,16 @@ mod tests {
     fn a_fetch_writes_its_assets_and_downloads_into_the_bake_s_folder() {
         let cache = tempfile::tempdir().unwrap();
         let dir = cache.path().join("vcpkg");
-        let vars = Vcpkg.fetch_env(&dir, &none).unwrap();
+        let vars = Vcpkg.fetch_vars(&dir, &none).unwrap();
         assert_eq!(
             vars,
             vec![
                 (
-                    VARIABLE.to_string(),
+                    VARIABLE,
                     format!("x-azurl,file://{},,readwrite", dir.join("assets").display()).into()
                 ),
-                (
-                    DOWNLOADS.to_string(),
-                    dir.join("downloads").into_os_string()
-                ),
-                (BINARY_SOURCES.to_string(), "clear".into()),
+                (DOWNLOADS, dir.join("downloads").into_os_string()),
+                (BINARY_SOURCES, "clear".into()),
             ]
         );
         // The fetch's folder holds `assets/`, which a harvest takes; a harvest of an asset cache
@@ -265,6 +266,6 @@ mod tests {
         assert_eq!(Vcpkg.harvest_root(&theirs), Some((theirs.clone(), ASSETS)));
         assert_eq!(Vcpkg.harvest_root(&cache.path().join("none")), None);
         let set = |n: &str| (n == VARIABLE).then(|| OsString::from("x-azurl,https://m,,read"));
-        assert!(Vcpkg.fetch_env(&dir, &set).is_err());
+        assert!(Vcpkg.fetch_vars(&dir, &set).is_err());
     }
 }

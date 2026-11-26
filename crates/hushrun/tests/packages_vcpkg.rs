@@ -129,7 +129,7 @@ fn a_baked_store_is_read_with_the_origin_gone_and_vcpkg_checks_every_file() {
     );
     // vcpkg checks each file itself: an unsigned store is read by any run.
     assert!(
-        out.contains("every part is checked against a lockfile as it is read, so any run reads it"),
+        out.contains("each part is checked against its lockfile, so any run reads it"),
         "{out}"
     );
     let asset = f.asset("hello");
