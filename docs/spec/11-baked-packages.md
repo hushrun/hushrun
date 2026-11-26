@@ -223,7 +223,9 @@ the pin's location less `.git`; a local or registry package is no clone of Swift
 `$XDG_CACHE_HOME/org.swift.swiftpm`, else `~/.cache/org.swift.swiftpm`, on Linux; elsewhere the
 part is left alone, with a line. It copies as pnpm's seed does (K-18): never over a file that is
 there, each file hashed as it is copied and left out, with a line, when its bytes aren't its
-row's, written beside its place and renamed, and a stamp when nothing was left out. A clone no
+row's, written beside its place and renamed, and a stamp when nothing was left out. A store
+keeps no empty folder, so after a seed that copied anything, each clone in that folder gains the
+folders git reads a repository by (`refs/heads`, `refs/tags`, `objects/info`, `objects/pack`). A clone no
 lockfile pins now is left, with a count. A `Package.resolved` at the checkout's root of a version
 other than 1, 2 or 3 leaves the part alone, with a line; nothing of it is guessed. Nothing is set:
 no variable, no option. *Rests on:* SwiftPM fetching nothing for a pin whose revision its cached

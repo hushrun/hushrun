@@ -35,6 +35,10 @@ for `swiftpm` says.
    `~/.cache/org.swift.swiftpm`. The part is the same on both. `hushrun run` seeds nothing, as for
    pnpm and npm, though SwiftPM resolves inside `swift build` and `swift test` themselves: a
    sandbox seeds with `hushrun packages restore` in its setup, before its checks.
+   A store keeps files only, and a bare clone holds empty folders (`refs/heads`, `refs/tags`)
+   without which git reads no folder as a repository; SwiftPM then clones from the network, or
+   fails offline. After a seed, `Part::after_seed` makes those folders in each clone. CI's first
+   run found this: the stand-in `swift` of the tests had written a ref file, so `refs/` came along.
 4. **A pin names a clone by its repository's name.** That name is the last component of the
    pin's location, less `.git`; SwiftPM's folder is that name, `-`, and 8 hex characters of a
    SHA-256 of its canonical location. Two pins whose locations end alike would both seed, which
@@ -104,4 +108,4 @@ out first. A seed that groups a clone's files would close it, and is left for la
 - A sandbox whose image carries a signed store resolves a Swift package's pinned dependencies
   with no network.
 - `part::Part` gains `download`, the tool's own download-only commands a bake runs with or
-  without `COMMAND`.
+  without `COMMAND`, and `after_seed`, what a tool needs where a seed copied that no file holds.

@@ -86,6 +86,11 @@ pub trait Part: Sync {
     fn locked(&self, _path: &str) -> Option<String> {
         None
     }
+    /// K-10, mechanism C: what the tool needs in `dest`, where a seed copied files, that no file
+    /// holds: a store keeps files only, never an empty folder.
+    fn after_seed(&self, _dest: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
     /// K-6: the tool's own download-only commands, which fetch the part into `into` from the
     /// manifest set in `checkout`. A bake runs them with or without its COMMAND.
     fn download(&self, _checkout: &Path, _manifests: &[String], _into: &Path) -> Download {

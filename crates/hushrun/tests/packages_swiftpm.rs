@@ -39,18 +39,20 @@ const RESOLVED: &str = r#"{
 "#;
 
 /// A `swift` that writes, under its `--cache-path`, what `swift package resolve` writes there: a
-/// bare clone, and SwiftPM's and git's own files, which a bake leaves out. Its environment goes
-/// into the clone's HEAD, so that a credential the bake withholds would show.
+/// bare clone, as git makes one with its empty folders, and SwiftPM's and git's own files, which a
+/// bake leaves out. Its environment goes into the clone's description, so that a credential the
+/// bake withholds would show.
 const FAKE_SWIFT: &str = r#"#!/bin/sh
 while [ $# -gt 0 ]; do
   if [ "$1" = "--cache-path" ]; then cache=$2; fi
   shift
 done
 d=$cache/repositories/foo-0a1b2c3d
-mkdir -p "$d/objects/ab" "$d/refs/tags"
-env > "$d/HEAD"
+git init -q --bare "$d"
+mkdir -p "$d/objects/ab"
+env > "$d/description"
 printf object > "$d/objects/ab/cdef"
-printf 1111111111111111111111111111111111111111 > "$d/refs/tags/1.0.0"
+printf "1111111111111111111111111111111111111111 refs/tags/1.0.0\n" > "$d/packed-refs"
 printf fetched > "$d/FETCH_HEAD"
 : > "$cache/repositories/foo-0a1b2c3d.lock"
 "#;
@@ -120,7 +122,7 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
     let (said, err) = text(&baked);
     assert!(baked.status.success(), "{said}{err}");
     assert!(
-        said.contains("packages: swiftpm: 3 files, ")
+        said.contains("packages: swiftpm: 6 files, ")
             && said.contains("(Package.resolved, Package.swift)"),
         "{said}"
     );
@@ -158,12 +160,25 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
     let err = exec(&home, &untrusted);
     assert!(
         err.contains(&format!(
-            "packages: swiftpm: seeded 3 files into {} (0 there already)",
+            "packages: swiftpm: seeded 6 files into {} (0 there already)",
             cache.join("repositories").display()
         )),
         "{err}"
     );
     let seeded = cache.join("repositories/foo-0a1b2c3d");
+    // A store holds files only; git needs a clone's folders too, which the seed makes.
+    let git = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&seeded)
+        .args(["rev-parse", "--is-bare-repository"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&git.stdout).trim(),
+        "true",
+        "git reads the seeded clone: {}",
+        String::from_utf8_lossy(&git.stderr)
+    );
     assert_eq!(
         std::fs::read(seeded.join("objects/ab/cdef")).unwrap(),
         b"object"
@@ -225,7 +240,7 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
     let fresh = r.root.join("home-unpinned");
     let err = exec(&fresh, &untrusted);
     assert!(
-        err.contains("packages: swiftpm: left out 3 files no lockfile here names now"),
+        err.contains("packages: swiftpm: left out 6 files no lockfile here names now"),
         "{err}"
     );
     assert!(
@@ -340,7 +355,7 @@ fn a_signed_store_is_seeded_in_ci_and_a_changed_byte_keeps_the_part_out() {
     };
     let home = r.root.join("home-ci");
     let err = exec(&home);
-    assert!(err.contains("packages: swiftpm: seeded 3 files"), "{err}");
+    assert!(err.contains("packages: swiftpm: seeded 6 files"), "{err}");
     // In CI every file is hashed before any tool reads it: one byte changed, the size the same,
     // and the part is left out, with a line; SwiftPM downloads as it does today.
     let file = store.join("parts/swiftpm/repositories/foo-0a1b2c3d/objects/ab/cdef");

@@ -120,6 +120,20 @@ impl Part for SwiftPm {
         })
     }
 
+    fn after_seed(&self, dest: &Path) -> std::io::Result<()> {
+        // A bare clone's empty folders: git reads no folder as a repository without `refs/` and
+        // `objects/`, and SwiftPM then clones the dependency from the network, or fails offline.
+        for entry in fs::read_dir(dest)?.flatten() {
+            let clone = entry.path();
+            if clone.join("HEAD").is_file() {
+                for folder in ["refs/heads", "refs/tags", "objects/info", "objects/pack"] {
+                    fs::create_dir_all(clone.join(folder))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn download(&self, checkout: &Path, manifests: &[String], into: &Path) -> Download {
         // `swift package resolve` in each package a Package.resolved pins, with the bake's own
         // cache, and its own scratch folder, so that nothing of the checkout is written.
