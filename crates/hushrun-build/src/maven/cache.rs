@@ -16,9 +16,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use hushrun_core::Digest;
 use serde_json::json;
@@ -26,16 +25,13 @@ use serde_json::json;
 use super::buildinfo::{self, Checked};
 use super::{BUILDINFO, Local, Module, REPORT};
 use crate::cache::http::{self, Body};
-use crate::model::{Class, Kind, Mode, NotStored, Outcome};
+use crate::cache::shared::Shared;
+use crate::model::{Class, Kind, NotStored, Outcome};
 use crate::origin::Origin;
-use crate::relay::{self, Answer, Problem, Request};
+use crate::relay::Request;
 use crate::session::{Current, Entry, MavenEntry};
 use crate::store::{Block, NewFile, Store};
 
-/// The longest a question waits on a relay that says nothing (ADR 0144): a relay working on an
-/// answer says so every heartbeat, so this bounds a frozen or gone relay only, and every question
-/// waits the same, whatever its module costs.
-const RELAY_WAIT: Duration = relay::WAIT;
 /// The most bytes one `PUT`'s body may hold.
 pub const MOST_BODY: u64 = crate::cache::service::MOST_BODY;
 /// The most bytes held for modules whose entry isn't whole yet: what comes beyond it stays in the
@@ -44,13 +40,10 @@ pub const MOST_PENDING: u64 = 512 << 20;
 
 /// The cache for one check's session.
 pub struct Cache {
-    current: Current,
+    /// The session, the relay and the log, as every tool's cache reaches them.
+    shared: Shared,
     /// The first part of every path Maven asks: the run's token.
     token: String,
-    /// The relay failed or timed out once: nothing more is asked of it this run.
-    relay_down: AtomicBool,
-    /// Keys whose first reuse of a download here was counted, so it is counted once.
-    first_reuses: Mutex<HashSet<Digest>>,
     /// The modules whose `buildinfo.xml` this run served: only their files are served (B-174).
     served: Mutex<HashSet<Digest>>,
     /// When this run's `GET` of a module's `buildinfo.xml` missed: Maven built the module from
@@ -116,10 +109,8 @@ impl Cache {
     /// A cache for the session `current`, which Maven reaches under `token`.
     pub fn new(current: Current, token: &str) -> Cache {
         Cache {
-            current,
+            shared: Shared::new(current, Kind::Maven),
             token: token.to_string(),
-            relay_down: AtomicBool::new(false),
-            first_reuses: Mutex::new(HashSet::new()),
             served: Mutex::new(HashSet::new()),
             missed: Mutex::new(HashMap::new()),
             pending: Mutex::new(Pending::default()),
@@ -191,7 +182,7 @@ impl Cache {
     }
 
     fn holds(&self, module: &Module, file: &str) -> bool {
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         self.block_of(&store, module)
             .is_some_and(|block| block.files.iter().any(|f| f.name == file))
     }
@@ -199,27 +190,15 @@ impl Cache {
     /// B-174: the `buildinfo.xml` of `module`, or `None` (a miss).
     pub fn get(&self, module: &Module) -> Option<Vec<u8>> {
         let key = module.key();
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         let at = SystemTime::now();
         if store.suspended_at(&key, at).is_some() {
             return None;
         }
         let served = if let Ok(Some(_)) = store.block(&key) {
             self.serve(&store, &key, module, false, at)
-        } else if self.current.mode == Mode::On {
-            // A download, only where the run shares with sharing on (the relay says) and the
-            // check's `maven/1` manifest names it.
-            let asked = Request::ToolFetch {
-                kind: Kind::Maven,
-                key,
-                local_ms: store.step_cost(&key),
-            };
-            match self.ask(&asked, RELAY_WAIT) {
-                Some(Answer::Ready { key: got }) if got == key => {
-                    self.serve(&store, &key, module, true, at)
-                }
-                _ => None,
-            }
+        } else if self.shared.fetch(&store, &key) {
+            self.serve(&store, &key, module, true, at)
         } else {
             None
         };
@@ -243,66 +222,25 @@ impl Cache {
     ) -> Option<Vec<u8>> {
         let block = self.block_of(store, module)?;
         let origin = store.origin(key);
-        let vouch = Request::ToolVouch {
-            kind: Kind::Maven,
-            key: *key,
-            outputs: super::outputs_of(&block),
-        };
         let cost = block.description["rustc_ms"].as_u64().unwrap_or(0);
-        let reusable =
-            self.current
-                .may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
-                    self.ask(request, RELAY_WAIT)
-                });
-        if !reusable {
+        if !self
+            .shared
+            .vouched(key, origin.as_ref(), super::outputs_of(&block), at)
+        {
             return None;
         }
         let downloaded = origin.as_ref().is_some_and(Origin::downloaded_only);
         let Some(buildinfo) = whole(&block) else {
-            // B-172: a block that isn't a canonical entry of its module is never served. One
-            // that was downloaded is reported to the scope its record names, and its key
-            // suspended for the kept days, as every adapter's refused downloads are; then it goes.
-            if downloaded {
-                let _ = self.ask(
-                    &Request::ToolReport {
-                        kind: Kind::Maven,
-                        key: *key,
-                        problem: Problem::Rejected,
-                    },
-                    RELAY_WAIT,
-                );
-                let until = at + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
-                let _ = store.suspend_until(
-                    key,
-                    "a downloaded Maven entry failed its checks",
-                    until,
-                    at,
-                );
-            }
-            let _ = store.discard(key);
-            self.log(Entry {
-                note: Some("a Maven entry in the store was refused: it failed its checks".into()),
-                ..maven_entry(
-                    Outcome::BuiltNotStored(NotStored::Compare),
-                    key,
-                    &module.name(),
-                )
-            });
+            let entry = maven_entry(
+                Outcome::BuiltNotStored(NotStored::Compare),
+                key,
+                &module.name(),
+            );
+            self.shared
+                .refuse(store, key, downloaded, "Maven entry", entry, at);
             return None;
         };
-        let _ = store.used(key, at);
-        let first_download = downloaded
-            && origin.as_ref().is_some_and(|o| !o.reused)
-            && self.first_reuses.lock().is_ok_and(|mut s| s.insert(*key));
-        if first_download {
-            let _ = store.update_origin(key, |origin| {
-                let mut origin = origin?;
-                (!origin.reused).then(|| {
-                    origin.reused = true;
-                    origin
-                })
-            });
-        }
+        self.shared.reused(store, key, origin.as_ref(), at);
         if let Ok(mut served) = self.served.lock() {
             served.insert(*key);
         }
@@ -321,7 +259,7 @@ impl Cache {
         if !self.served.lock().is_ok_and(|s| s.contains(&key)) {
             return None;
         }
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         let block = self.block_of(&store, module)?;
         let file = block.files.iter().find(|f| f.name == name)?;
         let bytes = std::fs::read(&file.path).ok()?;
@@ -415,7 +353,7 @@ impl Cache {
                 )
             });
         }
-        let store = Store::new(&self.current.store);
+        let store = Store::new(&self.shared.current.store);
         let at = SystemTime::now();
         // B-173: an entry whose files hold a folder of this machine stays with the extension's
         // own cache.
@@ -437,7 +375,7 @@ impl Cache {
                 ..maven_entry(Outcome::BuiltNotStored(NotStored::Suspended), &key, &name)
             });
         }
-        let floor = u64::from(self.current.min_free_gb).saturating_mul(1 << 30);
+        let floor = u64::from(self.shared.current.min_free_gb).saturating_mul(1 << 30);
         if floor > 0 && store.free_bytes().is_ok_and(|free| free < floor) {
             return self.log(Entry {
                 rustc_ms: cost_ms,
@@ -496,7 +434,7 @@ impl Cache {
     /// the checkout's folder, Maven's local repository, the store's folder or the home folder, as
     /// bytes anywhere.
     pub fn stays_here(&self, checked: &Checked, files: &[(String, Vec<u8>)]) -> Option<Local> {
-        let run = self.current.maven.clone().unwrap_or_default();
+        let run = self.shared.current.maven.clone().unwrap_or_default();
         let mut folders: Vec<(Local, String)> = run
             .roots
             .iter()
@@ -507,9 +445,9 @@ impl Cache {
         }
         folders.push((
             Local::Store,
-            self.current.store.to_string_lossy().into_owned(),
+            self.shared.current.store.to_string_lossy().into_owned(),
         ));
-        if let Some(home) = &self.current.home {
+        if let Some(home) = &self.shared.current.home {
             folders.push((Local::Home, home.clone()));
         }
         folders
@@ -537,7 +475,7 @@ impl Cache {
         cost_ms: u64,
         at: SystemTime,
     ) -> bool {
-        let share = self.current.share.relay();
+        let share = self.shared.current.share.relay();
         let description = json!({
             "schema": crate::key::BLOCK_SCHEMA,
             "kind": Kind::Maven.word(),
@@ -548,14 +486,15 @@ impl Cache {
             "checksum": module.checksum,
             "module": module.name(),
             "hash": checked.hash_function,
-            "repository": self.current.repository,
+            "repository": self.shared.current.repository,
             "rustc_ms": cost_ms,
             "built_ms": epoch_ms(at),
         });
         let run = share
             .map(|share| share.run.clone())
             .or_else(|| {
-                self.current
+                self.shared
+                    .current
                     .folder
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -588,12 +527,17 @@ impl Cache {
         checked: &Checked,
         files: &[(String, Vec<u8>)],
     ) -> Option<PathBuf> {
-        let dir = self.current.folder.join("maven-entries").join(format!(
-            "{}.{}.{:?}",
-            key.hex(),
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = self
+            .shared
+            .current
+            .folder
+            .join("maven-entries")
+            .join(format!(
+                "{}.{}.{:?}",
+                key.hex(),
+                std::process::id(),
+                std::thread::current().id()
+            ));
         std::fs::create_dir_all(&dir).ok()?;
         let written = std::fs::write(dir.join(BUILDINFO), &checked.canonical).is_ok()
             && files
@@ -606,40 +550,17 @@ impl Cache {
         Some(dir)
     }
 
-    // --- the relay and the log ---------------------------------------------------------
-
-    /// Asks the run's relay within `wait`: no relay, or one call that failed or timed out this
-    /// run, and nothing more is asked (B-26).
-    fn ask(&self, request: &Request, wait: Duration) -> Option<Answer> {
-        if self.relay_down.load(Ordering::SeqCst) {
-            return None;
-        }
-        let share = self.current.share.relay()?;
-        let answer = relay::ask(&share.socket, request, wait);
-        if answer.is_none() {
-            self.relay_down.store(true, Ordering::SeqCst);
-        }
-        answer
-    }
-
     fn tell(&self, request: &Request) {
-        if self.relay_down.load(Ordering::SeqCst) {
-            return;
-        }
-        if let Some(share) = self.current.share.relay()
-            && !relay::tell(&share.socket, request, RELAY_WAIT)
-        {
-            self.relay_down.store(true, Ordering::SeqCst);
-        }
+        self.shared.tell(request);
     }
 
     fn log(&self, entry: Entry) {
-        self.current.log(&entry);
+        self.shared.log(entry);
     }
 
     /// The session's folder.
     pub fn folder(&self) -> &Path {
-        &self.current.folder
+        self.shared.folder()
     }
 }
 
