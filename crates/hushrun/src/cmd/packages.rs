@@ -451,6 +451,12 @@ fn seed_all(context: &Context, state: &State, only: &[String]) -> Vec<String> {
                 dest.display()
             )),
             Ok(done) => {
+                if let Err(err) = part.after_seed(&dest) {
+                    lines.push(format!(
+                        "packages: {name}: seeding {} stopped: {err}",
+                        dest.display()
+                    ));
+                }
                 lines.push(format!(
                     "packages: {name}: seeded {} files into {} ({} there already)",
                     done.copied,

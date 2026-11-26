@@ -10,6 +10,7 @@ pub mod nuget;
 pub mod pip;
 pub mod pnpm;
 pub mod poetry;
+pub mod swiftpm;
 
 #[cfg(test)]
 mod tests;

@@ -858,6 +858,11 @@ beside its own cache: Gradle through `GRADLE_RO_DEP_CACHE`, Maven as
 `-Dmaven.repo.local.tail=` in `MAVEN_OPTS`. Nothing is copied, and what the store lacks is
 downloaded as usual.
 
+SwiftPM reads no second cache, so `hushrun packages restore` (or `exec`, or `env`) copies each
+repository your `Package.resolved` pins into SwiftPM's cache, checking every file as it copies
+and leaving alone what the cache already holds. Run it in a sandbox's setup, before the checks:
+`hushrun run` copies nothing. A bake runs `swift package resolve` itself, so it needs no command.
+
 ```sh
 # Bake: run the check's own build with the tools' caches at the bake's own folders.
 hushrun packages bake --out /hushrun-packages -- ./gradlew test
