@@ -585,7 +585,7 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     // Each part whose tool the fetch doesn't name already says where it downloads.
     let mut vars = Vec::new();
     for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
-        match part.fetch_vars(&fetch_cache(&cache, part), &var) {
+        match part.fetch_vars_in(&fetch_cache(&cache, part), &var) {
             Ok(given) => vars.extend(given),
             Err(why) if !part.manifests(&context.tracked).is_empty() => {
                 lines.push(format!("packages: {}: not fetched: {why}", part.name()));
@@ -1070,8 +1070,9 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 
 /// K-6: runs the fetch, COMMAND, the way a bake runs anything of the repository's: its
 /// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
-/// Maven's local repository, pnpm's store, npm's cache and Composer's cache at folders of the
-/// bake's own under `cache`, and `vars`, what the other parts give a fetch.
+/// Maven's local repository, NuGet's global packages folder, pnpm's store, npm's cache and
+/// Composer's cache at folders of the bake's own under `cache`, and `vars`, what the other parts
+/// give a fetch.
 fn run_fetch(
     checkout: &Path,
     command: &[String],
@@ -1081,6 +1082,7 @@ fn run_fetch(
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
+    let nuget = fetch_cache(cache, &hushrun_packages::parts::nuget::Nuget);
     let pnpm = fetch_cache(cache, &hushrun_packages::parts::pnpm::Pnpm);
     let npm = fetch_cache(cache, &hushrun_packages::parts::npm::Npm);
     let composer = fetch_cache(cache, &hushrun_packages::parts::composer::Composer);
@@ -1095,6 +1097,7 @@ fn run_fetch(
     let mut extra = vec![
         ("GRADLE_USER_HOME", gradle.into_os_string()),
         (opts, OsString::from(maven_opts)),
+        ("NUGET_PACKAGES", nuget.into_os_string()),
         (
             hushrun_packages::parts::pnpm::STORE_DIR,
             pnpm.into_os_string(),

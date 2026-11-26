@@ -29,8 +29,9 @@ names for C and C++.
    as a `readwrite` source, and `VCPKG_DOWNLOADS` and `VCPKG_BINARY_SOURCES=clear`, so that a
    machine's downloads folder or binary cache can't keep a source out of the part. `--harvest
    vcpkg=FOLDER` takes an asset cache vcpkg filled the same way. A part says what its fetch
-   needs through `Part::fetch_vars`, which `poetry` brought; it now also sees the job's
-   variables, and may refuse with a line, since vcpkg's must keep the person's words.
+   needs through `Part::fetch_vars`, which `poetry` brought; a bake asks `fetch_vars_in`, which
+   also sees the job's variables and may refuse with a line, since vcpkg's must keep the
+   person's words. Its default is `fetch_vars`, so a part that needs no more is unchanged.
 4. **A person's own asset source leaves the part alone**, with a line. vcpkg reads at most one
    asset source and refuses to start with two. Words that name none (`clear`, `x-block-origin`)
    are kept, before the part's.

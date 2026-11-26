@@ -136,15 +136,18 @@ pub trait Part: Sync {
         None
     }
     /// K-6: the variables a bake's COMMAND gets so that the tool downloads into `cache`, a folder
-    /// of the bake's own that [`Part::harvest_root`] is then asked about, given the job's own
-    /// variables `env`; or the line that says why this part isn't fetched. None for a part whose
-    /// cache the fetch already names.
-    fn fetch_vars(
+    /// of the bake's own.
+    fn fetch_vars(&self, _cache: &Path) -> Vec<(&'static str, OsString)> {
+        Vec::new()
+    }
+    /// K-6: [`Part::fetch_vars`] for a part whose variables keep the job's own words (`env`), or
+    /// the line that says why the part isn't fetched. What a bake asks.
+    fn fetch_vars_in(
         &self,
-        _cache: &Path,
+        cache: &Path,
         _env: Env<'_>,
     ) -> Result<Vec<(&'static str, OsString)>, String> {
-        Ok(Vec::new())
+        Ok(self.fetch_vars(cache))
     }
 }
 
@@ -154,6 +157,7 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
     &crate::parts::npm::Npm,
+    &crate::parts::nuget::Nuget,
     &crate::parts::pip::Pip,
     &crate::parts::pnpm::Pnpm,
     &crate::parts::poetry::Poetry,

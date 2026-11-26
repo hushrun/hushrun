@@ -53,7 +53,7 @@ impl Part for Vcpkg {
         cache.is_dir().then(|| (cache.to_path_buf(), ASSETS))
     }
 
-    fn fetch_vars(
+    fn fetch_vars_in(
         &self,
         cache: &Path,
         env: Env<'_>,
@@ -246,7 +246,7 @@ mod tests {
     fn a_fetch_writes_its_assets_and_downloads_into_the_bake_s_folder() {
         let cache = tempfile::tempdir().unwrap();
         let dir = cache.path().join("vcpkg");
-        let vars = Vcpkg.fetch_vars(&dir, &none).unwrap();
+        let vars = Vcpkg.fetch_vars_in(&dir, &none).unwrap();
         assert_eq!(
             vars,
             vec![
@@ -266,6 +266,6 @@ mod tests {
         assert_eq!(Vcpkg.harvest_root(&theirs), Some((theirs.clone(), ASSETS)));
         assert_eq!(Vcpkg.harvest_root(&cache.path().join("none")), None);
         let set = |n: &str| (n == VARIABLE).then(|| OsString::from("x-azurl,https://m,,read"));
-        assert!(Vcpkg.fetch_vars(&dir, &set).is_err());
+        assert!(Vcpkg.fetch_vars_in(&dir, &set).is_err());
     }
 }

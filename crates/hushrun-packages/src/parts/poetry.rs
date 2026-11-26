@@ -86,12 +86,8 @@ impl Part for Poetry {
         Some(locked)
     }
 
-    fn fetch_vars(
-        &self,
-        cache: &Path,
-        _env: Env<'_>,
-    ) -> Result<Vec<(&'static str, OsString)>, String> {
-        Ok(vec![(VARIABLE, cache.as_os_str().to_owned())])
+    fn fetch_vars(&self, cache: &Path) -> Vec<(&'static str, OsString)> {
+        vec![(VARIABLE, cache.as_os_str().to_owned())]
     }
 }
 
