@@ -490,9 +490,6 @@ fn a_frozen_relay_costs_a_build_one_wait_and_every_unit_compiles() {
         .env("HUSHRUN_CC_RELAY_WAIT_MS", "4000")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // A process group of its own: a stopped member makes the test's own group one the kernel
-    // may hang up on (an orphaned group with a stopped process gets SIGHUP), the test included.
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let child = cmd.spawn().unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     // Frozen, not gone: the relay is a thread of hushrun's own process.
