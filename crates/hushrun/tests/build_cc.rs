@@ -479,15 +479,21 @@ fn a_frozen_relay_costs_a_build_one_wait_and_every_unit_compiles() {
     let a = Machine::new(dir.path(), "a", None);
     let (code, stderr) = a.build(&fake, &[]);
     assert_eq!(code, 0, "{stderr}");
-    // C: nothing of its own, so every unit would ask the relay.
+    // C: nothing of its own, so every unit would ask the relay. Each unit is timed by marks it
+    // leaves on either side of its compile, by their modification times, so that the test
+    // counts the units that waited for the relay, whatever a compile takes on this machine.
+    const WAIT: Duration = Duration::from_millis(4000);
     let c = Machine::new(dir.path(), "c", Some(&a.repo));
-    let script = format!(
-        "sleep 3; date +%s > ../t0; {}; date +%s > ../t1",
-        compile_script()
-    );
+    let mut script = String::from("sleep 3; set -e; rm -rf build; mkdir -p build");
+    for name in SOURCES {
+        script.push_str(&format!(
+            "; : > ../{name}.start; ${{HUSHRUN_CC:?}} cc -Iinclude -Wall -O1 -MD -MF build/{name}.o.d -c src/{name}.c -o build/{name}.o; : > ../{name}.end"
+        ));
+    }
+    script.push_str("; : > ../t1");
     let mut cmd = c.hushrun(&fake);
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
-        .env("HUSHRUN_CC_RELAY_WAIT_MS", "4000")
+        .env("HUSHRUN_CC_RELAY_WAIT_MS", WAIT.as_millis().to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
     let child = cmd.spawn().unwrap();
@@ -504,16 +510,26 @@ fn a_frozen_relay_costs_a_build_one_wait_and_every_unit_compiles() {
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(t1.exists(), "the build hung with a frozen relay: {stderr}");
-    let read = |n: &str| -> u64 {
-        std::fs::read_to_string(c.root.join(n))
-            .unwrap_or_default()
-            .trim()
-            .parse()
-            .unwrap_or(0)
+    let mark = |n: String| {
+        std::fs::metadata(c.root.join(n))
+            .unwrap()
+            .modified()
+            .unwrap()
     };
-    // One wait (4 s and a quick 1 s), not one a unit (15 s).
-    let took = read("t1") - read("t0");
-    assert!(took < 10, "{took}s: {stderr}");
+    let took: Vec<Duration> = SOURCES
+        .iter()
+        .map(|name| {
+            mark(format!("{name}.end"))
+                .duration_since(mark(format!("{name}.start")))
+                .unwrap_or_default()
+        })
+        .collect();
+    // One wait: the first unit's question and the quick one after it go unanswered, and no
+    // unit asks the relay again. A unit that waited took the wait at least, however fast the
+    // machine; one that didn't takes a compile, a fraction of it however slow.
+    assert!(took[0] >= WAIT, "{took:?}: {stderr}");
+    let waited = took.iter().filter(|t| **t >= WAIT).count();
+    assert_eq!(waited, 1, "{took:?}: {stderr}");
     for name in SOURCES {
         assert_eq!(a.object(name), c.object(name), "{name}.o");
     }
