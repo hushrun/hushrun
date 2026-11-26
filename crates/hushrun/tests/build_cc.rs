@@ -490,6 +490,9 @@ fn a_frozen_relay_costs_a_build_one_wait_and_every_unit_compiles() {
         .env("HUSHRUN_CC_RELAY_WAIT_MS", "4000")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
+    // A process group of its own: a stopped member makes the test's own group one the kernel
+    // may hang up on (an orphaned group with a stopped process gets SIGHUP), the test included.
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let child = cmd.spawn().unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     // Frozen, not gone: the relay is a thread of hushrun's own process.
@@ -511,9 +514,11 @@ fn a_frozen_relay_costs_a_build_one_wait_and_every_unit_compiles() {
             .parse()
             .unwrap_or(0)
     };
-    // One wait (4 s and a quick 1 s), not one a unit (15 s).
+    // One wait, not one a unit. The wait is 4 s and the quick question after it another 4 s
+    // (every question waits the relay's silence, ADR 0144): about 8 s for the build, against 24 s
+    // if each of the three units waited. The rest is the compiles, slow on a busy runner.
     let took = read("t1") - read("t0");
-    assert!(took < 10, "{took}s: {stderr}");
+    assert!(took < 16, "{took}s: {stderr}");
     for name in SOURCES {
         assert_eq!(a.object(name), c.object(name), "{name}.o");
     }
