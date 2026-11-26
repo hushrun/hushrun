@@ -113,6 +113,14 @@ project's new branch starts from what main's CI already ran.
   - `bake --tar FILE` writes the store as one archive for `tar -x -C /`, the same bytes for the
     same store; `--no-build` runs no build and takes only `--harvest`'s caches; a bake whose
     `--out` already holds these parts for these build files changes nothing, unless `--force`.
+  - **pip and Poetry** ([ADR 0153](docs/adr/0153-baked-python-packages.md)): a `pip` part holds
+    the files a requirements file with hashes names, fetched by `pip download` with no build to
+    name, and pip reads it through `PIP_FIND_LINKS` when it can't reach its index. A `poetry`
+    part holds Poetry's downloads, fetched by the bake's COMMAND; `hushrun packages exec`, `env`
+    and `restore` copy each file `poetry.lock` still names, after checking its hash, into
+    Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
+    and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
+    from a store without rewriting `uv.lock`.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with

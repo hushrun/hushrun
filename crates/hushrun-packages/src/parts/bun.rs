@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::lockfile::{integrity_hex, json_with_trailing_commas, sha512_hex};
-use crate::part::{Admit, Admits, Download, Downloads, Env, LockedBy, Part, Reader, file_name};
+use crate::part::{
+    Admit, Admits, Downloads, Env, LockedBy, LockedDownload, Part, Reader, file_name,
+};
 use crate::state::ReadPart;
 use crate::store::VerifiedBy;
 
@@ -272,7 +274,7 @@ impl Part for Bun {
                     continue;
                 }
                 let base = package.name.rsplit('/').next().unwrap_or(&package.name);
-                downloads.list.push(Download {
+                downloads.list.push(LockedDownload {
                     url: format!(
                         "{REGISTRY}/{}/-/{base}-{}.tgz",
                         package.name, package.version
