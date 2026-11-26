@@ -89,7 +89,10 @@ dependencies. For `gradle`: `settings.gradle`, `settings.gradle.kts`, every `bui
 `build.gradle.kts`, `gradle/libs.versions.toml`, `gradle/wrapper/gradle-wrapper.properties`,
 `gradle.lockfile` and `gradle/verification-metadata.xml`. For `maven`: every `pom.xml`,
 `.mvn/maven.config`, `.mvn/extensions.xml` and `.mvn/wrapper/maven-wrapper.properties`. For
-`composer`: every `composer.lock`. Only files git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
+`composer`: every `composer.lock`. For
+`nuget`: every `*.csproj`, `*.fsproj`, `*.vbproj`, `packages.lock.json`, `packages.config`,
+`Directory.Packages.props`, `Directory.Build.props`, `Directory.Build.targets`, `global.json` and
+NuGet.Config (its name in any case), and `.config/dotnet-tools.json`. Only files git tracks count. *Rests on:* those files deciding what the tool downloads. *Breaks if:* a build
 resolved by something outside them (an init script, a property of the machine): the part's
 `inputs` would stay the same while what it downloads changed, and a bake would skip.
 
@@ -103,7 +106,10 @@ Nothing else: a file the bake can't class is left out and counted in what the ba
 `maven` part leaves out `_remote.repositories`, `*.lastUpdated`, `resolver-status.properties`,
 `*.lock`, `*.part`, every dot-folder (`.locks`, `.cache`) and every path with a `-SNAPSHOT`
 component; a `composer` part keeps only `files/<vendor>/<name>/<40 hex>.<type>`, Composer's archives,
-and leaves out the rest of its cache (`repo/`, `vcs/`, `.htaccess`). *Rests
+and leaves out the rest of its cache (`repo/`, `vcs/`, `.htaccess`); a `nuget` part keeps only
+files under a package's `<id>/<version>/` folder (a version starts with a digit), the
+`.nupkg.metadata` NuGet needs to see the package included, and leaves out `*.lock` and every top
+folder whose name starts with a dot (`.tools`). *Rests
 on:* a released version's bytes never changing at its registry. *Breaks if:* a registry served
 other bytes for a version: the store keeps the bytes it had, and a tool that checks a hash refuses
 them.
@@ -114,11 +120,12 @@ PART=FOLDER]... [--no-build] [--force] [--max-bytes N] [-- COMMAND]` writes the 
 the way a bake runs anything of the repository's (B-63's `in_bake`: hushrun's, CI's and signing
 credentials withheld, no result recorded, no baked store or package store read, nothing it
 started outliving it), with Gradle's user home (`GRADLE_USER_HOME`), Maven's local repository
-(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`) and Composer's cache (`COMPOSER_CACHE_DIR`) at
-folders of the bake's own, so that what the part
+(`-Dmaven.repo.local=` joined to `MAVEN_OPTS`), Composer's cache (`COMPOSER_CACHE_DIR`) and
+NuGet's global packages folder (`NUGET_PACKAGES`) at folders of the bake's own, so that what the part
 holds is this build's downloads and nothing a machine had before; a registry credential the job
 set for the tool stays. `--harvest PART=FOLDER` runs nothing for that part and takes a cache the
-job already filled (a Gradle user home, a Maven local repository, a Composer cache); a part harvested says
+job already filled (a Gradle user home, a Maven local repository, a Composer cache, a NuGet global
+packages folder); a part harvested says
 `harvested` as its tool. Either way a part is taken only when the tool's cache holds files, and
 only the files K-5 keeps, each copied as `0644`, or `0755` when its owner may run it; a link is
 kept only when it stays inside the part. The bake then writes the rows and `packages.json`,
@@ -201,7 +208,18 @@ checked against its `locked` hash, into the tool's own cache). `gradle` is A:
 `GRADLE_RO_DEP_CACHE=<store>/parts/gradle`, a folder that holds `modules-2` (Gradle 6.2 or later).
 `maven` is A: `-Dmaven.repo.local.tail=<store>/parts/maven/repository` in `MAVEN_OPTS`, never
 `MAVEN_ARGS`, which the Maven Wrapper's launcher doesn't read; a Maven older than 3.9 ignores the
-property and downloads as it does today. A variable the person or the job already set is kept and
+property and downloads as it does today. `nuget` is A:
+`NUGET_FALLBACK_PACKAGES=<store>/parts/nuget/packages`, a folder that holds `<id>/<version>/`. The
+variable replaces every fallback folder a NuGet.Config names, so where the person set it already,
+their folders are kept, first, and the part's joins after a `;`; otherwise the folders the
+NuGet.Configs name (the checkout's root and each folder above it, the user's `~/.nuget/NuGet` and
+`~/.nuget/config`, the machine's) are carried first, merged as NuGet merges them: the closest
+config's in its order, a key a closer config named skipped, a relative folder from its config's
+folder, nothing past a `<clear />`. A list hushrun can't read exactly (a `%VARIABLE%`, an entity,
+an item other than `add` and `clear`) and a folder whose path holds a `;` leave the part alone,
+with a line. NuGet hashes no file it reads from a fallback folder, and a lockfile's
+`contentHash` is of the `.nupkg`, not of the extracted files NuGet reads, so a `nuget` part is
+verified by a signature, with or without `packages.lock.json`. A variable the person or the job already set is kept and
 the part is left alone, with a line (`packages: <part>: left alone: <VARIABLE> is set already`);
 for `maven`, a `maven.repo.local.tail` already named in `MAVEN_OPTS`, `MAVEN_ARGS`,
 `.mvn/maven.config` or `.mvn/jvm.config`. A folder whose path holds white space, a quote or a
@@ -220,7 +238,15 @@ variable a reader sets never enters a key: not a check's, not a
 block's. *Rests on:* Gradle and Maven reading the second folder only for what their own cache
 lacks, and writing nothing to it (confirmed with Gradle 8.14.3 and Maven 3.9.11, a read-only part,
 an empty cache, offline). *Breaks if:* a tool wrote into the folder it reads: a read-only mount
-refuses it, and a run's check by names finds a file no row names.
+refuses it, and a run's check by names finds a file no row names. For `nuget`, *rests on:*
+NuGet reading a fallback folder only for packages its global packages folder lacks, writing
+nothing to it, and seeing a package only where its `.nupkg.metadata` is (confirmed with the .NET
+8 SDK 8.0.134, an empty global packages folder and no source; the part's bytes were the same
+after restore and build). *Breaks if:* a project's own NuGet.Config, below the checkout's root,
+named fallback folders: the variable replaces them, and NuGet downloads what they held, as it
+would without them. `obj/project.assets.json` names every
+folder NuGet read, the part's too, and is in no key: it is never tracked, and the dotnet adapter's
+keys hold only tracked files a test project compiles (ADR 0118).
 
 `composer` is C. The part holds the archives of Composer's files cache, `parts/composer/files/
 <vendor>/<name>/<40 hex>.<type>`, where the hex is the SHA-1 of the archive's URL, as Composer
