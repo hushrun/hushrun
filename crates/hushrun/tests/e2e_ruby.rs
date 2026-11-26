@@ -55,7 +55,7 @@ fn rspec_through_the_cli_says_what_it_reuses_and_records_it() {
         let saved = result["units"]["savedMs"].clone();
         assert_eq!(
             result["units"],
-            json!({"total": 7, "ran": 2, "reused": 5, "savedMs": saved})
+            json!({"total": 7, "ran": 2, "reused": 5, "savedMs": saved, "audited": 1})
         );
     }
 }
