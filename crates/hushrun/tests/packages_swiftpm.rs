@@ -71,6 +71,7 @@ const CLEARED: &[&str] = &[
     "HUSHRUN_PACKAGES",
     "HUSHRUN_PACKAGES_LOWER_UNTRUSTED",
     "XDG_CACHE_HOME",
+    "CFFIXED_USER_HOME",
 ];
 
 /// A package that pins one remote repository, with the stand-in `swift` first on `PATH`.
@@ -148,6 +149,8 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
         let mut cmd = r.hushrun();
         cmd.args(["packages", "exec", "--", "sh", "-c", "true"])
             .env("HOME", home)
+            // macOS: Foundation reads its home from here, not from HOME.
+            .env("CFFIXED_USER_HOME", home)
             .env("HUSHRUN_PACKAGES_LOWER", &store);
         for (n, v) in vars {
             cmd.env(n, v);
@@ -218,6 +221,8 @@ fn a_store_baked_by_swifts_own_resolve_is_seeded_checked_and_once() {
         .hushrun()
         .args(["packages", "env"])
         .env("HOME", r.root.join("home-env"))
+        // macOS: Foundation reads its home from here, not from HOME.
+        .env("CFFIXED_USER_HOME", r.root.join("home-env"))
         .env("HUSHRUN_PACKAGES_LOWER", &store)
         .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
         .output()
@@ -347,6 +352,8 @@ fn a_signed_store_is_seeded_in_ci_and_a_changed_byte_keeps_the_part_out() {
             .hushrun()
             .args(["packages", "exec", "--", "sh", "-c", "true"])
             .env("HOME", home)
+            // macOS: Foundation reads its home from here, not from HOME.
+            .env("CFFIXED_USER_HOME", home)
             .env("HUSHRUN_PACKAGES_LOWER", &store)
             .env("CI", "true")
             .output()
@@ -464,6 +471,8 @@ fn swiftpm_resolves_offline_from_a_seeded_cache_and_no_units_key_moves() {
             .arg(&swift)
             .args(["package", "resolve"])
             .env("HOME", r.root.join(home))
+            // macOS: Foundation reads its home from here, not from HOME.
+            .env("CFFIXED_USER_HOME", r.root.join(home))
             .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
             .envs(NO_NETWORK.iter().copied());
         if with_store {
@@ -506,6 +515,8 @@ fn swiftpm_resolves_offline_from_a_seeded_cache_and_no_units_key_moves() {
             .arg(&swift)
             .arg("test")
             .env("HOME", r.root.join(home))
+            // macOS: Foundation reads its home from here, not from HOME.
+            .env("CFFIXED_USER_HOME", r.root.join(home))
             .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
             .env("HUSHRUN_PACKAGES_LOWER", store_var)
             .envs(NO_NETWORK.iter().copied())
@@ -518,6 +529,8 @@ fn swiftpm_resolves_offline_from_a_seeded_cache_and_no_units_key_moves() {
         .hushrun()
         .args(["packages", "restore"])
         .env("HOME", r.root.join("home-run"))
+        // macOS: Foundation reads its home from here, not from HOME.
+        .env("CFFIXED_USER_HOME", r.root.join("home-run"))
         .env("HUSHRUN_PACKAGES_LOWER", &store)
         .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
         .output()
@@ -559,6 +572,8 @@ fn swiftpm_resolves_offline_from_a_seeded_cache_and_no_units_key_moves() {
         .arg(&swift)
         .args(["package", "resolve"])
         .env("HOME", r.root.join("home-behind"))
+        // macOS: Foundation reads its home from here, not from HOME.
+        .env("CFFIXED_USER_HOME", r.root.join("home-behind"))
         .env("HUSHRUN_PACKAGES_LOWER", &store)
         .env("HUSHRUN_PACKAGES_LOWER_UNTRUSTED", "1")
         .output()

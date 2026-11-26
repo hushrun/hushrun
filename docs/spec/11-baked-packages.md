@@ -223,7 +223,9 @@ with a line.
 `restore` seed, and `hushrun run` gives COMMAND nothing for it. The seed copies each file of a
 clone a `Package.resolved` of the checkout pins (by its repository's name, the last component of
 the pin's location less `.git`; a local or registry package is no clone of SwiftPM's) into
-`repositories/` of SwiftPM's cache: `~/Library/Caches/org.swift.swiftpm` on macOS,
+`repositories/` of SwiftPM's cache: `Library/Caches/org.swift.swiftpm` under
+`CFFIXED_USER_HOME`, else under `HOME`, on macOS (Foundation reads the home folder from
+`CFFIXED_USER_HOME` and the user's account, never from `HOME`);
 `$XDG_CACHE_HOME/org.swift.swiftpm`, else `~/.cache/org.swift.swiftpm`, on Linux; elsewhere the
 part is left alone, with a line. It copies as pnpm's seed does (K-18): never over a file that is
 there, each file hashed as it is copied and left out, with a line, when its bytes aren't its
@@ -235,8 +237,9 @@ other than 1, 2 or 3 leaves the part alone, with a line; nothing of it is guesse
 no variable, no option. *Rests on:* SwiftPM fetching nothing for a pin whose revision its cached
 clone holds, and copying that clone into the package's `.build` (its `ifNeeded` update strategy;
 confirmed by CI's Swift on Linux and macOS, offline). *Breaks if:* a command named another cache
-with `--cache-path`, turned it off with `--disable-dependency-cache`, or a Swift read another
-folder than these: nothing is there, and SwiftPM downloads as it does today; or a file of a clone
+with `--cache-path`, turned it off with `--disable-dependency-cache`, a Swift read another
+folder than these, or on macOS `HOME` named another folder than the user's account and
+`CFFIXED_USER_HOME` was unset: nothing is there, and SwiftPM downloads as it does today; or a file of a clone
 changed in a store nobody hashed whole: the seed leaves that file out, the clone lacks an object,
 and SwiftPM fails on it rather than download (in a run that may write what others trust, K-8 has
 left the whole part out first). Git checks no object against its name when it clones from a

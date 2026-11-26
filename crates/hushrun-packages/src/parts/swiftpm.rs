@@ -183,16 +183,20 @@ impl Part for SwiftPm {
 
 /// K-10: SwiftPM's shared cache for a run whose variables are `env`: `<caches>/org.swift.swiftpm`,
 /// where the caches are `~/Library/Caches` on macOS and `$XDG_CACHE_HOME`, else `~/.cache`,
-/// elsewhere.
+/// elsewhere. On macOS, Foundation takes the home folder from `CFFIXED_USER_HOME` when it is set,
+/// and otherwise from the user's account, not from `HOME`; `HOME` stands in for the account's.
 pub fn cache_dir(env: Env<'_>, macos: bool) -> Option<PathBuf> {
-    let home = || {
-        env("HOME")
+    let absolute = |name: &str| {
+        env(name)
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
             .filter(|h| h.is_absolute())
     };
+    let home = || absolute("HOME");
     let caches = if macos {
-        home()?.join("Library/Caches")
+        absolute("CFFIXED_USER_HOME")
+            .or_else(home)?
+            .join("Library/Caches")
     } else {
         match env("XDG_CACHE_HOME")
             .map(PathBuf::from)
@@ -440,6 +444,16 @@ mod tests {
             Some(PathBuf::from("/home/a/Library/Caches/org.swift.swiftpm"))
         );
         assert_eq!(cache_dir(&env(&[]), false), None);
+        // macOS: Foundation's own home first, which a sandbox or a test may set.
+        let fixed = env(&[("HOME", "/home/a"), ("CFFIXED_USER_HOME", "/f")]);
+        assert_eq!(
+            cache_dir(&fixed, true),
+            Some(PathBuf::from("/f/Library/Caches/org.swift.swiftpm"))
+        );
+        assert_eq!(
+            cache_dir(&fixed, false),
+            Some(PathBuf::from("/home/a/.cache/org.swift.swiftpm"))
+        );
         // A seed sets no variable: nothing of a key's moves.
         if !cfg!(windows) {
             assert!(matches!(
