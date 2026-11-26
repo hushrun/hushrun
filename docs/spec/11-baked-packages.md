@@ -125,8 +125,12 @@ place in one step under the folder's lock, as B-63 does (one bake of a folder at
 `.<name>.bake.lock` beside it). `baked_ms` is `SOURCE_DATE_EPOCH` when it is set, so the same
 files bake to the same bytes. A store larger than `--max-bytes` (4 GiB unless given) fails the
 bake, naming its two largest parts and `--only`. A bake with nothing to take fails and says what
-it takes. This release writes no signature: a store it bakes is read only on the person's
-say-so (K-7). *Rests on:* each tool downloading into the cache folder the bake names. *Breaks
+it takes. It signs as a bake of compiled code signs (B-67): `--signing-key FILE`, the signing
+variables, a CI job's ID token, or unsigned with a line (`--no-sign`: unsigned). The statement's
+predicate type is `https://hushrun.com/attestations/baked-packages/v1` and its one subject is
+`packages.json` by the SHA-256 of its bytes; `packages.json` names every rows file, which names
+every file, so the statement covers every byte a tool reads. The signature,
+`packages.sigstore.json`, is written into the new folder before it is put in place. *Rests on:* each tool downloading into the cache folder the bake names. *Breaks
 if:* a build downloaded through another cache (an init script naming another Gradle home): those
 files aren't in the part, and the tool downloads them in a run, as it does today.
 

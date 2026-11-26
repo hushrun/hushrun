@@ -401,6 +401,13 @@ pub struct PackagesBakeArgs {
     /// `maven=` a local repository. Repeat for more.
     #[arg(long = "harvest", value_name = "PART=FOLDER")]
     pub harvest: Vec<String>,
+    /// Sign the store with this key (PEM), as `hushrun build bake --signing-key` does. In a CI
+    /// job with an ID token it signs keylessly with none.
+    #[arg(long, value_name = "FILE")]
+    pub signing_key: Option<std::path::PathBuf>,
+    /// Write no signature.
+    #[arg(long, conflicts_with = "signing_key")]
+    pub no_sign: bool,
     /// Fail when the store is larger than this many bytes [default: 4 GiB].
     #[arg(long, value_name = "BYTES")]
     pub max_bytes: Option<u64>,

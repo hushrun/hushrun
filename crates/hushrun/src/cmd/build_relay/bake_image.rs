@@ -1654,6 +1654,28 @@ pub(crate) fn verify_packages(
     })
 }
 
+/// K-6: signs the package store in `folder` as it is: `packages.sigstore.json` beside its
+/// `packages.json`, a statement whose one subject is that file by the SHA-256 of its bytes. It names
+/// every rows file, which names every file: the signature covers every byte a tool reads.
+pub(crate) fn sign_packages(folder: &Path, signing: &Signing) -> Result<(), String> {
+    use hushrun_packages::store::{PACKAGES_JSON, Packages, SIGNATURE as PACKAGES_SIGNATURE};
+    let (packages, digest) = Packages::read_bytes(folder).map_err(|why| why.0)?;
+    let statement = serde_json::to_vec(&json!({
+        "_type": STATEMENT_TYPE,
+        "subject": [{"name": PACKAGES_JSON, "digest": {"sha256": digest.to_string()}}],
+        "predicateType": PACKAGES_PREDICATE,
+        "predicate": {
+            "repository": packages.repository,
+            "identity": packages.identity.to_string(),
+            "platform": packages.platform,
+        },
+    }))
+    .expect("statements serialize");
+    let bundle = sign(signing, &statement)?;
+    let path = folder.join(PACKAGES_SIGNATURE);
+    fs::write(&path, bundle).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// B-67: the events a keyless signature's run may have been started by for it to count: a push,
 /// a schedule, a run by hand (GitHub's `workflow_dispatch`, GitLab's `web`), and the run after
 /// another workflow (`workflow_run`: the job `hushrun init --bake` writes, whose condition, in the

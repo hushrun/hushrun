@@ -78,9 +78,8 @@ on another platform.
 
 - `hushrun packages bake` runs the check's own build with the tools' caches at its own folders,
   or takes a cache the job filled (`--harvest`), since no Gradle or Maven command resolves
-  everything a build will ask for without running it. This release signs nothing: a store it
-  bakes is read with `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1`, outside CI. Signing, an image and a
-  pull come later.
+  everything a build will ask for without running it. It signs as a bake of compiled code
+  does, with the same signers in `hushrun.yaml`; an image and a pull come later.
 - `hushrun run` gives COMMAND the readers' variables whether build reuse is on or off. Where the
   Maven test adapter or the `maven/1` cache builds `MAVEN_OPTS`, the tail joins that one value.
 - A program that lists a sandbox's folders sees one more, `/hushrun-packages`.

@@ -541,6 +541,24 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             named.join(" and ")
         )));
     }
+    // K-6: signed as a baked store is (B-67): a key, the signing variables, a CI job's ID token,
+    // or unsigned with a line.
+    let signed_by = if args.no_sign {
+        Err("--no-sign".to_string())
+    } else {
+        match crate::app::App::new(global)
+            .and_then(|app| app.bake_signing(args.signing_key.as_deref(), in_ci()))
+        {
+            Ok(crate::signing::BakeSigning::Signed(signing)) => {
+                crate::cmd::build_relay::bake_image::sign_packages(&new, &signing).map_err(fail)?;
+                Ok(signing.describe())
+            }
+            Ok(crate::signing::BakeSigning::Unsigned(why)) => Err(why.to_string()),
+            Err(failure) if args.signing_key.is_some() => return Err(failure),
+            Err(failure) => Err(format!("{:#}", failure.error)),
+        }
+    };
+    store::check_contents(&new, Some(&packages), Depth::Names).map_err(|why| fail(why.0))?;
     sync_tree(&new);
     hushrun_build::baked::put_in_place(&new, &out).map_err(|e| fail(e.to_string()))?;
     drop(cleanup);
@@ -558,9 +576,12 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             }
         ));
     }
-    lines.push(
-        "packages: the store is unsigned: a run reads its parts only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI".to_string(),
-    );
+    lines.push(match &signed_by {
+        Ok(signer) => format!("packages: signed by {signer}"),
+        Err(why) => format!(
+            "packages: the store is unsigned ({why}): a run reads its parts only with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI"
+        ),
+    });
     lines.push(format!(
         "packages: baked {} parts, {}, to {}",
         packages.parts.len(),

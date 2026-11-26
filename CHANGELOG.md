@@ -53,7 +53,9 @@ project's new branch starts from what main's CI already ran.
   - **`hushrun packages bake --out DIR -- COMMAND`** runs the check's own build with Gradle's user
     home and Maven's local repository at folders of its own and keeps what they downloaded;
     `--harvest gradle=FOLDER` or `--harvest maven=FOLDER` takes a cache the job already filled.
-    Unsigned in this release.
+    It signs as `hushrun build bake` does (`--signing-key`, or a CI job's ID token), and a run
+    reads a store signed by a signer `hushrun.yaml` names under `build: baked: signers:`, in CI
+    too.
   - **Readers:** Gradle reads its part in place through `GRADLE_RO_DEP_CACHE`, Maven through
     `-Dmaven.repo.local.tail=` in `MAVEN_OPTS`, in `hushrun run` (build reuse on or off) and in
     `hushrun packages exec -- COMMAND`; `hushrun packages env` prints them. A tool finds what

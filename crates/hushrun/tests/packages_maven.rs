@@ -275,3 +275,79 @@ fn exec_exits_with_commands_code_and_a_bake_keeps_no_withheld_credential() {
         );
     }
 }
+
+// covers: K-6, K-7
+#[test]
+fn a_store_signed_by_a_signer_hushrun_yaml_names_is_read_in_ci_and_not_once_edited() {
+    let r = fixture();
+    let key = r.root.join("key.pem");
+    let made = r
+        .hushrun()
+        .args(["keys", "generate", "--algorithm", "ecdsa-p256", "--out"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let public = r
+        .hushrun()
+        .args(["keys", "public", "--key"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    let public = String::from_utf8_lossy(&public.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("public key: ").map(str::to_string))
+        .expect("a public key");
+    r.write(
+        "hushrun.yaml",
+        &format!(
+            "version: 1\nrepository: github.com/acme/shop\nbuild:\n  baked:\n    signers:\n      - key: {public}\nchecks:\n  test:\n    run: mvn test\n"
+        ),
+    );
+    let cache = r.root.join("m2");
+    let jar = cache.join("g/n/1/n-1.jar");
+    std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+    std::fs::write(&jar, b"jar").unwrap();
+    let store = r.root.join("packages");
+    let baked = r
+        .hushrun()
+        .args(["packages", "bake", "--out"])
+        .arg(&store)
+        .arg("--harvest")
+        .arg(format!("maven={}", cache.display()))
+        .arg("--signing-key")
+        .arg(&key)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&baked.stdout).into_owned();
+    assert!(
+        baked.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&baked.stderr)
+    );
+    assert!(said.contains("packages: signed by "), "{said}");
+    assert!(store.join("packages.sigstore.json").is_file());
+    let env = || {
+        let out = r
+            .hushrun()
+            .args(["packages", "env"])
+            .env("HUSHRUN_PACKAGES_LOWER", &store)
+            .env("CI", "true")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(
+        env().contains("maven.repo.local.tail="),
+        "a signed store is read in CI"
+    );
+    // packages.json edited after signing: the signature is for other bytes.
+    let path = store.join("packages.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("\"baked_ms\": ", "\"baked_ms\":  ")).unwrap();
+    assert_eq!(env(), "", "a store edited after signing is untrusted");
+}
