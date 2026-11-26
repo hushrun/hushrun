@@ -856,7 +856,11 @@ Gradle or Maven build fills its cache from nothing. A **package store** holds th
 one part per package manager in the tool's own layout, and each tool reads its part in place
 beside its own cache: Gradle through `GRADLE_RO_DEP_CACHE`, Maven as
 `-Dmaven.repo.local.tail=` in `MAVEN_OPTS`. Nothing is copied, and what the store lacks is
-downloaded as usual.
+downloaded as usual. Go reads its part as its first proxy (`GOPROXY=file://…,` then the proxies
+it used before) and checks each module against `go.sum`. Cargo reads no second folder, so
+`hushrun run` copies each crate the cargo home lacks into it before the command, and only when
+its bytes are the ones `Cargo.lock` pins; `hushrun packages restore` does that in a setup script.
+A Cargo or Go part needs no signature: the lockfile checks every file.
 
 SwiftPM reads no second cache, so `hushrun packages restore` (or `exec`, or `env`) copies each
 repository your `Package.resolved` pins into SwiftPM's cache, checking every file as it copies

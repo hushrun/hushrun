@@ -12,6 +12,10 @@ use crate::store::VerifiedBy;
 /// The variables a reader sees: the run's own, before hushrun adds any.
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
+/// What a part's lockfiles pin: a key the part makes from a file of its cache (a crate's file
+/// name, a module and version), and the hashes the lockfiles write for it.
+pub type Locks = std::collections::BTreeMap<String, Vec<String>>;
+
 /// K-10: how a part reaches its tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reader {
@@ -142,6 +146,21 @@ pub trait Part: Sync {
     fn locked(&self, _path: &str) -> Option<String> {
         None
     }
+    /// K-3: what the lockfiles among `manifests` (paths from `checkout`) pin, for a part whose
+    /// file's path doesn't name its hash ([`Part::locked_by`]).
+    fn locks(&self, _checkout: &Path, _manifests: &[String]) -> Locks {
+        Locks::new()
+    }
+    /// K-3: the lockfile's own hash of the file at `path`, from `locks` where the part needs the
+    /// lockfile to say it, else from its path ([`Part::locked`]).
+    fn locked_by(&self, path: &str, _locks: &Locks) -> Option<String> {
+        self.locked(path)
+    }
+    /// K-10, mechanism C: whether `hushrun run` seeds the part before COMMAND too, for a tool
+    /// that fetches as part of the check's own build (cargo), not in an install before it.
+    fn seeds_in_a_run(&self) -> bool {
+        false
+    }
     /// K-10, mechanism C: what the tool needs in `dest`, where a seed copied files, that no file
     /// holds: a store keeps files only, never an empty folder.
     fn after_seed(&self, _dest: &Path) -> std::io::Result<()> {
@@ -178,7 +197,9 @@ pub trait Part: Sync {
 /// Every part this hushrun knows, by name.
 pub static ALL: &[&dyn Part] = &[
     &crate::parts::bundler::Bundler,
+    &crate::parts::cargo::Cargo,
     &crate::parts::composer::Composer,
+    &crate::parts::go::Go,
     &crate::parts::gradle::Gradle,
     &crate::parts::maven::Maven,
     &crate::parts::npm::Npm,
