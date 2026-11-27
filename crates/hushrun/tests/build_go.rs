@@ -909,30 +909,8 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let (a, _) = two_machines(dir.path(), &fake, &[]);
-    frozen_relay_run(dir.path(), &fake, &a, "c");
-}
-
-// TEMPORARY (ADR 0159), to be removed before merging: on macOS, where the hang-up came about half
-// the time, the same run five more times.
-#[test]
-fn temporary_the_frozen_relay_run_five_more_times_on_macos() {
-    if !cfg!(target_os = "macos") || !have_go() {
-        return;
-    }
-    let fake = FakeBuild::start();
-    let dir = tempfile::tempdir().unwrap();
-    let (a, _) = two_machines(dir.path(), &fake, &[]);
-    for n in 0..5 {
-        frozen_relay_run(dir.path(), &fake, &a, &format!("again-{n}"));
-    }
-}
-
-/// A machine `name` with nothing of its own runs three `go build` commands under `hushrun run`,
-/// which is stopped once they have begun: the first waits for the frozen relay once, and the run's
-/// later ones don't ask it.
-fn frozen_relay_run(dir: &Path, fake: &FakeBuild, a: &Machine, name: &str) {
-    // A machine with nothing of its own yet: every package asks the relay.
-    let b = Machine::new(dir, name, Some(&a.repo), &[]);
+    // A third machine, with nothing of its own yet: every package asks the relay.
+    let b = Machine::new(dir.path(), "c", Some(&a.repo), &[]);
     let stamp = |name: &str| format!("date +%s > ../{name}");
     let script = format!(
         "{}; sleep 3; {}; go build -o /dev/null ./cmd/app; {}; go build -o /dev/null ./lib; {}; \
@@ -943,7 +921,7 @@ fn frozen_relay_run(dir: &Path, fake: &FakeBuild, a: &Machine, name: &str) {
         stamp("t2"),
         stamp("t3"),
     );
-    let mut cmd = b.hushrun(fake);
+    let mut cmd = b.hushrun(&fake);
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
