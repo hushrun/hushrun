@@ -417,6 +417,11 @@ project's new branch starts from what main's CI already ran.
 
 ### Fixed
 
+- **A stopped `hushrun run` hung up on macOS by its own Go builds** (B-40, [ADR 0160](docs/adr/0160-go-cache-program-process-group.md)):
+  Go never waits for its cache program, which then often ends under launchd. On macOS that ended
+  the run's process group whenever `hushrun run` was stopped: a job a terminal stopped, a
+  debugger, a test freezing its relay. The run, COMMAND and the `go` commands still to come got
+  SIGHUP. The program now leads a process group of its own.
 - **Vitest in `jsdom` and `happy-dom`** (C-60): every test file failed under hushrun with `Cannot
   find module '/@fs/…/hushrun-vitest-setup.mjs'`, since Vite serves only what `server.fs.allow`
   holds; the plugin now adds its own directory there.

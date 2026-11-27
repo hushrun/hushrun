@@ -913,8 +913,9 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     let b = Machine::new(dir.path(), "c", Some(&a.repo), &[]);
     let stamp = |name: &str| format!("date +%s > ../{name}");
     let script = format!(
-        "sleep 3; {}; go build -o /dev/null ./cmd/app; {}; go build -o /dev/null ./lib; {}; \
+        "{}; sleep 3; {}; go build -o /dev/null ./cmd/app; {}; go build -o /dev/null ./lib; {}; \
          go build -o /dev/null ./cmd/app; {}",
+        stamp("started"),
         stamp("t0"),
         stamp("t1"),
         stamp("t2"),
@@ -924,8 +925,18 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
+    // A process group of its own: a hang-up the kernel sends hushrun's group (ADR 0160) would
+    // end the test too, and its SIGCONT would unfreeze hushrun, hiding the hang.
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let child = cmd.spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    // Frozen once COMMAND runs, not before: a hushrun stopped before it starts COMMAND runs
+    // nothing at all.
+    let started = b.root.join("started");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(started.exists(), "COMMAND never started");
     // Frozen, not gone: the relay is a thread of hushrun's own process.
     let pid = child.id().to_string();
     Command::new("kill").args(["-STOP", &pid]).status().unwrap();
@@ -950,6 +961,39 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     assert!(t1 - t0 < 60, "{}s: {stderr}", t1 - t0);
     assert!(t2 - t1 < 10, "{}s: {stderr}", t2 - t1);
     assert!(t3 - t2 < 10, "{}s: {stderr}", t3 - t2);
+}
+
+// covers: B-40
+#[test]
+fn the_cache_program_runs_in_a_process_group_of_its_own() {
+    // Started as Go starts it, by the program's name: before anything else it leaves the group
+    // of whoever started it, so that its end, which Go never waits for, can't hang up the
+    // `hushrun run` that started COMMAND (ADR 0160).
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("hushrun-gocache");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_hushrun"), &program).unwrap();
+    let mut child = Command::new(&program)
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Its first line is written once it has started, and so after it changed its group.
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    assert!(first.contains("KnownCommands"), "{first:?}");
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    let group = rustix::process::getpgid(Some(pid)).unwrap();
+    assert_eq!(group, pid, "the program leads a group of its own");
+    assert_ne!(group, rustix::process::getpgid(None).unwrap());
+    // The end of its input, with no `close`: Go is gone, and the program ends.
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
 }
 
 /// Not a check: what two machines save on a real module, for the record. `HUSHRUN_GO_MEASURE`

@@ -351,6 +351,7 @@ fn id32(field: Option<Base64>) -> Option<[u8; 32]> {
 
 /// The program's entry point, on the process's own stdin and stdout.
 pub fn main() -> std::process::ExitCode {
+    leave_the_go_commands_group();
     // The program's stderr is the `go` command's, which is the person's: a panic, which only
     // ever ends one handler in an answer of a miss, says nothing there.
     std::panic::set_hook(Box::new(|_| {}));
@@ -360,6 +361,25 @@ pub fn main() -> std::process::ExitCode {
     let stdout: Box<dyn Write + Send> = Box::new(io::stdout());
     serve(BufReader::new(io::stdin()), stdout, env);
     std::process::ExitCode::SUCCESS
+}
+
+/// Puts the program in a process group of its own (B-40, ADR 0160), before anything else.
+///
+/// Go never waits for its cache program: after `close` it reads the program's stdout to its end,
+/// which comes as the program exits, and exits too. So the program often outlives its `go`
+/// command by a moment, and the system makes launchd (or init) its parent. On macOS, the end of a
+/// process in the `go` command's group under launchd counts as that group losing its last link
+/// to its session. That group is COMMAND's, and the `hushrun run` that started COMMAND is in it.
+/// When `hushrun run` is stopped then (a terminal stopped the job, a debugger holds it, a test
+/// froze its relay), the kernel hangs up the whole group, `hushrun run`, COMMAND and the `go`
+/// commands still to come with it. In a group of its own, the program's end touches only its
+/// own group. Nothing signals the program through its group: it ends at `close`, or when its
+/// input ends because Go is gone.
+fn leave_the_go_commands_group() {
+    // Fails only for a process that leads a session already, which a program Go starts never
+    // is: it then stays where it is, as before.
+    #[cfg(unix)]
+    let _ = rustix::process::setpgid(None, None);
 }
 
 /// Serves one `go` command: declares the commands, answers every request, returns at `close`
