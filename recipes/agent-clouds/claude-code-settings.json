@@ -5,7 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$CLAUDE_CODE_REMOTE\" != true ] || npx --no-install hushrun build pull -q || true"
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != true ] || npx --no-install hushrun hook session-start || true",
+            "timeout": 60
           }
         ]
       }

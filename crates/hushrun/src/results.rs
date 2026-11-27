@@ -784,6 +784,15 @@ pub fn fetched_count() -> usize {
     FETCHED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// \[C-168\] Whether a lookup of this command's got no answer from its server, a failure (5xx,
+/// 408) or a refusal (401, 403, 407): a hosted sandbox's network may refuse the backend's host.
+static LOOKUP_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// \[C-168\] Whether a lookup of this command's failed, as [`LOOKUP_FAILED`] says.
+pub fn lookups_failed() -> bool {
+    LOOKUP_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// \[ADR 0142\] What this machine has for `key` from `base` while the server is out of reach:
 /// a result it passed and keeps in the outbox, else what `hushrun fetch` saved (C-143, C-144).
 fn kept_here(key: &Digest, base: &str, counts: &dyn Fn(&RunResult) -> bool) -> Option<RunResult> {
@@ -1363,29 +1372,37 @@ impl Backend {
                 if let (Some(_), Some(token)) = (&server.token, server.gitlab_id_token()) {
                     headers.push((hushrun_core::blocks::ID_TOKEN_HEADER, token.text().into()));
                 }
-                let (status, body) =
-                    match server
-                        .ledger
-                        .json_get_with(&path, query.as_deref(), &headers)
-                    {
-                        Ok(answer) => answer,
-                        // \[ADR 0142\] Out of reach: what this machine passed and keeps for it (C-143).
-                        Err(LedgerError::Unavailable(why)) if offline => {
-                            let kept = kept_here(key, &server.base, counts);
-                            match kept {
-                                Some(result) => {
-                                    return Ok(Latest {
-                                        result: Some(result),
-                                        ci_only: false,
-                                        recorded_by: Some("this machine".into()),
-                                        for_job,
-                                    });
-                                }
-                                None => return Err(plain(LedgerError::Unavailable(why))),
+                let answer = server
+                    .ledger
+                    .json_get_with(&path, query.as_deref(), &headers);
+                if match &answer {
+                    Err(LedgerError::Unavailable(_)) => true,
+                    Ok((status, _)) => {
+                        (retryable(*status) && *status != 429) || matches!(status, 401 | 403 | 407)
+                    }
+                    Err(_) => false,
+                } {
+                    LOOKUP_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                let (status, body) = match answer {
+                    Ok(answer) => answer,
+                    // \[ADR 0142\] Out of reach: what this machine passed and keeps for it (C-143).
+                    Err(LedgerError::Unavailable(why)) if offline => {
+                        let kept = kept_here(key, &server.base, counts);
+                        match kept {
+                            Some(result) => {
+                                return Ok(Latest {
+                                    result: Some(result),
+                                    ci_only: false,
+                                    recorded_by: Some("this machine".into()),
+                                    for_job,
+                                });
                             }
+                            None => return Err(plain(LedgerError::Unavailable(why))),
                         }
-                        Err(err) => return Err(plain(err)),
-                    };
+                    }
+                    Err(err) => return Err(plain(err)),
+                };
                 // \[ADR 0142\] A server that fails is as out of reach (C-143).
                 if retryable(status)
                     && status != 429

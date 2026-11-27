@@ -218,6 +218,10 @@ say so instead of trying to sign in, which `HUSHRUN_AGENT` refuses anyway.
   `hushrun login --session`, in a sandbox, swaps the sandbox's credential for a short session.
 - `hushrun build pull` puts the repository's baked store at `/hushrun` for a sandbox whose image
   is fixed. It belongs in a setup step or a hook a person wrote: don't run it to "fix" a slow build.
+- `hushrun hook session-start` is what a hosted sandbox's session-start hook runs: it pulls the
+  baked store, fetches the newest results, and prints what this code already passed. In Claude
+  Code on the web those lines reach you at the start of the session. They are a summary: `hushrun
+  ready` is still what you run before you push. Don't run it yourself.
 - The commands for deploys, such as `plan`, `attest` and `artifact`, are CI's: `hushrun --help`
   lists them.
 

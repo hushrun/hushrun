@@ -6735,6 +6735,60 @@ fn init_writes_agent_cloud_hooks_only_for_the_clouds_named() {
     );
 }
 
+// covers: C-145, C-168 (ADR 0161: init writes Claude Code's session-start hook with a timeout,
+// and replaces the `build pull` hook an earlier init wrote instead of adding a second)
+#[cfg(unix)]
+#[test]
+fn init_replaces_an_earlier_session_start_hook_and_keeps_the_rest() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    let old = "[ \"$CLAUDE_CODE_REMOTE\" != true ] || hushrun build pull -q || true";
+    let settings = serde_json::json!({
+        "permissions": {"allow": ["Bash(npm test)"]},
+        "hooks": {"SessionStart": [
+            {"matcher": "startup", "hooks": [{"type": "command", "command": "./setup.sh"}]},
+            {"hooks": [{"type": "command", "command": old}]},
+        ]},
+    });
+    r.write(
+        ".claude/settings.json",
+        &serde_json::to_string_pretty(&settings).unwrap(),
+    );
+    let out = ran(
+        r.hushrun(&fake),
+        &[
+            "init",
+            "--local",
+            "--yes",
+            "--no-run",
+            "--agent-clouds",
+            "claude-code",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    let written: serde_json::Value =
+        serde_json::from_str(&r.read(".claude/settings.json")).unwrap();
+    let runner = if r.read("package.json").contains("\"hushrun\"") {
+        "npx --no-install hushrun"
+    } else {
+        "hushrun"
+    };
+    let start = written["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(start.len(), 2, "{written:#}");
+    assert_eq!(start[0]["hooks"][0]["command"], "./setup.sh");
+    assert_eq!(
+        start[1]["hooks"][0]["command"],
+        format!("[ \"$CLAUDE_CODE_REMOTE\" != true ] || {runner} hook session-start || true")
+    );
+    assert_eq!(start[1]["hooks"][0]["timeout"], 60);
+    assert_eq!(written["permissions"]["allow"][0], "Bash(npm test)");
+    assert_eq!(
+        written["hooks"]["Stop"][0]["hooks"][0]["command"],
+        format!("{runner} flush -q || true")
+    );
+    assert!(!r.read(".claude/settings.json").contains("build pull"));
+}
+
 // covers: C-145 (ADR 0142: a hook starts hushrun through npx only when package.json holds it)
 #[cfg(unix)]
 #[test]

@@ -28,6 +28,7 @@ pub mod policy;
 pub mod ready;
 pub mod repository;
 pub mod run;
+pub mod session_start;
 pub mod setup;
 pub mod sigstore;
 pub mod skill;

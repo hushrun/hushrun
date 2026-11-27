@@ -74,6 +74,21 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **`hushrun hook session-start`: a cloud session starts warm, and Claude knows what passed**
+  ([ADR 0161](docs/adr/0161-a-session-start-that-warms-and-tells.md), C-168). In a hosted
+  agent's sandbox (C-140's platforms), it runs `hushrun build pull`, then `hushrun fetch` when
+  the sandbox has a credential. Then it prints at most 10 lines on stdout: how many checks this
+  exact code already passed, which are left to run here and which to CI, whether results stay on
+  this machine (with a pointer to `hushrun doctor`), and to run what `hushrun ready` lists before
+  pushing. Claude Code adds those lines to Claude's context. It always exits 0, within `--budget`
+  (45 s by default). A step still running then goes on in the background, with its output in
+  `session-start.log` in hushrun's cache directory. Elsewhere it does nothing.
+- **`hushrun init --agent-clouds claude-code` writes the new hook** (C-145): `SessionStart` runs
+  `[ "$CLAUDE_CODE_REMOTE" != true ] || hushrun hook session-start || true` with `"timeout": 60`.
+  An earlier init's `build pull` hook is replaced in place, and every other entry stays. Run init
+  again to move to it. The old hook still works. Contract change, additive: a `timeout` field in
+  the hook init writes.
+
 - **Bun in the package store** ([ADR 0151](docs/adr/0151-baked-packages-bun-yarn.md), K-20):
   `hushrun packages bake --out DIR` downloads the tarballs `bun.lock` names, each checked against
   its `integrity`, with no tool run, and `hushrun packages exec -- bun install --frozen-lockfile`
