@@ -181,3 +181,7 @@ queue in a ruleset, with a `ci.yml` that runs `hushrun run unit -- ./test.sh` on
 [the GitLab guide's sandbox section](../guides/gitlab.md#a-sandbox-project) describes, with
 `glab`: it waits for each push pipeline at the pushed commit and reads the plan job's trace.
 
+## Measurements
+
+[Rust tests one by one](rust-tests-one-by-one.md): what ADR 0145's per-test reuse ran on this
+repository's own `test` and `test-macos` checks, on a Mac and in CI, and what still runs again.

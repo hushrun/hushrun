@@ -37,21 +37,22 @@ names it after a `covers:` marker, and `cargo xtask trace` checks every rule is 
 
 CI's `test` (Linux) and `test-macos` (macOS) steps run `cargo nextest` through `hushrun run` with
 `tests: mode: reuse` ([hushrun.yaml](hushrun.yaml)): a test binary that already passed on the files
-it read doesn't run again on that OS. For Rust, the unit is a whole test binary, never one test.
-A test binary reads its own sources, every workspace library it may link, and, for an integration
-test, every other target of its package
+it read doesn't run again on that OS, and with `unit: test`, below, neither does one test. Without
+the static map, the unit is a whole test binary. A test binary reads its own sources, every
+workspace library it may link, and, for an integration test, every other target of its package
 ([ADR 0068](docs/adr/0068-test-files-observed.md), C-31). Each file in `crates/hushrun/tests/` is an
 integration test of the `hushrun` package, so each reads all of `crates/hushrun/src/`: nearly all
-start the `hushrun` binary, and the in-process ones link its library, which is the same files. Those 80 binaries and the binary's own unit tests are 81 of CI's 108 test
-binaries, and nearly all of its test time.
+start the `hushrun` binary, and the in-process ones link its library, which is the same files. Those
+binaries and the binary's own unit tests are 120 of CI's 148 test binaries, and nearly all of its
+test time.
 
 | A pull request that changes | runs, in `test` and `test-macos` |
 | --- | --- |
 | only files `tests.ignore` lists, such as `docs/adr/`, `docs/spec/`, the root's `*.md`, `ci.yml` | an audit's 2%: about 3 binaries, a few minutes |
 | one file in `crates/hushrun/tests/` | that binary, and the audit |
-| a library crate, such as `crates/hushrun-build/src/` | its own tests and those of every crate that links it, so `hushrun`'s 81 too |
-| anything in `crates/hushrun/src/` | all 108: 25 to 40 minutes on Linux, about 45 on macOS |
-| `Cargo.lock`, `rust-toolchain.toml` or a build script | all 108 |
+| a library crate, such as `crates/hushrun-build/src/` | its own tests and those of every crate that links it, so `hushrun`'s 120 too |
+| anything in `crates/hushrun/src/` | all 148: about 35 minutes on Linux, about 41 on macOS |
+| `Cargo.lock`, `rust-toolchain.toml` or a build script | all 148 |
 
 With `tests.unit: test` ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)), which
 `hushrun.yaml` turns on for `test` and `test-macos`, a Rust test is reused on its own when nothing
@@ -61,13 +62,19 @@ by one yet` and reuses whole binaries, as the table above says. The index costs 
 on each new tree, since a fresh runner keeps none. An integration test that starts the binary still
 reads all of `crates/hushrun/src/`. The in-process adapter tests, the `tests/units_<adapter>.rs`
 files written as [An adapter test the map can narrow](#an-adapter-test-the-map-can-narrow) says,
-link the library instead and narrow as the unit tests do:
+link the library instead and narrow as the unit tests do. What was measured on this repository:
+[docs/validation/rust-tests-one-by-one.md](docs/validation/rust-tests-one-by-one.md).
 
 | A pull request that changes | runs, with `unit: test` |
 | --- | --- |
-| one adapter, such as `crates/hushrun/src/units/gradle.rs` | the binary's unit tests that reach it (about 290 of 751), the in-process tests that reach it (that adapter's own), the integration binaries that start hushrun, and the audit |
-| one module of a library crate, such as `crates/hushrun-core/src/glob.rs` | that crate's tests that reach it (54 of 171), the binary's unit tests that reach it (about 350 of 751), the in-process tests that reach it, the other integration binaries of the crates that link it, and the audit |
+| one adapter, such as `crates/hushrun/src/units/gradle.rs` | the binary's unit tests that reach it (66 of 782, measured with the audit's), the in-process tests that reach it (that adapter's own), the integration tests that start hushrun (about 1,100), and the audit |
+| one module of a library crate, such as `crates/hushrun-core/src/glob.rs` | that crate's tests that reach it (57 of 187, measured with the audit's), the binary's unit tests that reach it (138 of 782), the in-process tests that reach it, the integration tests that start hushrun and the other integration binaries of the crates that link it, and the audit |
 | anything, on a machine without rust-analyzer | the same as the table above, and the log says `rustup component add rust-analyzer` |
+
+That table is what a machine that ran the tests before does, such as a laptop. CI doesn't, yet: a
+fresh runner keeps no store, and a plan knows a Rust test only from this machine's store, so CI
+reuses whole test binaries, as the first table says
+([measured](docs/validation/rust-tests-one-by-one.md#in-ci)).
 
 So a pull request that changes `crates/hushrun/src/` runs every integration test that starts the
 binary on every push, on both systems. That is reuse working: each of those tests runs the binary
@@ -85,18 +92,18 @@ running more than it must:
   reuse all but the audit's.
 - **Put a test that needs only a library in that library's crate**, not in `crates/hushrun/tests/`:
   there it reads that crate and what it links, never the whole binary.
-- **Read the line hushrun prints before the tests start**, such as `hushrun: test-macos: 3 of 107
-  test binaries run; 104 already passed on the files they read` or `all 108 test binaries run: …`:
-  it says what CI decided, and why.
+- **Read the line hushrun prints before the tests start**, such as `hushrun: test-macos: 111 of 148
+  test binaries run; 16 already passed on the files they read, and so did 2,049 tests of the
+  others` or `all 148 test binaries run: …`: it says what CI decided, and why.
 
 The Maven and Gradle adapters' tests need a filled Maven repository and Gradle user home. CI keeps
 both in Actions' cache, keyed by the files that decide what they download (`ci.yml` lists them). A
 pull request that changes one of those files fills them online once, which runs those two test
 binaries outside hushrun first.
 
-#### What the static map will count
+#### What the static map counts
 
-A static map of each Rust test, which needs no coverage run, will narrow the unit from a test
+A static map of each Rust test, which needs no coverage run, narrows the unit from a test
 binary to one test: a test that already passed is reused when no file it can reach changed. It
 follows each call rust-analyzer resolves, item by item, and keys a test by the files those
 items are in. So:
