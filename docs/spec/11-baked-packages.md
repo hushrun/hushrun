@@ -151,7 +151,8 @@ place in one step under the folder's lock, as B-63 does (one bake of a folder at
 `.<name>.bake.lock` beside it). `baked_ms` is `SOURCE_DATE_EPOCH` when it is set, so the same
 files bake to the same bytes. A store larger than `--max-bytes` (4 GiB unless given) fails the
 bake, naming its two largest parts and `--only`. A bake with nothing to take fails and says what
-it takes. It signs as a bake of compiled code signs (B-67): `--signing-key FILE`, the signing
+it takes. A part whose manifest set the checkout holds and whose cache the fetch left empty is
+left out with a line that says so: an install that finds everything in place downloads nothing. It signs as a bake of compiled code signs (B-67): `--signing-key FILE`, the signing
 variables, a CI job's ID token, or unsigned with a line (`--no-sign`: unsigned). The statement's
 predicate type is `https://hushrun.com/attestations/baked-packages/v1` and its one subject is
 `packages.json` by the SHA-256 of its bytes; `packages.json` names every rows file, which names
@@ -315,6 +316,33 @@ would without them. `obj/project.assets.json` names every
 folder NuGet read, the part's too, and is in no key: it is never tracked, and the dotnet adapter's
 keys hold only tracked files a test project compiles (ADR 0118).
 
+`vcpkg` is A: vcpkg's asset cache, read as one more asset source. Its manifest set is every
+`vcpkg.json` and `vcpkg-configuration.json`. The part is `parts/vcpkg/assets/<sha512>`: each file
+named by the SHA-512 a portfile (or vcpkg's own list of the tools it downloads) names, as 128
+lowercase hex characters; a bake keeps no other file. A bake's fetch (`vcpkg install
+--only-downloads` is the one to name) gets `X_VCPKG_ASSET_SOURCES=x-azurl,file://<folder>/assets,,readwrite`
+after the person's words, and `VCPKG_DOWNLOADS` at a folder of the bake's own and
+`VCPKG_BINARY_SOURCES=clear`, so that vcpkg downloads every source this build names and stores
+each there; `--harvest vcpkg=FOLDER` takes an asset cache vcpkg filled the same way. A run gives
+vcpkg `X_VCPKG_ASSET_SOURCES=x-azurl,file://<store>/parts/vcpkg/assets,,read`, after the person's
+words when they name no asset source (`clear`, `x-block-origin`). vcpkg reads at most one asset
+source and refuses to start with two, so a value that names one leaves the part alone, with a line
+(`packages: vcpkg: left alone: X_VCPKG_ASSET_SOURCES names an asset source already, and vcpkg
+reads only one`), and so does a store whose path holds white space, a quote, a backslash or one of
+`` ,;`%#? ``; a bake's fetch then isn't given the variable either, with a line. vcpkg checks each
+file it takes from an asset source against the SHA-512 its portfile names, and downloads from the
+file's own source when it differs or is missing, so the part is `verified_by: lockfile`: the
+portfiles at the checkout's baseline, or in the overlay ports it names, are its lockfile, and a
+run reads the part with no signature. vcpkg copies an asset into its own downloads folder and
+builds from its own tree, so no compile reads a file of the part where it is, no `cc/1` key holds
+the store's path, and the store may be anywhere. *Rests on:* vcpkg's asset sources (`x-azurl`
+with a `file://` URL, `read`, `x-block-origin`) and download mode starting no process of a port
+(confirmed with vcpkg 2025-10-16 on Linux: a read-only part read from an empty downloads folder
+with the origin gone; a file changed in place refused for its hash and downloaded from its
+origin). *Breaks if:* a vcpkg stopped checking an asset's SHA-512 or took one by another name: the
+part would then need a signature, as `maven`'s does. A file a portfile downloads with no SHA-512
+(`SKIP_SHA512`) never goes through an asset source, and is downloaded every time.
+
 `composer` is C. The part holds the archives of Composer's files cache, `parts/composer/files/
 <vendor>/<name>/<40 hex>.<type>`, where the hex is the SHA-1 of the archive's URL, as Composer
 names an archive it downloads. A bake's fetch is `composer install --download-only --no-scripts
@@ -389,6 +417,82 @@ lockfile's `integrity`, with no index entry and no request, when the lockfile ha
 *Breaks if:* npm stopped reading its cache by hash (a seed then saves nothing, and npm downloads
 as it does today), or a lockfile held only `sha1` hashes (nothing is seeded).
 
+**The `bun` part.** The part holds `parts/bun/tarballs/<name>@<version>.tgz` (a scoped name's
+scope as a folder), each the tarball of a package `bun.lock` names from npm's registry, which a
+bake downloads (K-20), and nothing of Bun's own cache, which keeps packages unpacked. Its manifest
+set is every tracked `bun.lock` and `bun.lockb`. `bun.lock` is read as JSON that allows a comma
+before a closing bracket; its `lockfileVersion` must be 1 or 2. Another version, or a `bun.lockb`
+alone (Bun's binary lockfile, which names no hashes), leaves the part out with a line. An entry of
+its `packages` is a package when it is `["<name>@<version>", "<registry>", {…}, "sha512-…"]` and
+the version holds no `:`: a workspace's packages and `file:`, `link:`, `git` and `github` entries
+are not. One whose registry field isn't empty came from another registry, and is left out and
+counted. Each row carries `package` (`<name>@<version>`) and `locked`, the entry's `integrity`. The
+part is verified by the lockfile (K-7). Its reader is C, and only `hushrun packages exec` and
+`hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed's folder is
+`BUN_INSTALL_CACHE_DIR` when set, else `bunfig.toml`'s `[install.cache]` `dir` when it is absolute
+(a relative one leaves the part alone, with a line), else `$BUN_INSTALL/install/cache`, else
+`~/.bun/install/cache`; it unpacks (K-20) each tarball whose name, version and SHA-512 a
+`bun.lock` of the checkout names now into `<name>@<version>@@@1/`, the folder Bun names a package
+of the default registry by. Never A: Bun has one cache, links `node_modules` files out of it, and
+fails an install that must add a package to a cache it can't write. *Rests on:* Bun installing,
+with a frozen lockfile and no request, every package whose folder its cache holds, without checking
+the folder, and leaving `node_modules` as an install from the network does, link for link, under
+both its linkers (`hoisted` and `isolated`) (confirmed with Bun 1.4.4, an empty cache seeded from
+tarballs, as a user who may not write the part, and no route to a registry). *Breaks if:* Bun named
+its cache's folders otherwise (another suffix than `@@@1`): it doesn't see what was seeded and
+downloads as it does today. Bun never checks a cached folder against the lockfile, so the seed's
+check is the only one.
+
+**The `yarn` part.** The part's files are of the Yarn that wrote the checkout's root `yarn.lock`.
+For Yarn 4 (`__metadata:` with `version: 8`), `parts/yarn/berry/<file>.zip`: the zips of Yarn's
+cache, each the file whose SHA-512 is a `checksum` (`<cacheKey>/<hex>`). For Yarn 1 (`# yarn
+lockfile v1`), `parts/yarn/v1/<file>.tgz`: an offline mirror's tarballs, each the file whose
+SHA-512 is an `integrity`. A Yarn 2 or 3 lockfile (`version` 4 or 6, whose `checksum` isn't the
+zip's SHA-512) leaves the part out with a line. Its manifest set is every tracked `yarn.lock`. A
+bake's fetch (`hushrun packages bake --out DIR -- yarn install …`) gives Yarn 4
+`YARN_GLOBAL_FOLDER` at a folder of the bake's own and `YARN_ENABLE_GLOBAL_CACHE=true`, and Yarn 1
+`YARN_YARN_OFFLINE_MIRROR` at a folder of the bake's own, made first, and `YARN_CACHE_FOLDER` at
+another, so that every package is downloaded; never the other Yarn's variables, since Yarn 4
+refuses Yarn 1's. `--harvest yarn=FOLDER` takes a Yarn 4 global folder (its `cache/`), a folder of
+zips, or a Yarn 1 mirror. Only the `.zip` and `.tgz` files directly in that folder are kept. Each
+row carries `locked`, the hash as `yarn.lock` writes it. The part is verified by the lockfile
+(K-7). Its reader is C, and only `hushrun packages exec` and `hushrun packages restore` seed. For
+Yarn 4 the seed's folder is what `yarn config get cacheFolder` names in the checkout (Yarn's global
+cache, or the project's). For Yarn 1 it is `hushrun-offline-mirror` beside the folder `yarn cache
+dir` names, and `hushrun packages exec` and `env` give the install `YARN_YARN_OFFLINE_MIRROR`
+naming it (`restore` says it); a mirror the person names already (`YARN_YARN_OFFLINE_MIRROR`, or
+`yarn-offline-mirror` in the checkout's or the home folder's `.yarnrc`) leaves the part alone,
+with a line. Either way the seed copies only a file whose SHA-512 a `yarn.lock` of the checkout
+names now. Never A: Yarn 1 writes every package it downloads into its mirror and fails an install
+when it can't, and Yarn 4 fails an install over a cached zip whose bytes aren't its checksum.
+*Rests on:* Yarn installing, with no request, from a cache folder of copied zips alone (Yarn 4,
+the same `.pnp.cjs` as from the network) or from a mirror of copied tarballs (Yarn 1, the same
+`node_modules`) (confirmed with Yarn 4.12.0 and 1.22.22, an empty cache and no route to a
+registry). *Breaks if:* Yarn 4 named its zips otherwise (another `cacheKey` changes the checksums
+too, so nothing is seeded and Yarn downloads), or a Yarn 1 bake found `node_modules` up to date:
+it downloads nothing, and the bake says so (K-6).
+
+**K-20 Downloaded by the lockfile, unpacked by the seed.** A part whose tool keeps no file a
+lockfile hashes (Bun's cache holds packages unpacked) holds instead each package's tarball as the
+registry serves it, which the lockfile's `integrity` hashes. A bake downloads those itself, with
+no tool run, with or without `-- COMMAND` and `--no-build`: each package of the manifest set's
+lockfiles that names its registry and an integrity, eight at a time, with no credential, each
+request ending on an answer, a failure, or 30 seconds in which no byte came. A tarball whose
+SHA-512 isn't the lockfile's, or that the registry doesn't serve, is left out, and the bake says
+how many and the first; a part none of whose packages came is left out. The part's `tool` is `the
+registry, by the lockfile`. A seed that unpacks checks each tarball as a copy is checked (its row's
+SHA-256, then the lockfile in the checkout), unpacks it into a folder beside its place in the
+tool's cache and renames that into place, never over a folder that is there: a gzip'd ustar
+archive, with the first component of every path dropped (npm's `package/`), pax and GNU long names
+read, regular files and folders only, a file `0755` when the archive lets anyone run it and
+`0644` otherwise. A link, a device, an absolute path or a path with a `..` component refuses that
+tarball, which is left out with a line, and the tool downloads it. The seed's stamp is written only
+when it left nothing out. *Rests on:* a package's files in the tool's cache being its tarball's,
+and nothing more (confirmed for Bun 1.4.4: a folder unpacked from the registry's tarball is the
+folder Bun writes, byte for byte). *Breaks if:* a tool's unpacking changed a package's files (a
+rename, a file of its own): the seeded folder would then differ from what the tool writes, which
+a test that installs from a seed and compares the tree with an install from the network finds.
+
 **K-30 The `pip` part.** The part is a flat folder, `parts/pip/<file>`, of the wheels and source
 archives a requirements file with hashes names, and pip reads it as a registry (K-10, B):
 `PIP_FIND_LINKS=<store>/parts/pip`. Its manifest set is every tracked `requirements*.txt`,
@@ -441,6 +545,53 @@ another platform only: the command downloads none, and the part is left out.
 own, not the files it downloaded; it takes no file from `UV_FIND_LINKS` that `uv.lock` names at an
 index; and an index named by `UV_DEFAULT_INDEX` or `UV_INDEX_URL` rewrites `uv.lock` (confirmed
 with uv 0.13.10).
+`hex` is C. Its folder holds `packages/hexpm/<name>-<version>.tar`, the tarballs of Hex's own
+repository as Hex caches them, and nothing else of the cache: not `cache.bin` (Hex's registry
+cache, in Hex's own format), not a file Hex is writing, not another repository's folder (an
+organization's). Its manifest set is every `mix.lock` and `mix.exs`. A bake's fetch, such as `mix
+deps.get`, runs with `HEX_HOME` at a folder of the bake's own and with `MIX_DEPS_PATH` and
+`MIX_BUILD_PATH` at two more, discarded after it, so that the checkout's `deps` and `_build` are
+left as they were and no `_build` is ever baked (a copied `_build` holds another checkout's paths);
+`mix deps.get` runs no dependency's code, neither its `mix.exs` nor its compile. It is verified by
+the lockfile: a row's `locked` is the outer checksum `mix.lock` gives that package from `hexpm`,
+the eighth field of its `:hex` entry and the SHA-256 of the tarball. `mix.lock` is read one entry a
+line, as Mix writes it; a lockfile in another form, or a `:hex` entry of other than eight fields
+(the lockfile of a Hex older than 0.21, which has no outer checksum), gives no hashes, and the bake
+leaves the part out and a seed leaves it alone, each with a line. Only `hushrun packages exec`,
+`env` and `restore` seed it (K-50), as they seed `pnpm` and `npm`; `hushrun run` gives COMMAND
+nothing for it, since by the time a check runs the install is done. The seed goes into
+`packages/hexpm` of the cache Hex uses: `HEX_HOME`; else, when `MIX_XDG` is `1` or `true`, `hex`
+under `XDG_CACHE_HOME` or `~/.cache`; else `~/.hex`. A relative or empty folder leaves the part
+alone, with a line. A tarball is put only when `mix.lock` pins its SHA-256, and as a link to the
+store's file where the file system allows one. Nothing is set: hushrun never names `HEX_HOME`, a
+variable of Mix's or `ERL_LIBS`. `mix deps.get` then unpacks `deps/` from the cache, and `mix
+deps.compile` runs as it does without the store, every time. Hex checks each cached tarball
+against `mix.lock`'s outer checksum itself and downloads the package again when they differ. Hex
+still fetches each package's registry record (signed, a few KB), so a seeded install needs Hex's
+repository reachable; with no network it fails as it does without the store. *Rests on:* `mix
+deps.get` taking a cached tarball whose SHA-256 is the lockfile's outer checksum without
+downloading it, and replacing a cached file rather than writing into it (confirmed with Hex 2.7.0,
+Elixir 1.18.4 and Erlang/OTP 27.3.4, against a repository that refused every tarball). *Breaks
+if:* a Hex version kept its tarballs in another folder or under other names: the seed puts them
+where Hex doesn't look, and Hex downloads as it does today; `mix.lock` took a newer form: the part
+is left out, with a line; Hex wrote into a cached file in place: a linked file would change the
+store's, which a run's check by bytes and `hushrun packages verify` find.
+
+**K-50 A seed.** A part read by a seed (K-10's mechanism C) puts each of its files into the tool's
+own cache, at the same path below it, when `hushrun packages exec`, `env` or `restore` runs. A
+file the cache holds already is never written over. Each other file is read and its SHA-256
+checked against its row and then against what the part's lockfile pins; a file whose bytes aren't
+its row's or the lockfile's is never put, with one line, and the tool downloads its package; a
+file no lockfile names now stays in the store. A file is written beside its place and renamed in,
+so the tool never sees half of one: a copy, `0644` (`0755` for a row of kind `exe`), or, for a
+part whose tool replaces a file of its cache and never writes into one (`hex`), a hard link to
+the store's file where the file system allows one, whose bytes are the ones checked. A seed that
+left nothing out writes `.hushrun-packages-<part identity>` in the folder it seeds, and the next
+seed of the same part reads that stamp and nothing else: one `stat`. *Rests on:* SHA-256, and a
+linking part's tool replacing a cached file rather than writing into it. *Breaks if:* that tool
+wrote into a cached file in place: through a link it would change the store's file, which a run's
+check by bytes and `hushrun packages verify` find; a person removed a seeded file after the
+stamp: the tool downloads it, as it does today.
 
 **K-45 The `bundler` part.** The part holds the `.gem` files of a gem cache and nothing else of
 it: `parts/bundler/cache/<name>-<version>[-<platform>].gem`. Not a git source's clone

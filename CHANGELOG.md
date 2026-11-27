@@ -74,6 +74,16 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Bun in the package store** ([ADR 0151](docs/adr/0151-baked-packages-bun-yarn.md), K-20):
+  `hushrun packages bake --out DIR` downloads the tarballs `bun.lock` names, each checked against
+  its `integrity`, with no tool run, and `hushrun packages exec -- bun install --frozen-lockfile`
+  unpacks each one the lockfile still names into Bun's cache, so a sandbox installs with no
+  registry to reach. The lockfile is the evidence, so an unsigned store is read.
+- **Yarn in the package store** ([ADR 0151](docs/adr/0151-baked-packages-bun-yarn.md)): `hushrun
+  packages bake --out DIR -- yarn install` keeps Yarn 4's cache zips, or Yarn 1's offline mirror,
+  and `hushrun packages exec -- yarn install` copies in each file `yarn.lock` still hashes, into
+  Yarn 4's cache or into a mirror beside Yarn 1's cache that the install is pointed at. A Yarn 2 or
+  3 lockfile isn't read.
 - **pnpm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-18): `hushrun
   packages bake --out DIR -- pnpm fetch` keeps pnpm's store as a part, and `hushrun packages exec --
   pnpm install --frozen-lockfile` copies it into the store pnpm uses before the install, every file
@@ -124,6 +134,12 @@ project's new branch starts from what main's CI already ran.
     Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
     and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
     from a store without rewriting `uv.lock`.
+  - **vcpkg** ([ADR 0159](docs/adr/0159-baked-packages-vcpkg-conan.md)): a `vcpkg` part holds
+    vcpkg's asset cache, which `hushrun packages bake -- vcpkg install --only-downloads` fills,
+    and vcpkg reads it as one more asset source through `X_VCPKG_ASSET_SOURCES`. vcpkg checks
+    every file against its portfile's SHA-512, so any run reads the part, signed or not. An asset
+    source of the person's leaves it alone, with a line, since vcpkg reads only one. There is no
+    Conan part: `conan cache restore` writes what its archive says, outside the cache too.
 - **Baked packages for NuGet** ([ADR 0154](docs/adr/0154-baked-packages-nuget.md)): a `nuget`
   part, a global packages folder that `dotnet restore` reads in place as a fallback folder
   through `NUGET_FALLBACK_PACKAGES`. A bake's build fetches into a `NUGET_PACKAGES` of its own;
@@ -147,6 +163,15 @@ project's new branch starts from what main's CI already ran.
   against the lockfile, so any run reads them unsigned, CI included. `bake -- COMMAND` runs the
   fetch with `CARGO_HOME` and `GOMODCACHE` at its own folders; `--harvest cargo=FOLDER` and
   `--harvest go=FOLDER` take a filled cargo home or module cache.
+- **Baked packages for Hex** ([ADR 0157](docs/adr/0157-baked-hex-packages.md)): a package store's
+  `hex` part holds Hex's tarballs, baked by `hushrun packages bake --out DIR -- mix deps.get` with
+  Hex's cache, `deps` and `_build` at the bake's own folders, so the checkout's are left as they
+  were. `hushrun packages exec`, `env` and `restore` put each tarball whose SHA-256 is `mix.lock`'s
+  outer checksum into the run's Hex cache, and `mix deps.get` then unpacks `deps/` with no tarball
+  downloaded; `mix deps.compile` runs as before. Checked against the lockfile, the part is read
+  unsigned by any run, CI included. A `mix.lock` in a form hushrun doesn't read leaves the part
+  out, with a line. The seed is pnpm's and npm's, which may now link a part's files where the part
+  allows it (Hex's) instead of copying them.
 - **Rust tests one by one** ([ADR 0145](docs/adr/0145-rust-tests-by-a-static-map.md)): with
   `tests.unit: test` and `cargo nextest run`, a Rust test that already passed is left out when
   nothing it can reach changed, by a static map of the workspace's sources made with
