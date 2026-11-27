@@ -1,6 +1,6 @@
 # 0145. Rust tests one by one, by a static map of what each reaches
 
-- **Status:** proposed; built
+- **Status:** proposed; built; amended (amendment 1, 2026-11-27)
 - **Date:** 2026-11-25
 - **Rules:** C-146 to C-152 added; C-39 amended; relies on ADR 0068, 0069, 0080, 0095,
   0096
@@ -147,3 +147,33 @@ narrower than can be shown.
   toolchain, and its output still has to be resolved.
 - **A name-based map alone:** sound and fast, but every common name (`new`, `run`) reaches every
   item of that name, and it was ruled out for this round.
+
+## Amendment 1 (2026-11-27): files read at compile time
+
+A test that reads a source as text was reused after that source changed. A repository's test
+did `include_str!("../src/api/mod.rs")` and checked the routes it lists. Its map reached nothing
+of `api/mod.rs`, which held no item the test called, so the file left the test's list. A change
+to it that broke the test kept the test's key, and the test was reused.
+
+`include_str!`, `include_bytes!` and `include!` read a file when the crate compiles. rustc's
+dep-info names it, so it was in the binary's reads, and in the files a test's list may leave out.
+The map now counts it as reached, two ways (C-147):
+
+1. **The macro.** An item whose own bytes hold one of the three reaches the whole file it names.
+   The input is a string literal, resolved from the folder of the item's file, as rustc does. The
+   macro is found by its name and its `!` wherever it stands, nested in another macro's input or
+   in a `macro_rules!` body, where tree-sitter sees only tokens. An input that names no source
+   changes nothing: one whose last string literals make a name that doesn't end in `.rs`
+   (`concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/x.json")`), whose file already stays in
+   every list, and one under `OUT_DIR`, which a build script made and its output keys. Any other
+   input makes the item fall back. It can name any file, the map can't tell which, and a skip
+   counts as a pass.
+2. **The dep-info.** Each `.rs` file a crate's dep-info names that isn't one of that crate's
+   modules stays in the list of every test of a binary built from that crate. The macro rule
+   doesn't see every read: a macro from outside the workspace can include a file its input
+   names. A file that isn't a module of the crate that read it was read as text or included,
+   whoever read it. It stays whole, for every test of the binary, which is sound and coarse. A
+   crate whose root the map lacks keeps every file its dep-info names. A file that is a module of
+   the crate that includes it is the first rule's alone.
+
+What this costs this repository is nothing: none of its tests includes a `.rs` file.

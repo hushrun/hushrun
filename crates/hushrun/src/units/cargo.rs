@@ -410,7 +410,12 @@ pub struct Observed {
 
 /// \[C-146\] A test binary's own files, those its tests' lists may leave out, and of those, what
 /// is built into it.
-pub type Mapping = (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>);
+pub type Mapping = (
+    BTreeSet<String>,
+    BTreeSet<String>,
+    BTreeSet<String>,
+    BTreeMap<String, BTreeSet<String>>,
+);
 
 /// \[ADR 0069\] What a build says of its test binaries before any runs: the plan's.
 #[derive(Debug, Default)]
@@ -467,6 +472,9 @@ pub struct BuiltUnit {
     /// \[C-149\] Of `mappable`, what is built into the binary: its own crate's and its libraries'
     /// files, not its package's other targets the package rule adds, which it may only start.
     pub linked: BTreeSet<String>,
+    /// \[C-146\] Each crate of `mappable` by its root file, with the `.rs` files its dep-info
+    /// names: of those, what are none of its modules it read as text or included, and stay.
+    pub crates: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// \[ADR 0096\] The SHA-256 of the values of `names` that `var` gives, raw, as [`units::env()`]
@@ -887,7 +895,12 @@ pub fn observe(
         let tests = recognized.nextest.then(|| tests_of(starts)).flatten();
         mapping.insert(
             unit.clone(),
-            (b.own.clone(), b.mappable.clone(), b.linked.clone()),
+            (
+                b.own.clone(),
+                b.mappable.clone(),
+                b.linked.clone(),
+                b.crates.clone(),
+            ),
         );
         let outside = b.outside();
         let declared = Some(b.declared.clone());
@@ -1151,10 +1164,13 @@ fn read_build(
         let mut mappable_depinfos: BTreeSet<PathBuf> = BTreeSet::new();
         let mut linked_depinfos: BTreeSet<PathBuf> = BTreeSet::new();
         let mut own_depinfo: Option<PathBuf> = None;
+        // \[C-146\] Each mappable dep-info's crate, by its root file.
+        let mut roots: BTreeMap<PathBuf, String> = BTreeMap::new();
         match &artifact.depinfo {
             Some(d) => {
                 depinfos.push(d.clone());
                 mappable_depinfos.insert(d.clone());
+                roots.insert(d.clone(), unit.clone());
                 linked_depinfos.insert(d.clone());
                 own_depinfo = Some(d.clone());
             }
@@ -1186,6 +1202,9 @@ fn read_build(
                     depinfos.push(d.clone());
                     if !script && !proc_macro {
                         mappable_depinfos.insert(d.clone());
+                        if let Some(root) = relative(&other.target.src_path) {
+                            roots.insert(d.clone(), root);
+                        }
                         if lib {
                             linked_depinfos.insert(d.clone());
                         }
@@ -1248,6 +1267,7 @@ fn read_build(
         let mut linked_rs: BTreeSet<String> = BTreeSet::new();
         let mut kept: BTreeSet<String> = BTreeSet::new();
         let mut own: BTreeSet<String> = BTreeSet::new();
+        let mut crates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (d, files, sources) in depinfos
             .iter()
             .map(|d| (d, true, true))
@@ -1269,6 +1289,13 @@ fn read_build(
                 let named: Vec<String> = info.files.iter().filter_map(|p| relative(p)).collect();
                 if mappable_depinfos.contains(d) {
                     mappable.extend(named.iter().filter(|f| f.ends_with(".rs")).cloned());
+                    // A crate whose root is outside the scope gets the root's path all the same:
+                    // the map lacks it, and every file of it stays.
+                    let root = roots.get(d).cloned().unwrap_or_default();
+                    crates
+                        .entry(root)
+                        .or_default()
+                        .extend(named.iter().filter(|f| f.ends_with(".rs")).cloned());
                     if linked_depinfos.contains(d) {
                         linked_rs.extend(named.iter().filter(|f| f.ends_with(".rs")).cloned());
                     }
@@ -1378,6 +1405,7 @@ fn read_build(
                 own,
                 linked: linked_rs.intersection(&mappable).cloned().collect(),
                 mappable,
+                crates,
             },
         );
     }
@@ -2196,6 +2224,7 @@ impl Adapter for Recognized {
                             own: &b.own,
                             mappable: &b.mappable,
                             linked: &b.linked,
+                            crates: &b.crates,
                             tests,
                         },
                     )
@@ -2259,7 +2288,7 @@ impl Adapter for Recognized {
                 .iter()
                 .filter(|(unit, seen)| seen.facts.not_followed.is_empty() && at.tree.contains(unit))
                 .filter_map(|(unit, seen)| {
-                    let (own, mappable, linked) = observed.mapping.get(unit)?;
+                    let (own, mappable, linked, crates) = observed.mapping.get(unit)?;
                     let tests = seen
                         .tests
                         .as_ref()
@@ -2272,6 +2301,7 @@ impl Adapter for Recognized {
                             own,
                             mappable,
                             linked,
+                            crates,
                             tests,
                         },
                     ))

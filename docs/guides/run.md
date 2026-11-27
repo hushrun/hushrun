@@ -1213,8 +1213,9 @@ With `tests: {mode: reuse, unit: test}` and `cargo nextest run`, hushrun reuses 
 its own ([ADR 0145](../adr/0145-rust-tests-by-a-static-map.md)), not only whole test binaries. A
 test is left out when nothing it can reach changed. What it can reach comes from a static map of
 the workspace's sources, made with rust-analyzer's index: the functions it calls, the types it
-uses and their `impl` blocks, every implementation of a trait method it calls, and what its macros
-expand to. No coverage and no tracing are used. Where the map can't be sure (a procedural macro of
+uses and their `impl` blocks, every implementation of a trait method it calls, what its macros
+expand to, and every file it reads at compile time (`include_str!`, `include_bytes!`, `include!`).
+No coverage and no tracing are used. Where the map can't be sure (a procedural macro of
 your own, a test that starts one of your binaries), the test keeps its test binary's reads, and the
 run says why once.
 

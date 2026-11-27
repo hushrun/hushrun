@@ -46,6 +46,8 @@ pub struct Binary<'a> {
     pub mappable: &'a BTreeSet<String>,
     /// Of those, what is built into it, where what runs unnamed comes from (C-149).
     pub linked: &'a BTreeSet<String>,
+    /// Each of its crates by its root file, with the `.rs` files its dep-info names.
+    pub crates: &'a BTreeMap<String, BTreeSet<String>>,
     /// The ids of the tests to map.
     pub tests: Vec<String>,
 }
@@ -106,6 +108,13 @@ pub fn lists(
             .filter(|f| f.ends_with(".rs"))
             .find_map(|f| graph.unmapped(f).map(|why| (f.clone(), why.to_string())));
         let linked: BTreeSet<String> = b.linked.union(b.own).cloned().collect();
+        // \[C-146\] What a crate's dep-info names that is none of its modules was read as text
+        // or included, by whatever path: it stays in every test's list.
+        let as_text: BTreeSet<String> = b
+            .crates
+            .iter()
+            .flat_map(|(root, files)| graph.not_modules(root, files))
+            .collect();
         for id in &b.tests {
             total += 1;
             let list = match &unmapped {
@@ -123,7 +132,11 @@ pub fn lists(
                     // What its binary read, less what it may leave out and doesn't reach.
                     b.reads
                         .iter()
-                        .filter(|f| !b.mappable.contains(*f) || reached.files.contains(*f))
+                        .filter(|f| {
+                            !b.mappable.contains(*f)
+                                || as_text.contains(*f)
+                                || reached.files.contains(*f)
+                        })
                         .cloned()
                         .collect()
                 }),
@@ -493,6 +506,7 @@ mod tests {
         // No rust-analyzer on this `PATH`.
         let assigned = vec![("PATH".to_string(), empty.path().display().to_string())];
         let reads = BTreeSet::from(["src/lib.rs".to_string()]);
+        let crates = BTreeMap::new();
         let binaries = BTreeMap::from([(
             "src/lib.rs".to_string(),
             Binary {
@@ -500,6 +514,7 @@ mod tests {
                 own: &reads,
                 mappable: &reads,
                 linked: &reads,
+                crates: &crates,
                 tests: vec!["tests::t".to_string()],
             },
         )]);
