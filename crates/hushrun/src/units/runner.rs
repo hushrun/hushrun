@@ -604,7 +604,6 @@ fn read_testlog(path: &Path) -> Option<(Vec<String>, bool)> {
     Some((out, false))
 }
 
-/// The tests a libtest `--list --format terse` printed: `name: test` lines.
 /// \[C-146\] The tests of `binary` that the run's `hushrun.json` lets the runner leave out one
 /// by one: those `reuseTests` lists for the unit `testBinaries` names it as, when its bytes are
 /// the ones listed there. Anything that can't be read leaves out nothing.
@@ -648,7 +647,9 @@ fn without(list: &[u8], leave_out: &BTreeSet<String>) -> Vec<u8> {
     out.into_bytes()
 }
 
-fn terse_list(bytes: &[u8]) -> Vec<String> {
+/// The tests a libtest `--list --format terse` printed: `name: test` lines. \[ADR 0162\] A
+/// plan reads a test binary's list with it too.
+pub(super) fn terse_list(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
         .lines()
         .filter_map(|line| line.strip_suffix(": test"))

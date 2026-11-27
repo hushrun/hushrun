@@ -243,6 +243,10 @@ pub struct Planning {
     pub bound: BTreeMap<String, PathBuf>,
     /// \[C-146\] Each test's own list, as the adapter maps it.
     pub test_lists: TestLists,
+    /// \[ADR 0162\] Each unit's tests as its runner lists them before COMMAND, by their ids, for
+    /// an adapter that can list them (Cargo's, under nextest): a unit whose list was read, though
+    /// it may name none. The plan keys each, whether or not this machine ever ran it.
+    pub listed: BTreeMap<String, BTreeSet<String>>,
     /// \[C-152\] What the run says once, before COMMAND, of what the adapter couldn't do: words
     /// people read, without the check's name.
     pub notes: Vec<String>,

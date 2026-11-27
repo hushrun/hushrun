@@ -451,6 +451,8 @@ pub struct Workspace {
 #[derive(Debug, Clone)]
 pub struct BuiltUnit {
     pub executable: PathBuf,
+    /// \[ADR 0162\] Its package's folder, where nextest starts it, to list its tests too.
+    pub package_dir: PathBuf,
     pub reads: BTreeSet<String>,
     /// \[ADR 0095\] What the same dep-info says its build read of the environment, as its key
     /// holds it (C-31's `env`).
@@ -983,6 +985,167 @@ fn deselected(starts: &[&Invocation]) -> bool {
     !starts.is_empty() && starts.iter().all(|s| s.reused)
 }
 
+/// \[ADR 0162\] The longest one start of a test binary that lists its tests may take.
+const LIST_BUDGET: Duration = Duration::from_secs(60);
+
+/// \[ADR 0162\] What listing the tests of a plan's test binaries came to: each binary's tests,
+/// by its unit, for those whose lists were read, and what the run says once of those that
+/// couldn't be.
+#[derive(Debug, Default)]
+pub struct Listed {
+    pub tests: BTreeMap<String, BTreeSet<String>>,
+    pub notes: Vec<String>,
+}
+
+/// \[C-146, ADR 0162\] The tests of each of `binaries` (its unit, its executable and its
+/// package's folder), as nextest lists them before it runs any: `<binary> --list --format terse`
+/// in its package's folder, each `<name>: test` line a test, by the id its start with `--exact
+/// <name>` gets ([`tests_of`]); less, unless COMMAND says something of ignored tests, what
+/// `--list --format terse --ignored` lists, which nextest doesn't run. Started side by side, with
+/// COMMAND's assignments. A binary whose list can't be read (it can't start, exits otherwise than
+/// 0, or takes over [`LIST_BUDGET`]) isn't in `tests`, and the run says so once.
+pub fn listed_tests(
+    recognized: &Recognized,
+    binaries: &[(String, PathBuf, PathBuf)],
+    assigned: &[(String, String)],
+) -> Listed {
+    let started = Instant::now();
+    let next = std::sync::Mutex::new(binaries.iter());
+    let found: std::sync::Mutex<Vec<(String, ListOf)>> = std::sync::Mutex::new(Vec::new());
+    let workers = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .min(binaries.len().max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let Some((unit, exe, dir)) = next.lock().ok().and_then(|mut n| n.next()) else {
+                        break;
+                    };
+                    let listed = list_of(exe, dir, !recognized.ignored, assigned);
+                    if let Ok(mut found) = found.lock() {
+                        found.push((unit.clone(), listed));
+                    }
+                }
+            });
+        }
+    });
+    let mut out = Listed::default();
+    let mut failed: BTreeMap<String, String> = BTreeMap::new();
+    for (unit, listed) in found.into_inner().unwrap_or_default() {
+        match listed {
+            Ok(tests) => {
+                out.tests.insert(unit, tests);
+            }
+            Err(why) => {
+                failed.insert(unit, why);
+            }
+        }
+    }
+    if let Some((unit, why)) = failed.iter().next() {
+        out.notes.push(format!(
+            "the tests of {} of {} test binaries couldn't be listed, so only those this machine ran are reused one by one: {unit}: {why}",
+            failed.len(),
+            binaries.len()
+        ));
+    }
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        binaries = binaries.len(),
+        failed = failed.len(),
+        "listed the tests of the plan's test binaries"
+    );
+    out
+}
+
+/// \[ADR 0162\] One test binary's tests, by their ids, or why they couldn't be listed.
+type ListOf = Result<BTreeSet<String>, String>;
+
+/// \[ADR 0162\] The tests the test binary `exe` lists in `dir`, less its ignored ones when
+/// `drop_ignored`.
+fn list_of(exe: &Path, dir: &Path, drop_ignored: bool, assigned: &[(String, String)]) -> ListOf {
+    let mut tests = list_once(exe, dir, &["--list", "--format", "terse"], assigned)?;
+    if drop_ignored {
+        let ignored = list_once(
+            exe,
+            dir,
+            &["--list", "--format", "terse", "--ignored"],
+            assigned,
+        )?;
+        tests.retain(|test| !ignored.contains(test));
+    }
+    Ok(tests)
+}
+
+/// \[ADR 0162\] One start of the test binary `exe` with `args`, in `dir`: the tests its terse
+/// list names.
+fn list_once(
+    exe: &Path,
+    dir: &Path,
+    args: &[&str],
+    assigned: &[(String, String)],
+) -> Result<BTreeSet<String>, String> {
+    use std::io::Read as _;
+    let mut command = super::command::tool(exe, dir, assigned);
+    command
+        .args(args)
+        .env("CARGO_MANIFEST_DIR", dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // What it links dynamically from its own folder, as Cargo and nextest give it.
+    if let Some(deps) = exe.parent() {
+        let var = if cfg!(windows) {
+            "PATH"
+        } else if cfg!(target_os = "macos") {
+            "DYLD_FALLBACK_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        let mut paths = vec![deps.to_path_buf()];
+        let had = assigned
+            .iter()
+            .rev()
+            .find(|(name, _)| name == var)
+            .map(|(_, value)| OsString::from(value))
+            .or_else(|| std::env::var_os(var));
+        paths.extend(had.iter().flat_map(std::env::split_paths));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env(var, joined);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("can't start it ({err})"))?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() > LIST_BUDGET => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "listing its tests took longer than {} seconds",
+                    LIST_BUDGET.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(2)),
+            Err(err) => return Err(format!("can't wait for it ({err})")),
+        }
+    };
+    let bytes = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!("`{}` ended with {status}", args.join(" ")));
+    }
+    Ok(runner::terse_list(&bytes).into_iter().collect())
+}
+
 /// The test binaries of a build, what each read and what can't be told of it, from its artifacts:
 /// a test binary read what its own dep-info names, what the dep-info of every workspace library
 /// it may link names, and for an integration test, a bench or an example, what every target of
@@ -1394,6 +1557,10 @@ fn read_build(
             unit,
             BuiltUnit {
                 executable: executable.clone(),
+                package_dir: artifact
+                    .manifest
+                    .parent()
+                    .map_or_else(|| root.to_path_buf(), Path::to_path_buf),
                 reads,
                 env: units::env(env.iter().map(|(n, v)| (n.as_str(), v.as_deref()))),
                 scripts: units::scripts(given),
@@ -2204,21 +2371,36 @@ impl Adapter for Recognized {
             .iter()
             .map(|(unit, b)| (unit.clone(), b.executable.clone()))
             .collect();
-        // \[C-146\] Each test this machine knows of a binary that may be keyed, by the map.
-        let (test_lists, notes) = if at.by_test && self.nextest && !self.doc {
-            let binaries = b
+        // \[C-146\] Each test of a binary that may be keyed, by the map: \[ADR 0162\] each its
+        // list names, and each this machine's store has, so that a machine that never ran it,
+        // a fresh CI runner, keys it too.
+        let (test_lists, notes, listed) = if at.by_test && self.nextest && !self.doc {
+            let keyable: Vec<(&String, &BuiltUnit)> = b
                 .units
                 .iter()
                 .filter(|(unit, b)| b.not_followed.is_empty() && at.tree.contains(unit))
+                .collect();
+            let listed = listed_tests(
+                self,
+                &keyable
+                    .iter()
+                    .map(|(unit, b)| ((*unit).clone(), b.executable.clone(), b.package_dir.clone()))
+                    .collect::<Vec<_>>(),
+                at.assigned,
+            );
+            let binaries = keyable
+                .iter()
                 .map(|(unit, b)| {
-                    let tests = at
+                    let mut tests: BTreeSet<String> = at
                         .map
                         .units
-                        .get(unit)
+                        .get(*unit)
                         .map(|m| m.tests.keys().cloned().collect())
                         .unwrap_or_default();
+                    tests.extend(listed.tests.get(*unit).into_iter().flatten().cloned());
+                    let tests: Vec<String> = tests.into_iter().collect();
                     (
-                        unit.clone(),
+                        (*unit).clone(),
                         super::cargo_map::Binary {
                             reads: &b.reads,
                             own: &b.own,
@@ -2238,15 +2420,18 @@ impl Adapter for Recognized {
                 &binaries,
                 at.assigned,
             );
-            (mapped.lists, mapped.notes)
+            let mut notes = listed.notes;
+            notes.extend(mapped.notes);
+            (mapped.lists, notes, listed.tests)
         } else {
-            (TestLists::new(), Vec::new())
+            (TestLists::new(), Vec::new(), BTreeMap::new())
         };
         Ok(Some(Planning {
             sets,
             known,
             bound,
             test_lists,
+            listed,
             notes,
             ..Planning::default()
         }))
@@ -3604,5 +3789,57 @@ mod tests {
                 .tests()
                 .reads
         );
+    }
+
+    // covers: C-146
+    // \[ADR 0162\] A test binary's tests as nextest lists them: its terse list's `: test` lines,
+    // less its ignored ones unless COMMAND says something of them; a binary whose list can't be
+    // read lists nothing, and the run says why once.
+    #[cfg(unix)]
+    #[test]
+    fn a_test_binarys_tests_are_its_terse_list_less_its_ignored_ones() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let lists = dir.path().join("lists");
+        std::fs::write(
+            &lists,
+            "#!/bin/sh\n[ \"$PWD\" = \"$CARGO_MANIFEST_DIR\" ] || exit 3\ncase \"$*\" in\n  \"--list --format terse\") printf 'a::one: test\\na::slow: test\\nbench_it: benchmark\\n\\n2 tests, 1 benchmark\\n' ;;\n  \"--list --format terse --ignored\") printf 'a::slow: test\\n' ;;\n  *) exit 2 ;;\nesac\n",
+        )
+        .unwrap();
+        let fails = dir.path().join("fails");
+        std::fs::write(&fails, "#!/bin/sh\nexit 1\n").unwrap();
+        for exe in [&lists, &fails] {
+            std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let package = std::fs::canonicalize(dir.path()).unwrap();
+        let binaries = vec![
+            ("src/lib.rs".to_string(), lists.clone(), package.clone()),
+            ("tests/x.rs".to_string(), fails.clone(), package.clone()),
+        ];
+        let run = recognize(&words("cargo nextest run --workspace")).unwrap();
+        let listed = listed_tests(&run, &binaries, &[]);
+        assert_eq!(
+            listed.tests,
+            BTreeMap::from([(
+                "src/lib.rs".to_string(),
+                BTreeSet::from(["a::one".to_string()])
+            )])
+        );
+        assert_eq!(listed.notes.len(), 1, "{:?}", listed.notes);
+        assert!(
+            listed.notes[0].starts_with(
+                "the tests of 1 of 2 test binaries couldn't be listed, so only those this machine ran are reused one by one: tests/x.rs: "
+            ),
+            "{}",
+            listed.notes[0]
+        );
+        // COMMAND runs ignored tests too: they are listed.
+        let ignored = recognize(&words("cargo nextest run --run-ignored all")).unwrap();
+        let listed = listed_tests(&ignored, &binaries[..1], &[]);
+        assert_eq!(
+            listed.tests["src/lib.rs"],
+            BTreeSet::from(["a::one".to_string(), "a::slow".to_string()])
+        );
+        assert!(listed.notes.is_empty());
     }
 }

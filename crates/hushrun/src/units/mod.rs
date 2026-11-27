@@ -257,6 +257,9 @@ pub struct Plan {
     /// \[C-34\] The test files the audit runs whole though they passed: \[C-163\] what a run
     /// counts as audited, with `tests.audited`.
     audited: BTreeSet<String>,
+    /// \[ADR 0162\] Each test file's tests as its adapter listed them before COMMAND: what a
+    /// test file reused whole counts as reused, though this machine never ran it.
+    listed: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// \[C-39\] A test whose key had a pass that counts here, and nothing that failed: what its reuse
@@ -284,7 +287,8 @@ struct PlannedTests {
     /// a test the audit runs: its other tests are left out one by one instead.
     whole: BTreeMap<String, (String, String)>,
     /// \[C-41\] How many tests this machine knows of each test file, from its rows and the hints
-    /// it read: what the plan's line counts.
+    /// it read, and \[ADR 0162\] what its adapter listed: what the plan's line counts. A test file
+    /// is here when they know its tests, though it may have none.
     known: BTreeMap<String, usize>,
 }
 
@@ -330,7 +334,8 @@ impl PlannedTests {
 
 /// \[C-34\] With `unit: test`, the test files of `passed` whose tests this machine doesn't know
 /// (`tested.known`): they can't be left out test by test, so they are audited whole, 2% of them,
-/// at least one, as C-34 audits test files.
+/// at least one, as C-34 audits test files. \[ADR 0162\] One its adapter listed no test of has
+/// nothing to audit.
 fn untold_audited(
     passed: &BTreeMap<String, Found>,
     keys: &BTreeMap<String, Digest>,
@@ -340,7 +345,7 @@ fn untold_audited(
     units::audited(
         passed
             .keys()
-            .filter(|unit| tested.known.get(*unit).is_none_or(|n| *n == 0))
+            .filter(|unit| !tested.known.contains_key(*unit))
             .filter_map(|unit| Some((unit.as_str(), keys.get(unit)?))),
         started,
     )
@@ -353,6 +358,8 @@ struct TestsAt<'a> {
     reads: Reads,
     /// \[C-146\] Each test's own list, by its adapter's map.
     test_lists: &'a adapter::TestLists,
+    /// \[ADR 0162\] Each test file's tests as its adapter listed them before COMMAND.
+    listed: &'a BTreeMap<String, BTreeSet<String>>,
     tree: &'a Tree,
     keyed: &'a Keyed,
     map: &'a store::Map,
@@ -371,8 +378,13 @@ struct TestsAt<'a> {
 struct TooMany(usize);
 
 /// \[C-39, C-41\] The tests a plan knows of `unit`, by id, each with the lists its key may be made
-/// from (\[C-40\] [`shared::test_lists`]): those this machine saw run, and those hints hold of it.
-/// One that wasn't followed the last time it ran here has none.
+/// from (\[C-40\] [`shared::test_lists`]): those this machine saw run, those hints hold of it, and
+/// \[ADR 0162\] those its adapter `listed` before COMMAND. One that wasn't followed the last time
+/// it ran here has none.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each is one thing the plan already holds"
+)]
 fn tests_known(
     reads: Reads,
     unit: &str,
@@ -381,6 +393,7 @@ fn tests_known(
     hints: &Shared,
     tree: &Tree,
     mapped: Option<&BTreeMap<String, Result<BTreeSet<String>, String>>>,
+    listed: Option<&BTreeSet<String>>,
 ) -> BTreeMap<String, Vec<shared::TestList>> {
     let rows = map.units.get(unit).map(|mapped| &mapped.tests);
     let mut ids: BTreeSet<&str> = hints.test_ids(unit);
@@ -388,6 +401,7 @@ fn tests_known(
         rows.into_iter()
             .flat_map(|rows| rows.keys().map(String::as_str)),
     );
+    ids.extend(listed.into_iter().flatten().map(String::as_str));
     ids.into_iter()
         .map(|id| {
             let row = rows.and_then(|rows| rows.get(id));
@@ -454,6 +468,7 @@ fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
             at.shared,
             at.tree,
             at.test_lists.get(unit.as_str()),
+            at.listed.get(unit.as_str()),
         );
         if !known.is_empty() {
             asked_of.insert(unit, known);
@@ -463,10 +478,14 @@ fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
     if total > MOST_TESTS {
         return Err(TooMany(total));
     }
-    let known = asked_of
+    let mut known: BTreeMap<String, usize> = asked_of
         .iter()
         .map(|(unit, tests)| ((*unit).clone(), tests.len()))
         .collect();
+    // \[ADR 0162\] A test file its adapter listed no test of is known to have none.
+    for unit in at.keyed.keys().filter(|unit| at.listed.contains_key(*unit)) {
+        known.entry(unit.clone()).or_insert(0);
+    }
     // \[C-34\] The tests of the test files the first tier may reuse whole, each audited by its
     // file's key and its id.
     let whole_keys: BTreeMap<String, (String, String, Digest)> = asked_of
@@ -720,11 +739,14 @@ fn tests_counted<'a>(
         .clone()
         .filter(|unit| !reuse.contains(*unit) && !all_of(unit))
         .count();
-    let tests = units.clone().all(|unit| tests_of(unit) > 0).then(|| {
-        let total: usize = units.map(|unit| tests_of(unit)).sum();
-        let reused: usize = reuse.iter().map(|unit| tests_of(unit)).sum::<usize>() + one_by_one;
-        (total, reused)
-    });
+    let tests = units
+        .clone()
+        .all(|unit| tested.known.contains_key(unit))
+        .then(|| {
+            let total: usize = units.map(|unit| tests_of(unit)).sum();
+            let reused: usize = reuse.iter().map(|unit| tests_of(unit)).sum::<usize>() + one_by_one;
+            (total, reused)
+        });
     TestsCounted {
         tests,
         files_total,
@@ -749,7 +771,9 @@ fn tests_line(
     let listed = tested.listed();
     let one_by_one: usize = listed.values().map(Vec::len).sum();
     let tests_of = |unit: &str| tested.known.get(unit).copied().unwrap_or(0);
-    if reuse.is_empty() && one_by_one == 0 {
+    // \[ADR 0162\] A test file known to hold no test, reused whole, reuses no test.
+    let no_test = |unit: &String| tested.known.get(unit) == Some(&0);
+    if reuse.iter().all(no_test) && one_by_one == 0 {
         // Only tests run as a check: said as test files' are, with tests.
         let checked = tested.audited.len();
         if checked == 0 || !audited.is_empty() {
@@ -1061,6 +1085,7 @@ impl Observer {
             extras,
             bound,
             test_lists,
+            listed,
             notes: adapter_notes,
         } = planning;
         let keyer = Keyer::new(input.tree, &sets, &input.base, self.profile.keys);
@@ -1152,6 +1177,7 @@ impl Observer {
                     keyer: &keyer,
                     reads: self.reads,
                     test_lists: &test_lists,
+                    listed: &listed,
                     tree: input.tree,
                     keyed: &keyed,
                     map: &map,
@@ -1189,6 +1215,10 @@ impl Observer {
             }
             Unit::File => PlannedTests::default(),
         };
+        // \[C-34\] A binary the first tier reused whole that the second took back, since the
+        // audit runs it or one of its tests, isn't deselected whole: the target runner reuses
+        // what `binaries` lists.
+        binaries.retain(|binary| reuse.contains(&binary.unit));
         // \[C-146\] A binary some of whose tests are left out one by one is left as the bytes
         // whose build the tests' keys hold, as one reused whole is.
         let mut test_binaries = Vec::new();
@@ -1283,6 +1313,7 @@ impl Observer {
             received,
             tests: tested,
             audited,
+            listed,
         });
         self.plan_notes = notes;
         Planned::Plan(line)
@@ -1854,6 +1885,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
                 keyer: &keyer,
                 reads,
                 test_lists: &adapter::TestLists::new(),
+                listed: &found.listed,
                 tree: p.tree,
                 keyed: &keyed,
                 map: &map,
@@ -2855,10 +2887,18 @@ fn decide(
             if !s.facts.deselected || s.tests.as_ref().is_some_and(|t| !t.is_empty()) {
                 continue;
             }
-            let known: BTreeSet<String> = match map.units.get(unit).filter(|m| !m.tests.is_empty())
-            {
-                Some(mapped) => mapped.tests.keys().cloned().collect(),
-                None => mode
+            // \[ADR 0162\] What its adapter listed before COMMAND first: it names what the test
+            // file holds now, though this machine never ran it, and tells one with no tests.
+            let listed = match &how {
+                How::Plan(plan) => plan.listed.get(unit),
+                How::Observe | How::Quiet => None,
+            };
+            let known: BTreeSet<String> = match (listed, map.units.get(unit)) {
+                (Some(listed), _) => listed.clone(),
+                (None, Some(mapped)) if !mapped.tests.is_empty() => {
+                    mapped.tests.keys().cloned().collect()
+                }
+                (None, _) => mode
                     .shared
                     .test_ids(unit)
                     .into_iter()
@@ -2866,7 +2906,8 @@ fn decide(
                     .collect(),
             };
             if known.is_empty() {
-                tests_unknown |= matches!(&how, How::Plan(plan) if plan.reuse.contains(unit));
+                tests_unknown |= listed.is_none()
+                    && matches!(&how, How::Plan(plan) if plan.reuse.contains(unit));
                 continue;
             }
             let left_out = facts::MergedTest {

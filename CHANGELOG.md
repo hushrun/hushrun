@@ -6,8 +6,24 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Changed
+
+- **Rust tests one by one on a fresh machine** ([ADR 0162](docs/adr/0162-rust-tests-listed-before-the-run.md),
+  C-146, C-39). Under `cargo nextest run` with `tests.unit: test`, the plan lists each test
+  binary's tests (`--list --format terse`, as nextest does) and keys every one the static map can
+  map, so a CI runner with no store of its own reuses the tests that passed before from the
+  results alone. It used to know a test only once it had run on the same machine, so CI ran every
+  test of each binary that changed. A binary whose list can't be read keeps the tests this
+  machine ran, and the run says so once.
+
 ### Fixed
 
+- **An audited test of a binary that passed whole runs** (C-34, C-39). With `tests.unit: test`,
+  when the audit drew a test of a Rust test binary the plan could reuse whole, the binary stayed in
+  the list the target runner skips, so the test never ran though the run said it did.
+- **A test binary with no tests no longer hides the count of tests.** A binary reused whole that
+  lists no test counts as one with none, so the plan's line and the last line count tests
+  (`reusing 2,049 tests saved about …`) instead of test binaries.
 - **Rust tests one by one** ([ADR 0145 amendment 1](docs/adr/0145-rust-tests-by-a-static-map.md)):
   a test that reads a source at compile time (`include_str!`, `include_bytes!`, `include!`) runs
   again when that file changes. It was reused, since the map reached nothing of the file it read

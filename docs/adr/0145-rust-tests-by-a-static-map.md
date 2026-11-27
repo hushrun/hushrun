@@ -4,6 +4,8 @@
 - **Date:** 2026-11-25
 - **Rules:** C-146 to C-152 added; C-39 amended; relies on ADR 0068, 0069, 0080, 0095,
   0096
+- **Amended by:** [0162](0162-rust-tests-listed-before-the-run.md): the plan lists each test
+  binary's tests, so a machine with no store of its own, a CI runner, reuses them one by one
 
 ## Context
 
