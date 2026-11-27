@@ -83,16 +83,18 @@ id came from a row or a list. Two cases need a word:
 
 ## What it costs
 
-Listing every test binary of this workspace (148 binaries, two starts each) took LISTING_TIME on
-an Apple silicon Mac. The static map was already made at the plan on a machine with rows; on a
-fresh machine it is now made at the plan rather than only after COMMAND, from the same index,
-which the plan and the reading after COMMAND share (C-152). So the index costs no more than before.
+Listing every test binary of this workspace (148 binaries, two starts each) took 0.3 seconds on
+an Apple silicon Mac, and found the same 3,533 tests nextest ran. The static map was already made
+at the plan on a machine with rows; on a fresh machine it is now made at the plan rather than only
+after COMMAND, from the same index, which the plan and the reading after COMMAND share (C-152).
+So the index costs no more than before: 47 seconds on that Mac, and the map 5 more.
 
 ## Consequences
 
 - A CI runner reuses Rust tests one by one from the results alone. On this repository, after the
-  same change to `units/gradle.rs`, a fresh store ran FIXED_HUSHRUN of the binary's 782 unit
-  tests, against all 782 with 0.20.1 ([the measurements](../validation/rust-tests-one-by-one.md#a-fresh-machine)).
+  same change to `units/gradle.rs`, a fresh store ran 66 of the binary's 782 unit tests and
+  1,221 tests in all, as a machine that ran them before does, against 782 and 2,120 with 0.20.1
+  ([the measurements](../validation/rust-tests-one-by-one.md#a-fresh-machine)).
 - CI installs the newest release, so the fix shows in CI only once it is released.
 - An audit of a test of a binary that passed whole runs that test.
 - The run's lines count tests on a fresh machine, and when a binary with no tests is reused whole.
