@@ -15,7 +15,7 @@ Both went up as class `library`. At `begin`, when the trusted scope holds a `lib
 same key with other outputs, the server does more than refuse the second copy with `differs`: it
 suspends the key in the repository for 7 days, deletes the stored trusted block, and counts the
 suspension against the run, whose uploads are refused once it has suspended 20 keys
-(`docs/contracts/build-v0.md` §4 and §6, in cloud). A trusted `begin` of a `library` also deletes
+(the server's build contract, §4 and §6). A trusted `begin` of a `library` also deletes
 the key's differing copies in the repository's `ci/` scopes. On `differs` the CLI discarded its
 own copy of a library too. For Maven, two honest builds on main would differ almost every time:
 main's second build would empty the store of the first one's modules and, after 20 modules, have

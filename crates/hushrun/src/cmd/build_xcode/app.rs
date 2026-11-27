@@ -346,20 +346,20 @@ mod tests {
     #[test]
     fn the_apps_service_has_fixed_places_and_a_short_socket() {
         let places = Places::of(
-            Path::new("/Users/ana/Library/Caches/hushrun"),
-            Path::new("/Users/ana"),
+            Path::new("/home/ana/Library/Caches/hushrun"),
+            Path::new("/home/ana"),
             501,
         );
         assert_eq!(
             places.socket,
-            Path::new("/Users/ana/Library/Caches/hushrun/xcode-app/xcode.sock")
+            Path::new("/home/ana/Library/Caches/hushrun/xcode-app/xcode.sock")
         );
         assert_eq!(
             places.plist,
-            Path::new("/Users/ana/Library/LaunchAgents/com.hushrun.xcode-cache.plist")
+            Path::new("/home/ana/Library/LaunchAgents/com.hushrun.xcode-cache.plist")
         );
-        let deep = format!("/Users/ana/{}", "a".repeat(120));
-        let long = Places::of(Path::new(&deep), Path::new("/Users/ana"), 501);
+        let deep = format!("/home/ana/{}", "a".repeat(120));
+        let long = Places::of(Path::new(&deep), Path::new("/home/ana"), 501);
         assert_eq!(long.socket, Path::new("/tmp/hushrun-xcode-501/xcode.sock"));
     }
 
