@@ -6,6 +6,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+0.20.0 was tagged but never published: its Windows builds failed. This is the first release with
+0.20.0's changes, listed under it below.
+
+### Fixed
+
+- The CLI builds for Windows again: the Xcode service's socket code is built on Unix only.
+
 ## [0.20.0] - 2026-11-27
 
 hushrun in agent clouds ([ADR 0140](docs/adr/0140-hosted-agents-sandboxes-are-local.md)): a
