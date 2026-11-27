@@ -20,20 +20,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+#[cfg(unix)]
 use bytes::Bytes;
+#[cfg(unix)]
 use hushrun_build::xcode::proto;
 use hushrun_build::xcode::service::{Counts, Service};
 
 /// The socket's name in the session's folder.
 pub(crate) const SOCKET: &str = "xcode.sock";
+#[cfg(unix)]
 /// The most bytes one request may hold: an object's most, and its frame.
 const MOST_REQUEST: usize = hushrun_build::xcode::cas::MOST_OBJECT as usize + 1024;
+#[cfg(unix)]
 /// HTTP/2 flow-control windows: large, so an object of a few MiB doesn't wait for updates.
 const STREAM_WINDOW: u32 = 8 << 20;
+#[cfg(unix)]
 const CONNECTION_WINDOW: u32 = 32 << 20;
 /// How long in-flight calls get when the service stops.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
+#[cfg(unix)]
 /// gRPC status codes the service writes.
 mod code {
     pub(super) const OK: &str = "0";
@@ -180,6 +186,7 @@ pub(crate) fn start_at(_service: Service, path: &Path) -> Result<Running, String
     ))
 }
 
+#[cfg(unix)]
 async fn connection(stream: tokio::net::UnixStream, service: Arc<Service>) {
     let mut builder = h2::server::Builder::new();
     builder
@@ -201,6 +208,7 @@ async fn connection(stream: tokio::net::UnixStream, service: Arc<Service>) {
     }
 }
 
+#[cfg(unix)]
 /// One call: its request read whole, answered, the reply written, and then what the reply left
 /// to do.
 async fn call(
@@ -255,6 +263,7 @@ async fn call(
     Ok(())
 }
 
+#[cfg(unix)]
 /// A reply of a status alone (gRPC's "trailers-only" form).
 fn status(
     respond: &mut h2::server::SendResponse<Bytes>,
@@ -423,6 +432,7 @@ pub(crate) fn summary(counts: &Counts) -> Option<String> {
     Some(line)
 }
 
+#[cfg(unix)]
 /// A message's gRPC frame: not compressed, its length, its bytes.
 pub(crate) fn frame(message: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(5 + message.len());
@@ -432,6 +442,7 @@ pub(crate) fn frame(message: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(unix)]
 /// The one message of a request's body.
 fn unframe(body: &[u8]) -> Result<&[u8], (&'static str, &'static str)> {
     let Some((head, rest)) = body.split_first_chunk::<5>() else {
@@ -447,6 +458,7 @@ fn unframe(body: &[u8]) -> Result<&[u8], (&'static str, &'static str)> {
     Ok(rest)
 }
 
+#[cfg(unix)]
 /// gRPC's percent-encoding of a status message.
 fn percent(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
