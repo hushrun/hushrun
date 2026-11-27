@@ -929,40 +929,44 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     assert!(t3 - t2 < 10, "{}s: {diag}", t3 - t2);
 }
 
-// DIAGNOSTIC (temporary): the same freeze, with no Go at all.
+// DIAGNOSTIC (temporary): fails on purpose, so that nextest prints what each frozen run's
+// process group went through on this machine: Go with its cache program (twice), sleeps only,
+// and Go with no cache program.
 #[test]
-fn diag_a_frozen_hushrun_with_sleeps_only() {
-    if !have_go() {
+fn diag_timelines_of_a_frozen_hushrun() {
+    if !cfg!(target_os = "macos") || !have_go() {
         return;
     }
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
-    let b = Machine::new(dir.path(), "c", None, &[]);
-    let (t, diag) = diag_frozen(&b, &fake, "sleep 40; sleep 1; sleep 1", &[]);
-    eprintln!("{diag}");
-    assert!(t[3] > 0, "sleeps died with a frozen hushrun: {diag}");
-}
-
-// DIAGNOSTIC (temporary): the same freeze, Go with no cache program (build reuse off).
-#[test]
-fn diag_a_frozen_hushrun_with_go_and_no_cache_program() {
-    if !have_go() {
-        return;
+    let (a, _) = two_machines(dir.path(), &fake, &[]);
+    let go =
+        |n: &str, what: &str| format!("go build -o /dev/null {what}; echo \"{n} $?\" >> ../codes");
+    let with_program = format!(
+        "{}; {}; {}",
+        go("go1", "./cmd/app"),
+        go("go2", "./lib"),
+        go("go3", "./cmd/app")
+    );
+    let mut all = String::new();
+    for (name, body, env) in [
+        ("cacheprog-1", with_program.as_str(), &[][..]),
+        ("cacheprog-2", with_program.as_str(), &[][..]),
+        ("sleeps", "sleep 40; sleep 1; sleep 1", &[][..]),
+        (
+            "no-cacheprog",
+            "go build -o /dev/null ./cmd/app; echo \"go1 $?\" >> ../codes; sleep 35; go build -o /dev/null ./lib; echo \"go2 $?\" >> ../codes",
+            &[("HUSHRUN_BUILD", "off")][..],
+        ),
+    ] {
+        let b = Machine::new(dir.path(), name, Some(&a.repo), &[]);
+        let (t, diag) = diag_frozen(&b, &fake, body, env);
+        all += &format!(
+            "\n######## {name}: t3 {}\n{diag}",
+            if t[3] > 0 { "written" } else { "MISSING" }
+        );
     }
-    let fake = FakeBuild::start();
-    let dir = tempfile::tempdir().unwrap();
-    let b = Machine::new(dir.path(), "c", None, &[]);
-    let (t, diag) = diag_frozen(
-        &b,
-        &fake,
-        "go build -o /dev/null ./cmd/app; echo \"go1 $?\" >> ../codes; sleep 35; go build -o /dev/null ./lib; echo \"go2 $?\" >> ../codes",
-        &[("HUSHRUN_BUILD", "off")],
-    );
-    eprintln!("{diag}");
-    assert!(
-        t[3] > 0,
-        "go died with a frozen hushrun and no cache program: {diag}"
-    );
+    panic!("DIAGNOSTIC, not a failure of the code:{all}");
 }
 
 /// DIAGNOSTIC (temporary): runs `body` (three commands, `;`-separated) under `hushrun run`, with
