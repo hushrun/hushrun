@@ -527,9 +527,29 @@ fn a_seeded_install_leaves_every_key_as_a_network_install_does() {
     let reads_seeded: Vec<Vec<String>> = units.iter().map(|u| read_by(&r, u)).collect();
     // What only the install could change is the same: the unit that calls the dependency reads
     // the same files, and no unit reads a file of deps/ or _build. (A unit's reads also hold what
-    // ran while it ran, which another test file's module can join in one run and not the next, so
-    // the other units are compared by their own files.)
-    assert_eq!(reads_seeded[2], reads_net[2]);
+    // ran while it ran, which another test file's module can join in one run and not the next:
+    // test files compile while others run, as `Shop.Tax`'s macro does when its test file is
+    // required. So the unit that calls the dependency is compared without the other units' own
+    // modules, and every other unit by its own file.)
+    let others = |p: &String| {
+        p.strip_prefix("lib/shop/")
+            .is_some_and(|m| m != "leafy.ex" && m.ends_with(".ex") && !m.contains('/'))
+    };
+    let own = |reads: &[String]| -> Vec<String> {
+        reads.iter().filter(|p| !others(p)).cloned().collect()
+    };
+    assert!(
+        own(&reads_net[2]).contains(&"lib/shop/leafy.ex".to_string()),
+        "{:?}",
+        reads_net[2]
+    );
+    assert_eq!(
+        own(&reads_seeded[2]),
+        own(&reads_net[2]),
+        "seeded: {:?}\nnetwork: {:?}",
+        reads_seeded[2],
+        reads_net[2]
+    );
     for (unit, (net, seeded)) in units.iter().zip(reads_net.iter().zip(&reads_seeded)) {
         for reads in [net, seeded] {
             assert!(reads.contains(&unit.to_string()), "{unit}: {reads:?}");
