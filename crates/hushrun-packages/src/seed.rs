@@ -29,6 +29,9 @@ pub struct Seeded {
     pub not_locked: usize,
     /// The stamp was there: nothing was looked at.
     pub stamped: bool,
+    /// Files a seed that unpacks couldn't unpack, each with why: not placed. The tool downloads
+    /// what they were of.
+    pub refused: Vec<(String, String)>,
 }
 
 /// The stamp a seed of `read` leaves in `dest`.
@@ -114,6 +117,85 @@ pub fn seed(
     }
     // A file the lockfile doesn't name may be named by the next one: no stamp then.
     if done.changed.is_empty() && done.not_locked == 0 {
+        fs::create_dir_all(dest)?;
+        fs::write(&stamp, b"")?;
+    }
+    Ok(done)
+}
+
+/// K-20: a seed that unpacks. Each tarball of `read` under its folder `under` is checked as
+/// [`seed`] checks a file (its row's SHA-256, then `admit`), and unpacked into the folder below
+/// `dest` that `folder_of` names for its path, never over a folder that is there. A tarball that
+/// can't be unpacked is left out, with why. The stamp is [`seed`]'s.
+pub fn seed_unpacking(
+    read: &ReadPart,
+    under: &str,
+    dest: &Path,
+    admit: &dyn Fn(&str, &[u8]) -> Admit,
+    folder_of: &dyn Fn(&str) -> Option<String>,
+) -> io::Result<Seeded> {
+    let stamp = dest.join(stamp_name(read));
+    if fs::symlink_metadata(&stamp).is_ok() {
+        return Ok(Seeded {
+            stamped: true,
+            ..Seeded::default()
+        });
+    }
+    let prefix = format!("{under}/");
+    let mut done = Seeded::default();
+    for row in &read.rows {
+        let Some(rest) = row.path.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(folder) = folder_of(rest).filter(|_| row.kind != Kind::Link) else {
+            continue;
+        };
+        let to = dest.join(&folder);
+        if fs::symlink_metadata(&to).is_ok() {
+            done.there += 1;
+            continue;
+        }
+        let bytes = fs::read(read.dir.join(&row.path))?;
+        if Hex32::sha256(&bytes) != row.sha256 {
+            done.changed.push(row.path.clone());
+            continue;
+        }
+        match admit(rest, &bytes) {
+            Admit::Copy => {}
+            Admit::NotLocked => {
+                done.not_locked += 1;
+                continue;
+            }
+            Admit::Changed => {
+                done.changed.push(row.path.clone());
+                continue;
+            }
+        }
+        let parent = to.parent().unwrap_or(dest);
+        fs::create_dir_all(parent)?;
+        // Unpacked beside, then renamed: a tool never sees half a package.
+        let temp = parent.join(format!(
+            ".{}.hushrun-seed-{}",
+            to.file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default(),
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        if let Err(err) = crate::tgz::unpack(&bytes, &temp) {
+            let _ = fs::remove_dir_all(&temp);
+            done.refused.push((row.path.clone(), err.to_string()));
+            continue;
+        }
+        if fs::rename(&temp, &to).is_err() {
+            // Another install put it there meanwhile.
+            let _ = fs::remove_dir_all(&temp);
+            done.there += 1;
+            continue;
+        }
+        done.copied += 1;
+    }
+    if done.changed.is_empty() && done.not_locked == 0 && done.refused.is_empty() {
         fs::create_dir_all(dest)?;
         fs::write(&stamp, b"")?;
     }

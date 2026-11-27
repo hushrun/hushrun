@@ -151,7 +151,8 @@ place in one step under the folder's lock, as B-63 does (one bake of a folder at
 `.<name>.bake.lock` beside it). `baked_ms` is `SOURCE_DATE_EPOCH` when it is set, so the same
 files bake to the same bytes. A store larger than `--max-bytes` (4 GiB unless given) fails the
 bake, naming its two largest parts and `--only`. A bake with nothing to take fails and says what
-it takes. It signs as a bake of compiled code signs (B-67): `--signing-key FILE`, the signing
+it takes. A part whose manifest set the checkout holds and whose cache the fetch left empty is
+left out with a line that says so: an install that finds everything in place downloads nothing. It signs as a bake of compiled code signs (B-67): `--signing-key FILE`, the signing
 variables, a CI job's ID token, or unsigned with a line (`--no-sign`: unsigned). The statement's
 predicate type is `https://hushrun.com/attestations/baked-packages/v1` and its one subject is
 `packages.json` by the SHA-256 of its bytes; `packages.json` names every rows file, which names
@@ -388,6 +389,82 @@ lockfile's `integrity`, with no index entry and no request, when the lockfile ha
 `resolved` (confirmed with npm 10.9 and `npm ci`, an empty cache and a registry nobody answers).
 *Breaks if:* npm stopped reading its cache by hash (a seed then saves nothing, and npm downloads
 as it does today), or a lockfile held only `sha1` hashes (nothing is seeded).
+
+**The `bun` part.** The part holds `parts/bun/tarballs/<name>@<version>.tgz` (a scoped name's
+scope as a folder), each the tarball of a package `bun.lock` names from npm's registry, which a
+bake downloads (K-20), and nothing of Bun's own cache, which keeps packages unpacked. Its manifest
+set is every tracked `bun.lock` and `bun.lockb`. `bun.lock` is read as JSON that allows a comma
+before a closing bracket; its `lockfileVersion` must be 1 or 2. Another version, or a `bun.lockb`
+alone (Bun's binary lockfile, which names no hashes), leaves the part out with a line. An entry of
+its `packages` is a package when it is `["<name>@<version>", "<registry>", {…}, "sha512-…"]` and
+the version holds no `:`: a workspace's packages and `file:`, `link:`, `git` and `github` entries
+are not. One whose registry field isn't empty came from another registry, and is left out and
+counted. Each row carries `package` (`<name>@<version>`) and `locked`, the entry's `integrity`. The
+part is verified by the lockfile (K-7). Its reader is C, and only `hushrun packages exec` and
+`hushrun packages restore` seed; `hushrun run` gives COMMAND nothing for it. The seed's folder is
+`BUN_INSTALL_CACHE_DIR` when set, else `bunfig.toml`'s `[install.cache]` `dir` when it is absolute
+(a relative one leaves the part alone, with a line), else `$BUN_INSTALL/install/cache`, else
+`~/.bun/install/cache`; it unpacks (K-20) each tarball whose name, version and SHA-512 a
+`bun.lock` of the checkout names now into `<name>@<version>@@@1/`, the folder Bun names a package
+of the default registry by. Never A: Bun has one cache, links `node_modules` files out of it, and
+fails an install that must add a package to a cache it can't write. *Rests on:* Bun installing,
+with a frozen lockfile and no request, every package whose folder its cache holds, without checking
+the folder, and leaving `node_modules` as an install from the network does, link for link, under
+both its linkers (`hoisted` and `isolated`) (confirmed with Bun 1.4.4, an empty cache seeded from
+tarballs, as a user who may not write the part, and no route to a registry). *Breaks if:* Bun named
+its cache's folders otherwise (another suffix than `@@@1`): it doesn't see what was seeded and
+downloads as it does today. Bun never checks a cached folder against the lockfile, so the seed's
+check is the only one.
+
+**The `yarn` part.** The part's files are of the Yarn that wrote the checkout's root `yarn.lock`.
+For Yarn 4 (`__metadata:` with `version: 8`), `parts/yarn/berry/<file>.zip`: the zips of Yarn's
+cache, each the file whose SHA-512 is a `checksum` (`<cacheKey>/<hex>`). For Yarn 1 (`# yarn
+lockfile v1`), `parts/yarn/v1/<file>.tgz`: an offline mirror's tarballs, each the file whose
+SHA-512 is an `integrity`. A Yarn 2 or 3 lockfile (`version` 4 or 6, whose `checksum` isn't the
+zip's SHA-512) leaves the part out with a line. Its manifest set is every tracked `yarn.lock`. A
+bake's fetch (`hushrun packages bake --out DIR -- yarn install …`) gives Yarn 4
+`YARN_GLOBAL_FOLDER` at a folder of the bake's own and `YARN_ENABLE_GLOBAL_CACHE=true`, and Yarn 1
+`YARN_YARN_OFFLINE_MIRROR` at a folder of the bake's own, made first, and `YARN_CACHE_FOLDER` at
+another, so that every package is downloaded; never the other Yarn's variables, since Yarn 4
+refuses Yarn 1's. `--harvest yarn=FOLDER` takes a Yarn 4 global folder (its `cache/`), a folder of
+zips, or a Yarn 1 mirror. Only the `.zip` and `.tgz` files directly in that folder are kept. Each
+row carries `locked`, the hash as `yarn.lock` writes it. The part is verified by the lockfile
+(K-7). Its reader is C, and only `hushrun packages exec` and `hushrun packages restore` seed. For
+Yarn 4 the seed's folder is what `yarn config get cacheFolder` names in the checkout (Yarn's global
+cache, or the project's). For Yarn 1 it is `hushrun-offline-mirror` beside the folder `yarn cache
+dir` names, and `hushrun packages exec` and `env` give the install `YARN_YARN_OFFLINE_MIRROR`
+naming it (`restore` says it); a mirror the person names already (`YARN_YARN_OFFLINE_MIRROR`, or
+`yarn-offline-mirror` in the checkout's or the home folder's `.yarnrc`) leaves the part alone,
+with a line. Either way the seed copies only a file whose SHA-512 a `yarn.lock` of the checkout
+names now. Never A: Yarn 1 writes every package it downloads into its mirror and fails an install
+when it can't, and Yarn 4 fails an install over a cached zip whose bytes aren't its checksum.
+*Rests on:* Yarn installing, with no request, from a cache folder of copied zips alone (Yarn 4,
+the same `.pnp.cjs` as from the network) or from a mirror of copied tarballs (Yarn 1, the same
+`node_modules`) (confirmed with Yarn 4.12.0 and 1.22.22, an empty cache and no route to a
+registry). *Breaks if:* Yarn 4 named its zips otherwise (another `cacheKey` changes the checksums
+too, so nothing is seeded and Yarn downloads), or a Yarn 1 bake found `node_modules` up to date:
+it downloads nothing, and the bake says so (K-6).
+
+**K-20 Downloaded by the lockfile, unpacked by the seed.** A part whose tool keeps no file a
+lockfile hashes (Bun's cache holds packages unpacked) holds instead each package's tarball as the
+registry serves it, which the lockfile's `integrity` hashes. A bake downloads those itself, with
+no tool run, with or without `-- COMMAND` and `--no-build`: each package of the manifest set's
+lockfiles that names its registry and an integrity, eight at a time, with no credential, each
+request ending on an answer, a failure, or 30 seconds in which no byte came. A tarball whose
+SHA-512 isn't the lockfile's, or that the registry doesn't serve, is left out, and the bake says
+how many and the first; a part none of whose packages came is left out. The part's `tool` is `the
+registry, by the lockfile`. A seed that unpacks checks each tarball as a copy is checked (its row's
+SHA-256, then the lockfile in the checkout), unpacks it into a folder beside its place in the
+tool's cache and renames that into place, never over a folder that is there: a gzip'd ustar
+archive, with the first component of every path dropped (npm's `package/`), pax and GNU long names
+read, regular files and folders only, a file `0755` when the archive lets anyone run it and
+`0644` otherwise. A link, a device, an absolute path or a path with a `..` component refuses that
+tarball, which is left out with a line, and the tool downloads it. The seed's stamp is written only
+when it left nothing out. *Rests on:* a package's files in the tool's cache being its tarball's,
+and nothing more (confirmed for Bun 1.4.4: a folder unpacked from the registry's tarball is the
+folder Bun writes, byte for byte). *Breaks if:* a tool's unpacking changed a package's files (a
+rename, a file of its own): the seeded folder would then differ from what the tool writes, which
+a test that installs from a seed and compares the tree with an install from the network finds.
 
 **K-30 The `pip` part.** The part is a flat folder, `parts/pip/<file>`, of the wheels and source
 archives a requirements file with hashes names, and pip reads it as a registry (K-10, B):
