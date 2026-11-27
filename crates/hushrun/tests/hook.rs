@@ -2755,3 +2755,97 @@ fn a_clones_older_lines_are_replaced_by_an_install_and_by_nothing_else() {
     assert!(text.contains(":(icase)node_modules"), "{text}");
     assert_eq!(text.matches("# hushrun:start").count(), 1, "{text}");
 }
+
+/// `hushrun hook session-start`, with the variables of a sandbox or a person's shell.
+fn session_start(r: &Repo, vars: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("hushrun"));
+    r.env(&mut cmd);
+    // No registry answers here: the pull fails fast instead of waiting on a real host.
+    cmd.env("HUSHRUN_BUILD_LOWER", r.root.join("lower"));
+    cmd.args(["hook", "session-start", "--budget", "30"]);
+    for (name, value) in vars {
+        cmd.env(name, value);
+    }
+    cmd.output().expect("hushrun")
+}
+
+const CLAUDE_CODE_WEB: &[(&str, &str)] = &[("CLAUDE_CODE_REMOTE", "true"), ("CLAUDECODE", "1")];
+
+// covers: C-168 (ADR 0161: outside a hosted agent's sandbox it does nothing, and exits 0)
+#[test]
+fn session_start_does_nothing_outside_a_hosted_sandbox() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    for vars in [&[][..], AGENT, &[("CLAUDE_CODE_REMOTE", "false")]] {
+        let out = session_start(&r, vars);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(stdout(&out), "", "{vars:?}");
+    }
+    assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+}
+
+// covers: C-168 (ADR 0161: in a hosted sandbox it runs its steps, then tells the agent what this
+// code already passed and what is left, with no secret in it)
+#[test]
+fn session_start_tells_the_agent_what_passed_and_what_is_left() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    assert!(r.npm("lint").status.success());
+    let out = session_start(&r, CLAUDE_CODE_WEB);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("hushrun, at the start of this Claude Code on the web session:\n"),
+        "{text}"
+    );
+    assert!(text.contains("fetch done"), "{text}\n{}", stderr(&out));
+    let short = &r.head()[..7];
+    assert!(
+        text.contains(&format!(
+            "- 1 of 2 checks already passed on this exact code ({short}): hushrun run skips them here, and CI skips them.\n- Still to run here: unit.\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("once it says the code is ready.\n"),
+        "{text}"
+    );
+    assert!(text.lines().count() <= 10, "{text}");
+    assert!(!text.contains(FakeResults::TOKEN), "{text}");
+    assert!(!text.contains("Results stay"), "{text}");
+}
+
+// covers: C-168 (ADR 0161: with no credential the fetch is skipped, and the agent is told results
+// stay on this machine)
+#[test]
+fn session_start_without_a_credential_says_results_stay_here() {
+    let fake = FakeResults::start();
+    let r = Repo::new(SIGNED_OUT);
+    r.write(
+        "package.json",
+        &PACKAGE.replace(
+            "\"name\": \"shop\",",
+            &format!(
+                "\"name\": \"shop\",\n  \"hushrun\": {{\"backend\": \"{}\"}},",
+                fake.url()
+            ),
+        ),
+    );
+    git::commit_all(&r.repo, "backend");
+    let out = session_start(&r, CLAUDE_CODE_WEB);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("fetch skipped (no credential for the backend)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- Still to run here: lint and unit.\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- Results stay on this machine, so CI runs every check again"),
+        "{text}"
+    );
+    assert!(text.contains("`hushrun doctor`"), "{text}");
+}

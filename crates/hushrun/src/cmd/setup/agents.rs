@@ -187,8 +187,8 @@ fn runner(npm: bool) -> &'static str {
 }
 
 /// \[ADR 0142\] What each cloud gets (C-145): an end-of-session hook that runs `hushrun flush`
-/// (Claude Code's `Stop` in `.claude/settings.json`, which also gets a `SessionStart` that pulls
-/// the baked store in Claude Code on the web; Cursor's `stop` in `.cursor/hooks.json`; Copilot's
+/// (Claude Code's `Stop` in `.claude/settings.json`, which also gets a `SessionStart` that runs
+/// `hushrun hook session-start` in Claude Code on the web, ADR 0161; Cursor's `stop` in `.cursor/hooks.json`; Copilot's
 /// `sessionEnd` in `.github/hooks/hushrun.json`), Copilot's setup steps, and a dev container's
 /// feature. A file there keeps everything it has: JSON gets hushrun's hook added where it lacks it;
 /// a workflow or a dev container's file that exists is left as it is.
@@ -221,20 +221,33 @@ fn cloud_files(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
     for cloud in clouds {
         match cloud {
             Cloud::ClaudeCode => {
-                let pull =
-                    format!("[ \"$CLAUDE_CODE_REMOTE\" != true ] || {run} build pull -q || true");
+                let start = session_start(run);
+                let entry = serde_json::json!({
+                    "type": "command",
+                    "command": start,
+                    "timeout": crate::cmd::session_start::HOOK_TIMEOUT_SECONDS,
+                });
+                let migrates = read(".claude/settings.json")
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .is_some_and(|mut value| replace_old_pull(&mut value, &entry, &start));
                 files.extend(json_hook(
                     ".claude/settings.json",
                     &|value| {
                         let a = add_hook(value, &["hooks", "Stop"], || {
                             serde_json::json!({"hooks": [{"type": "command", "command": flush}]})
                         }, &flush);
-                        let b = add_hook(value, &["hooks", "SessionStart"], || {
-                            serde_json::json!({"hooks": [{"type": "command", "command": pull}]})
-                        }, &pull);
-                        a || b
+                        // \[ADR 0161\] An earlier init's `build pull` gives way to this hook.
+                        let b = replace_old_pull(value, &entry, &start);
+                        let c = add_hook(value, &["hooks", "SessionStart"], || {
+                            serde_json::json!({"hooks": [entry.clone()]})
+                        }, &start);
+                        a || b || c
                     },
-                    "Claude Code's hooks: send what a session passed when it stops, and pull the baked store in a cloud session",
+                    if migrates {
+                        "Claude Code's hooks: the session-start hook an earlier init wrote becomes `hook session-start`, which warms a cloud session and tells Claude what passed"
+                    } else {
+                        "Claude Code's hooks: send what a session passed when it stops, and warm a cloud session when it starts and tell Claude what passed"
+                    },
                 ));
             }
             Cloud::Cursor => files.extend(json_hook(
@@ -291,6 +304,73 @@ fn cloud_files(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
         }
     }
     files
+}
+
+/// \[ADR 0161\] Claude Code's `SessionStart` command (C-145): gated on Claude Code on the web, so
+/// nothing starts elsewhere, and never failing the session.
+pub(crate) fn session_start(run: &str) -> String {
+    format!("[ \"$CLAUDE_CODE_REMOTE\" != true ] || {run} hook session-start || true")
+}
+
+/// \[ADR 0161\] The `SessionStart` commands an earlier init wrote (ADR 0143), for either runner.
+fn old_pulls() -> [String; 2] {
+    [runner(true), runner(false)]
+        .map(|run| format!("[ \"$CLAUDE_CODE_REMOTE\" != true ] || {run} build pull -q || true"))
+}
+
+/// \[ADR 0161\] Puts `hook` where `SessionStart` holds an earlier init's `build pull`, and takes out
+/// any other copy of it, an entry left with no hook going too; when a hook already runs `command`,
+/// the old one only goes. Every other entry and field stays. Whether it changed anything.
+fn replace_old_pull(
+    value: &mut serde_json::Value,
+    hook: &serde_json::Value,
+    command: &str,
+) -> bool {
+    let old = old_pulls();
+    let is_old = |item: &serde_json::Value| {
+        item.get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| old.iter().any(|old| text.trim() == old))
+    };
+    let Some(list) = value
+        .pointer_mut("/hooks/SessionStart")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut placed = list.iter().any(|entry| {
+        entry["hooks"].as_array().is_some_and(|hooks| {
+            hooks.iter().any(|item| {
+                item.get("command").and_then(serde_json::Value::as_str) == Some(command)
+            })
+        })
+    });
+    let mut changed = false;
+    for entry in list.iter_mut() {
+        let Some(hooks) = entry
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let mut kept = Vec::with_capacity(hooks.len());
+        for item in hooks.drain(..) {
+            if !is_old(&item) {
+                kept.push(item);
+                continue;
+            }
+            changed = true;
+            if !placed {
+                kept.push(hook.clone());
+                placed = true;
+            }
+        }
+        *hooks = kept;
+    }
+    if changed {
+        list.retain(|entry| !entry["hooks"].as_array().is_some_and(Vec::is_empty));
+    }
+    changed
 }
 
 /// Adds `entry` under `path` in `value` unless an entry there already holds `command`; whether it
@@ -588,11 +668,19 @@ mod tests {
             claude["hooks"]["Stop"][0]["hooks"][0]["command"],
             "npx --no-install hushrun flush -q || true"
         );
-        assert!(
-            claude["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .contains("CLAUDE_CODE_REMOTE")
+        // ADR 0161: the one command, gated on Claude Code on the web, with a timeout for its
+        // budget.
+        assert_eq!(
+            claude["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "[ \"$CLAUDE_CODE_REMOTE\" != true ] || npx --no-install hushrun hook session-start || true"
+        );
+        assert_eq!(
+            claude["hooks"]["SessionStart"][0]["hooks"][0]["timeout"],
+            crate::cmd::session_start::HOOK_TIMEOUT_SECONDS
+        );
+        const _: () = assert!(
+            crate::cmd::session_start::BUDGET_SECONDS + 10
+                <= crate::cmd::session_start::HOOK_TIMEOUT_SECONDS
         );
         let cursor: serde_json::Value = serde_json::from_str(&files[1].text).unwrap();
         assert_eq!(
@@ -623,5 +711,78 @@ mod tests {
             "{}",
             files[0].text
         );
+    }
+    // covers: C-145, C-168
+    #[test]
+    fn an_earlier_inits_build_pull_becomes_session_start_and_the_rest_stays() {
+        for npm in [true, false] {
+            let run = runner(npm);
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::create_dir_all(root.join(".claude")).unwrap();
+            let old = format!("[ \"$CLAUDE_CODE_REMOTE\" != true ] || {run} build pull -q || true");
+            let flush = format!("{run} flush -q || true");
+            let settings = serde_json::json!({
+                "permissions": {"allow": ["Bash(npm test)"]},
+                "hooks": {
+                    "SessionStart": [
+                        {"matcher": "startup", "hooks": [{"type": "command", "command": "./scripts/setup.sh"}]},
+                        {"hooks": [{"type": "command", "command": old}]},
+                    ],
+                    "Stop": [{"hooks": [{"type": "command", "command": flush}]}],
+                },
+            });
+            std::fs::write(
+                root.join(".claude/settings.json"),
+                serde_json::to_string_pretty(&settings).unwrap(),
+            )
+            .unwrap();
+            let files = cloud_files(root, &[Cloud::ClaudeCode], npm);
+            assert_eq!(files.len(), 1);
+            assert!(
+                files[0].change.contains("an earlier init wrote"),
+                "{}",
+                files[0].change
+            );
+            let value: serde_json::Value = serde_json::from_str(&files[0].text).unwrap();
+            let start = value["hooks"]["SessionStart"].as_array().unwrap();
+            assert_eq!(start.len(), 2, "replaced, not added: {value:#}");
+            assert_eq!(start[0]["matcher"], "startup");
+            assert_eq!(start[0]["hooks"][0]["command"], "./scripts/setup.sh");
+            assert_eq!(start[1]["hooks"][0]["command"], session_start(run));
+            assert_eq!(start[1]["hooks"][0]["timeout"], 60);
+            assert_eq!(value["hooks"]["Stop"].as_array().unwrap().len(), 1);
+            assert_eq!(value["permissions"]["allow"][0], "Bash(npm test)");
+            assert!(!files[0].text.contains("build pull"), "{}", files[0].text);
+            // Written, init has nothing more to do.
+            std::fs::write(root.join(".claude/settings.json"), &files[0].text).unwrap();
+            assert!(cloud_files(root, &[Cloud::ClaudeCode], npm).is_empty());
+        }
+        // Beside the new hook already, the old one only goes.
+        let mut value = serde_json::json!({"hooks": {"SessionStart": [
+            {"hooks": [{"type": "command", "command": session_start("hushrun")}]},
+            {"hooks": [
+                {"type": "command", "command": "[ \"$CLAUDE_CODE_REMOTE\" != true ] || hushrun build pull -q || true"},
+                {"type": "command", "command": "echo hi"},
+            ]},
+        ]}});
+        let entry = serde_json::json!({"type": "command", "command": session_start("hushrun")});
+        assert!(replace_old_pull(
+            &mut value,
+            &entry,
+            &session_start("hushrun")
+        ));
+        assert_eq!(
+            value["hooks"]["SessionStart"],
+            serde_json::json!([
+                {"hooks": [{"type": "command", "command": session_start("hushrun")}]},
+                {"hooks": [{"type": "command", "command": "echo hi"}]},
+            ])
+        );
+        assert!(!replace_old_pull(
+            &mut value,
+            &entry,
+            &session_start("hushrun")
+        ));
     }
 }

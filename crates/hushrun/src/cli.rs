@@ -125,7 +125,7 @@ pub enum Command {
     #[command(after_long_help = READY_HELP)]
     Ready(ReadyArgs),
     /// The pre-push hook: says what CI would run again, and refuses a coding agent's push until
-    /// that is done.
+    /// that is done. And what a hosted agent's session-start hook runs.
     #[command(subcommand, after_long_help = HOOK_HELP)]
     Hook(HookCommand),
     /// Print what a coding agent needs to know about this hushrun, and whether hushrun and its
@@ -706,6 +706,27 @@ pub enum HookCommand {
     /// What the hook runs: git passes the remote, and the refs on stdin.
     #[command(name = "pre-push", hide = true)]
     PrePush(PrePushArgs),
+    /// What a hosted agent's session-start hook runs: warm the sandbox, then tell the agent what
+    /// this code already passed. Elsewhere it does nothing; it always exits 0.
+    ///
+    /// In a hosted agent's sandbox (Claude Code on the web, Cursor's and Copilot's cloud agents,
+    /// Codex cloud) it pulls the baked compiled code (`hushrun build pull`), fetches the newest
+    /// results and compiled code with the sandbox's credential (`hushrun fetch`), then prints a
+    /// few lines on stdout for the agent: which checks already passed on this code, which are
+    /// left to run here and which to CI, and whether results stay on this machine. A step the
+    /// budget cuts off goes on in the background, and the steps after it are skipped.
+    #[command(name = "session-start")]
+    SessionStart(SessionStartArgs),
+}
+
+/// `hushrun hook session-start` (C-168).
+#[derive(Debug, Args)]
+pub struct SessionStartArgs {
+    /// The most seconds it takes, steps and context together: past it, it skips what is left
+    /// and prints the context it has. Keep it under the hook's own timeout.
+    #[arg(long, value_name = "SECONDS", default_value_t = crate::cmd::session_start::BUDGET_SECONDS,
+          value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub budget: u64,
 }
 
 /// Who the hook refuses.
@@ -834,6 +855,7 @@ Examples:
   hushrun hook install --refuse     Refuse everyone's push
   hushrun hook install --warn       Refuse no one's push
   hushrun hook uninstall            Take the hook out
+  hushrun hook session-start        In a hosted agent's session-start hook: warm it, say what passed
 
 The hook refuses a push only when it knows a check hasn't passed on the code being pushed and the
 command that passes it can run here. When it can't tell, it lets the push through: CI still runs
