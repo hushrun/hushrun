@@ -48,6 +48,32 @@ pub enum Admit {
 /// What [`Part::admit`] gives a seed: for a file's path and bytes, what it does with it.
 pub type Admits = Box<dyn Fn(&str, &[u8]) -> Admit>;
 
+/// What [`Part::locked_by`] gives a bake: for a file's path under the part's folder and its
+/// bytes, the lockfile's own hash of it, as the lockfile writes it.
+pub type LockedBy = Box<dyn Fn(&str, &[u8]) -> Option<String>>;
+
+/// K-20: one package a bake downloads by the lockfile, with no tool run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedDownload {
+    /// Where the registry serves it.
+    pub url: String,
+    /// Its path under the part's folder, first folder included.
+    pub path: String,
+    /// The package, as the lockfile names it.
+    pub package: String,
+    /// The lockfile's own hash of it, as the lockfile writes it.
+    pub locked: String,
+}
+
+/// K-20: what a bake downloads for a part by the lockfile, and what it leaves out, by why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Downloads {
+    /// The packages to download.
+    pub list: Vec<LockedDownload>,
+    /// Packages the lockfile names that the bake doesn't download: how many, and why.
+    pub left_out: Vec<(usize, String)>,
+}
+
 /// K-3: the files a lockfile names by hash, by their SHA-256: the file's name where the lockfile
 /// gives one, and the hash as the lockfile writes it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -146,6 +172,44 @@ pub trait Part: Sync {
     fn locked(&self, _path: &str) -> Option<String> {
         None
     }
+    /// K-3: for a part the lockfile verifies, the lockfile's own hash of each file, from the
+    /// lockfiles `manifests` of `checkout`: what a bake writes as a row's `locked` where the file's
+    /// path alone doesn't say it.
+    fn locked_from(&self, _checkout: &Path, _manifests: &[String]) -> Option<LockedBy> {
+        None
+    }
+    /// K-5: why a bake leaves this part out though its tool's cache holds files: a lockfile among
+    /// `manifests` this hushrun doesn't read, whose hashes would verify nothing. `None` to take it.
+    fn lockfile_unread(&self, _checkout: &Path, _manifests: &[String]) -> Option<String> {
+        None
+    }
+    /// K-20: what a bake downloads for this part by the lockfiles `manifests` of `checkout`, with
+    /// no tool run. `None` for a part a fetch or a harvest fills; an error names a lockfile this
+    /// hushrun doesn't read.
+    fn downloads(
+        &self,
+        _checkout: &Path,
+        _manifests: &[String],
+    ) -> Option<Result<Downloads, String>> {
+        None
+    }
+    /// K-10, mechanism C: seeds `read`'s files under its folder `under` into `dest`, each checked
+    /// by `admit`. Most parts copy each file to the same path below `dest`, or link it where
+    /// [`Part::links`] says.
+    fn seed(
+        &self,
+        read: &crate::state::ReadPart,
+        under: &str,
+        dest: &Path,
+        admit: &dyn Fn(&str, &[u8]) -> Admit,
+    ) -> std::io::Result<crate::seed::Seeded> {
+        crate::seed::seed(read, under, dest, admit, self.links())
+    }
+    /// K-10, mechanism C: the variables an install needs to read what a seed put in `dest`, for
+    /// `checkout`: none where the seed fills the tool's own cache.
+    fn seed_env(&self, _checkout: &Path, _dest: &Path) -> Vec<(String, OsString)> {
+        Vec::new()
+    }
     /// K-3: what the lockfiles among `manifests` (paths from `checkout`) pin, for a part whose
     /// file's path doesn't name its hash ([`Part::locked_by`]).
     fn locks(&self, _checkout: &Path, _manifests: &[String]) -> Locks {
@@ -206,6 +270,7 @@ pub trait Part: Sync {
 
 /// Every part this hushrun knows, by name.
 pub static ALL: &[&dyn Part] = &[
+    &crate::parts::bun::Bun,
     &crate::parts::bundler::Bundler,
     &crate::parts::cargo::Cargo,
     &crate::parts::composer::Composer,
@@ -220,6 +285,7 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::poetry::Poetry,
     &crate::parts::swiftpm::SwiftPm,
     &crate::parts::vcpkg::Vcpkg,
+    &crate::parts::yarn::Yarn,
 ];
 
 /// The part named `name`.

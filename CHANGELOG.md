@@ -74,6 +74,16 @@ project's new branch starts from what main's CI already ran.
 
 ### Added
 
+- **Bun in the package store** ([ADR 0151](docs/adr/0151-baked-packages-bun-yarn.md), K-20):
+  `hushrun packages bake --out DIR` downloads the tarballs `bun.lock` names, each checked against
+  its `integrity`, with no tool run, and `hushrun packages exec -- bun install --frozen-lockfile`
+  unpacks each one the lockfile still names into Bun's cache, so a sandbox installs with no
+  registry to reach. The lockfile is the evidence, so an unsigned store is read.
+- **Yarn in the package store** ([ADR 0151](docs/adr/0151-baked-packages-bun-yarn.md)): `hushrun
+  packages bake --out DIR -- yarn install` keeps Yarn 4's cache zips, or Yarn 1's offline mirror,
+  and `hushrun packages exec -- yarn install` copies in each file `yarn.lock` still hashes, into
+  Yarn 4's cache or into a mirror beside Yarn 1's cache that the install is pointed at. A Yarn 2 or
+  3 lockfile isn't read.
 - **pnpm in the package store** ([ADR 0150](docs/adr/0150-baked-packages-pnpm.md), K-18): `hushrun
   packages bake --out DIR -- pnpm fetch` keeps pnpm's store as a part, and `hushrun packages exec --
   pnpm install --frozen-lockfile` copies it into the store pnpm uses before the install, every file
