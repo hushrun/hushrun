@@ -242,7 +242,7 @@ fn a_value_whose_outputs_are_gone_is_a_miss() {
 #[test]
 fn a_value_put_in_a_run_becomes_a_block_and_serves_a_fresh_cache() {
     let machine = Machine::new().with_session(Some("none"));
-    let service = machine.service(&["/Users/ana"]);
+    let service = machine.service(&["/home/ana"]);
     let (key, value) = compile(&service, b"object code");
     assert_eq!(service.counts().stored, 1);
     let store = Store::new(&machine.store_dir());
@@ -255,7 +255,7 @@ fn a_value_put_in_a_run_becomes_a_block_and_serves_a_fresh_cache() {
     // The cache emptied (a fresh DerivedData is not this: the cache is the service's; a CI job's
     // store that came from a baked image, or a machine whose cache was trimmed, is).
     std::fs::remove_dir_all(service.cache().root()).unwrap();
-    let again = machine.service(&["/Users/ana"]);
+    let again = machine.service(&["/home/ana"]);
     assert_eq!(get(&again, &key), Some(value));
     assert_eq!(again.counts().reused, 1);
     let log = machine.log();
@@ -280,8 +280,8 @@ fn a_value_put_in_a_run_becomes_a_block_and_serves_a_fresh_cache() {
 #[test]
 fn an_output_holding_a_folder_of_this_machine_stays_here() {
     let machine = Machine::new().with_session(Some("none"));
-    let service = machine.service(&["/Users/ana"]);
-    let (key, _) = compile(&service, b"debug info: /Users/ana/src/app/main.swift");
+    let service = machine.service(&["/home/ana"]);
+    let (key, _) = compile(&service, b"debug info: /home/ana/src/app/main.swift");
     assert_eq!(service.counts().stored, 0);
     let store = Store::new(&machine.store_dir());
     assert!(store.block(&crate::xcode::key(&key)).unwrap().is_none());
@@ -292,7 +292,7 @@ fn an_output_holding_a_folder_of_this_machine_stays_here() {
     }));
     // Still this machine's: another checkout here is served from the cache, and its line says it
     // stays here, so no manifest names a block no server has.
-    assert!(get(&machine.service(&["/Users/ana"]), &key).is_some());
+    assert!(get(&machine.service(&["/home/ana"]), &key).is_some());
     let served = machine
         .log()
         .into_iter()

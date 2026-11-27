@@ -50,7 +50,7 @@ Go code that `bin/tsc` `execve`s: none of that passes through Node.
    project's `.d.ts` for the next) is its output, not its input, and is left out. Paths are kept
    from the checkout's root. The compiler's walk up for `package.json` and `node_modules` above the
    checkout is kept as names absent below *every* folder above the root, which holds at any depth,
-   so a laptop at `/Users/me/src/app` and CI at `/home/runner/work/app/app` share. Anything else
+   so a laptop at `/home/me/src/app` and CI at `/home/runner/work/app/app` share. Anything else
    outside the checkout ties the block to the checkout's folder.
 3. **What a block holds and how it is put back** (B-104, B-105). Every file written, standard output
    and error with the root replaced by `{root}`, and the exit status (0, 1, 2: errors are as

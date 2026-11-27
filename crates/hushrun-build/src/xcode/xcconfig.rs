@@ -98,10 +98,10 @@ mod tests {
     // covers: B-84
     #[test]
     fn the_checkouts_folder_is_mapped_unless_it_holds_white_space() {
-        let maps = maps(&Root::Folder(Path::new("/Users/ana/src/app/"))).unwrap();
-        assert!(maps.ends_with(" /Users/ana/src/app=/^workspace"));
+        let maps = maps(&Root::Folder(Path::new("/home/ana/src/app/"))).unwrap();
+        assert!(maps.ends_with(" /home/ana/src/app=/^workspace"));
         assert!(maps.starts_with("$(PROJECT_TEMP_DIR)=/^derived"));
-        assert!(super::maps(&Root::Folder(Path::new("/Users/ana/my app"))).is_err());
+        assert!(super::maps(&Root::Folder(Path::new("/home/ana/my app"))).is_err());
         assert!(
             super::maps(&Root::Workspace)
                 .unwrap()
@@ -116,10 +116,10 @@ mod tests {
         let text = text(
             Path::new("/tmp/s/xcode.sock"),
             Some(&maps),
-            Some(Path::new("/Users/ana/ci.xcconfig")),
+            Some(Path::new("/home/ana/ci.xcconfig")),
         );
         assert!(is_hushruns(&text));
-        assert!(text.contains("#include? \"/Users/ana/ci.xcconfig\"\n"));
+        assert!(text.contains("#include? \"/home/ana/ci.xcconfig\"\n"));
         assert!(text.contains("COMPILATION_CACHE_REMOTE_SERVICE_PATH = /tmp/s/xcode.sock\n"));
         assert!(text.contains("CLANG_MODULES_BUILD_SESSION_FILE =\n"));
         assert!(text.contains("SWIFT_ENABLE_PROJECT_PREFIX_MAPPING = YES\n"));

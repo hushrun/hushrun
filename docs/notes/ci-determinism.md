@@ -193,7 +193,7 @@ waiting on the answer. Nothing sleeps.
 
 1. **Manifest amendments** (`hushrun flush` for build blocks): would let a person's command exit
    before its uploads finish without its manifest falling short. This needs a protocol change and
-   the backend's support (hushrun/cloud). Worth doing on top of ADR 0144, not instead of it.
+   the backend's support. Worth doing on top of ADR 0144, not instead of it.
 2. **C-48 "held" output**: decide whether what a test program prints after `QUIET` counts for
    results (today it is forwarded, not parsed).
 3. **B-31's no-mint-at-the-end rule** against a long CI drain: decide whether the end may renew

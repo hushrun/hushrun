@@ -407,11 +407,11 @@ mod tests {
     #[test]
     fn a_folder_of_this_machine_in_an_output_is_found() {
         let objects = [Object {
-            data: b"debug info: /Users/ana/src/app/main.swift".to_vec(),
+            data: b"debug info: /home/ana/src/app/main.swift".to_vec(),
             references: vec![],
         }];
-        assert!(holds_a_folder(&objects, &["/Users/ana".into()]));
-        assert!(!holds_a_folder(&objects, &["/Users/bo".into()]));
+        assert!(holds_a_folder(&objects, &["/home/ana".into()]));
+        assert!(!holds_a_folder(&objects, &["/home/bo".into()]));
         assert!(!holds_a_folder(&objects, &["/".into(), String::new()]));
     }
 }
