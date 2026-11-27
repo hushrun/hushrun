@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-27
+
 hushrun in agent clouds ([ADR 0140](docs/adr/0140-hosted-agents-sandboxes-are-local.md)): a
 hosted agent's sandbox is local, whatever CI it sets, and `hushrun doctor` says what it needs.
 
@@ -446,7 +448,6 @@ project's new branch starts from what main's CI already ran.
 - **Uploads left for the next run by a command that ended early** (B-29): an end that came before
   the upload loop first ran found no loop and waited for none. The loop is marked as running when
   it is started.
-
 
 ## [0.19.1] - 2026-11-23
 
