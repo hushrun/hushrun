@@ -363,7 +363,7 @@ pub fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// Puts the program in a process group of its own (B-40, ADR 0159), before anything else.
+/// Puts the program in a process group of its own (B-40, ADR 0160), before anything else.
 ///
 /// Go never waits for its cache program: after `close` it reads the program's stdout to its end,
 /// which comes as the program exits, and exits too. So the program often outlives its `go`

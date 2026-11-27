@@ -2659,7 +2659,7 @@ a panic, the watchdog) in a folder of the program's own, removed at `close`; onl
 SHA-256 isn't its `OutputID` is answered with an error. The program's stdout carries protocol
 lines only: no child it starts inherits it (it would hold Go's `close` open), and a panic prints
 nothing on its stderr, which is the person's. Before anything else the program leads a process
-group of its own (ADR 0159). Go never waits for it, so it often ends after its `go` command,
+group of its own (ADR 0160). Go never waits for it, so it often ends after its `go` command,
 under launchd or init, and on macOS that end, in COMMAND's group, hangs up the whole group when
 `hushrun run` is stopped. Nothing signals the program through a group: it ends at `close`, or
 when its input ends because Go is gone. `close` waits for the handlers still running while

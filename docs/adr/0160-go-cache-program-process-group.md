@@ -1,4 +1,4 @@
-# 0159. Go's cache program leads a process group of its own
+# 0160. Go's cache program leads a process group of its own
 
 - **Status:** proposed; built
 - **Date:** 2026-11-27

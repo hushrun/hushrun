@@ -925,7 +925,7 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // A process group of its own: a hang-up the kernel sends hushrun's group (ADR 0159) would
+    // A process group of its own: a hang-up the kernel sends hushrun's group (ADR 0160) would
     // end the test too, and its SIGCONT would unfreeze hushrun, hiding the hang.
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let child = cmd.spawn().unwrap();
@@ -968,7 +968,7 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
 fn the_cache_program_runs_in_a_process_group_of_its_own() {
     // Started as Go starts it, by the program's name: before anything else it leaves the group
     // of whoever started it, so that its end, which Go never waits for, can't hang up the
-    // `hushrun run` that started COMMAND (ADR 0159).
+    // `hushrun run` that started COMMAND (ADR 0160).
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("hushrun-gocache");
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_hushrun"), &program).unwrap();
