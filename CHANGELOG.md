@@ -134,6 +134,12 @@ project's new branch starts from what main's CI already ran.
     Poetry's own cache, and Poetry then downloads none of them. Both are checked against their lockfile, so an unsigned store's pip
     and Poetry parts are read by any run, in CI too. `uv` has no part: nothing uv reads can come
     from a store without rewriting `uv.lock`.
+  - **vcpkg** ([ADR 0159](docs/adr/0159-baked-packages-vcpkg-conan.md)): a `vcpkg` part holds
+    vcpkg's asset cache, which `hushrun packages bake -- vcpkg install --only-downloads` fills,
+    and vcpkg reads it as one more asset source through `X_VCPKG_ASSET_SOURCES`. vcpkg checks
+    every file against its portfile's SHA-512, so any run reads the part, signed or not. An asset
+    source of the person's leaves it alone, with a line, since vcpkg reads only one. There is no
+    Conan part: `conan cache restore` writes what its archive says, outside the cache too.
 - **Baked packages for NuGet** ([ADR 0154](docs/adr/0154-baked-packages-nuget.md)): a `nuget`
   part, a global packages folder that `dotnet restore` reads in place as a fallback folder
   through `NUGET_FALLBACK_PACKAGES`. A bake's build fetches into a `NUGET_PACKAGES` of its own;

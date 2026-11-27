@@ -247,6 +247,15 @@ pub trait Part: Sync {
     fn fetch_vars(&self, _cache: &Path) -> Vec<(&'static str, OsString)> {
         Vec::new()
     }
+    /// K-6: [`Part::fetch_vars`] for a part whose variables keep the job's own words (`env`), or
+    /// the line that says why the part isn't fetched. What a bake asks.
+    fn fetch_vars_in(
+        &self,
+        cache: &Path,
+        _env: Env<'_>,
+    ) -> Result<Vec<(&'static str, OsString)>, String> {
+        Ok(self.fetch_vars(cache))
+    }
     /// K-3: [`Part::locks`], or an error, naming the lockfile, when one is in a form the part
     /// doesn't read, which leaves the part out of a bake and a seed rather than guess.
     fn read_locks(&self, checkout: &Path, manifests: &[String]) -> Result<Locks, String> {
@@ -275,6 +284,7 @@ pub static ALL: &[&dyn Part] = &[
     &crate::parts::pnpm::Pnpm,
     &crate::parts::poetry::Poetry,
     &crate::parts::swiftpm::SwiftPm,
+    &crate::parts::vcpkg::Vcpkg,
     &crate::parts::yarn::Yarn,
 ];
 

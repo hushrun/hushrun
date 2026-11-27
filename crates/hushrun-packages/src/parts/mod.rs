@@ -14,6 +14,7 @@ pub mod pip;
 pub mod pnpm;
 pub mod poetry;
 pub mod swiftpm;
+pub mod vcpkg;
 pub mod yarn;
 
 #[cfg(test)]

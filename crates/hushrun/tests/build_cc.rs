@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 use hushrun_testkit::fake_build::FakeBuild;
 use hushrun_testkit::git;
 
+#[path = "common/vcpkg.rs"]
+mod vcpkg;
+
 const CLEARED: &[&str] = &[
     "CI",
     "GITHUB_ACTIONS",
@@ -781,4 +784,111 @@ fn serve_a_fake_backend_for_a_measurement() {
         }
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+// covers: K-10
+#[test]
+fn a_vcpkg_package_store_changes_no_object_s_key() {
+    if !have_cc() {
+        return;
+    }
+    let Some(tool) = vcpkg::vcpkg() else { return };
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    // A port of the fixture's own whose header one more source includes.
+    let canary = a.root.join("canary");
+    let (files, ports) = vcpkg::files(
+        &tool,
+        &a.root.join("origin"),
+        &canary,
+        &["hello"],
+        &["hello"],
+    );
+    for (path, text) in &files {
+        let path = a.repo.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::write(
+        a.repo.join("src/vc.c"),
+        "#include <hello.h>\nint vc(void) { return HELLO_VALUE; }\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "vcpkg");
+    // The store: an asset cache vcpkg filled, harvested.
+    let assets = a.root.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let mut fill = Command::new(&tool);
+    for name in vcpkg::CLEARED {
+        fill.env_remove(name);
+    }
+    fill.arg("install")
+        .args(vcpkg::roots(&a.root.join("fill")))
+        .current_dir(&a.repo)
+        .env(
+            "X_VCPKG_ASSET_SOURCES",
+            format!("x-azurl,file://{},,readwrite", assets.display()),
+        )
+        .env("VCPKG_DOWNLOADS", a.root.join("fill/downloads"))
+        .envs(vcpkg::GIVEN.iter().copied());
+    let out = fill.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let store = a.root.join("packages");
+    let out = a
+        .hushrun(&fake)
+        .args(["packages", "bake", "--no-sign", "--out"])
+        .arg(&store)
+        .arg("--harvest")
+        .arg(format!("vcpkg={}", assets.display()))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // vcpkg installs into the build folder, and every source compiles through the launcher.
+    let mut script = format!(
+        "set -e; rm -rf build; {tool} install {} >&2; inc=$(echo build/vcpkg/install/*/include)",
+        vcpkg::roots(Path::new("build/vcpkg")).join(" ")
+    );
+    for name in SOURCES.iter().chain(&["vc"]) {
+        script.push_str(&format!(
+            "; ${{HUSHRUN_CC:?}} cc -Iinclude -I$inc -O1 -MD -MF build/{name}.o.d -c src/{name}.c -o build/{name}.o"
+        ));
+    }
+    let downloads = a.root.join("downloads");
+    let downloads = downloads.to_str().unwrap();
+    let mut env: Vec<(&str, &str)> = vcpkg::GIVEN.to_vec();
+    env.push(("VCPKG_DOWNLOADS", downloads));
+    // With the store, the origin gone: the header comes from the store.
+    let origin = &ports[0].origin;
+    std::fs::rename(origin, origin.with_extension("away")).unwrap();
+    let with: Vec<(&str, &str)> = env
+        .iter()
+        .copied()
+        .chain([("HUSHRUN_PACKAGES_LOWER", store.to_str().unwrap())])
+        .collect();
+    let (code, stderr) = a.run(&fake, &script, &with);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Asset cache hit"), "{stderr}");
+    assert!(cc_line(&stderr).contains("4 built"), "{stderr}");
+    // Without it, the origin back and every folder new: each object is the block the run with
+    // the store stored, under the same key.
+    std::fs::rename(origin.with_extension("away"), origin).unwrap();
+    let _ = std::fs::remove_dir_all(downloads);
+    let without: Vec<(&str, &str)> = env
+        .iter()
+        .copied()
+        .chain([("HUSHRUN_PACKAGES_LOWER", "")])
+        .collect();
+    let (code, stderr) = a.run(&fake, &script, &without);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("Asset cache hit"), "{stderr}");
+    assert!(cc_line(&stderr).contains("4 reused"), "{stderr}");
 }

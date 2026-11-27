@@ -635,6 +635,17 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     // a folder of the bake's own (K-6).
     let cache = hushrun_build::baked::new_folder(&out).map_err(|e| fail(e.to_string()))?;
     let _cache = Cleanup(vec![cache.clone()]);
+    // Each part whose tool the fetch doesn't name already says where it downloads.
+    let mut vars = Vec::new();
+    for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
+        match part.fetch_vars_in(&fetch_cache(&cache, part), &var) {
+            Ok(given) => vars.extend(given),
+            Err(why) if !part.manifests(&context.tracked).is_empty() => {
+                lines.push(format!("packages: {}: not fetched: {why}", part.name()));
+            }
+            Err(_) => {}
+        }
+    }
     let mut fetched: Vec<(&'static dyn Part, PathBuf, String)> = Vec::new();
     let mut cannot: Vec<&'static str> = Vec::new();
     for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
@@ -659,14 +670,14 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
                         .iter()
                         .map(|w| w.to_string_lossy().into_owned())
                         .collect();
-                    run_fetch(&context.checkout, &words, &cache).map_err(fail)?;
+                    run_fetch(&context.checkout, &words, &cache, &vars).map_err(fail)?;
                 }
                 fetched.push((part, into, download_tool(&commands)));
             }
         }
     }
     if !args.command.is_empty() {
-        run_fetch(&context.checkout, &args.command, &cache).map_err(fail)?;
+        run_fetch(&context.checkout, &args.command, &cache, &vars).map_err(fail)?;
         let words = shell_words(&args.command);
         for part in part::ALL.iter().copied().filter(|p| wanted(*p)) {
             if fetched.iter().any(|(p, _, _)| p.name() == part.name()) {
@@ -1325,8 +1336,13 @@ fn normalize_mode(path: &Path) -> std::io::Result<()> {
 /// credentials of hushrun, CI and signing withheld, no results recorded, with Gradle's user home,
 /// Maven's local repository, NuGet's global packages folder, pnpm's store, npm's cache, Composer's
 /// cache, the cargo home, Go's module cache and Yarn's cache or mirror at folders of the bake's own
-/// under `cache`.
-fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), String> {
+/// under `cache`, and `vars`, what the other parts give a fetch.
+fn run_fetch(
+    checkout: &Path,
+    command: &[String],
+    cache: &Path,
+    vars: &[(&'static str, OsString)],
+) -> Result<(), String> {
     let (program, args) = command.split_first().ok_or("name the fetch's command")?;
     let gradle = fetch_cache(cache, &hushrun_packages::parts::gradle::Gradle);
     let maven = fetch_cache(cache, &hushrun_packages::parts::maven::Maven);
@@ -1369,11 +1385,8 @@ fn run_fetch(checkout: &Path, command: &[String], cache: &Path) -> Result<(), St
         checkout,
         &fetch_cache(cache, &hushrun_packages::parts::yarn::Yarn),
     ));
-    env.extend(
-        part::ALL
-            .iter()
-            .flat_map(|p| p.fetch_vars(&fetch_cache(cache, *p))),
-    );
+    // Each part's own fetch variables, as the bake asked them (`Part::fetch_vars_in`).
+    env.extend(vars.iter().cloned());
     let built = crate::cmd::bake_build::in_bake(built, checkout, &[], None, &env);
     crate::cmd::bake_build::run_in_bake(built, None).map_err(|ended| {
         format!(
