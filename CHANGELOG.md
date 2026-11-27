@@ -6,6 +6,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rust tests one by one** ([ADR 0145 amendment 1](docs/adr/0145-rust-tests-by-a-static-map.md)):
+  a test that reads a source at compile time (`include_str!`, `include_bytes!`, `include!`) runs
+  again when that file changes. It was reused, since the map reached nothing of the file it read
+  as text. A path the map can't tell makes the test keep its binary's reads.
+
 ## [0.20.1] - 2026-11-27
 
 0.20.0 was tagged but never published: its Windows builds failed. This is the first release with

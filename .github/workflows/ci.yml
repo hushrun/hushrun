@@ -440,9 +440,10 @@ jobs:
   # `doctest-macos`, whose rule in hushrun.yaml is `os: macos`: a pass here skips this job's next
   # run on the same code, and nothing on Linux skips on it, nor the other way round. The Python
   # references and the npm tests take seconds, and run every time. Like `test`, `test-macos`
-  # reuses whole test binaries: every integration test of crates/hushrun starts the hushrun binary
-  # and so reads all of crates/hushrun/src, and a change there runs all of them here, about 45
-  # minutes. Which change runs what, and how to keep a pull request from it: CONTRIBUTING.md,
+  # asks for each Rust test on its own (`unit: test`, ADR 0145), which a fresh runner can't use
+  # yet (docs/validation/rust-tests-one-by-one.md), and every integration test of crates/hushrun
+  # that starts the hushrun binary reads all of crates/hushrun/src and what it links: a change
+  # there runs all of those here, most of the job's test time. Which change runs what, and how to keep a pull request from it: CONTRIBUTING.md,
   # "Which tests CI runs again".
   macos:
     name: clippy, test, references, npm (macOS)

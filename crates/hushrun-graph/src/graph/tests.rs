@@ -1026,3 +1026,156 @@ fn a_crates_files_are_its_root_and_the_modules_it_declares() {
     );
     assert!(g.crate_files("tests/missing.rs").is_empty());
 }
+
+/// What `include_str!`, `include_bytes!` and `include!` resolve to in rust-analyzer's index: the
+/// built-in macros of `core`.
+const INCLUDES: [(&str, &str); 3] = [
+    (
+        "include_str",
+        "rust-analyzer cargo core 1.0 macros/builtin/include_str!",
+    ),
+    (
+        "include_bytes",
+        "rust-analyzer cargo core 1.0 macros/builtin/include_bytes!",
+    ),
+    (
+        "include",
+        "rust-analyzer cargo core 1.0 macros/builtin/include!",
+    ),
+];
+
+// covers: C-147
+#[test]
+fn a_test_that_includes_a_source_of_its_crate_as_text_reaches_that_file() {
+    let mut symbols = vec![
+        ("t", "tests/t()."),
+        ("tests", "tests/"),
+        ("contains", "rust-analyzer cargo core 1.0 str/contains()."),
+        (
+            "assert",
+            "rust-analyzer cargo core 1.0 macros/builtin/assert!",
+        ),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+        ("cfg", "rust-analyzer cargo core 1.0 cfg:"),
+    ];
+    symbols.extend(INCLUDES);
+    let fake = Fake {
+        files: &[
+            (
+                "src/lib.rs",
+                "mod a; mod b;\n#[cfg(test)]\nmod tests { #[test] fn t() { assert!(include_str!(\"b.rs\").contains(\"pub fn b\")); } }\n",
+            ),
+            ("src/a.rs", "pub fn a() {}\n"),
+            ("src/b.rs", "pub fn b() {}\n"),
+        ],
+        symbols: &symbols,
+        at: &[],
+    };
+    // b.rs is read as text, whatever of it the test calls: none.
+    assert_eq!(
+        fake.reach("tests::t").unwrap(),
+        set(&["src/lib.rs", "src/b.rs"])
+    );
+}
+
+// covers: C-147
+#[test]
+fn an_integration_test_that_includes_a_library_source_reaches_it_from_its_own_folder() {
+    let mut symbols = vec![
+        ("routes", "routes()."),
+        ("len", "rust-analyzer cargo core 1.0 slice/len()."),
+        (
+            "assert",
+            "rust-analyzer cargo core 1.0 macros/builtin/assert!",
+        ),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+    ];
+    symbols.extend(INCLUDES);
+    let fake = Fake {
+        files: &[
+            ("crates/back/src/lib.rs", "pub mod api;\n"),
+            ("crates/back/src/api/mod.rs", "pub fn admin() {}\n"),
+            (
+                "crates/back/tests/routes.rs",
+                "#[test]\nfn routes() { assert!(include_bytes!(\"../src/api/mod.rs\").len() > 0); }\n",
+            ),
+        ],
+        symbols: &symbols,
+        at: &[],
+    };
+    assert_eq!(
+        fake.reach("routes").unwrap(),
+        set(&["crates/back/tests/routes.rs", "crates/back/src/api/mod.rs"])
+    );
+}
+
+// covers: C-147
+#[test]
+fn an_include_by_a_path_the_map_cant_tell_falls_back_unless_it_names_no_rust_source() {
+    let mut symbols = vec![
+        ("by_dir", "by_dir()."),
+        ("data", "data()."),
+        ("generated", "generated()."),
+        ("absolute", "absolute()."),
+        (
+            "concat",
+            "rust-analyzer cargo core 1.0 macros/builtin/concat!",
+        ),
+        ("env", "rust-analyzer cargo core 1.0 macros/builtin/env!"),
+        ("test", "rust-analyzer cargo core 1.0 macros/builtin/test:"),
+    ];
+    symbols.extend(INCLUDES);
+    let fake = Fake {
+        files: &[(
+            "tests/t.rs",
+            "#[test]\nfn by_dir() { include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/a.rs\")); }\n#[test]\nfn data() { include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/testdata/x.json\")); }\n#[test]\nfn generated() { include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\")); }\n#[test]\nfn absolute() { include_str!(\"/w/src/a.rs\"); }\n",
+        )],
+        symbols: &symbols,
+        at: &[],
+    };
+    for test in ["by_dir", "absolute"] {
+        let why = fake.reach(test).unwrap_err();
+        assert!(why.contains("include_str!"), "{test}: {why}");
+    }
+    // A JSON file stays in every test's list as it is; what a build script made is its output's.
+    assert_eq!(fake.reach("data").unwrap(), set(&["tests/t.rs"]));
+    assert_eq!(fake.reach("generated").unwrap(), set(&["tests/t.rs"]));
+}
+
+// covers: C-146, C-147
+#[test]
+fn a_file_a_crates_dep_info_names_that_is_none_of_its_modules_is_read_as_text() {
+    // What rustc's dep-info names for each crate: the integration test's names the library's
+    // `api.rs`, which a macro from outside the workspace read; the library's names a file it
+    // `include!`s and its own modules.
+    let fake = Fake {
+        files: &[
+            ("src/lib.rs", "pub mod api;\ninclude!(\"gen.rs\");\n"),
+            ("src/api.rs", "pub fn admin() {}\n"),
+            ("src/gen.rs", "pub fn made() {}\n"),
+            (
+                "tests/routes.rs",
+                "#[test]\nfn routes() { ext::load!(\"../src/api.rs\"); }\n",
+            ),
+        ],
+        symbols: &[("routes", "routes().")],
+        at: &[],
+    };
+    let g = fake.graph(&|_, _, _| None);
+    assert_eq!(
+        g.not_modules("tests/routes.rs", &set(&["tests/routes.rs", "src/api.rs"])),
+        set(&["src/api.rs"])
+    );
+    assert_eq!(
+        g.not_modules(
+            "src/lib.rs",
+            &set(&["src/lib.rs", "src/api.rs", "src/gen.rs", "README.md"])
+        ),
+        set(&["src/gen.rs"])
+    );
+    // A root the map lacks has no module it can show: every file of it stays.
+    assert_eq!(
+        g.not_modules("src/missing.rs", &set(&["src/missing.rs", "src/api.rs"])),
+        set(&["src/missing.rs", "src/api.rs"])
+    );
+}

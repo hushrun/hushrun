@@ -160,6 +160,9 @@ pub struct Graph {
     by_path: HashMap<String, usize>,
     /// \[C-147\] Each file's crates, by their root files' indices.
     crates_of: Vec<BTreeSet<u32>>,
+    /// \[C-147\] The files each node reads by `include_str!`, `include_bytes!` or `include!`,
+    /// from the repository's root: a test that reaches the node reaches each whole.
+    includes: HashMap<u32, Vec<String>>,
 }
 
 /// \[C-152\] Why a test falls back to its binary's reads.
@@ -187,6 +190,7 @@ impl Graph {
             unmapped: BTreeMap::new(),
             by_path: HashMap::new(),
             crates_of: Vec::new(),
+            includes: HashMap::new(),
         };
         let mut symbols: Vec<String> = Vec::new();
         let mut interned: HashMap<String, u32> = HashMap::new();
@@ -298,6 +302,20 @@ impl Graph {
             .collect()
     }
 
+    /// \[C-146, C-147\] Of `files`, the `.rs` files a crate's dep-info names (its root `root`)
+    /// that are none of that crate's modules as the map reads them: what it read as text or
+    /// included (`include_str!`, `include_bytes!`, `include!`, or a macro that expands to one),
+    /// which stays in every test's list of a binary built from that crate. Every one, when the map
+    /// lacks `root`.
+    pub fn not_modules(&self, root: &str, files: &BTreeSet<String>) -> BTreeSet<String> {
+        let modules = self.crate_files(root);
+        files
+            .iter()
+            .filter(|f| f.ends_with(".rs") && !modules.contains(*f))
+            .cloned()
+            .collect()
+    }
+
     /// \[C-152\] Why `path` isn't in the map, when it isn't: a binary built from it can't narrow.
     pub fn unmapped(&self, path: &str) -> Option<&str> {
         if self.by_path.contains_key(path) {
@@ -331,8 +349,15 @@ impl Graph {
                 .path
                 .clone()
         };
+        // \[C-147\] And what what it reaches includes, as text or as code.
+        let included: Vec<String> = seen
+            .keys()
+            .filter_map(|n| self.includes.get(n))
+            .flatten()
+            .cloned()
+            .collect();
         Ok(Reached {
-            files: seen.into_keys().map(path).collect(),
+            files: seen.into_keys().map(path).chain(included).collect(),
             trusted,
         })
     }
@@ -348,9 +373,16 @@ impl Graph {
     ) -> Option<String> {
         let start = self.test_node(id, own).ok()?;
         let seen = self.walk(start, linked).ok()?;
+        // \[C-147\] An item of the file, or one that includes it.
         let (n, _) = seen
             .iter()
-            .filter(|(n, _)| self.files[self.nodes[**n as usize].file as usize].path == file)
+            .filter(|(n, _)| {
+                self.files[self.nodes[**n as usize].file as usize].path == file
+                    || self
+                        .includes
+                        .get(*n)
+                        .is_some_and(|i| i.iter().any(|f| f == file))
+            })
             .min_by_key(|(n, _)| self.depth(&seen, **n))?;
         Some(self.chain(&seen, *n))
     }
@@ -1219,6 +1251,9 @@ impl<'g, 'i> Linker<'g, 'i> {
                 }
             }
         }
+        // \[C-147\] Files it reads by `include_str!`, `include_bytes!` or `include!`, wherever the
+        // macro stands: in its code, in another macro's input or in a `macro_rules!` body.
+        self.include_edges(n, file, &own);
         // \[C-150\] Macros invoked in it.
         let entry = &self.g.files[file];
         let macros: Vec<items::MacroUse> = in_ranges(&entry.split.macros, &own, |m| &m.range)
@@ -1746,6 +1781,49 @@ impl<'g, 'i> Linker<'g, 'i> {
 
     /// \[C-150\] Every item the module of `n` holds, and those of each module it imports by `*`:
     /// what a name an expansion makes can be resolved to there.
+    /// \[C-147\] What `n`'s own bytes (`own`, of `file`) read by `include_str!`,
+    /// `include_bytes!` or `include!`: a Rust source named by a path the map can resolve goes in
+    /// [`Graph::includes`]; any other file isn't a source, and stays in every test's list as it
+    /// is; a path the map can't tell makes `n` fall back.
+    fn include_edges(&mut self, n: u32, file: usize, own: &[Range<usize>]) {
+        let entry = &self.g.files[file];
+        let Some(source) = self.inputs.sources.get(&entry.path) else {
+            return;
+        };
+        let names: Vec<(String, usize)> = in_ranges(&entry.split.idents, own, |i| &i.range)
+            .filter(|i| INCLUDES.contains(&i.text.as_str()))
+            .map(|i| (i.text.clone(), i.range.end))
+            .collect();
+        let mut found: Vec<String> = Vec::new();
+        let mut unknown: Option<String> = None;
+        for (name, end) in names {
+            let Some(args) = include_args(source, end, &entry.split.strings) else {
+                continue;
+            };
+            match included(source, &args, &entry.split.strings) {
+                Included::Source(path) => match resolve(&entry.path, &path) {
+                    Some(path) => found.push(path),
+                    None => {
+                        unknown.get_or_insert(name);
+                    }
+                },
+                Included::NoSource => {}
+                Included::Unknown => {
+                    unknown.get_or_insert(name);
+                }
+            }
+        }
+        if let Some(name) = unknown {
+            self.flag(
+                n,
+                format!("it reads a file by `{name}!` whose path the static map can't tell, and so reads all its binary is built from"),
+            );
+        }
+        if !found.is_empty() {
+            self.g.includes.entry(n).or_default().extend(found);
+        }
+    }
+
     fn scope_edges(&mut self, n: u32) {
         let node = self.g.nodes[n as usize];
         let module = self.item(n).module.map(|m| m as u32);
@@ -1820,6 +1898,148 @@ fn normalize(path: &str) -> String {
 }
 
 /// The members of `sorted` (by their ranges' starts, as a file keeps them) inside one of `ranges`.
+/// \[C-147\] The macros that read a file at compile time.
+const INCLUDES: [&str; 3] = ["include_str", "include_bytes", "include"];
+
+/// \[C-147\] What an `include_str!`, `include_bytes!` or `include!` names.
+#[derive(Debug, PartialEq, Eq)]
+enum Included {
+    /// A `.rs` file, by the path written, from the file that holds the macro.
+    Source(String),
+    /// A file that is no Rust source: one that doesn't end in `.rs`, or one under `OUT_DIR`,
+    /// which a build script made.
+    NoSource,
+    /// A path the map can't tell.
+    Unknown,
+}
+
+/// The bytes between the brackets after the macro's name that ends at `end`, when a `!` and a
+/// bracket follow it: the macro's input. `None` for anything else of that name.
+fn include_args(source: &str, end: usize, strings: &[items::Str]) -> Option<Range<usize>> {
+    let bytes = source.as_bytes();
+    let skip = |mut at: usize| {
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        at
+    };
+    let bang = skip(end);
+    if bytes.get(bang) != Some(&b'!') {
+        return None;
+    }
+    let open = skip(bang + 1);
+    let close_of = |c: u8| match c {
+        b'(' => Some(b')'),
+        b'[' => Some(b']'),
+        b'{' => Some(b'}'),
+        _ => None,
+    };
+    close_of(*bytes.get(open)?)?;
+    let mut depth = 0usize;
+    let mut at = open;
+    while at < bytes.len() {
+        // A string's brackets are its own.
+        if let Some(s) = strings.iter().find(|s| s.range.start == at) {
+            at = s.range.end;
+            continue;
+        }
+        match bytes[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + 1..at);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+/// A string literal's value as written, its quotes and raw marks taken off; `None` when it holds
+/// an escape, which the map doesn't read.
+fn literal(text: &str) -> Option<String> {
+    let body = text.trim_start_matches(['b', 'c']);
+    let (body, raw) = match body.strip_prefix('r') {
+        Some(rest) => (rest.trim_matches('#'), true),
+        None => (body, false),
+    };
+    let value = body.strip_prefix('"')?.strip_suffix('"')?;
+    (raw || !value.contains('\\')).then(|| value.to_string())
+}
+
+/// \[C-147\] What the macro input `args` names: one string literal, its path; else, when the
+/// literals it ends with don't make a `.rs` name, or it starts `concat!(env!("OUT_DIR")`, no
+/// source; else what the map can't tell.
+fn included(source: &str, args: &Range<usize>, strings: &[items::Str]) -> Included {
+    let text = &source[args.clone()];
+    let end = args.start + text.trim_end().trim_end_matches(',').trim_end().len();
+    let start = args.start + (text.len() - text.trim_start().len());
+    let lits: Vec<&items::Str> = strings
+        .iter()
+        .filter(|s| s.range.start >= args.start && s.range.end <= args.end)
+        .collect();
+    let gap = |from: usize, to: usize, also: &[char]| {
+        source[from..to]
+            .chars()
+            .all(|c| c.is_whitespace() || c == ',' || also.contains(&c))
+    };
+    if let [one] = lits.as_slice()
+        && one.range.start == start
+        && one.range.end == end
+    {
+        return match literal(&one.text) {
+            Some(path) if path.ends_with(".rs") => Included::Source(path),
+            Some(_) => Included::NoSource,
+            None => Included::Unknown,
+        };
+    }
+    // The literals the input ends with, after the last thing that isn't one.
+    let mut tail = String::new();
+    let mut to = end;
+    for s in lits.iter().rev() {
+        let also: &[char] = if to == end { &[')', ']', '}'] } else { &[] };
+        if !gap(s.range.end, to, also) {
+            break;
+        }
+        let Some(value) = literal(&s.text) else {
+            return Included::Unknown;
+        };
+        tail.insert_str(0, &value);
+        to = s.range.start;
+    }
+    if !tail.is_empty() && !tail.ends_with(".rs") {
+        return Included::NoSource;
+    }
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.starts_with("concat!(env!(\"OUT_DIR\")") {
+        return Included::NoSource;
+    }
+    Included::Unknown
+}
+
+/// \[C-147\] `written`, a path an include macro of the file `from` names, from the repository's
+/// root: `None` for an absolute one, or one that leaves the root.
+fn resolve(from: &str, written: &str) -> Option<String> {
+    if written.starts_with('/') || written.contains(':') || written.contains('\\') {
+        return None;
+    }
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    for part in written.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
 fn in_ranges<'a, T>(
     sorted: &'a [T],
     ranges: &'a [Range<usize>],
