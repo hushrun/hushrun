@@ -2658,7 +2658,11 @@ miss. A `put` answers a file holding exactly the body: in Go's cache, else (a wr
 a panic, the watchdog) in a folder of the program's own, removed at `close`; only a body whose
 SHA-256 isn't its `OutputID` is answered with an error. The program's stdout carries protocol
 lines only: no child it starts inherits it (it would hold Go's `close` open), and a panic prints
-nothing on its stderr, which is the person's. `close` waits for the handlers still running while
+nothing on its stderr, which is the person's. Before anything else the program leads a process
+group of its own (ADR 0159). Go never waits for it, so it often ends after its `go` command,
+under launchd or init, and on macOS that end, in COMMAND's group, hangs up the whole group when
+`hushrun run` is stopped. Nothing signals the program through a group: it ends at `close`, or
+when its input ends because Go is gone. `close` waits for the handlers still running while
 one has shown life within the watchdog's time, answers, and the process exits. Every call to the
 relay waits on its silence alone, 30 seconds (B-26's `relay::WAIT`), whatever the key's compile
 cost: a relay working on an answer (a large download) says so every heartbeat and is waited for;
@@ -2673,8 +2677,9 @@ on: the program never exits before `close`. Side effects of serving a block (its
 download's first reuse, the log's line) happen only for the answer Go got: a `get` the watchdog
 answered first records nothing.
 *Rests on:* Go waiting for every answer without a limit, failing the command when the program
-exits before `close` or sends an answer it doesn't expect, and building on a miss (read in
-`cmd/go/internal/cache/prog.go`; proved by a test whose handlers hang and panic). *Breaks if:* Go
+exits before `close` or sends an answer it doesn't expect, building on a miss, and never waiting
+for the program's exit, only for the end of its stdout (read in `cmd/go/internal/cache/prog.go`;
+proved by a test whose handlers hang and panic, and by one that checks the program's group). *Breaks if:* Go
 starts the program through a shell, or a Go release treats a miss on a hit's subkey differently,
 or an error answer to a `get` as fatal.
 

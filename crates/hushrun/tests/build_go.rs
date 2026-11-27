@@ -909,192 +909,113 @@ fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let (a, _) = two_machines(dir.path(), &fake, &[]);
-    // A third machine, with nothing of its own yet: every package asks the relay.
-    let b = Machine::new(dir.path(), "c", Some(&a.repo), &[]);
-    let go =
-        |n: &str, what: &str| format!("go build -o /dev/null {what}; echo \"{n} $?\" >> ../codes");
-    let body = format!(
-        "{}; {}; {}",
-        go("go1", "./cmd/app"),
-        go("go2", "./lib"),
-        go("go3", "./cmd/app")
-    );
-    let (t, diag) = diag_frozen(&b, &fake, &body, &[]);
-    eprintln!("{diag}");
-    let (t0, t1, t2, t3) = (t[0], t[1], t[2], t[3]);
-    assert!(t3 > 0, "go hung with a frozen relay: {diag}");
-    // The first command waits for the relay once; the run's later ones don't ask it.
-    assert!(t1 - t0 < 60, "{}s: {diag}", t1 - t0);
-    assert!(t2 - t1 < 10, "{}s: {diag}", t2 - t1);
-    assert!(t3 - t2 < 10, "{}s: {diag}", t3 - t2);
+    frozen_relay_run(dir.path(), &fake, &a, "c");
 }
 
-// DIAGNOSTIC (temporary): fails on purpose, so that nextest prints what each frozen run's
-// process group went through on this machine: Go with its cache program (twice), sleeps only,
-// and Go with no cache program.
+// TEMPORARY (ADR 0159), to be removed before merging: on macOS, where the hang-up came about half
+// the time, the same run five more times.
 #[test]
-fn diag_timelines_of_a_frozen_hushrun() {
+fn temporary_the_frozen_relay_run_five_more_times_on_macos() {
     if !cfg!(target_os = "macos") || !have_go() {
         return;
     }
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let (a, _) = two_machines(dir.path(), &fake, &[]);
-    let go =
-        |n: &str, what: &str| format!("go build -o /dev/null {what}; echo \"{n} $?\" >> ../codes");
-    let with_program = format!(
-        "{}; {}; {}",
-        go("go1", "./cmd/app"),
-        go("go2", "./lib"),
-        go("go3", "./cmd/app")
-    );
-    let mut all = String::new();
-    for (name, body, env) in [
-        ("cacheprog-1", with_program.as_str(), &[][..]),
-        ("cacheprog-2", with_program.as_str(), &[][..]),
-        ("sleeps", "sleep 40; sleep 1; sleep 1", &[][..]),
-        (
-            "no-cacheprog",
-            "go build -o /dev/null ./cmd/app; echo \"go1 $?\" >> ../codes; sleep 35; go build -o /dev/null ./lib; echo \"go2 $?\" >> ../codes",
-            &[("HUSHRUN_BUILD", "off")][..],
-        ),
-    ] {
-        let b = Machine::new(dir.path(), name, Some(&a.repo), &[]);
-        let (t, diag) = diag_frozen(&b, &fake, body, env);
-        all += &format!(
-            "\n######## {name}: t3 {}\n{diag}",
-            if t[3] > 0 { "written" } else { "MISSING" }
-        );
+    for n in 0..5 {
+        frozen_relay_run(dir.path(), &fake, &a, &format!("again-{n}"));
     }
-    panic!("DIAGNOSTIC, not a failure of the code:{all}");
 }
 
-/// DIAGNOSTIC (temporary): runs `body` (three commands, `;`-separated) under `hushrun run`, with
-/// stamps t0..t3 between them, stops hushrun at 1.5 s, and records a timeline of its process
-/// group until t3 or 150 s. The stamps, and what was seen.
-fn diag_frozen(
-    b: &Machine,
-    fake: &FakeBuild,
-    body: &str,
-    env: &[(&str, &str)],
-) -> ([u64; 4], String) {
-    let parts: Vec<&str> = body.splitn(3, "; ").collect();
-    let hires =
-        |name: &str| format!("perl -MTime::HiRes=time -e 'printf \"%.3f\\n\", time' > ../{name}");
+/// A machine `name` with nothing of its own runs three `go build` commands under `hushrun run`,
+/// which is stopped once they have begun: the first waits for the frozen relay once, and the run's
+/// later ones don't ask it.
+fn frozen_relay_run(dir: &Path, fake: &FakeBuild, a: &Machine, name: &str) {
+    // A machine with nothing of its own yet: every package asks the relay.
+    let b = Machine::new(dir, name, Some(&a.repo), &[]);
     let stamp = |name: &str| format!("date +%s > ../{name}");
     let script = format!(
-        "trap 'echo HUP >> ../sig; {}' HUP; trap 'echo TERM >> ../sig' TERM; {}; sleep 3; {}; {}; {}; {}; {}; {}; {}",
-        hires("hup_at"),
-        hires("ts"),
+        "{}; sleep 3; {}; go build -o /dev/null ./cmd/app; {}; go build -o /dev/null ./lib; {}; \
+         go build -o /dev/null ./cmd/app; {}",
+        stamp("started"),
         stamp("t0"),
-        parts[0],
         stamp("t1"),
-        parts.get(1).copied().unwrap_or("true"),
         stamp("t2"),
-        parts.get(2).copied().unwrap_or("true"),
         stamp("t3"),
     );
-    let epoch = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64()
-    };
     let mut cmd = b.hushrun(fake);
     cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    // A group of its own, so that the test itself is never hung up.
+    // A process group of its own: a hang-up the kernel sends hushrun's group (ADR 0159) would
+    // end the test too, and its SIGCONT would unfreeze hushrun, hiding the hang.
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let t_start = epoch();
-    let mut child = cmd.spawn().unwrap();
-    let pid = child.id();
-    let mut diag = String::new();
-    let sh = |c: &str| -> String {
-        let o = Command::new("sh").args(["-c", c]).output().unwrap();
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
-        )
-    };
-    std::thread::sleep(Duration::from_millis(1500));
-    diag += &format!("DIAG stop at +{:.3}\n", epoch() - t_start);
-    Command::new("kill")
-        .args(["-STOP", &pid.to_string()])
-        .status()
-        .unwrap();
-    diag += &sh(&format!(
-        "ps -o pid,ppid,pgid,sess,tpgid,stat,command -p {},{pid},$(ps -o ppid= -p {}) 2>&1",
-        std::process::id(),
-        std::process::id()
-    ));
-    let t3 = b.root.join("t3");
-    let deadline = Instant::now() + Duration::from_secs(150);
-    let mut last = String::new();
-    while !t3.exists() && Instant::now() < deadline {
-        let now = sh(&format!(
-            "ps -A -o pid=,ppid=,pgid=,stat=,command= | awk '$3=={pid} {{ $5=$5; print $1, $2, $4, substr($0, index($0,$5), 60) }}' | sort -n"
-        ));
-        // Only what changed, and with the time it changed.
-        let shape: String = now
-            .lines()
-            .map(|l| {
-                let f: Vec<&str> = l.splitn(4, ' ').collect();
-                format!(
-                    "{} {} {}\n",
-                    f[0],
-                    f.get(2).unwrap_or(&""),
-                    f.get(3).unwrap_or(&"")
-                )
-            })
-            .collect();
-        if shape != last {
-            diag += &format!("DIAG +{:.1}s group:\n{now}", epoch() - t_start);
-            last = shape;
-        }
-        if let Ok(Some(status)) = child.try_wait() {
-            diag += &format!(
-                "DIAG +{:.1}s hushrun ended while stopped: {status:?}\n",
-                epoch() - t_start
-            );
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(500));
+    let child = cmd.spawn().unwrap();
+    // Frozen once COMMAND runs, not before: a hushrun stopped before it starts COMMAND runs
+    // nothing at all.
+    let started = b.root.join("started");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
     }
-    diag += &format!(
-        "DIAG +{:.1}s CONT (t3 there: {})\n",
-        epoch() - t_start,
-        t3.exists()
-    );
-    Command::new("kill")
-        .args(["-CONT", &pid.to_string()])
-        .status()
-        .unwrap();
+    assert!(started.exists(), "COMMAND never started");
+    // Frozen, not gone: the relay is a thread of hushrun's own process.
+    let pid = child.id().to_string();
+    Command::new("kill").args(["-STOP", &pid]).status().unwrap();
+    let t3 = b.root.join("t3");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while !t3.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Command::new("kill").args(["-CONT", &pid]).status().unwrap();
     let out = child.wait_with_output().unwrap();
-    let read = |n: &str| std::fs::read_to_string(b.root.join(n)).unwrap_or_default();
-    let num = |n: &str| -> u64 { read(n).trim().parse().unwrap_or(0) };
-    diag += &format!(
-        "DIAG hushrun's status {:?}; start={t_start:.3} ts={} t0..t3={} {} {} {}; codes={:?}; sig={:?} hup_at={}\nstderr: {}\n",
-        out.status,
-        read("ts").trim(),
-        num("t0"),
-        num("t1"),
-        num("t2"),
-        num("t3"),
-        read("codes"),
-        read("sig"),
-        read("hup_at").trim(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    diag += &sh(&format!(
-        "find {} -name go-relay-down -exec sh -c 'echo relay-down at $(cat \"$1\")' _ {{}} +",
-        b.root.display()
-    ));
-    ([num("t0"), num("t1"), num("t2"), num("t3")], diag)
+    let read = |n: &str| -> u64 {
+        std::fs::read_to_string(b.root.join(n))
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(t3.exists(), "go hung with a frozen relay: {stderr}");
+    // The first command waits for the relay once; the run's later ones don't ask it.
+    let (t0, t1, t2, t3) = (read("t0"), read("t1"), read("t2"), read("t3"));
+    assert!(t1 - t0 < 60, "{}s: {stderr}", t1 - t0);
+    assert!(t2 - t1 < 10, "{}s: {stderr}", t2 - t1);
+    assert!(t3 - t2 < 10, "{}s: {stderr}", t3 - t2);
+}
+
+// covers: B-40
+#[test]
+fn the_cache_program_runs_in_a_process_group_of_its_own() {
+    // Started as Go starts it, by the program's name: before anything else it leaves the group
+    // of whoever started it, so that its end, which Go never waits for, can't hang up the
+    // `hushrun run` that started COMMAND (ADR 0159).
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("hushrun-gocache");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_hushrun"), &program).unwrap();
+    let mut child = Command::new(&program)
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Its first line is written once it has started, and so after it changed its group.
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    assert!(first.contains("KnownCommands"), "{first:?}");
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    let group = rustix::process::getpgid(Some(pid)).unwrap();
+    assert_eq!(group, pid, "the program leads a group of its own");
+    assert_ne!(group, rustix::process::getpgid(None).unwrap());
+    // The end of its input, with no `close`: Go is gone, and the program ends.
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
 }
 
 /// Not a check: what two machines save on a real module, for the record. `HUSHRUN_GO_MEASURE`
