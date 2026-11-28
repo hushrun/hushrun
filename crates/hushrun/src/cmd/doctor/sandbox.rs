@@ -22,8 +22,11 @@ pub const STORE_HOSTS: &str = "*.r2.cloudflarestorage.com";
 /// The hosts hushrun needs from here, each with what it is for and the URL that asks it (`None`
 /// for one that can't be asked from here): the backend's, its registry's, and, for hushrun's own
 /// backend, the shared store's, whose exact host is the org's own subdomain, which only a run that
-/// uses the store learns.
-pub fn hosts(backend: Option<&str>) -> Vec<(String, &'static str, Option<String>)> {
+/// uses the store learns; then the registry of the packages image `image` names, when it's another.
+pub fn hosts(
+    backend: Option<&str>,
+    image: Option<&str>,
+) -> Vec<(String, &'static str, Option<String>)> {
     let origin = backend
         .and_then(|base| hushrun_core::ledger_url::LedgerUrl::parse(base).ok())
         .map(|url| crate::credentials::origin(&url))
@@ -49,7 +52,24 @@ pub fn hosts(backend: Option<&str>) -> Vec<(String, &'static str, Option<String>
             None,
         ));
     }
+    if let Some(registry) = image.and_then(image_host)
+        && hosts.iter().all(|(host, _, _)| *host != registry)
+    {
+        hosts.push((
+            registry.clone(),
+            "the packages image (hushrun packages pull)",
+            Some(format!("https://{registry}/v2/")),
+        ));
+    }
     hosts
+}
+
+/// The registry's host of an image reference `<host>/<org>/<name>[:tag]`, port and all.
+fn image_host(image: &str) -> Option<String> {
+    let image = image.trim();
+    let image = image.split_once("://").map_or(image, |(_, rest)| rest);
+    let (host, rest) = image.split_once('/')?;
+    (!host.is_empty() && !rest.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 fn host_of(origin: &str) -> String {
@@ -88,7 +108,7 @@ pub(super) fn check(
         }) => Some(base.as_str()),
         _ => None,
     };
-    let hosts = hosts(backend);
+    let hosts = hosts(backend, env.get(crate::cmd::packages_pull::IMAGE_VARIABLE));
     let mut blocked = Vec::new();
     for (host, what, url) in &hosts {
         let Some(url) = url else {
@@ -121,13 +141,7 @@ pub(super) fn check(
         }
     }
     let entry: Vec<&str> = hosts.iter().map(|(host, _, _)| host.as_str()).collect();
-    let allowlist = match platform.and_then(|p| p.allowlist) {
-        Some(place) => format!("allow {} in {place}", entry.join(", ")),
-        None => format!(
-            "where this network allows only some hosts, allow {}",
-            entry.join(", ")
-        ),
-    };
+    let allowlist = allowlist_line(platform, &entry);
     report.add(
         "allowlist",
         if blocked.is_empty() {
@@ -140,15 +154,34 @@ pub(super) fn check(
     report.add("shared", Level::Ok, shared_line(place));
 }
 
+/// What the `allowlist` line says: the hosts, and where the platform allows them.
+pub fn allowlist_line(platform: Option<&Platform>, hosts: &[&str]) -> String {
+    match platform.and_then(|p| p.allowlist) {
+        Some(place) => format!("allow {} in {place}", hosts.join(", ")),
+        None => format!(
+            "where this network allows only some hosts, allow {}",
+            hosts.join(", ")
+        ),
+    }
+}
+
 fn sandbox_level(platform: &Platform) -> Level {
     match platform.evidence {
-        Evidence::Unconfirmed => Level::Warning,
-        Evidence::Probed | Evidence::Documented => Level::Ok,
+        // A row with no marker is one a person named: nothing unconfirmed decided it.
+        Evidence::Unconfirmed if !platform.markers.is_empty() => Level::Warning,
+        Evidence::Unconfirmed | Evidence::Probed | Evidence::Documented => Level::Ok,
     }
 }
 
 /// What the `sandbox` line says.
 pub fn sandbox_line(platform: &Platform) -> String {
+    if platform.markers.is_empty() {
+        return format!(
+            "{}: a hosted sandbox, as {} says, since no variable of its own is known yet; runs are local",
+            platform.name,
+            hushrun_ci::platforms::SANDBOX_VARIABLE
+        );
+    }
     let marker = platform
         .markers
         .iter()
@@ -230,7 +263,7 @@ mod tests {
     #[test]
     fn hushruns_own_backend_needs_three_hosts_and_another_one() {
         let names = |backend: Option<&str>| {
-            hosts(backend)
+            hosts(backend, None)
                 .into_iter()
                 .map(|(host, _, _)| host)
                 .collect::<Vec<_>>()
@@ -242,6 +275,55 @@ mod tests {
         assert_eq!(
             names(Some("https://hushrun.acme.dev/o/acme")),
             ["hushrun.acme.dev"]
+        );
+    }
+
+    // covers: C-140
+    #[test]
+    fn the_packages_image_names_its_registry_too() {
+        let names = |image: &str| {
+            hosts(Some("https://api.hushrun.com/o/acme"), Some(image))
+                .into_iter()
+                .map(|(host, _, _)| host)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names("ghcr.io/acme/shop:hushrun-packages-linux-latest"),
+            [
+                "api.hushrun.com",
+                "registry.hushrun.com",
+                STORE_HOSTS,
+                "ghcr.io"
+            ]
+        );
+        assert_eq!(
+            names("Registry.Acme.dev:5000/acme/shop")[3],
+            "registry.acme.dev:5000"
+        );
+        // Named already, or no host to name.
+        assert_eq!(names("registry.hushrun.com/acme/shop").len(), 3);
+        assert_eq!(names("shop").len(), 3);
+    }
+
+    // covers: C-140
+    #[test]
+    fn antigravitys_remote_agents_are_named_by_hushrun_sandbox() {
+        let env = hushrun_ci::Env::from_pairs([
+            ("HUSHRUN_SANDBOX", "antigravity-remote"),
+            ("CI", "true"),
+        ]);
+        let platform = hushrun_ci::sandbox(&env).unwrap();
+        assert_eq!(platform.id, "antigravity-remote");
+        assert_eq!(
+            sandbox_line(platform),
+            "Antigravity Remote Agents: a hosted sandbox, as HUSHRUN_SANDBOX says, since no variable of its own is known yet; runs are local"
+        );
+        assert_eq!(sandbox_level(platform), Level::Ok);
+        let image = hosts(None, Some("ghcr.io/acme/shop"));
+        let entry: Vec<&str> = image.iter().map(|(host, _, _)| host.as_str()).collect();
+        assert_eq!(
+            allowlist_line(Some(platform), &entry),
+            "allow api.hushrun.com, registry.hushrun.com, *.r2.cloudflarestorage.com, ghcr.io in the Remote Agents environment's network settings, where it limits egress"
         );
     }
 

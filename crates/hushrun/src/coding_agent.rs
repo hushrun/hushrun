@@ -23,6 +23,14 @@ pub fn agent(var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     if let Some(name) = var("AI_AGENT").filter(|name| !name.trim().is_empty()) {
         return Some(name.trim().to_string());
     }
+    // \[ADR 0140\] A platform row `HUSHRUN_SANDBOX` names, as detection takes it: a sandbox whose
+    // marker is missing, or that has none yet, such as Antigravity's Remote Agents.
+    if let Some(platform) = var(hushrun_ci::platforms::SANDBOX_VARIABLE)
+        .and_then(|id| hushrun_ci::platforms::by_id(id.trim()))
+        .filter(|platform| platform.kind == hushrun_ci::platforms::Kind::Platform)
+    {
+        return Some(platform.agent.to_string());
+    }
     // \[ADR 0140\] The one table of agents and their platforms, which `detect` reads too.
     let env = hushrun_ci::Env::from_pairs(
         hushrun_ci::platforms::PLATFORMS
@@ -89,6 +97,17 @@ mod tests {
             who(&[("CURSOR_EXTENSION_HOST_ROLE", "agent-exec")]).as_deref(),
             Some("Cursor")
         );
+        // Antigravity's Remote Agents, by HUSHRUN_SANDBOX, and its local agent by its own marker.
+        assert_eq!(
+            who(&[("HUSHRUN_SANDBOX", "antigravity-remote")]).as_deref(),
+            Some("Antigravity")
+        );
+        assert_eq!(
+            who(&[("ANTIGRAVITY_AGENT", "1")]).as_deref(),
+            Some("Antigravity")
+        );
+        assert_eq!(who(&[("HUSHRUN_SANDBOX", "claude-code")]), None);
+        assert_eq!(who(&[("HUSHRUN_SANDBOX", "nope")]), None);
         assert_eq!(who(&[("AI_AGENT", "my-bot")]).as_deref(), Some("my-bot"));
         // Everyone's terminal in Cursor has this.
         assert_eq!(who(&[("CURSOR_TRACE_ID", "abc")]), None);

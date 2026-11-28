@@ -1026,6 +1026,23 @@ mod tests {
             Detected::Ci(Provider::Generic)
         );
         assert!(sandbox(&Env::from_pairs([("CLAUDE_CODE_REMOTE", "0")])).is_none());
+        // Antigravity's Remote Agents have no marker yet: HUSHRUN_SANDBOX names them, beside
+        // CI=true and the local agent's own variable; that variable alone stays the agent row.
+        let remote = Env::from_pairs([
+            ("HUSHRUN_SANDBOX", "antigravity-remote"),
+            ("CI", "true"),
+            ("ANTIGRAVITY_AGENT", "1"),
+        ]);
+        assert!(matches!(detection(&remote), Detected::Sandbox(p) if p.id == "antigravity-remote"));
+        assert!(matches!(
+            detection(&Env::from_pairs([("ANTIGRAVITY_AGENT", "1"), ("CI", "true")])),
+            Detected::Sandbox(p) if p.id == "antigravity"
+        ));
+        assert_eq!(of(&[("ANTIGRAVITY_AGENT", "1")]), Detected::Local);
+        assert_eq!(
+            of(&[("HOME", "/home/antigravity"), ("CI", "true")]),
+            Detected::Ci(Provider::Generic)
+        );
     }
 
     // covers: C-140

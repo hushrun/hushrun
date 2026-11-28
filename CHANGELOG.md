@@ -19,6 +19,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ### Added
 
+- **Antigravity's Remote Agents as a hosted sandbox** (C-140, C-23). `HUSHRUN_SANDBOX=antigravity-remote`
+  makes a run the sandbox of Google Antigravity's Remote Agents: local, beside `CI=true` too, with
+  Antigravity as the agent the pre-push hook refuses, and `hushrun hook session-start` acting
+  there. No variable of its own is known yet, so nothing else names it; `ANTIGRAVITY_AGENT` alone
+  stays Antigravity on a person's machine. `hushrun doctor` names the platform and the hosts its
+  network settings need to allow, with the registry of the image `HUSHRUN_PACKAGES_IMAGE` names
+  when it's set.
 - **Antigravity's hooks** ([ADR 0165](docs/adr/0165-a-session-start-in-antigravitys-format.md),
   C-168, C-169): `hushrun hook session-start --format antigravity` prints its lines as Google
   Antigravity's `injectSteps` JSON, one system message, and `{}` where it has nothing to say.
