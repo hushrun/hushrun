@@ -185,3 +185,9 @@ queue in a ruleset, with a `ci.yml` that runs `hushrun run unit -- ./test.sh` on
 
 [Rust tests one by one](rust-tests-one-by-one.md): what ADR 0145's per-test reuse ran on this
 repository's own `test` and `test-macos` checks, on a Mac and in CI, and what still runs again.
+
+## Platform probes
+
+[Antigravity Remote Agents, probed](antigravity-remote.md): the kit, steps and results form for
+what a Google Antigravity Remote Agent's conversation looks like to hushrun, its hooks and its
+setup script included, run by someone with an account.
