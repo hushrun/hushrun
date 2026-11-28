@@ -1207,6 +1207,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
     let plan = |map: &store::Map| {
         plan_tests(&TestsAt {
             test_lists: &adapter::TestLists::new(),
+            listed: &BTreeMap::new(),
             keyer: &keyer,
             reads: Reads::File,
             tree: &tree,
@@ -1500,4 +1501,173 @@ fn a_mapped_test_is_keyed_by_its_map_with_its_test_files_outside() {
         assert!(!lists[0].own);
         assert_eq!(lists[0].list, file);
     }
+}
+
+/// Results in which every key asked has a pass.
+struct AllPassed;
+
+impl UnitResults for AllPassed {
+    fn lookup(&self, keys: &[Digest], _: &dyn Fn(&RunResult) -> bool) -> Result<Lookup, String> {
+        Ok(Lookup {
+            found: keys
+                .iter()
+                .map(|key| {
+                    (
+                        *key,
+                        Found {
+                            passed: true,
+                            duration_ms: 1,
+                        },
+                    )
+                })
+                .collect(),
+            reuse: ReuseState::default(),
+        })
+    }
+    fn suspend(&self, _: &str, _: &Digest, _: &Digest, _: &str) -> Result<ReuseState, String> {
+        unreachable!()
+    }
+    fn resume(&self, _: i64, _: &str) -> Result<Resumed, String> {
+        unreachable!()
+    }
+}
+
+// covers: C-39, C-146
+// \[ADR 0162\] A machine whose store has no row of a test binary, a fresh CI runner, keys each
+// test its adapter listed before COMMAND by the map, and reuses those whose keys passed; a binary
+// that listed no test is known to hold none.
+#[test]
+fn a_test_its_adapter_listed_is_keyed_though_this_machine_never_ran_it() {
+    let paths: Vec<String> = ["src/lib.rs", "src/a.rs", "tests/none.rs"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let tree = tree(&paths);
+    let sets = units::classify(
+        tree.paths(),
+        &|p| p == "src/lib.rs" || p == "tests/none.rs",
+        units::Sources::Kinds(&[".rs"]),
+        &[],
+    );
+    let base = KeyBase {
+        check: CheckName::new("unit").unwrap(),
+        command: vec!["cargo".into(), "nextest".into(), "run".into()],
+        cwd: String::new(),
+        scope: ScopeName::new("default").unwrap(),
+        external: None,
+        counts_from: None,
+    };
+    let keyer = Keyer::new(&tree, &sets, &base, adapter::KeysOutside::None);
+    let all: BTreeSet<String> = paths.iter().cloned().collect();
+    let file = built_list(&all, units::Outside::default());
+    let keyed: Keyed = ["src/lib.rs", "tests/none.rs"]
+        .iter()
+        .map(|unit| {
+            let key = keyer.key(unit, &file.files, &file.outside);
+            (unit.to_string(), vec![(key, file.clone())])
+        })
+        .collect();
+    let lib = BTreeSet::from(["src/lib.rs".to_string()]);
+    let test_lists: adapter::TestLists = BTreeMap::from([(
+        "src/lib.rs".to_string(),
+        BTreeMap::from([
+            ("tests::one".to_string(), Ok(lib.clone())),
+            ("tests::two".to_string(), Err("it falls back".to_string())),
+        ]),
+    )]);
+    let listed = BTreeMap::from([
+        (
+            "src/lib.rs".to_string(),
+            BTreeSet::from(["tests::one".to_string(), "tests::two".to_string()]),
+        ),
+        ("tests/none.rs".to_string(), BTreeSet::new()),
+    ]);
+    let plan = |listed: &BTreeMap<String, BTreeSet<String>>| {
+        plan_tests(&TestsAt {
+            keyer: &keyer,
+            reads: Reads::File,
+            test_lists: &test_lists,
+            listed,
+            tree: &tree,
+            keyed: &keyed,
+            map: &store::Map::default(),
+            shared: &Shared::default(),
+            passed: &BTreeMap::new(),
+            keys: &BTreeMap::new(),
+            store: &AllPassed,
+            counts: &|_| true,
+            started: "2026-11-27T12:00:00Z",
+        })
+        .map_err(|TooMany(n)| n)
+        .unwrap()
+    };
+    let tested = plan(&listed);
+    // Both are keyed: the one the map narrows by its own list, the one it can't by its binary's.
+    let names: BTreeSet<&str> = tested.passed.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        BTreeSet::from([
+            units::test_name("src/lib.rs", "tests::one").as_str(),
+            units::test_name("src/lib.rs", "tests::two").as_str(),
+        ])
+    );
+    let one = &tested.passed[&units::test_name("src/lib.rs", "tests::one")];
+    assert_eq!(
+        one.key,
+        keyer
+            .test_key("src/lib.rs", "tests::one", &lib, &file.outside)
+            .unwrap()
+    );
+    assert_eq!(
+        tested.known,
+        BTreeMap::from([
+            ("src/lib.rs".to_string(), 2),
+            ("tests/none.rs".to_string(), 0)
+        ])
+    );
+    // Listed nowhere and run nowhere here: nothing is known, and nothing is asked.
+    let tested = plan(&BTreeMap::new());
+    assert!(tested.passed.is_empty());
+    assert!(tested.known.is_empty());
+}
+
+// covers: C-39, C-10
+// \[ADR 0162\] A test file reused whole whose tests this machine never ran counts the tests its
+// adapter listed before COMMAND as reused.
+#[test]
+fn a_test_file_reused_whole_counts_the_tests_its_adapter_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<String> = ["app.py", "tests/test_a.py"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let tree = tree(&paths);
+    let left_out = Seen {
+        outside: Default::default(),
+        declared: None,
+        getenv: Default::default(),
+        facts: Facts {
+            deselected: true,
+            ..Facts::default()
+        },
+        reads: BTreeSet::new(),
+        duration_ms: 0,
+        tests: None,
+    };
+    let mut plan = Plan::default();
+    plan.reuse.insert("tests/test_a.py".into());
+    plan.listed.insert(
+        "tests/test_a.py".into(),
+        BTreeSet::from(["test_one".to_string(), "test_two".to_string()]),
+    );
+    let (o, _) = decided(dir.path(), &tree, left_out, &store::Map::default(), &plan);
+    assert_eq!(o.units["tests/test_a.py"].0, State::Reused);
+    assert_eq!(
+        o.counts.as_ref().unwrap().tests,
+        Some(TestCounts {
+            total: 2,
+            ran: 0,
+            reused: 2
+        })
+    );
 }

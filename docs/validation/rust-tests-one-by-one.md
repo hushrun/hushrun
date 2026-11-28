@@ -8,8 +8,11 @@ map.
 In short: on a machine that ran the tests before, a change to one module ran the tests that reach
 it, and no test the map left out would have failed. Most of the test time is integration tests that
 start the `hushrun` binary, which always run, so a change in `crates/hushrun/src/` saved little time.
-In CI no test was reused one by one: a fresh runner's plan knows no Rust test (see [In CI](#in-ci)).
-The runs also found a test reused wrongly, which [is fixed](#a-wrong-reuse-found-and-fixed).
+In CI no test was reused one by one with 0.20.1: a fresh runner's plan knew no Rust test (see
+[In CI](#in-ci)). [ADR 0162](../adr/0162-rust-tests-listed-before-the-run.md) has the plan list
+each test binary's tests, and a fresh store then runs the same tests a warm machine runs (see
+[A fresh machine](#a-fresh-machine)); CI shows it once that is released. The runs also found a
+test reused wrongly, which [is fixed](#a-wrong-reuse-found-and-fixed).
 
 ## On a Mac
 
@@ -114,8 +117,40 @@ alone, the row its last run here wrote. A fresh runner has no store. Cargo share
 (its keys come from the build, so it sends none), so no other machine's run names a test to it.
 Each test of a binary that changed is then keyed by its binary's list, and runs. Runs A and B
 recorded each test's key on the server, so the passes are there to find; nothing asks for them.
-A plan that listed each test binary's tests (it builds them before COMMAND) would know them on
-any machine. That fix needs a release before CI can show it, since CI installs the newest one.
+A plan that lists each test binary's tests (it builds them before COMMAND) knows them on any
+machine: [ADR 0162](../adr/0162-rust-tests-listed-before-the-run.md) does, measured below. CI
+installs the newest release, so these CI numbers stay 0.20.1's until a release has it; then CI's
+run B would run about the 1,221 tests of the next section, not 2,120.
+
+## A fresh machine
+
+The fix of [ADR 0162](../adr/0162-rust-tests-listed-before-the-run.md), on the same Mac and clone
+as above, as `test-macos` on the whole workspace, steps that stand in for a CI runner:
+
+1. Run 1 with hushrun 0.20.1, with a new cache folder: `all 148 test binaries run`, 3,533 tests,
+   which records each test's key in the results (local mode, ADR 0067).
+2. Two copies of that cache folder, each without its `units/` folder: no store of the check's
+   tests and no rust-analyzer index, as on a fresh runner. The results stay, as on the server.
+3. A comment in `fn method_of` of `crates/hushrun/src/units/gradle.rs`, the change of run B, and
+   the test binaries built once, so that neither run below pays the compile.
+4. Run 2 with 0.20.1 on one copy, and with the fix on the other.
+
+| Run 2 | What hushrun said | Tests run | `hushrun` unit tests | `crates/hushrun/tests/` | nextest | The check |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.20.1 | `121 of 148 test binaries run; 27 already passed on the files they read, and 1 more test binary that already passed runs anyway, as a check` | 2,120 | 782 of 782 | 1,338 of 1,338 | 336 s | 6 min 18 s |
+| The fix | `1,221 of 3,533 tests run, in 108 of 148 test binaries; 2,312 already passed on the files they read, and 48 more that already passed run anyway, as a check` | 1,221 | 66 of 782 | 1,121 of 1,338 | 317 s | 5 min 18 s |
+
+With 0.20.1, the fresh store ran what CI's run B ran: the 2,120 tests of the 121 binaries whose
+keys changed, every unit test of the `hushrun` binary among them. With the fix it ran what a warm
+machine runs after the same change ([On a Mac](#on-a-mac): 66 of the 782, and 1,122 of the
+1,338): 66 and 1,121, and 34 tests of other crates, the audit's runs among them. Its last line counts tests, `2,312 tests reused`, where 0.20.1's said `27 test binaries
+reused` (neither gives a time: a store with no whole run of the check has nothing to cap it by,
+C-33).
+
+Listing the 148 test binaries' tests (two starts each, side by side) took 0.3 seconds and found
+the same 3,533 tests nextest ran. The fresh store's rust-analyzer index took 47 seconds and the
+map 5 seconds more, both before COMMAND now; 0.20.1 pays the index after COMMAND instead, to
+record each test's key. Both checks include it.
 
 ## A wrong reuse, found and fixed
 
@@ -130,16 +165,19 @@ file, and no crate's dep-info names one that isn't its module.
 
 ## Known follow-ups
 
-- **In CI, no Rust test is reused one by one** (above): on a fresh runner the plan knows no test of
-  a Cargo test binary. Listing each built test binary's tests at the plan (`--list`), and keying
-  the tests the adapter maps whether or not a row or a hint names them, would fix it.
-
-- **A test binary with no tests hides the run's count of tests** (on a Mac; in CI there was no
-  count of tests to hide). Four of this workspace's binaries
-  have no tests without the `it` feature. When one is reused whole, its row names no test, so the
-  run takes its tests to be known nowhere (C-39) and sends no count of tests: after the change to
+- **In CI, no Rust test is reused one by one** with 0.20.1 (above). Fixed by
+  [ADR 0162](../adr/0162-rust-tests-listed-before-the-run.md), [measured](#a-fresh-machine) on a
+  fresh store; CI shows it once a release has it.
+- **A test binary with no tests hid the run's count of tests.** Four of this workspace's binaries
+  have no tests without the `it` feature. When one was reused whole, its row named no test, so the
+  run took its tests to be known nowhere (C-39) and sent no count of tests: after the change to
   `gradle.rs`, the last line said `reusing 48 test binaries saved about 6m 32s` while 2,049 tests
-  were reused. A row can't tell "no tests" from "tests not known"; it would need to.
+  were reused. Fixed by ADR 0162: the plan's list tells a binary with no tests from one whose tests
+  aren't known.
+- **An audited test of a binary that passed whole didn't run.** When the audit drew a test of a
+  binary the first tier could reuse whole, the plan took the binary out of `reuse` but left it in
+  the list the target runner skips, so the test never ran though the line counted it. Fixed by
+  ADR 0162.
 - **`saved about` can be more than the run took.** It adds up the reused tests' recorded
   durations, which ran side by side, capped at the last whole run: `saved about 6m 32s` on a run
   that took 5 min 45 s, 47 seconds less than the run before.

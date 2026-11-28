@@ -276,6 +276,217 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     );
 }
 
+fn has_rust_analyzer() -> bool {
+    Command::new("rust-analyzer")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// \[ADR 0162\] A workspace whose tests are reused one by one: `core-lib`'s unit tests of `a` and
+/// of `b` (and an ignored one, which nextest doesn't run), an integration test of `b`, an
+/// integration test with no tests, and a second crate, `other`, with a unit test and an
+/// integration test with none.
+fn one_by_one_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/ws\nchecks:\n  test:\n    tests:\n      mode: reuse\n      unit: test\n",
+        ),
+        (".gitignore", "target/\n"),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/core\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crates/core/Cargo.toml",
+            "[package]\nname = \"core-lib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"core_lib\"\n",
+        ),
+        ("crates/core/src/lib.rs", "pub mod a;\npub mod b;\n"),
+        ("crates/core/src/a.rs", ONE_A),
+        (
+            "crates/core/src/b.rs",
+            "pub fn b() -> u32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn b_is_two() {\n        assert_eq!(super::b(), 2);\n    }\n\n    #[test]\n    fn b_plus_one() {\n        assert_eq!(super::b() + 1, 3);\n    }\n\n    #[test]\n    #[ignore]\n    fn slow() {}\n}\n",
+        ),
+        (
+            "crates/core/tests/uses_b.rs",
+            "#[test]\nfn b_from_outside() {\n    assert_eq!(core_lib::b::b(), 2);\n}\n",
+        ),
+        ("crates/core/tests/empty.rs", "// No tests here.\n"),
+        (
+            "crates/other/Cargo.toml",
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/other/src/lib.rs",
+            "pub fn two() -> u32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() {\n        assert_eq!(super::two(), 2);\n    }\n}\n",
+        ),
+        ("crates/other/tests/none.rs", "// No tests here.\n"),
+    ]
+}
+
+/// `core-lib`'s `a`, with its two tests.
+const ONE_A: &str = "pub fn a() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn a_is_one() {\n        assert_eq!(super::a(), 1);\n    }\n\n    #[test]\n    fn a_twice() {\n        assert_eq!(super::a() * 2, 2);\n    }\n}\n";
+
+/// The tests nextest ran in a run, as `<binary id> <test name>`, from its `PASS` and `FAIL` lines.
+fn ran_tests(ran: &Ran) -> std::collections::BTreeSet<String> {
+    format!("{}\n{}", ran.stdout, ran.stderr)
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let l = l
+                .strip_prefix("PASS [")
+                .or_else(|| l.strip_prefix("FAIL ["))?;
+            let after = l.split_once(']')?.1.trim_start();
+            let after = match after.strip_prefix('(') {
+                Some(counted) => counted.split_once(')')?.1.trim_start(),
+                None => after,
+            };
+            let mut words = after.split_whitespace();
+            Some(format!("{} {}", words.next()?, words.next()?))
+        })
+        .collect()
+}
+
+// covers: C-146, C-39
+// \[ADR 0162\] A fresh machine, a CI runner, with the check's results on the results store and
+// no store of its own: after a change to one function, the plan lists each test binary's tests,
+// keys each by the static map, and finds the passes another machine's run recorded. Only the
+// tests that reach the function run, with one audited; not every test of each binary that links
+// it. The test binaries with no tests are known to have none, so the run counts tests.
+#[test]
+fn a_fresh_machine_reuses_rust_tests_one_by_one_from_the_results_alone() {
+    if !tools("cargo-nextest", has_nextest()) || !tools("rust-analyzer", has_rust_analyzer()) {
+        return;
+    }
+    let r = new_repo(&one_by_one_files());
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "-q"])
+        .current_dir(&r.repo)
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    git::commit_all(&r.repo, "lock");
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(ran_tests(&first).len(), 6, "{}", first.stderr);
+    // A fresh machine: the results stay, this machine's store of the check and the index go.
+    let units = r.cache.join("units");
+    assert!(units.is_dir(), "{}", units.display());
+    std::fs::remove_dir_all(&units).unwrap();
+    assert!(r.cache.join("results").is_dir());
+    r.write(
+        "crates/core/src/a.rs",
+        &ONE_A.replace("    1\n", "    2 - 1\n"),
+    );
+    let second = r.run(&NEXTEST, &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let plan = second
+        .stderr
+        .lines()
+        .find(|l| l.starts_with("hushrun: test: ") && l.contains(" run"))
+        .unwrap_or_else(|| panic!("no plan line in:\n{}", second.stderr));
+    // Six tests, the ignored one not among them; three reused, one audited.
+    assert!(
+        plan.starts_with("hushrun: test: 3 of 6 tests run, in ")
+            && plan.ends_with(" of 5 test binaries; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"),
+        "{plan}\n{}",
+        second.stderr
+    );
+    let ran = ran_tests(&second);
+    for must in ["core-lib a::tests::a_is_one", "core-lib a::tests::a_twice"] {
+        assert!(ran.contains(must), "{must} didn't run: {ran:?}");
+    }
+    let audited: Vec<&String> = ran
+        .iter()
+        .filter(|t| !t.starts_with("core-lib a::"))
+        .collect();
+    assert_eq!(
+        audited.len(),
+        1,
+        "one test audited: {ran:?}\n{}",
+        second.stderr
+    );
+    assert!(
+        [
+            "core-lib b::tests::b_is_two",
+            "core-lib b::tests::b_plus_one",
+            "core-lib::uses_b b_from_outside",
+            "other tests::two",
+        ]
+        .contains(&audited[0].as_str()),
+        "{ran:?}"
+    );
+    // The last line counts the tests reused, those of the test binaries reused whole too.
+    let last = second
+        .stderr
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("hushrun: test passed in "))
+        .unwrap_or_else(|| panic!("no last line in:\n{}", second.stderr));
+    assert!(
+        last.contains("; 3 tests reused;") || last.contains("; reusing 3 tests saved about "),
+        "{last}"
+    );
+}
+
+// covers: C-34, C-39, C-146
+// \[ADR 0162\] An audit of a test of a binary the first tier would reuse whole runs it: the binary
+// isn't deselected whole. Here the only test that could be left out is `other`'s, of a binary
+// whose key passed, so it is the one audited, whatever the run's start.
+#[test]
+fn an_audited_test_of_a_binary_that_passed_whole_runs() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let files: Vec<(&str, &str)> = one_by_one_files()
+        .into_iter()
+        .filter(|(path, _)| !path.starts_with("crates/core/") || *path == "crates/core/Cargo.toml")
+        .chain([
+            ("crates/core/src/lib.rs", "pub mod a;\n"),
+            ("crates/core/src/a.rs", ONE_A),
+        ])
+        .collect();
+    let r = new_repo(&files);
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "-q"])
+        .current_dir(&r.repo)
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    git::commit_all(&r.repo, "lock");
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    r.write(
+        "crates/core/src/a.rs",
+        &ONE_A.replace("    1\n", "    2 - 1\n"),
+    );
+    let second = r.run(&NEXTEST, &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stderr.contains(
+            "hushrun: test: all 3 tests run; 1 that already passed on the files it read runs anyway, as a check"
+        ),
+        "{}",
+        second.stderr
+    );
+    assert_eq!(
+        ran_tests(&second),
+        [
+            "core-lib a::tests::a_is_one",
+            "core-lib a::tests::a_twice",
+            "other tests::two",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        "{}",
+        second.stderr
+    );
+}
+
 /// \[ADR 0095\] A workspace whose test binaries read variables at compile time: `flavored` reads
 /// `HUSHRUN_FIXTURE_FLAVOR` with `option_env!`, `scripted` reads `HUSHRUN_FIXTURE_TONE`, which its
 /// build script sets with `cargo:rustc-env` from `HUSHRUN_FIXTURE_MOOD`; `steady` and `other` read
