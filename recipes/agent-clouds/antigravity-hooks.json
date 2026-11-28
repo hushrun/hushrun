@@ -1,0 +1,18 @@
+{
+  "hushrun": {
+    "SessionStart": [
+      {
+        "command": "hushrun hook session-start --format antigravity || echo '{}'",
+        "timeout": 60,
+        "type": "command"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "hushrun hook stop --format antigravity || echo '{}'",
+        "timeout": 30,
+        "type": "command"
+      }
+    ]
+  }
+}

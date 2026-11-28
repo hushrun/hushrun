@@ -14,6 +14,7 @@ steps for you.
 | `cursor-environment.json` | Cursor cloud agents | `.cursor/environment.json`: `install` runs that script, after the install command already there |
 | `copilot-setup-steps.yml` | GitHub Copilot cloud agent | `.github/workflows/copilot-setup-steps.yml`: a session from the job's ID token, and the baked store |
 | `copilot-hooks.json` | GitHub Copilot cloud agent | `.github/hooks/hushrun.json`: sends waiting results when the session ends |
+| `antigravity-hooks.json` | Google Antigravity Remote Agents | `.agents/hooks.json`: a `hushrun` group beside your own; when a conversation starts, `hushrun hook session-start --format antigravity` warms it and tells the agent what this code already passed; when the agent is idle, `hushrun hook stop` sends waiting results. Each prints `{}` when hushrun can't start, with `\|\|`, which a Windows shell without it doesn't run |
 | `codex-setup.sh` | Codex cloud | The environment's setup script: a session, results and compiled code fetched while there is a network |
 | `jules-setup.sh` | Jules | The repository's setup script |
 | `devin-setup.sh` | Devin | The machine's setup, before it is saved |
