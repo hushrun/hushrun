@@ -16,6 +16,11 @@ pub enum Format {
     Json,
     Env,
     Dotenv,
+    /// \[ADR 0165\] Google Antigravity's hook output: what `hushrun hook session-start` and
+    /// `hushrun hook stop` print with `--format antigravity`. No other command takes it, and
+    /// `HUSHRUN_FORMAT` can't set it.
+    #[value(hide = true)]
+    Antigravity,
 }
 
 /// The most variables a dotenv output may hold (GitLab's default limit, per job).

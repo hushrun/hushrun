@@ -69,7 +69,7 @@ pub fn run(global: &GlobalOpts, args: &DigestArgs) -> CmdResult {
     crate::ci::Ci::from_process(global).report(&outputs, &summary)?;
 
     match global.format {
-        Format::Text => {
+        Format::Text | Format::Antigravity => {
             let mut text = String::new();
             if let Some(entries) = &run.explain {
                 text.push_str(&explain_text(entries));

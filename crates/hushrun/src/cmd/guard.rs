@@ -134,7 +134,7 @@ pub fn run(app: &App<'_>, args: &GuardArgs) -> CmdResult {
         eprintln!("notice: {notice}");
     }
     match app.global.format {
-        Format::Text => {
+        Format::Text | Format::Antigravity => {
             let text = if stale {
                 format!(
                     "stale: {revision} is no longer the head of {branch} ({head} is); recorded superseded{}\n",

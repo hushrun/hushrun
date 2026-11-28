@@ -26,6 +26,18 @@ codes, environment variables, event formats, the ledger layout) are listed first
   stays Antigravity on a person's machine. `hushrun doctor` names the platform and the hosts its
   network settings need to allow, with the registry of the image `HUSHRUN_PACKAGES_IMAGE` names
   when it's set.
+- **Antigravity's hooks** ([ADR 0165](docs/adr/0165-a-session-start-in-antigravitys-format.md),
+  C-168, C-169): `hushrun hook session-start --format antigravity` prints its lines as Google
+  Antigravity's `injectSteps` JSON, one system message, and `{}` where it has nothing to say.
+  Plain text stays the default. The new, hidden `hushrun hook stop` sends what waits on this machine
+  once the agent is idle (`fullyIdle` true or absent), prints nothing on stdout (`{}` with
+  `--format antigravity`) and always exits 0. New contract: the `--format` value `antigravity`,
+  which only those two commands take.
+- **`hushrun hook session-start` reads the hook's payload, and runs its steps once per commit**
+  (C-168): it reads stdin (at most 1 MiB, never logged) for the workspace's folder when it starts
+  outside the checkout. A second start on the same commit within 10 minutes, such as a subagent's,
+  skips the steps and says what the first said (`<cache dir>/session-start.stamp`). A lock keeps
+  two starts, or a start and a pull an earlier one left running, from pulling at once.
 - **`hushrun packages pull`** ([ADR 0163](docs/adr/0163-a-package-store-pulled-into-a-sandbox.md),
   K-15): puts the repository's newest package store at `/hushrun-packages` (or
   `HUSHRUN_PACKAGES_LOWER`, or `--to`) from its registry, for a sandbox with no Dockerfile, such as

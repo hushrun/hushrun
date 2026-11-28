@@ -150,7 +150,7 @@ pub fn run(app: &App<'_>, args: &MarkArgs) -> CmdResult {
         outputs.write_dotenv(path)?;
     }
     match app.global.format {
-        Format::Text => {
+        Format::Text | Format::Antigravity => {
             let mut text = String::new();
             for (kind, keys) in &written {
                 let _ = writeln!(text, "recorded {kind}: {}", keys[0]);

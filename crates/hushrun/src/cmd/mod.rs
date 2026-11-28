@@ -17,6 +17,8 @@ pub mod flush;
 pub mod guard;
 pub mod guide;
 pub mod hook;
+pub mod hook_input;
+pub mod hook_stop;
 pub mod init;
 pub mod keys;
 pub mod login;
