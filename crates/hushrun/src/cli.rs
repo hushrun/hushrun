@@ -473,6 +473,9 @@ pub struct PackagesBakeArgs {
     /// ghcr.io/acme/app, with the credentials docker uses: one layer, the archive --tar writes,
     /// tagged hushrun-packages-PLATFORM-IDENTITY, and hushrun-packages-PLATFORM-latest from CI on
     /// the default branch. `hushrun packages pull --image REPOSITORY` puts it in a sandbox.
+    /// `--oci hushrun` (or a repository on the backend's registry host) publishes into hushrun's
+    /// registry instead, from CI with the job's own ID token, which asks the backend for a push
+    /// grant; `hushrun packages pull` then needs no --image.
     #[arg(long, value_name = "REPOSITORY", conflicts_with = "oci_dir")]
     pub oci: Option<String>,
     /// Write that image into this folder as an OCI image layout instead, no registry.

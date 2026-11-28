@@ -8,6 +8,12 @@
 //! so the same store is the same layer digest and a registry that holds it uploads nothing again.
 //! The signature is the store's own `packages.sigstore.json`, which that archive carries: it
 //! covers `packages.json`, which covers every byte (K-7), so no referrer is needed.
+//!
+//! The backend's registry (`--oci hushrun`, or a repository on its host) takes the image through a
+//! push grant (ADR 0163, hushrun/cloud's `registry-v0` §10): the CI job's own credential, settled
+//! before the fetch, asks `POST v0/packages/images/grant` for a password to that one repository
+//! and its two tags; the blobs then go up in chunks of at most the grant's `chunk_bytes`, and the
+//! manifest under the fixed tag, then the moving one.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -72,23 +78,164 @@ pub(crate) enum Target {
         repository: Repository,
         artifacts: Box<Artifacts>,
     },
+    /// The backend's registry, through a push grant ([`Hosted`]).
+    Hosted(Box<Hosted>),
     /// An OCI image layout in a folder.
     Layout(PathBuf),
 }
 
-/// Why the backend's registry is refused as a target: it takes images only through
-/// `POST v0/build/images`, which carries a baked store of compiled code (B-70).
-pub(crate) fn hosted_refusal(host: &str) -> String {
-    format!(
-        "{host} is the registry of this repository's backend, which takes only what `hushrun build bake` publishes there (B-70), not a package store yet: publish to a registry of your own with --oci <host>/<org>/<name>, and have sandboxes pull it with HUSHRUN_PACKAGES_IMAGE=<host>/<org>/<name> (ADR 0163)"
-    )
+/// The backend's push grant (`registry-v0` §10): its route under the org's URL.
+pub(crate) const GRANT_PATH: &str = "v0/packages/images/grant";
+/// The most bytes per request hushrun's registry takes, when a grant names none.
+const CHUNK_BYTES: u64 = 16 << 20;
+/// How long the grant's request waits on a backend that sends nothing.
+const GRANT_SILENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// K-14: the backend's registry as a target: the image `<registry host>/<org>/<name>` and the CI
+/// job's credential, settled before the fetch ran (ADR 0102), that asks the backend for a push
+/// grant once the store is baked.
+pub(crate) struct Hosted {
+    caller: crate::cmd::build_relay::caller::Caller,
+    /// The image the backend's registry names this repository's.
+    image: Repository,
+    /// The commit checked out: the backend takes a grant only for the ID token's own.
+    commit: String,
+    /// `--insecure-registry`'s hosts.
+    insecure: Vec<String>,
+    /// The backend is reached over plain HTTP (tests): so is its registry.
+    plain: bool,
+}
+
+/// What the backend granted: a password to push to one repository under two tags. Never
+/// printed: its `Debug` leaves the password out.
+#[derive(Deserialize)]
+struct Grant {
+    registry: String,
+    repository: String,
+    image: String,
+    username: String,
+    password: String,
+    tags: GrantTags,
+    #[serde(default)]
+    chunk_bytes: u64,
+    #[serde(default)]
+    most_blob_bytes: u64,
+}
+
+impl std::fmt::Debug for Grant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Grant")
+            .field("image", &self.image)
+            .field("tags", &self.tags)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GrantTags {
+    fixed: String,
+    latest: String,
+}
+
+/// What a grant's request came to.
+enum Granted {
+    Grant(Grant),
+    /// 409 `not_newer`: a newer run holds the moving tag, and nothing is granted.
+    NotNewer(String),
+}
+
+impl Hosted {
+    /// K-14: asks the backend for a push grant for the store of `identity` on `platform`. `Err`
+    /// is the line to fail with.
+    fn grant(&self, platform: &str, identity: &str, latest: &str) -> Result<Granted, String> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "platform": platform,
+            "identity": identity,
+            "commit": self.commit,
+        }))
+        .map_err(|e| e.to_string())?;
+        let answer = self
+            .caller
+            .post(GRANT_PATH, body, GRANT_SILENCE)
+            .map_err(|why| format!("the backend didn't answer the push grant's request: {why}"))?;
+        if answer.status == 200 {
+            return serde_json::from_slice(&answer.body)
+                .map(Granted::Grant)
+                .map_err(|e| format!("the backend's push grant isn't one: {e}"));
+        }
+        let refusal: serde_json::Value =
+            serde_json::from_slice(&answer.body).unwrap_or(serde_json::Value::Null);
+        let code = refusal["error"]["code"].as_str().unwrap_or_default();
+        let message = refusal["error"]["message"].as_str().unwrap_or_default();
+        if (answer.status, code) == (409, "not_newer") {
+            return Ok(Granted::NotNewer(format!(
+                "a newer run holds {latest}{}: nothing of this bake was published to {}",
+                said(message),
+                self.image
+            )));
+        }
+        Err(grant_refused(
+            answer.status,
+            code,
+            message,
+            refusal["current"]["word"].as_str(),
+        ))
+    }
+}
+
+/// ` (message)`, or nothing.
+fn said(message: &str) -> String {
+    if message.is_empty() {
+        String::new()
+    } else {
+        format!(" ({message})")
+    }
+}
+
+/// K-14: the line a refused push grant fails with, in `build bake --oci hushrun`'s words for
+/// the same refusals (B-70).
+fn grant_refused(status: u16, code: &str, message: &str, word: Option<&str>) -> String {
+    let said = said(message);
+    match (status, code) {
+        (401, _) => format!(
+            "the backend took no credential for the push grant{said}: only CI publishes there, with its own ID token (`permissions: id-token: write` on GitHub, `id_tokens: HUSHRUN_ID_TOKEN` on GitLab)"
+        ),
+        (403, _) => format!(
+            "only the repository's CI, with its own ID token, on its default branch, publishes to the backend's registry; this run doesn't ({}){said}. Elsewhere, write the image into a folder with --oci-dir, or push it to a registry of your own with --oci REPOSITORY",
+            word.unwrap_or("no reason given")
+        ),
+        (404 | 405, _) => format!(
+            "the backend has no registry, or the org doesn't share build blocks (answered {status}){said}: publish to a registry of your own with --oci REPOSITORY, or into a folder with --oci-dir"
+        ),
+        (409, "name_taken") => format!(
+            "another repository of the org has this image's name in the backend's registry{said}: an owner settles it"
+        ),
+        (422, "bad_platform" | "bad_identity") => {
+            format!("the backend refused the store's {code}{said}: report it")
+        }
+        (429, _) => format!(
+            "the backend grants a repository only so many pushes an hour, and this one is past it{said}: bake again later"
+        ),
+        (400, _) => {
+            format!("the backend refused the push grant's request as invalid{said}: report it")
+        }
+        (status, "") => format!("the backend answered the push grant's request {status}{said}"),
+        (status, code) => {
+            format!("the backend answered the push grant's request {status} {code}{said}")
+        }
+    }
 }
 
 /// K-14: the target `--oci` or `--oci-dir` names, settled before the fetch runs anything of the
-/// repository's (ADR 0102): the registry's credential is the CI job's own, else the Docker
-/// configuration's, read now. `None` when neither is given. The backend's registry is refused
-/// ([`hosted_refusal`]).
-pub(crate) fn target(args: &PackagesBakeArgs, folder: &Path) -> Result<Option<Target>, Failure> {
+/// repository's (ADR 0102): for a registry, its credential is the CI job's own, else the Docker
+/// configuration's, read now; for the backend's (`--oci hushrun`, or a repository on its host),
+/// the CI job's credential for the backend ([`hosted_target`]). `None` when neither is given.
+/// `repository` is the repository's name (`github.com/acme/shop`), which names its image there.
+pub(crate) fn target(
+    args: &PackagesBakeArgs,
+    folder: &Path,
+    repository: Option<&str>,
+) -> Result<Option<Target>, Failure> {
     let refused = |why: String| Failure::new(Exit::Usage, anyhow!("packages bake: {why}"));
     if let Some(dir) = &args.oci_dir {
         return Ok(Some(Target::Layout(dir.clone())));
@@ -96,18 +243,20 @@ pub(crate) fn target(args: &PackagesBakeArgs, folder: &Path) -> Result<Option<Ta
     let Some(text) = args.oci.as_deref().map(str::trim) else {
         return Ok(None);
     };
-    let backend_registry = match crate::results::Backend::select(Some(folder)) {
-        Ok(crate::results::Selection::On(backend)) => backend
-            .build_access()
-            .map(|a| crate::hosted::registry_host(&a.host)),
-        _ => None,
+    let (access, place) = match crate::results::Backend::select(Some(folder)) {
+        Ok(crate::results::Selection::On(backend)) => {
+            (backend.build_access(), backend.build_place())
+        }
+        _ => (None, None),
     };
+    let named = place.is_some();
+    let backend_registry = access
+        .as_ref()
+        .map(|a| a.host.clone())
+        .or(place.map(|p| p.host))
+        .map(|host| crate::hosted::registry_host(&host));
     if text == "hushrun" {
-        return Err(refused(hosted_refusal(
-            backend_registry
-                .as_deref()
-                .unwrap_or(crate::hosted::HOSTED_REGISTRY),
-        )));
+        return hosted_target(args, None, access, named, folder, repository).map(Some);
     }
     let reference = hushrun_artifact::ImageRef::parse(text).map_err(|e| refused(e.to_string()))?;
     if reference.tag.is_some() || reference.digest.is_some() {
@@ -116,9 +265,22 @@ pub(crate) fn target(args: &PackagesBakeArgs, folder: &Path) -> Result<Option<Ta
         )));
     }
     let host = reference.repository.host.clone();
-    if Some(host.as_str()) == backend_registry.as_deref() || host == crate::hosted::HOSTED_REGISTRY
-    {
-        return Err(refused(hosted_refusal(&host)));
+    if Some(host.as_str()) == backend_registry.as_deref() {
+        return hosted_target(
+            args,
+            Some(reference.repository),
+            access,
+            named,
+            folder,
+            repository,
+        )
+        .map(Some);
+    }
+    if host == crate::hosted::HOSTED_REGISTRY {
+        return Err(refused(format!(
+            "{} is the registry of hushrun's hosted backend, which this repository doesn't use: publish to its own backend's registry with --oci hushrun, or to a registry of your own",
+            crate::hosted::HOSTED_REGISTRY
+        )));
     }
     let config =
         hushrun_artifact::credentials::DockerConfig::load().map_err(|e| refused(e.to_string()))?;
@@ -143,6 +305,94 @@ pub(crate) fn target(args: &PackagesBakeArgs, folder: &Path) -> Result<Option<Ta
     }))
 }
 
+/// K-14: the backend's registry as a target: the image `<registry host>/<org>/<name>` (B-70's
+/// naming), `given` if named the same, and the CI job's own credential for the backend, which
+/// alone a push grant is had with (default-branch CI, as for B-70's publish). Without one, a line
+/// says why, before anything bakes. `named`: a backend is named, whether or not this run can
+/// reach it.
+fn hosted_target(
+    args: &PackagesBakeArgs,
+    given: Option<Repository>,
+    access: Option<crate::results::BuildAccess>,
+    named: bool,
+    folder: &Path,
+    repository: Option<&str>,
+) -> Result<Target, Failure> {
+    use crate::results::{BuildCredential, GitlabCi};
+    let refused = |why: String| Failure::new(Exit::Usage, anyhow!("packages bake: {why}"));
+    let elsewhere =
+        "publish to a registry of your own with --oci REPOSITORY, or into a folder with --oci-dir";
+    if access.is_none() && named {
+        return Err(refused(format!(
+            "only CI publishes to the backend's registry, with the job's own ID token, and this run has no credential for the backend: {elsewhere}"
+        )));
+    }
+    let access = access.ok_or_else(|| {
+        refused(
+            "--oci hushrun publishes to the registry of the repository's backend, and no backend is named here (hushrun.yaml's `backend`, or HUSHRUN_BACKEND)".into(),
+        )
+    })?;
+    let name = repository
+        .and_then(hushrun_core::blocks::publish::image_name)
+        .ok_or_else(|| {
+            refused(format!(
+                "the backend's registry names an image after its repository, and {} has no name it takes",
+                repository.unwrap_or("this repository")
+            ))
+        })?;
+    let host = crate::hosted::registry_host(&access.host);
+    let image = Repository::parse(&format!("{host}/{}/{name}", access.org))
+        .map_err(|e| refused(e.to_string()))?;
+    if let Some(given) = &given
+        && given.path != image.path
+    {
+        return Err(refused(format!(
+            "the backend's registry names this repository's image {image}, not {given}"
+        )));
+    }
+    // Only a CI job's own ID token is granted a push (default-branch CI, as B-70's publish).
+    match &access.credential {
+        Some(
+            BuildCredential::GithubOidc { .. } | BuildCredential::Gitlab(GitlabCi::Usable { .. }),
+        ) => {}
+        Some(BuildCredential::Gitlab(GitlabCi::Absent { declare })) => {
+            return Err(refused(format!(
+                "only CI publishes to the backend's registry, with the job's own ID token, and this job has none: {declare}; else {elsewhere}"
+            )));
+        }
+        Some(BuildCredential::Gitlab(GitlabCi::Unusable(why))) => {
+            return Err(refused(format!(
+                "only CI publishes to the backend's registry, with the job's own ID token, and this job's can't be sent ({why}); else {elsewhere}"
+            )));
+        }
+        Some(BuildCredential::Token(_)) => {
+            return Err(refused(format!(
+                "only CI publishes to the backend's registry, with the job's own ID token, on the default branch, and this bake has a person's or an agent's token: {elsewhere}"
+            )));
+        }
+        None => {
+            return Err(refused(format!(
+                "only CI publishes to the backend's registry, with the job's own ID token, and this run has none (GitHub: `permissions: id-token: write`): {elsewhere}"
+            )));
+        }
+    }
+    let commit = crate::cmd::build::head_commit(folder).ok_or_else(|| {
+        refused("the backend grants a push for the commit checked out, and no commit is checked out here".into())
+    })?;
+    let caller = crate::cmd::build_relay::caller::Caller::of(&access).map_err(|why| {
+        refused(format!(
+            "no credential for the backend's registry: {why}; {elsewhere}"
+        ))
+    })?;
+    Ok(Target::Hosted(Box::new(Hosted {
+        caller,
+        image,
+        commit,
+        insecure: args.registry.insecure.clone(),
+        plain: access.host.starts_with("http://"),
+    })))
+}
+
 /// What a publish did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Published {
@@ -156,6 +406,9 @@ pub(crate) struct Published {
     pub(crate) uploaded: bool,
     /// What the publish says of its tags.
     pub(crate) notes: Vec<String>,
+    /// K-14: nothing went up, since a newer run holds the moving tag (the backend's `not_newer`):
+    /// what the notes say then is why.
+    pub(crate) held_back: bool,
 }
 
 /// K-14: publishes the package store at `folder` to `target`: its archive, written beside it and
@@ -230,6 +483,17 @@ fn publish_layer(
         }
     };
     let (reference, pushed) = match target {
+        Target::Hosted(hosted) => {
+            return publish_hosted(
+                hosted,
+                layer,
+                &image,
+                packages,
+                &fixed,
+                moving.first().map(String::as_str),
+                notes,
+            );
+        }
         Target::Registry {
             repository,
             artifacts,
@@ -284,6 +548,127 @@ fn publish_layer(
         layer_bytes: first.map_or(0, |b| b.size),
         uploaded: first.is_some_and(|b| b.uploaded),
         notes,
+        held_back: false,
+    })
+}
+
+/// K-14: publishes `image` (of the archive at `layer`) into the backend's registry with a push
+/// grant: the layer and the config, in chunks of at most the grant's `chunk_bytes`, each unless
+/// the registry holds it; then the manifest under the fixed tag, kept where it is when it names
+/// another image (409), then under the moving one when `latest` names it (CI on the default
+/// branch), kept where it is when a newer run holds it (409 `not_newer`).
+fn publish_hosted(
+    hosted: &Hosted,
+    layer: &Path,
+    image: &oci::Image,
+    packages: &Packages,
+    fixed: &str,
+    latest: Option<&str>,
+    mut notes: Vec<String>,
+) -> Result<Published, String> {
+    let digest = image.digest();
+    let size = image.layers.first().map_or(0, |l| l.size);
+    let identity = packages.identity.to_string();
+    let latest_tag = tags::packages_latest_tag(&packages.platform);
+    let grant = match hosted.grant(&packages.platform, &identity, &latest_tag)? {
+        Granted::Grant(grant) => grant,
+        Granted::NotNewer(why) => {
+            notes.push(why);
+            return Ok(Published {
+                reference: hosted.image.at_digest(&digest),
+                digest: digest.to_string(),
+                tags: Vec::new(),
+                layer_bytes: size,
+                uploaded: false,
+                notes,
+                held_back: true,
+            });
+        }
+    };
+    if grant.tags.fixed != fixed || grant.tags.latest != latest_tag {
+        return Err(format!(
+            "the backend granted the tags {} and {}, not the ones K-14 names ({fixed} and {latest_tag}): report it",
+            grant.tags.fixed, grant.tags.latest
+        ));
+    }
+    if grant.repository != hosted.image.path {
+        return Err(format!(
+            "the backend granted a push to {}, not to {}: report it",
+            grant.repository, hosted.image.path
+        ));
+    }
+    if grant.most_blob_bytes > 0 && size > grant.most_blob_bytes {
+        return Err(format!(
+            "the store's layer is {size} bytes, more than the {} the backend's registry takes in one blob",
+            grant.most_blob_bytes
+        ));
+    }
+    let repository = Repository::parse(&grant.image).map_err(|e| e.to_string())?;
+    if repository.host != grant.registry {
+        return Err(format!(
+            "the backend's push grant names the image {} on another registry than {}: report it",
+            grant.image, grant.registry
+        ));
+    }
+    let mut insecure = hosted.insecure.clone();
+    if hosted.plain {
+        insecure.push(repository.host.clone());
+    }
+    let chunk = if grant.chunk_bytes == 0 {
+        CHUNK_BYTES
+    } else {
+        grant.chunk_bytes
+    };
+    let artifacts = Artifacts::connect_chunked(
+        hushrun_artifact::credentials::DockerConfig::default(),
+        &hushrun_artifact::Options {
+            insecure_registries: insecure,
+            credentials: vec![(
+                repository.host.clone(),
+                hushrun_artifact::credentials::Credential::Basic {
+                    username: grant.username.clone(),
+                    password: grant.password.clone(),
+                },
+            )],
+        },
+        chunk,
+    )
+    .map_err(|e| e.to_string())?;
+    let blobs = artifacts
+        .push_file_image_blobs(&repository, image, layer)
+        .map_err(|e| format!("{repository}: {e}"))?;
+    let mut taken = Vec::new();
+    // The fixed tag never moves: one that names another image (the same store signed another
+    // time) stays, and the moving tag still goes to this one.
+    match artifacts.tag(&repository, fixed, &image.manifest) {
+        Ok(()) => taken.push(fixed.to_string()),
+        Err(hushrun_artifact::ArtifactError::Conflict { message, .. }) => notes.push(format!(
+            "{fixed} names another image already, this store signed another time: fixed tags never move ({message})"
+        )),
+        Err(e) => return Err(format!("{repository}: {e}")),
+    }
+    if let Some(latest) = latest {
+        match artifacts.tag(&repository, latest, &image.manifest) {
+            Ok(()) => taken.push(latest.to_string()),
+            Err(hushrun_artifact::ArtifactError::Conflict { message, .. })
+                if message.starts_with("not_newer") =>
+            {
+                notes.push(format!(
+                    "a newer run holds {latest}, which stays where it is ({message})"
+                ));
+            }
+            Err(e) => return Err(format!("{repository}: {e}")),
+        }
+    }
+    let first = blobs.first();
+    Ok(Published {
+        reference: repository.at_digest(&digest),
+        digest: digest.to_string(),
+        tags: taken,
+        layer_bytes: first.map_or(0, |b| b.size),
+        uploaded: first.is_some_and(|b| b.uploaded),
+        notes,
+        held_back: false,
     })
 }
 
@@ -424,7 +809,7 @@ pub(crate) mod tests {
 
     // covers: K-14
     #[test]
-    fn the_label_says_the_store_and_the_backends_registry_is_refused_plainly() {
+    fn the_label_says_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let packages = store_at(dir.path(), "linux-x64", &[("a", b"a", false)], &[]);
         let (_, digest) = Packages::read_bytes(dir.path()).unwrap();
@@ -437,8 +822,379 @@ pub(crate) mod tests {
         assert_eq!(read.parts, ["npm"]);
         let other = serde_json::json!({"config": {"Labels": {LABEL: "{\"schema\":\"x\"}"}}});
         assert!(Label::of_config(&serde_json::to_vec(&other).unwrap()).is_none());
-        let why = hosted_refusal("registry.hushrun.com");
-        assert!(why.contains("--oci <host>/<org>/<name>"), "{why}");
-        assert!(why.contains("HUSHRUN_PACKAGES_IMAGE"), "{why}");
+    }
+
+    /// The grant's password, which nothing may print.
+    const PASSWORD: &str = "hrg_0123456789abcdefghijABCDEFGHIJ0123456789";
+    /// The CI job's token the fake backend takes.
+    const JOB_TOKEN: &str = "job-id-token";
+    /// The registry's bearer for the grant's password.
+    const BEARER: &str = "registry-bearer";
+    /// The fake registry's most bytes per request.
+    const CHUNK: usize = 1024;
+
+    /// What the fake backend and registry do and saw.
+    #[derive(Default)]
+    struct Seen {
+        /// The grant's answer instead of a grant: status and body.
+        refuse_grant: Option<(u16, serde_json::Value)>,
+        /// The moving tag is held by a newer run.
+        latest_newer: bool,
+        grants: Vec<serde_json::Value>,
+        /// Every registry request: method, path, body size.
+        requests: Vec<(String, String, usize)>,
+        blobs: BTreeMap<String, Vec<u8>>,
+        uploads: BTreeMap<String, Vec<u8>>,
+        tags: BTreeMap<String, String>,
+    }
+
+    /// A backend that grants pushes and the registry they go to, both on the loopback.
+    struct Fake {
+        backend: hushrun_testkit::http::Server,
+        registry: hushrun_testkit::http::Server,
+        seen: std::sync::Arc<std::sync::Mutex<Seen>>,
+    }
+
+    impl Fake {
+        fn start() -> Fake {
+            use hushrun_testkit::http::{Reply, Response, Server};
+            use std::sync::{Arc, Mutex};
+            let seen: Arc<Mutex<Seen>> = Arc::default();
+            let at = seen.clone();
+            let registry = Server::start(move |request| {
+                use base64::Engine as _;
+                let mut seen = at.lock().unwrap();
+                seen.requests.push((
+                    request.method.clone(),
+                    request.path.clone(),
+                    request.body.len(),
+                ));
+                let path = request.path.as_str();
+                let host = request.header("host").unwrap_or_default().to_string();
+                if path == "/v2/token" {
+                    let basic = format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(format!("hushrun-push:{PASSWORD}"))
+                    );
+                    if request.header("authorization") != Some(basic.as_str()) {
+                        return Reply::Send(Response::new(401));
+                    }
+                    return Reply::Send(Response::json(200, &serde_json::json!({"token": BEARER})));
+                }
+                if request.header("authorization") != Some(format!("Bearer {BEARER}").as_str()) {
+                    return Reply::Send(Response::new(401).header(
+                        "www-authenticate",
+                        format!("Bearer realm=\"http://{host}/v2/token\",service=\"{host}\""),
+                    ));
+                }
+                if request.body.len() > CHUNK {
+                    return Reply::Send(Response::new(413));
+                }
+                if path == "/v2/" {
+                    return Reply::Send(Response::new(200));
+                }
+                let Some(rest) = path.strip_prefix("/v2/acme/shop/") else {
+                    return Reply::Send(Response::new(404));
+                };
+                let location = |id: &str| format!("/v2/acme/shop/blobs/uploads/{id}");
+                if let Some(id) = rest.strip_prefix("blobs/uploads/") {
+                    return Reply::Send(match request.method.as_str() {
+                        "POST" => {
+                            let id = format!("u{}", seen.requests.len());
+                            seen.uploads.insert(id.clone(), Vec::new());
+                            Response::new(202).header("location", location(&id))
+                        }
+                        "PATCH" => match seen.uploads.get_mut(id) {
+                            Some(bytes) => {
+                                bytes.extend_from_slice(&request.body);
+                                Response::new(202).header("location", location(id))
+                            }
+                            None => Response::new(404),
+                        },
+                        "PUT" => match seen.uploads.remove(id) {
+                            Some(mut bytes) => {
+                                bytes.extend_from_slice(&request.body);
+                                let digest = request.query("digest").unwrap().to_string();
+                                if hushrun_core::digest::Digest::of(&bytes).to_string() != digest {
+                                    Response::new(400)
+                                } else {
+                                    seen.blobs.insert(digest.clone(), bytes);
+                                    Response::new(201)
+                                        .header("location", format!("/v2/acme/shop/blobs/{digest}"))
+                                        .header("docker-content-digest", digest)
+                                }
+                            }
+                            None => Response::new(404),
+                        },
+                        _ => Response::new(405),
+                    });
+                }
+                if let Some(digest) = rest.strip_prefix("blobs/") {
+                    return Reply::Send(match seen.blobs.get(digest) {
+                        Some(b) => Response::new(200)
+                            .header("content-length", b.len().to_string())
+                            .header("docker-content-digest", digest),
+                        None => Response::new(404),
+                    });
+                }
+                if let Some(tag) = rest.strip_prefix("manifests/") {
+                    let denied = |status: u16, message: &str| {
+                        Response::json(
+                            status,
+                            &serde_json::json!({"errors": [{"code": "DENIED", "message": message}]}),
+                        )
+                    };
+                    if request.method != "PUT" {
+                        return Reply::Send(Response::new(404));
+                    }
+                    if !tag.starts_with("hushrun-packages-") {
+                        return Reply::Send(denied(403, "only the granted tags"));
+                    }
+                    let digest = hushrun_core::digest::Digest::of(&request.body).to_string();
+                    if tag.ends_with("-latest") && seen.latest_newer {
+                        return Reply::Send(denied(409, "not_newer: run 9 holds it"));
+                    }
+                    if !tag.ends_with("-latest")
+                        && seen.tags.get(tag).is_some_and(|held| *held != digest)
+                    {
+                        return Reply::Send(denied(409, "the fixed tag names another image"));
+                    }
+                    seen.tags.insert(tag.to_string(), digest.clone());
+                    return Reply::Send(Response::new(201).header("docker-content-digest", digest));
+                }
+                Reply::Send(Response::new(404))
+            });
+            let registry_host = registry.addr().to_string();
+            let at = seen.clone();
+            let backend = Server::start(move |request| {
+                let mut seen = at.lock().unwrap();
+                if request.path != format!("/o/acme/{GRANT_PATH}")
+                    || request.header("authorization")
+                        != Some(format!("Bearer {JOB_TOKEN}").as_str())
+                {
+                    return Reply::Send(Response::new(404));
+                }
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                seen.grants.push(body.clone());
+                if let Some((status, refusal)) = &seen.refuse_grant {
+                    return Reply::Send(Response::json(*status, refusal));
+                }
+                let platform = body["platform"].as_str().unwrap();
+                let identity = body["identity"].as_str().unwrap();
+                Reply::Send(Response::json(
+                    200,
+                    &serde_json::json!({
+                        "registry": registry_host,
+                        "repository": "acme/shop",
+                        "image": format!("{registry_host}/acme/shop"),
+                        "username": "hushrun-push",
+                        "password": PASSWORD,
+                        "expires_ms": 1,
+                        "tags": {
+                            "fixed": format!("hushrun-packages-{platform}-{}", &identity[..16]),
+                            "latest": format!("hushrun-packages-{platform}-latest"),
+                        },
+                        "chunk_bytes": CHUNK,
+                        "most_blob_bytes": 1u64 << 31,
+                    }),
+                ))
+            });
+            Fake {
+                backend,
+                registry,
+                seen,
+            }
+        }
+
+        fn target(&self) -> Target {
+            Target::Hosted(Box::new(Hosted {
+                caller: crate::cmd::build_relay::caller::Caller::with_token(
+                    &format!("{}/o/acme", self.backend.url()),
+                    JOB_TOKEN,
+                ),
+                image: Repository::parse(&format!("{}/acme/shop", self.registry.addr())).unwrap(),
+                commit: "c".repeat(40),
+                insecure: Vec::new(),
+                plain: true,
+            }))
+        }
+
+        fn seen(&self) -> std::sync::MutexGuard<'_, Seen> {
+            self.seen.lock().unwrap()
+        }
+    }
+
+    /// A store whose archive takes a few chunks of the fake registry's.
+    fn big_store(folder: &Path) -> Packages {
+        let bytes: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
+        store_at(folder, "linux-x64", &[("cache/a.tgz", &bytes, false)], &[])
+    }
+
+    /// Everything a publish says, which must never hold the grant's password.
+    fn said(published: &Result<Published, String>) -> String {
+        let text = match published {
+            Ok(p) => format!(
+                "{p:?} {}",
+                crate::cmd::packages::tests_published_lines(p).join("\n")
+            ),
+            Err(why) => why.clone(),
+        };
+        assert!(!text.contains(PASSWORD), "{text}");
+        text
+    }
+
+    // covers: K-14
+    #[test]
+    fn the_backends_registry_takes_a_store_with_a_push_grant_in_chunks_fixed_tag_first() {
+        let fake = Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("store");
+        let packages = big_store(&folder);
+        let identity = packages.identity.to_string();
+        let fixed = tags::packages_fixed_tag("linux-x64", &identity);
+        let latest = tags::packages_latest_tag("linux-x64");
+        let target = fake.target();
+        let published = publish(&folder, &target, Ok(()));
+        said(&published);
+        let published = published.unwrap();
+        assert_eq!(published.tags, [fixed.clone(), latest.clone()]);
+        assert!(published.uploaded && !published.held_back);
+        {
+            let seen = fake.seen();
+            // The grant was asked with the store's platform and identity and the commit.
+            assert_eq!(
+                seen.grants,
+                [
+                    serde_json::json!({"platform": "linux-x64", "identity": identity, "commit": "c".repeat(40)})
+                ]
+            );
+            // No request carried more than a chunk, and the layer took several.
+            assert!(
+                seen.requests.iter().all(|(_, _, n)| *n <= CHUNK),
+                "{:?}",
+                seen.requests
+            );
+            let patches = seen
+                .requests
+                .iter()
+                .filter(|(m, _, _)| m == "PATCH")
+                .count();
+            assert!(patches >= 5, "{:?}", seen.requests);
+            // The fixed tag, then the moving one; never a digest.
+            let manifests: Vec<&str> = seen
+                .requests
+                .iter()
+                .filter(|(m, p, _)| m == "PUT" && p.contains("/manifests/"))
+                .map(|(_, p, _)| p.rsplit('/').next().unwrap())
+                .collect();
+            assert_eq!(manifests, [fixed.as_str(), latest.as_str()]);
+            assert_eq!(seen.tags.get(&fixed), Some(&published.digest));
+        }
+        // Outside default-branch CI the moving tag isn't asked for, and the blobs the registry
+        // holds don't go up again.
+        fake.seen().requests.clear();
+        let again = publish(&folder, &target, Err("outside CI".into())).unwrap();
+        assert_eq!(again.tags, std::slice::from_ref(&fixed));
+        assert!(!again.uploaded);
+        assert!(again.notes[0].contains("outside CI"), "{:?}", again.notes);
+        let seen = fake.seen();
+        assert!(
+            !seen.requests.iter().any(|(m, _, _)| m == "PATCH"),
+            "{:?}",
+            seen.requests
+        );
+        assert!(!seen.requests.iter().any(|(_, p, _)| p.ends_with("-latest")));
+    }
+
+    // covers: K-14
+    #[test]
+    fn a_held_fixed_tag_stays_and_a_newer_runs_moving_tag_is_left_alone() {
+        let fake = Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("store");
+        let packages = big_store(&folder);
+        let fixed = tags::packages_fixed_tag("linux-x64", &packages.identity.to_string());
+        let latest = tags::packages_latest_tag("linux-x64");
+        // The same store signed another time: its fixed tag names another image already.
+        fake.seen()
+            .tags
+            .insert(fixed.clone(), "sha256:other".into());
+        let published = publish(&folder, &fake.target(), Ok(()));
+        said(&published);
+        let published = published.unwrap();
+        assert_eq!(published.tags, std::slice::from_ref(&latest));
+        assert!(
+            published
+                .notes
+                .iter()
+                .any(|n| n.contains("fixed tags never move")),
+            "{:?}",
+            published.notes
+        );
+        assert_eq!(
+            fake.seen().tags.get(&fixed).map(String::as_str),
+            Some("sha256:other")
+        );
+        // A newer run holds the moving tag: it stays, and the publish still succeeds.
+        fake.seen().tags.clear();
+        fake.seen().latest_newer = true;
+        let published = publish(&folder, &fake.target(), Ok(())).unwrap();
+        assert_eq!(published.tags, std::slice::from_ref(&fixed));
+        assert!(
+            published
+                .notes
+                .iter()
+                .any(|n| n.contains("a newer run holds")),
+            "{:?}",
+            published.notes
+        );
+    }
+
+    // covers: K-14
+    #[test]
+    fn a_refused_grant_says_why_and_a_newer_runs_grant_publishes_nothing() {
+        let fake = Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("store");
+        big_store(&folder);
+        fake.seen().refuse_grant = Some((
+            403,
+            serde_json::json!({"error": {"code": "not_publisher", "message": "not the default branch"}, "current": {"word": "default_branch"}}),
+        ));
+        let refused = publish(&folder, &fake.target(), Ok(()));
+        let why = said(&refused);
+        assert!(refused.is_err());
+        assert!(
+            why.contains("default_branch") && why.contains("--oci-dir"),
+            "{why}"
+        );
+        fake.seen().refuse_grant = Some((
+            409,
+            serde_json::json!({"error": {"code": "not_newer", "message": "run 9"}, "current": {"run_id": "9", "run_attempt": "1", "digest": "sha256:x"}}),
+        ));
+        let held = publish(&folder, &fake.target(), Ok(()));
+        said(&held);
+        let held = held.unwrap();
+        assert!(held.held_back && held.tags.is_empty());
+        assert!(
+            held.notes[0].contains("a newer run holds"),
+            "{:?}",
+            held.notes
+        );
+        // Nothing reached the registry.
+        assert!(fake.seen().requests.is_empty());
+        for (status, code, words) in [
+            (404, "", "--oci REPOSITORY"),
+            (429, "rate_limited", "bake again later"),
+            (409, "name_taken", "an owner settles it"),
+        ] {
+            fake.seen().refuse_grant = Some((
+                status,
+                serde_json::json!({"error": {"code": code, "message": ""}}),
+            ));
+            let why = said(&publish(&folder, &fake.target(), Ok(())));
+            assert!(why.contains(words), "{status}: {why}");
+        }
     }
 }

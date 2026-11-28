@@ -34,4 +34,6 @@ tracing.workspace = true
 it = []
 
 [dev-dependencies]
+# \[K-14\] A fake registry on the loopback, for the chunked upload's tests.
+hushrun-testkit.workspace = true
 tempfile.workspace = true

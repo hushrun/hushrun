@@ -1037,6 +1037,54 @@ impl crate::Artifacts {
         Ok(pushed)
     }
 
+    /// \[K-14\] Uploads the blobs of `image`, made by [`file_image`] of the file at `layer`, into
+    /// `repository`, each unless the registry holds it, and moves no tag: the layer, then the
+    /// config. For a registry that takes a manifest only under a tag it names, as hushrun's does,
+    /// whose tags then go up one by one with [`Self::tag`].
+    pub fn push_file_image_blobs(
+        &self,
+        repository: &Repository,
+        image: &Image,
+        layer: &Path,
+    ) -> Result<Vec<PushedBlob>, ArtifactError> {
+        let first = image
+            .layers
+            .first()
+            .ok_or_else(|| ArtifactError::Invalid("an image of no layer".into()))?;
+        let uploaded = self.push_file(repository, layer, &first.digest, first.size)?;
+        let config = Digest::of(&image.config);
+        let config_uploaded = self.runtime.block_on(async {
+            let registry = self.registry.as_ref();
+            if registry.blob_exists(repository, &config).await? {
+                return Ok::<_, ArtifactError>(false);
+            }
+            let bytes = Bytes::from(image.config.clone());
+            registry
+                .push_blob(
+                    repository,
+                    &config,
+                    image.config.len() as u64,
+                    futures_util::stream::once(async move { Ok(bytes) }).boxed(),
+                )
+                .await?;
+            Ok(true)
+        })?;
+        Ok(vec![
+            PushedBlob {
+                role: first.role.word().into(),
+                digest: first.digest.to_string(),
+                size: first.size,
+                uploaded,
+            },
+            PushedBlob {
+                role: "config".into(),
+                digest: config.to_string(),
+                size: image.config.len() as u64,
+                uploaded: config_uploaded,
+            },
+        ])
+    }
+
     /// \[K-14\] Uploads the file at `path`, whose SHA-256 and size are `digest` and `size`, as a
     /// blob of `repository`, unless the registry holds it already (a HEAD first): whether it was
     /// uploaded. A layer written whole beforehand goes up this way, then [`Self::publish`] takes

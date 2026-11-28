@@ -29,10 +29,12 @@ init --agent-clouds claude-code`, in the old one's place.
 Its steps are `hushrun build pull` (compiled code, into `/hushrun`), `hushrun packages pull` (the
 package store, into `/hushrun-packages`, before anything installs) and `hushrun fetch`. CI
 publishes the package store with `hushrun packages bake --oci REPOSITORY … -- COMMAND` on the
-default branch (ADR 0163). The backend's registry doesn't take package stores yet, so publish to a
-registry of your own (`--oci ghcr.io/acme/shop`) and set `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`
-in the environment's settings. Add `HUSHRUN_PACKAGES_REGISTRY_TOKEN` there too if that registry
-needs a token; `HUSHRUN_REGISTRY_TOKEN` stays the one for hushrun's registry. A sandbox that
+default branch (ADR 0163). `--oci hushrun` publishes it into hushrun's own registry, beside the
+baked store, with the job's own ID token (`permissions: id-token: write` on GitHub), and the step
+pulls it from there with no setting. To publish to a registry of your own instead (`--oci
+ghcr.io/acme/shop`), set `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop` in the environment's settings,
+and `HUSHRUN_PACKAGES_REGISTRY_TOKEN` too if that registry needs a token; `HUSHRUN_REGISTRY_TOKEN`
+stays the one for hushrun's registry. A sandbox that
 doesn't run as root sets `HUSHRUN_PACKAGES_LOWER` to a folder it may write.
 
 Cursor runs `install` on every Build and snapshots the disk; a new agent boots that disk, so it

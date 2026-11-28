@@ -887,12 +887,17 @@ with `--oci`, and the sandbox's setup or session-start hook runs `hushrun packag
 checks every file and the signature before it swaps the store in (ADR 0163):
 
 ```sh
-# CI, on the default branch: bake and publish (one layer, tagged hushrun-packages-<platform>-latest).
-hushrun packages bake --oci ghcr.io/acme/shop -- ./gradlew test
-# The sandbox: pull it into /hushrun-packages (HUSHRUN_PACKAGES_IMAGE names the image too, and
-# HUSHRUN_PACKAGES_REGISTRY_TOKEN, else HUSHRUN_REGISTRY_TOKEN, is the pull token).
-hushrun packages pull --image ghcr.io/acme/shop
+# CI, on the default branch: bake and publish into hushrun's registry, beside the baked store
+# (one layer, tagged hushrun-packages-<platform>-latest; the job's own ID token asks the backend
+# for a push grant, so GitHub needs `permissions: id-token: write`).
+hushrun packages bake --oci hushrun -- ./gradlew test
+# The sandbox: pull it into /hushrun-packages, from the repository's image there.
+hushrun packages pull
 ```
+
+A registry of your own works too: `--oci ghcr.io/acme/shop` in CI, and in the sandbox
+`HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop` (or `--image`), with `HUSHRUN_PACKAGES_REGISTRY_TOKEN`,
+else `HUSHRUN_REGISTRY_TOKEN`, as the pull token.
 
 Hex's packages are seeded, as pnpm's and npm's are: `hushrun packages restore` (or `exec`) puts
 each tarball `mix.lock` pins into Hex's own cache (`HEX_HOME`, else `~/.hex`), checked against the lockfile, and `mix deps.get`
