@@ -200,6 +200,11 @@ impl FakeResults {
         });
     }
 
+    /// Forgets the answers [`FakeResults::answer`] set that are left: it answers as usual again.
+    pub fn forget_answers(&self) {
+        self.state().injected.clear();
+    }
+
     /// \[ADR 0141\] Answers requests with no token as if the sandbox's network had added one.
     pub fn add_credentials_as_a_proxy(&self) {
         self.state().proxy = true;

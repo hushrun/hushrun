@@ -37,7 +37,9 @@ pub fn read(cli: &mut Cli, var: impl Fn(&str) -> Option<OsString>) -> Vec<String
         Some(format) => format,
         None => vars
             .read_as("HUSHRUN_FORMAT", &one_of::<Format>(), |value| {
-                <Format as ValueEnum>::from_str(value, true).ok()
+                <Format as ValueEnum>::from_str(value, true)
+                    .ok()
+                    .filter(|format| *format != Format::Antigravity)
             })
             .unwrap_or_default(),
     };
