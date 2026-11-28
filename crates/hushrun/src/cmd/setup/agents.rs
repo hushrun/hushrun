@@ -189,7 +189,8 @@ fn runner(npm: bool) -> &'static str {
 /// \[ADR 0142\] What each cloud gets (C-145): an end-of-session hook that runs `hushrun flush`
 /// (Claude Code's `Stop` in `.claude/settings.json`, which also gets a `SessionStart` that runs
 /// `hushrun hook session-start` in Claude Code on the web, ADR 0161; Cursor's `stop` in `.cursor/hooks.json`; Copilot's
-/// `sessionEnd` in `.github/hooks/hushrun.json`), Copilot's setup steps, and a dev container's
+/// `sessionEnd` in `.github/hooks/hushrun.json`), Cursor's install script and the `install` of its
+/// `.cursor/environment.json` (ADR 0164), Copilot's setup steps, and a dev container's
 /// feature. A file there keeps everything it has: JSON gets hushrun's hook added where it lacks it;
 /// a workflow or a dev container's file that exists is left as it is.
 fn cloud_files(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
@@ -250,21 +251,33 @@ fn cloud_files(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
                     },
                 ));
             }
-            Cloud::Cursor => files.extend(json_hook(
-                ".cursor/hooks.json",
-                &|value| {
-                    if value.get("version").is_none() {
-                        value["version"] = serde_json::json!(1);
-                    }
-                    add_hook(
-                        value,
-                        &["hooks", "stop"],
-                        || serde_json::json!({"command": flush}),
-                        &flush,
-                    )
-                },
-                "Cursor's stop hook: send what an agent passed when it stops",
-            )),
+            Cloud::Cursor => {
+                files.extend(json_hook(
+                    ".cursor/hooks.json",
+                    &|value| {
+                        if value.get("version").is_none() {
+                            value["version"] = serde_json::json!(1);
+                        }
+                        add_hook(
+                            value,
+                            &["hooks", "stop"],
+                            || serde_json::json!({"command": flush}),
+                            &flush,
+                        )
+                    },
+                    "Cursor's stop hook: send what an agent passed when it stops",
+                ));
+                // \[ADR 0164\] What Cursor's Build runs before it snapshots the disk.
+                files.extend(script_file(
+                    read(CURSOR_SCRIPT).as_deref(),
+                    &OLD_CURSOR_SCRIPTS,
+                ));
+                files.extend(json_hook(
+                    ".cursor/environment.json",
+                    &with_cursor_install,
+                    "Cursor's environment: run that install script when Cursor builds the environment, after the install command already there",
+                ));
+            }
             Cloud::Copilot => {
                 files.extend(json_hook(
                     ".github/hooks/hushrun.json",
@@ -304,6 +317,82 @@ fn cloud_files(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
         }
     }
     files
+}
+
+/// \[ADR 0164\] Where Cursor's install script goes, and the command `install` runs it with.
+const CURSOR_SCRIPT: &str = ".cursor/hushrun-install.sh";
+const CURSOR_INSTALL: &str = "sh .cursor/hushrun-install.sh";
+
+/// \[ADR 0164\] Cursor's install script (C-145): installs hushrun when it is missing, pulls the
+/// baked store into `/hushrun` as root, and fetches results as the user; it always exits 0.
+/// `recipes/agent-clouds/` is the one place its text lives.
+fn cursor_install_script() -> &'static str {
+    include_str!("../../../../../recipes/agent-clouds/cursor-hushrun-install.sh")
+}
+
+/// \[ADR 0164\] The install scripts an earlier hushrun wrote, which init replaces: none yet. A
+/// change to the script adds the text it replaces here.
+const OLD_CURSOR_SCRIPTS: [&str; 0] = [];
+
+/// What the install script in a repository is, next to this hushrun's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Script {
+    Absent,
+    Current,
+    /// One an earlier hushrun wrote, as it wrote it.
+    Older,
+    /// Anything else: a hand edit, which stays.
+    Edited,
+}
+
+/// The one place that says what `found` is: missing, this hushrun's script, one of `older`, or
+/// edited.
+fn script_state(found: Option<&str>, older: &[&str]) -> Script {
+    match found {
+        None => Script::Absent,
+        Some(text) if text == cursor_install_script() => Script::Current,
+        Some(text) if older.contains(&text) => Script::Older,
+        Some(_) => Script::Edited,
+    }
+}
+
+/// The install script to write over `found`, or `None` when it stays as it is.
+fn script_file(found: Option<&str>, older: &[&str]) -> Option<File> {
+    let change = match script_state(found, older) {
+        Script::Current | Script::Edited => return None,
+        Script::Absent => {
+            "Cursor's install script: pull the baked store and fetch results while Cursor builds the environment"
+        }
+        Script::Older => {
+            "Cursor's install script: an older copy becomes the one that pulls the baked store and fetches results"
+        }
+    };
+    Some(File {
+        path: CURSOR_SCRIPT.to_string(),
+        text: cursor_install_script().to_string(),
+        change: change.to_string(),
+    })
+}
+
+/// \[ADR 0164\] Points `.cursor/environment.json`'s `install` at the script, after the command
+/// already there, joined with `&&` so that a failing dependency install still fails the Build.
+/// An `install` that already names the script, or isn't a string, stays. Whether it changed.
+fn with_cursor_install(value: &mut serde_json::Value) -> bool {
+    let install = match value.get("install") {
+        None => CURSOR_INSTALL.to_string(),
+        Some(serde_json::Value::String(text)) if text.contains(CURSOR_SCRIPT) => return false,
+        Some(serde_json::Value::String(text)) => {
+            let text = text.trim_end_matches(|c: char| c.is_whitespace() || c == ';');
+            if text.trim().is_empty() {
+                CURSOR_INSTALL.to_string()
+            } else {
+                format!("{text} && {CURSOR_INSTALL}")
+            }
+        }
+        Some(_) => return false,
+    };
+    value["install"] = serde_json::Value::String(install);
+    true
 }
 
 /// \[ADR 0161\] Claude Code's `SessionStart` command (C-145): gated on Claude Code on the web, so
@@ -657,6 +746,8 @@ mod tests {
             [
                 ".claude/settings.json",
                 ".cursor/hooks.json",
+                ".cursor/hushrun-install.sh",
+                ".cursor/environment.json",
                 ".github/hooks/hushrun.json",
                 ".github/workflows/copilot-setup-steps.yml",
                 ".devcontainer/devcontainer.json",
@@ -687,13 +778,30 @@ mod tests {
             cursor["hooks"]["stop"][0]["command"],
             "npx --no-install hushrun flush -q || true"
         );
-        let copilot: serde_json::Value = serde_json::from_str(&files[2].text).unwrap();
+        // ADR 0164: the install script pulls before it fetches, as root through sudo with no
+        // password, from PATH, and never fails the Build.
+        let script = &files[2].text;
+        let pull = script.find("build pull").unwrap();
+        assert!(pull < script.find("hushrun fetch").unwrap(), "{script}");
+        assert!(script.contains("sudo -n"), "{script}");
+        assert!(
+            script.contains("--preserve-env=HUSHRUN_REGISTRY_TOKEN"),
+            "{script}"
+        );
+        assert!(script.trim_end().ends_with("exit 0"), "{script}");
+        assert!(!script.contains("npx"), "{script}");
+        let environment: serde_json::Value = serde_json::from_str(&files[3].text).unwrap();
+        assert_eq!(
+            environment,
+            serde_json::json!({"install": "sh .cursor/hushrun-install.sh"})
+        );
+        let copilot: serde_json::Value = serde_json::from_str(&files[4].text).unwrap();
         assert_eq!(
             copilot["hooks"]["sessionEnd"][0]["bash"],
             "npx --no-install hushrun flush -q || true"
         );
-        assert!(files[3].text.contains("id-token: write"));
-        assert!(files[3].text.contains("login --session"));
+        assert!(files[5].text.contains("id-token: write"));
+        assert!(files[5].text.contains("login --session"));
         // Written, init has nothing more to add.
         for file in &files {
             let path = root.join(&file.path);
@@ -705,11 +813,252 @@ mod tests {
         assert!(parse_clouds(&["none".into()]).unwrap().is_empty());
         // Without npm, hushrun from PATH.
         let dir = tempfile::tempdir().unwrap();
-        let files = cloud_files(dir.path(), &[Cloud::Cursor], false);
+        let without = cloud_files(dir.path(), &[Cloud::Cursor], false);
         assert!(
-            files[0].text.contains("\"hushrun flush -q || true\""),
+            without[0].text.contains("\"hushrun flush -q || true\""),
             "{}",
-            files[0].text
+            without[0].text
+        );
+        // Only the stop hook follows npm: the script is the same either way.
+        assert_eq!(without[1].path, ".cursor/hushrun-install.sh");
+        assert_eq!(without[1].text, files[2].text);
+        assert_eq!(without[2].text, files[3].text);
+    }
+
+    /// Cursor's files, written into `root` with `environment` as `.cursor/environment.json` (none
+    /// when `None`), and what init plans for Cursor then.
+    fn cursor_plan(environment: Option<&str>) -> (tempfile::TempDir, Vec<File>) {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(text) = environment {
+            std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+            std::fs::write(dir.path().join(".cursor/environment.json"), text).unwrap();
+        }
+        let files = cloud_files(dir.path(), &[Cloud::Cursor], false);
+        (dir, files)
+    }
+
+    /// `install` in the plan's `environment.json`, or `None` when the plan has no such file.
+    fn planned_install(files: &[File]) -> Option<serde_json::Value> {
+        let file = files
+            .iter()
+            .find(|f| f.path == ".cursor/environment.json")?;
+        assert!(file.text.ends_with("}\n"), "{}", file.text);
+        let value: serde_json::Value = serde_json::from_str(&file.text).unwrap();
+        Some(value)
+    }
+
+    // covers: C-145
+    #[test]
+    fn cursors_install_runs_hushruns_script_after_the_command_already_there() {
+        let (_dir, files) = cursor_plan(Some(
+            r#"{"install": "pnpm install && ./custom_script.sh", "start": "sudo service docker start", "terminals": [{"name": "dev", "command": "pnpm dev"}]}"#,
+        ));
+        let value = planned_install(&files).unwrap();
+        assert_eq!(
+            value["install"],
+            "pnpm install && ./custom_script.sh && sh .cursor/hushrun-install.sh"
+        );
+        assert_eq!(value["start"], "sudo service docker start");
+        assert_eq!(value["terminals"][0]["command"], "pnpm dev");
+        let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            ["install", "start", "terminals"],
+            "keys keep their order"
+        );
+        assert!(
+            files[2]
+                .change
+                .contains("after the install command already there"),
+            "{}",
+            files[2].change
+        );
+        // With no file, the recipe's bytes.
+        let (_dir, files) = cursor_plan(None);
+        assert_eq!(
+            files[2].text,
+            include_str!("../../../../../recipes/agent-clouds/cursor-environment.json")
+        );
+        // A trailing `;` or newline isn't left before `&&`.
+        let (_dir, files) = cursor_plan(Some("{\"install\": \"npm ci; \\n\"}"));
+        assert_eq!(
+            planned_install(&files).unwrap()["install"],
+            "npm ci && sh .cursor/hushrun-install.sh"
+        );
+        // An empty install, or none, is the script alone.
+        for text in [
+            r#"{"install": "  "}"#,
+            r#"{"build": {"dockerfile": "Dockerfile"}}"#,
+        ] {
+            let (_dir, files) = cursor_plan(Some(text));
+            let value = planned_install(&files).unwrap();
+            assert_eq!(value["install"], "sh .cursor/hushrun-install.sh", "{text}");
+        }
+        // Already there, however it starts the script: nothing to add.
+        for install in [
+            "pnpm install && sh .cursor/hushrun-install.sh",
+            "bash .cursor/hushrun-install.sh",
+        ] {
+            let (_dir, files) =
+                cursor_plan(Some(&serde_json::json!({ "install": install }).to_string()));
+            assert!(planned_install(&files).is_none(), "{install}");
+            assert!(files.iter().any(|f| f.path == ".cursor/hushrun-install.sh"));
+        }
+        // Not a string, or not JSON: the file stays, and the script is still written.
+        for text in [r#"{"install": ["pnpm install"]}"#, "{not json", "[]"] {
+            let (_dir, files) = cursor_plan(Some(text));
+            assert!(planned_install(&files).is_none(), "{text}");
+            let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+            assert_eq!(
+                paths,
+                [".cursor/hooks.json", ".cursor/hushrun-install.sh"],
+                "{text}"
+            );
+        }
+    }
+
+    // covers: C-145
+    #[test]
+    fn cursors_install_script_is_replaced_only_when_hushrun_wrote_it() {
+        let current = cursor_install_script();
+        assert_eq!(script_state(None, &[]), Script::Absent);
+        assert_eq!(script_state(Some(current), &[]), Script::Current);
+        assert_eq!(
+            script_state(
+                Some("#!/bin/sh\nhushrun build pull\n"),
+                &["#!/bin/sh\nhushrun build pull\n"]
+            ),
+            Script::Older
+        );
+        assert_eq!(
+            script_state(
+                Some("#!/bin/sh\nmy own\n"),
+                &["#!/bin/sh\nhushrun build pull\n"]
+            ),
+            Script::Edited
+        );
+        // A hand edit stays, and the rest of Cursor's files are still planned.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+        let edited = format!("{current}echo mine\n");
+        std::fs::write(dir.path().join(".cursor/hushrun-install.sh"), &edited).unwrap();
+        let files = cloud_files(dir.path(), &[Cloud::Cursor], false);
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, [".cursor/hooks.json", ".cursor/environment.json"]);
+        // Missing, it is written, and says what it does.
+        let (_dir, files) = cursor_plan(None);
+        assert_eq!(files[1].text, current);
+        assert!(files[1].change.starts_with("Cursor's install script: pull"));
+        // An older copy is replaced, and the plan says so.
+        let older = script_file(Some("old"), &["old"]).unwrap();
+        assert_eq!(older.text, current);
+        assert!(older.change.contains("an older copy"), "{}", older.change);
+        assert!(script_file(Some(current), &["old"]).is_none());
+    }
+
+    /// The install script, run by `sh` with `hushrun`, `id`, `sudo` and `curl` faked on `PATH`:
+    /// what each was asked, a line each, and the script's exit code.
+    #[cfg(unix)]
+    fn run_install_script(
+        uid: &str,
+        sudo: bool,
+        pull_fails: bool,
+        lower: Option<&str>,
+    ) -> (String, i32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.path().join("log");
+        let fake = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let pull = if pull_fails { "exit 1" } else { "exit 0" };
+        fake(
+            "hushrun",
+            &format!(
+                "echo \"hushrun $* token=$HUSHRUN_REGISTRY_TOKEN\" >> \"$LOG\"\n[ \"$1\" = build ] && {pull}\nexit 0"
+            ),
+        );
+        fake("id", &format!("echo {uid}"));
+        // What sudo runs is looked up on PATH, which holds only the fakes.
+        fake("true", "exit 0");
+        fake("curl", "echo \"curl $*\" >> \"$LOG\"; exit 1");
+        if sudo {
+            // Records what it was asked, then runs the command after its options.
+            fake(
+                "sudo",
+                "echo \"sudo $*\" >> \"$LOG\"\nwhile [ \"${1#-}\" != \"$1\" ]; do shift; done\nexec \"$@\"",
+            );
+        }
+        let script = dir.path().join("hushrun-install.sh");
+        std::fs::write(&script, cursor_install_script()).unwrap();
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg(&script)
+            .env_clear()
+            // Only the fakes: a real sudo must never run here.
+            .env("PATH", &bin)
+            .env("LOG", &log)
+            .env("HUSHRUN_REGISTRY_TOKEN", "pull-token");
+        if let Some(lower) = lower {
+            command.env("HUSHRUN_BUILD_LOWER", lower);
+        }
+        let status = command.status().unwrap();
+        let said = std::fs::read_to_string(&log).unwrap_or_default();
+        (said, status.code().unwrap_or(-1))
+    }
+
+    // covers: C-145
+    #[cfg(unix)]
+    #[test]
+    fn cursors_install_script_pulls_as_root_and_fetches_as_the_user() {
+        // As root: no sudo.
+        let (said, code) = run_install_script("0", true, false, None);
+        assert_eq!(code, 0);
+        assert_eq!(
+            said.lines().collect::<Vec<_>>(),
+            [
+                "hushrun build pull token=pull-token",
+                "hushrun fetch token=pull-token"
+            ],
+            "{said}"
+        );
+        // As a user with sudo that needs no password: the pull through sudo, by its path, with
+        // the token kept; fetch as the user.
+        let (said, code) = run_install_script("1000", true, false, None);
+        assert_eq!(code, 0);
+        let lines: Vec<&str> = said.lines().collect();
+        assert_eq!(lines[0], "sudo -n true", "{said}");
+        assert!(
+            lines[1].starts_with(
+                "sudo -n --preserve-env=HUSHRUN_REGISTRY_TOKEN,HUSHRUN_BACKEND,HUSHRUN_HOST /"
+            ) && lines[1].ends_with("/bin/hushrun build pull"),
+            "{said}"
+        );
+        assert_eq!(lines[2], "hushrun build pull token=pull-token", "{said}");
+        assert_eq!(lines[3], "hushrun fetch token=pull-token", "{said}");
+        assert_eq!(lines.len(), 4, "{said}");
+        // A store someone named is theirs: no sudo for the pull.
+        let (said, code) = run_install_script("1000", true, false, Some("/home/me/baked"));
+        assert_eq!(code, 0);
+        assert!(!said.contains("sudo -n --preserve-env"), "{said}");
+        assert!(
+            said.contains("hushrun build pull token=pull-token"),
+            "{said}"
+        );
+        // A failed pull, and no sudo: fetch still runs, and the Build goes on.
+        let (said, code) = run_install_script("1000", false, true, None);
+        assert_eq!(code, 0);
+        assert_eq!(
+            said.lines().collect::<Vec<_>>(),
+            [
+                "hushrun build pull token=pull-token",
+                "hushrun fetch token=pull-token"
+            ],
+            "{said}"
         );
     }
     // covers: C-145, C-168

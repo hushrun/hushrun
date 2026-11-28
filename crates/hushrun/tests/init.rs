@@ -6709,6 +6709,8 @@ fn init_writes_agent_cloud_hooks_only_for_the_clouds_named() {
         "no flag, no hooks"
     );
     assert!(!r.repo.join(".cursor/hooks.json").exists());
+    assert!(!r.repo.join(".cursor/hushrun-install.sh").exists());
+    assert!(!r.repo.join(".cursor/environment.json").exists());
 
     let out = ran(
         r.hushrun(&fake),
@@ -6733,6 +6735,44 @@ fn init_writes_agent_cloud_hooks_only_for_the_clouds_named() {
         settings,
         "only the named cloud"
     );
+    // ADR 0164: Cursor's Build runs the install script, which pulls before it fetches.
+    let script = r.read(".cursor/hushrun-install.sh");
+    assert!(script.contains("build pull"), "{script}");
+    assert!(script.contains("hushrun fetch"), "{script}");
+    assert!(!script.contains("npx"), "{script}");
+    let environment: serde_json::Value =
+        serde_json::from_str(&r.read(".cursor/environment.json")).unwrap();
+    assert_eq!(environment["install"], "sh .cursor/hushrun-install.sh");
+    // A second init has nothing to change.
+    let written: Vec<String> = [
+        ".cursor/hooks.json",
+        ".cursor/hushrun-install.sh",
+        ".cursor/environment.json",
+    ]
+    .iter()
+    .map(|path| r.read(path))
+    .collect();
+    let out = ran(
+        r.hushrun(&fake),
+        &[
+            "init",
+            "--local",
+            "--yes",
+            "--no-run",
+            "--agent-clouds",
+            "cursor",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    let again: Vec<String> = [
+        ".cursor/hooks.json",
+        ".cursor/hushrun-install.sh",
+        ".cursor/environment.json",
+    ]
+    .iter()
+    .map(|path| r.read(path))
+    .collect();
+    assert_eq!(again, written);
 }
 
 // covers: C-145, C-168 (ADR 0161: init writes Claude Code's session-start hook with a timeout,
@@ -6818,4 +6858,7 @@ fn a_package_json_without_hushrun_gets_hooks_that_run_hushrun_from_path() {
         hooks.contains(&format!("\"{runner} flush -q || true\"")),
         "{hooks}"
     );
+    // The install script runs hushrun from PATH, whatever package.json holds.
+    let script = r.read(".cursor/hushrun-install.sh");
+    assert!(!script.contains("npx"), "{script}");
 }

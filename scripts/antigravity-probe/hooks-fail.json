@@ -1,0 +1,11 @@
+{
+  "hushrun-probe": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "sh -c 'for d in \"$PWD\" \"$(git rev-parse --show-toplevel 2>/dev/null)\" \"$HOME\"/* /home/antigravity/* /workspace /workspace/*; do if [ -f \"$d/scripts/antigravity-probe/hook.sh\" ]; then exec sh \"$d/scripts/antigravity-probe/hook.sh\" SessionStart fail; fi; done; echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) SessionStart fail hook.sh-not-found cwd=$PWD\" >> \"$HOME/.probe-hooks.log\"; echo \"{\\\"injectSteps\\\":[{\\\"systemMessage\\\":{\\\"systemMessage\\\":\\\"PROBE-NOSCRIPT: the probe hook ran from $PWD but found no scripts/antigravity-probe/hook.sh\\\"}}]}\"'",
+        "timeout": 30
+      }
+    ]
+  }
+}
