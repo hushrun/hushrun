@@ -852,7 +852,7 @@ jobs:
 
   # The recipes (§15), the reusable workflow, what `hushrun adopt` writes (its golden files) and
   # these workflows pass actionlint, with shellcheck on run scripts (M6, M14), and GitLab's
-  # install script and the maintainers' scripts pass shellcheck (M9).
+  # install script, the Antigravity setup recipe and the maintainers' scripts pass shellcheck (M9).
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
@@ -862,7 +862,7 @@ jobs:
           persist-credentials: false
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - run: '"$(go env GOPATH)/bin/actionlint" recipes/github/*.yml .github/workflows/*.yml testdata/adopt/*/.github/workflows/*.yml'
-      - run: shellcheck -s sh recipes/gitlab/install-hushrun.sh scripts/verify.sh scripts/hooks/pre-push
+      - run: shellcheck -s sh recipes/gitlab/install-hushrun.sh recipes/agent-clouds/antigravity-env-setup.sh scripts/verify.sh scripts/hooks/pre-push
       - run: shellcheck scripts/release.sh
 
   deny:

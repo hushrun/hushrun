@@ -268,3 +268,34 @@ fn the_recipes_call_the_reusable_workflow() {
         );
     }
 }
+
+// covers: K-14
+#[test]
+fn the_package_store_recipe_publishes_from_the_default_branch_alone() {
+    let recipe = yaml("recipes/github/packages-bake.yml");
+    assert_eq!(
+        recipe["on"]["push"]["branches"],
+        serde_json::json!(["main"])
+    );
+    assert!(recipe["on"].get("pull_request").is_none());
+    let job = &recipe["jobs"]["bake"];
+    // By hand too, but only on the default branch: `-latest` moves only from there.
+    assert_eq!(
+        job["if"],
+        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+    );
+    // hushrun's registry grants the push to the job's ID token, which also signs the store; no
+    // registry token of the repository's own is needed.
+    assert_eq!(recipe["permissions"]["id-token"], "write");
+    assert!(recipe["permissions"].get("packages").is_none());
+    let bake = steps(job)
+        .into_iter()
+        .find(|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|r| r.contains("hushrun packages bake --oci hushrun -- "))
+        })
+        .expect("a step bakes the package store into hushrun's registry");
+    assert!(bake.get("env").is_none(), "{bake}");
+    assert_eq!(recipe["concurrency"]["cancel-in-progress"], false);
+}
