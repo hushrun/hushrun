@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-28
+
 ### Changed
 
 - **Rust tests one by one on a fresh machine** ([ADR 0162](docs/adr/0162-rust-tests-listed-before-the-run.md),
