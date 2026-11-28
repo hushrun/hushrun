@@ -14,6 +14,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
   `hushrun hook session-start` says `none published yet` for such a step instead of `failed (exit
   1)`, so a session in a repository that hasn't baked one isn't told a step failed. Other failures
   still exit 1.
+- **`hushrun hook session-start` pulls the package store** (C-168): `packages pull -q` runs
+  between `build pull` and `fetch`, within the same budget, and the `Setup:` line names it.
 
 ### Added
 
@@ -40,11 +42,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
   gains `image`. The backend's registry doesn't take package stores yet: `--oci hushrun` says so
   and names the way that works today, which is a registry of your own plus `HUSHRUN_PACKAGES_IMAGE`
   in the sandbox.
-
-### Changed
-
-- **`hushrun hook session-start` pulls the package store** (C-168): `packages pull -q` runs
-  between `build pull` and `fetch`, within the same budget, and the `Setup:` line names it.
+- **Cursor's Build starts with the baked store and the newest results**
+  ([ADR 0164](docs/adr/0164-a-cursor-build-that-starts-warm.md), C-145).
+  `hushrun init --agent-clouds cursor` writes `.cursor/hushrun-install.sh` and points
+  `.cursor/environment.json`'s `install` at it, after the command already there. Cursor runs that
+  script while it builds the environment, so a new agent boots with `/hushrun` and fetched results
+  on disk. The pull needs root or passwordless sudo. The Dockerfile recipe no longer pulls: a pull
+  in a layer would stay until the Dockerfile changed. The `stop` hook is unchanged.
 
 ## [0.21.1] - 2026-11-28
 

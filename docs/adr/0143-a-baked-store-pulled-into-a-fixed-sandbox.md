@@ -3,7 +3,7 @@
 - **Status:** proposed; built
 - **Date:** 2026-11-23
 - **Rules:** B-240 and C-145 new; B-63 to B-67 and B-70 read
-- **Amended by:** [0148](0148-a-pull-that-says-what-it-pulled.md), [0161](0161-a-session-start-that-warms-and-tells.md)
+- **Amended by:** [0148](0148-a-pull-that-says-what-it-pulled.md), [0161](0161-a-session-start-that-warms-and-tells.md), [0164](0164-a-cursor-build-that-starts-warm.md)
 
 ## Context
 
