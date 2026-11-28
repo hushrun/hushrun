@@ -334,8 +334,9 @@ pub struct WhyArgs {
     /// The check, as `hushrun run NAME` names it.
     pub check: CheckName,
 
-    /// The test file, from here or the repository's root; for go test, a package's directory or
-    /// one of its test files. With `tests.unit: test`, one of its tests: `TEST_FILE::TEST`.
+    /// The test file, from here, or from the repository's root when nothing is at that path from
+    /// here; for go test, a package's directory or one of its test files. With `tests.unit: test`,
+    /// one of its tests: `TEST_FILE::TEST`.
     #[arg(value_name = "TEST_FILE")]
     pub unit: String,
 

@@ -132,6 +132,12 @@ narrower than can be shown.
   per crate, kept by that crate's inputs, would index only what changed.
 - **Finer keys.** A test's key is made of whole files. Keying by the items it reaches would let a
   change to a function it doesn't reach, in a file it does, leave it reusable.
+- **Comments.** A comment changes a file's bytes, so it runs every test that reaches the file. A
+  key that ignored comments can't be sound when a line moves (`line!()`, `Location::caller()`,
+  a panic's location), for a doc comment, or inside a macro's input
+  (`proc_macro::Span::source_text`). What is left, a comment that moves no token, was measured
+  and not built: see
+  [the measurements](../validation/rust-tests-one-by-one.md#why-a-comment-still-changes-a-tests-key).
 - **Lists a repository extends.** `HYGIENIC` (procedural macro crates whose output names only
   absolute paths and its input) and `OWN_METHODS` (crates whose `macro_rules!` bodies call methods
   only on their own types) are hushrun's own trust assumptions, in code and in C-150. A

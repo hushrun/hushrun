@@ -152,6 +152,67 @@ the same 3,533 tests nextest ran. The fresh store's rust-analyzer index took 47 
 map 5 seconds more, both before COMMAND now; 0.20.1 pays the index after COMMAND instead, to
 record each test's key. Both checks include it.
 
+## A comment in a web server ran three tests in four
+
+Measured on 2026-11-28 with hushrun 0.21.0 on another workspace: a web server, one package of 96
+source files, with 972 tests in 63 test binaries. 176 are unit tests of its library and 796 are
+integration tests, nearly all of which build the whole application (its configuration and its
+router) and send it requests in the test's own process. None starts a binary, so the map narrows
+all 972.
+
+After a run that passed, two lines of comment were added at the end of one module, a file whose
+functions request handlers call and one of whose constants the configuration reads:
+
+| What ran | Tests run | Reused |
+| --- | --- | --- |
+| The whole suite, nothing recorded yet | 972 | 0 |
+| After the comment | 746 | 226 |
+
+The map is right, and it is why they ran. This machine's store keeps each test's list:
+
+| Tests | Their lists hold the changed file | Source files in a list |
+| --- | --- | --- |
+| 176 unit tests of the library | 21 | 5 on average, 93 at most |
+| 796 integration tests | 737 | 88 of the 96 on average; 737 hold 80 or more |
+
+A test that builds the application's router can reach every handler the router names, and through
+them nearly every module. The 59 integration tests whose lists don't hold the file (tests of migrations among them) could be
+reused, as could the unit tests that reach nothing of it: 8 of the library's 176 ran, the audit's
+among them. `hushrun why` says the same of each:
+`… runs: it read src/<module>.rs, which changed`.
+
+So for a server tested through its router, a change to any module the router reaches runs every
+such test. The map narrows unit tests and tests of one module's functions. Finer keys (by the
+items a test reaches, ADR 0145's follow-up) wouldn't help here either: the handlers are reached.
+
+### Why a comment still changes a test's key
+
+A test's key holds the bytes of each file it reaches (C-146), so a comment changes it. A key that
+ignored comments was considered and not built, since no form of it is both sound and worth its
+cost:
+
+- **A comment that moves a line can fail a test.** `line!()`, `column!()`, a panic's location and
+  `Location::caller()` in a `#[track_caller]` function give the line to the running code, and
+  error types and log records carry it. A test that compares such a text
+  (`assert_eq!(format!("failed at line {}", here()), "failed at line 8")`, `here` returning
+  `Location::caller().line()`) passes, and fails once a comment line is added above it: tried
+  with rustc 1.94. The map can't show that no code a test reaches does this, in a dependency
+  included. A skip counts as a pass, so a key must change when a line moves.
+- **A doc comment is code.** `///` and `//!` are `#[doc]` attributes, which macros read and
+  rustdoc runs.
+- **A procedural macro can read comments.** `proc_macro::Span::source_text` gives a macro the
+  source behind its input, comments included, so a comment inside a macro's input, or inside an
+  item an attribute or a derive is given, can change what it expands to.
+- **A file read as text** (`include_str!`, `include_bytes!`, `include!`) is its bytes
+  ([amendment 1](../adr/0145-rust-tests-by-a-static-map.md#amendment-1-2026-11-27-files-read-at-compile-time)).
+
+What is left is a comment that moves no token, outside every macro's input and every item with an
+attribute macro or a derive: text changed inside a comment, a comment added at the end of a line
+or of the file. That would have kept the keys in the measurement above, whose comment was at the
+end of the file, but not after the commoner edit, a comment line added above a function. It needs
+a second hash of each source through the keys, this machine's store and `hushrun why`. It is left
+as a proposal.
+
 ## A wrong reuse, found and fixed
 
 A test that reads a source as text, `include_str!("../src/api/mod.rs")`, was reused after a
@@ -184,6 +245,10 @@ file, and no crate's dep-info names one that isn't its module.
 
 ## Proposals
 
+- **Keys that ignore a comment that moves no token.** See
+  [above](#why-a-comment-still-changes-a-tests-key): sound only for a comment outside every
+  macro's input whose change leaves every token on its line and column, which leaves out a comment
+  line added or removed anywhere but at the end of a file.
 - **C-151's string rule.** A string that starts with `CARGO_BIN_EXE_` counts as a lookup of a
   binary even where it is a prefix compared against (`starts_with`, `strip_prefix`) or kept in a
   list of prefixes. Leaving those out, or a marker for them, would narrow the 143 tests of
