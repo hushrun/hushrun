@@ -1237,6 +1237,13 @@ hushrun keeps it in its cache, so a run on files already indexed doesn't start r
 Plain `cargo test` starts each binary once for all its tests, so it keeps reusing whole test
 binaries.
 
+A test's key holds each file it can reach, whole. A comment changes the file, so it runs the tests
+that reach it: a comment that moves a line can change what `line!()` or a panic's location gives a
+test. A test that builds a whole application, such as a web server's router, reaches nearly every
+module, so a change to any of them runs it; unit tests and tests of one module narrow most
+([measured](../validation/rust-tests-one-by-one.md#a-comment-in-a-web-server-ran-three-tests-in-four)).
+`hushrun why NAME TEST_FILE::TEST` names the file that changed for one test.
+
 A test that starts a program from a variable (`Command::new(path)`) keeps its binary's reads, since
 that program could be one of your binaries. A helper that only ever starts other programs, such as
 the real test runner of an adapter test, can say so with a marker. A wrong marker hides a failure,
