@@ -21,6 +21,13 @@ use crate::exit::{CmdResult, Exit, Failure};
 /// so it counts as named (C-13), as `--image` does.
 pub(crate) const IMAGE_VARIABLE: &str = "HUSHRUN_PACKAGES_IMAGE";
 
+/// The variable that holds a pull token for the package store's registry alone: a package store
+/// on a registry of the team's own, next to a baked store on hushrun's, needs a token of its own.
+pub(crate) const TOKEN_VARIABLE: &str = "HUSHRUN_PACKAGES_REGISTRY_TOKEN";
+
+/// The pull tokens `packages pull` reads, first set first: its own, then `build pull`'s.
+const PULL_TOKENS: &[&str] = &[TOKEN_VARIABLE, build_pull::PULL_TOKEN];
+
 pub fn run(global: &GlobalOpts, args: &PackagesPullArgs) -> CmdResult {
     let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("packages pull: {why}"));
     let usage = |why: String| Failure::new(Exit::Usage, anyhow!("packages pull: {why}"));
@@ -38,7 +45,8 @@ pub fn run(global: &GlobalOpts, args: &PackagesPullArgs) -> CmdResult {
         IMAGE_VARIABLE
     };
     let (image, credential) =
-        build_pull::image_and_credential(named.as_deref(), flag, root.as_deref()).map_err(usage)?;
+        build_pull::image_and_credential(named.as_deref(), flag, root.as_deref(), PULL_TOKENS)
+            .map_err(usage)?;
     let platform = args.platform.clone().unwrap_or_else(build_pull::platform);
     let tag = args
         .tag

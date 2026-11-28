@@ -395,8 +395,9 @@ pub enum PackagesCommand {
     /// /hushrun-packages), from its registry: for a sandbox with no Dockerfile.
     ///
     /// It pulls `<registry>/<org>/<name>:hushrun-packages-<platform>-latest` (or the image
-    /// HUSHRUN_PACKAGES_IMAGE names) with a pull token in HUSHRUN_REGISTRY_TOKEN, the backend's
-    /// credential here, or nothing for a public repository; checks every file, and the signature
+    /// HUSHRUN_PACKAGES_IMAGE names) with a pull token in HUSHRUN_PACKAGES_REGISTRY_TOKEN, else
+    /// HUSHRUN_REGISTRY_TOKEN, else the backend's credential here, or nothing for a public
+    /// repository; checks every file, and the signature
     /// as K-7 asks when hushrun.yaml names signers of baked stores; and only then replaces what was
     /// there. When the folder holds that store already, it downloads nothing.
     Pull(PackagesPullArgs),

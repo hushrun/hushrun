@@ -242,8 +242,11 @@ for one store: each would be another image of the same fixed tag, and the first 
 **K-15 `hushrun packages pull`.** [ADR 0163] It puts the repository's newest package store where a
 run reads one, with B-240's rules and code but for what follows. The image is `--image`, else
 `HUSHRUN_PACKAGES_IMAGE`, else B-240's; the tag `--tag`, else `hushrun-packages-<platform>-latest`
-for `--platform` or this machine's. The credential is B-240's, and `HUSHRUN_PACKAGES_IMAGE` counts
-as named, as `--image` does (C-13). It reads the manifest and the config, whose label (K-14) names
+for `--platform` or this machine's. The credential is B-240's, but for the pull token:
+`HUSHRUN_PACKAGES_REGISTRY_TOKEN` when it is set and not empty, else `HUSHRUN_REGISTRY_TOKEN`, so a
+package store on a registry of the team's own and a baked store on hushrun's each get their own;
+`build pull` never reads `HUSHRUN_PACKAGES_REGISTRY_TOKEN`. Either goes only where B-240's token
+goes, and `HUSHRUN_PACKAGES_IMAGE` counts as named, as `--image` does (C-13). It reads the manifest and the config, whose label (K-14) names
 the store's identity and platform; `--resolve` prints `<image>@sha256:<64 hex>` and writes nothing.
 When the label's identity is the destination's `packages.json` `identity` and the destination
 passes K-1 by names, it downloads nothing and says `hushrun: <folder> holds <image>:<tag>

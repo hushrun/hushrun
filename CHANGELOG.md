@@ -29,8 +29,10 @@ codes, environment variables, event formats, the ledger layout) are listed first
   downloads nothing. It has `--image`, `--tag`, `--platform`, `--resolve`, `--force`,
   `--require-signed` and `-q`. New contract: `hushrun.packages-pull/v1`
   (`docs/schemas/packages-pull.v1.schema.json`), the step outputs `hushrun-image-digest` and
-  `hushrun-packages-identity`, and the variable `HUSHRUN_PACKAGES_IMAGE`, which names the image
-  when `--image` doesn't.
+  `hushrun-packages-identity`, the variable `HUSHRUN_PACKAGES_IMAGE`, which names the image
+  when `--image` doesn't, and the variable `HUSHRUN_PACKAGES_REGISTRY_TOKEN`, a pull token for the
+  package store's registry alone, read before `HUSHRUN_REGISTRY_TOKEN`, so a package store on a
+  registry of your own and a baked store on hushrun's each get their own token.
 - **`hushrun packages bake --oci REPOSITORY | --oci-dir DIR`** (K-14): also publishes the store as
   an image of one layer, the archive `--tar` writes byte for byte, so the same store uploads
   nothing again. It is tagged `hushrun-packages-<platform>-<identity>` and, from CI on the default

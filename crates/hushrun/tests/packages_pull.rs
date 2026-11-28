@@ -34,6 +34,7 @@ fn fixture() -> Repo {
         "HUSHRUN_PACKAGES",
         "HUSHRUN_PACKAGES_IMAGE",
         "HUSHRUN_REGISTRY_TOKEN",
+        "HUSHRUN_PACKAGES_REGISTRY_TOKEN",
     ])
 }
 
@@ -46,11 +47,31 @@ struct LayoutRegistry {
 
 impl LayoutRegistry {
     fn serve(layout: &Path) -> LayoutRegistry {
+        LayoutRegistry::serve_to(layout, None)
+    }
+
+    /// As [`LayoutRegistry::serve`], but answering only a request with HTTP Basic credentials
+    /// whose password is `password`, and asking for them otherwise.
+    fn serve_to(layout: &Path, password: Option<&str>) -> LayoutRegistry {
+        use base64::Engine as _;
         use hushrun_testkit::http::{Reply, Response, Server};
         let layout = layout.to_path_buf();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let counted = sent.clone();
+        let expected = password.map(|p| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("hushrun:{p}"))
+            )
+        });
         let server = Server::start(move |request| {
+            if let Some(expected) = &expected
+                && request.header("authorization") != Some(expected.as_str())
+            {
+                return Reply::Send(
+                    Response::new(401).header("www-authenticate", "Basic realm=\"test\""),
+                );
+            }
             let blob = |digest: &str| {
                 std::fs::read(
                     layout
@@ -320,6 +341,97 @@ fn a_store_published_as_an_image_is_pulled_into_a_fresh_sandbox_once() {
         std::fs::read(sandbox.join("packages.json")).unwrap(),
         before
     );
+}
+
+// covers: K-15
+#[test]
+fn a_package_store_on_another_registry_is_pulled_with_its_own_token() {
+    let r = fixture();
+    r.write("hushrun.yaml", &policy(None));
+    let cache = r.root.join("m2");
+    let jar = cache.join("g/n/1/n-1.jar");
+    std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+    std::fs::write(&jar, b"jar").unwrap();
+    let layout = r.root.join("layout");
+    let baked = r
+        .hushrun()
+        .args([
+            "packages",
+            "bake",
+            "--no-build",
+            "--format",
+            "json",
+            "--oci-dir",
+        ])
+        .arg(&layout)
+        .arg("--harvest")
+        .arg(format!("maven={}", cache.display()))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&baked.stderr).into_owned();
+    assert!(baked.status.success(), "{stderr}");
+    let said: Value = serde_json::from_slice(&baked.stdout).expect(&stderr);
+    let fixed = said["image"]["tags"][0].as_str().unwrap().to_string();
+
+    // The team's registry takes only its own token, never the one for hushrun's registry.
+    let registry = LayoutRegistry::serve_to(&layout, Some("packages-token"));
+    let image = format!("{}/acme/shop", registry.server.addr());
+    let run = |command: &str, tag: &str, env: &[(&str, &str)]| {
+        let mut cmd = r.hushrun();
+        cmd.args([command, "pull", "--insecure", "--resolve", "--tag", tag])
+            .env("HUSHRUN_PACKAGES_IMAGE", &image)
+            .args(["--image", &image]);
+        for (name, value) in env {
+            cmd.env(name, value);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let packages = |env: &[(&str, &str)]| run("packages", &fixed, env);
+
+    // Its own variable, next to build pull's token for another registry.
+    let (code, err) = packages(&[
+        ("HUSHRUN_PACKAGES_REGISTRY_TOKEN", "packages-token"),
+        ("HUSHRUN_REGISTRY_TOKEN", "build-token"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    // Unset, or empty: build pull's token, as before.
+    let (code, err) = packages(&[("HUSHRUN_REGISTRY_TOKEN", "packages-token")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, err) = packages(&[
+        ("HUSHRUN_PACKAGES_REGISTRY_TOKEN", " "),
+        ("HUSHRUN_REGISTRY_TOKEN", "packages-token"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    // Set, it wins: the other token isn't tried.
+    let (code, err) = packages(&[
+        ("HUSHRUN_PACKAGES_REGISTRY_TOKEN", "build-token"),
+        ("HUSHRUN_REGISTRY_TOKEN", "packages-token"),
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        !err.contains("packages-token") && !err.contains("build-token"),
+        "{err}"
+    );
+
+    // build pull never reads it: refused with it alone (exit 1), and with its own token it gets as
+    // far as the tag, which names nothing (exit 12).
+    let tag = "hushrun-plan9-x64-latest";
+    let (code, err) = run(
+        "build",
+        tag,
+        &[("HUSHRUN_PACKAGES_REGISTRY_TOKEN", "packages-token")],
+    );
+    assert_eq!(code, 1, "{err}");
+    let (code, err) = run(
+        "build",
+        tag,
+        &[("HUSHRUN_REGISTRY_TOKEN", "packages-token")],
+    );
+    assert_eq!(code, 12, "{err}");
 }
 
 // covers: K-14

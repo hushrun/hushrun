@@ -27,8 +27,9 @@ package store, into `/hushrun-packages`, before anything installs) and `hushrun 
 publishes the package store with `hushrun packages bake --oci REPOSITORY … -- COMMAND` on the
 default branch (ADR 0163). The backend's registry doesn't take package stores yet, so publish to a
 registry of your own (`--oci ghcr.io/acme/shop`) and set `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`
-in the environment's settings. Add `HUSHRUN_REGISTRY_TOKEN` there too if that registry needs a
-token. A sandbox that doesn't run as root sets `HUSHRUN_PACKAGES_LOWER` to a folder it may write.
+in the environment's settings. Add `HUSHRUN_PACKAGES_REGISTRY_TOKEN` there too if that registry
+needs a token; `HUSHRUN_REGISTRY_TOKEN` stays the one for hushrun's registry. A sandbox that
+doesn't run as root sets `HUSHRUN_PACKAGES_LOWER` to a folder it may write.
 
 A dev container gets hushrun from its feature, `ghcr.io/hushrun/features/hushrun:1` (`features/`).
 

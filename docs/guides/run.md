@@ -889,7 +889,8 @@ checks every file and the signature before it swaps the store in (ADR 0163):
 ```sh
 # CI, on the default branch: bake and publish (one layer, tagged hushrun-packages-<platform>-latest).
 hushrun packages bake --oci ghcr.io/acme/shop -- ./gradlew test
-# The sandbox: pull it into /hushrun-packages (HUSHRUN_PACKAGES_IMAGE names the image too).
+# The sandbox: pull it into /hushrun-packages (HUSHRUN_PACKAGES_IMAGE names the image too, and
+# HUSHRUN_PACKAGES_REGISTRY_TOKEN, else HUSHRUN_REGISTRY_TOKEN, is the pull token).
 hushrun packages pull --image ghcr.io/acme/shop
 ```
 

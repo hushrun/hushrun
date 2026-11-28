@@ -44,8 +44,11 @@ publishes a package store to a registry, and nothing pulls one. `hushrun hook se
    (`build_pull::{image_and_credential, Source, Unpack, untar, swap}`), not a copy of it:
    - the image is `--image`, else `HUSHRUN_PACKAGES_IMAGE`, else the repository's on its backend's
      registry; the tag is `--tag`, else `hushrun-packages-<platform>-latest`;
-   - the credential is the same: `HUSHRUN_REGISTRY_TOKEN`, the backend's own token only to its own
-     registry, or none. The token goes to hushrun's registry, an image `--image` or
+   - the credential is the same: a pull token, the backend's own token only to its own registry,
+     or none. The pull token is `HUSHRUN_PACKAGES_REGISTRY_TOKEN` when set, else
+     `HUSHRUN_REGISTRY_TOKEN`: until the backend's registry takes package stores, a private
+     repository pulls its baked store from hushrun's registry and its package store from the team's,
+     and one variable can't hold both tokens. `build pull` never reads the new one. The token goes to hushrun's registry, an image `--image` or
      `HUSHRUN_PACKAGES_IMAGE` names, or a backend the environment named, never a registry a
      repository's file chose (C-13). The variable counts as named because whoever set up the sandbox
      set it, as with `--image`;
@@ -90,7 +93,8 @@ That contract belongs in hushrun/cloud's `docs/contracts`. This change could not
 repository, so neither the endpoint nor the CLI's call to it exists yet. Until both do:
 
 - publishing goes to any other registry (`--oci ghcr.io/acme/shop`);
-- sandboxes pull it with `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`. In Claude Code on the web that
+- sandboxes pull it with `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`, and
+  `HUSHRUN_PACKAGES_REGISTRY_TOKEN` when that image is private. In Claude Code on the web that
   variable goes in the environment's settings, and session start's step then pulls it;
 - with no variable set, the step looks at the backend's registry, finds no `hushrun-packages-…`
   tag, and the `Setup:` line says `packages pull none published yet` within a second: both pulls

@@ -174,8 +174,13 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
         .or_else(|| baked::named(&|name| hushrun_ci::var_os(name)))
         .unwrap_or_else(|| PathBuf::from(baked::DEFAULT_LOWER));
     let root = crate::cmd::login::repository_root(global);
-    let (image, credential) =
-        image_and_credential(args.image.as_deref(), "--image", root.as_deref()).map_err(usage)?;
+    let (image, credential) = image_and_credential(
+        args.image.as_deref(),
+        "--image",
+        root.as_deref(),
+        &[PULL_TOKEN],
+    )
+    .map_err(usage)?;
     let tag = args
         .tag
         .clone()
@@ -337,13 +342,17 @@ fn said(global: &GlobalOpts, pulled: &Pulled) -> CmdResult {
 /// What the line says of a store when `hushrun.yaml` names no signer of baked stores.
 const UNSIGNED: &str = "hushrun.yaml names no signer of baked stores, so a run reuses it as the backend vouches, or with HUSHRUN_BUILD_LOWER_UNTRUSTED=1";
 
+/// The variable that holds a pull token for `build pull` (B-240).
+pub(crate) const PULL_TOKEN: &str = "HUSHRUN_REGISTRY_TOKEN";
+
 /// The image to pull and the credential to pull it with: `given` (named by `--image`, or by a
-/// variable `flag` names), else the repository's on its backend's registry; a pull token, else the
-/// backend's credential here, else none.
+/// variable `flag` names), else the repository's on its backend's registry; a pull token (the
+/// first of `tokens` that is set and not empty), else the backend's credential here, else none.
 pub(crate) fn image_and_credential(
     given: Option<&str>,
     flag: &str,
     root: Option<&Path>,
+    tokens: &[&'static str],
 ) -> Result<
     (
         hushrun_artifact::Repository,
@@ -356,10 +365,13 @@ pub(crate) fn image_and_credential(
         username: "hushrun".into(),
         password: token,
     };
-    let pull_token = hushrun_ci::var("HUSHRUN_REGISTRY_TOKEN")
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
+    let pull_token = tokens.iter().find_map(|&name| {
+        hushrun_ci::var(name)
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .map(|t| (name, t))
+    });
     let backend = match crate::results::Backend::select(root) {
         Ok(crate::results::Selection::On(backend)) => Some(backend),
         _ => None,
@@ -396,12 +408,12 @@ pub(crate) fn image_and_credential(
         })
     );
     let hushruns = image.host == crate::hosted::registry_host(&crate::hosted::origin());
-    if let Some(token) = pull_token {
+    if let Some((name, token)) = pull_token {
         if given.is_some() || hushruns || env_named {
             return Ok((image, basic(token)));
         }
         return Err(format!(
-            "HUSHRUN_REGISTRY_TOKEN goes only to a registry someone named, and {} is named by this repository's files: pass {flag} {image}, or set HUSHRUN_BACKEND",
+            "{name} goes only to a registry someone named, and {} is named by this repository's files: pass {flag} {image}, or set HUSHRUN_BACKEND",
             image.host
         ));
     }
