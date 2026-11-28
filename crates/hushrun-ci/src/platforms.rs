@@ -63,7 +63,8 @@ pub struct Platform {
     /// The coding agent it runs, as C-23 names it: `Claude Code`.
     pub agent: &'static str,
     pub kind: Kind,
-    /// Any one of them, set, is the row.
+    /// Any one of them, set, is the row. A platform row may have none, while none is known:
+    /// `HUSHRUN_SANDBOX` alone names it.
     pub markers: &'static [Marker],
     pub evidence: Evidence,
     /// Where that platform lets a team allow hosts, for `hushrun doctor`; `None` where the
@@ -87,6 +88,19 @@ impl Platform {
 /// matches is the one. A platform runs one of the agents below it (Claude Code on the web sets
 /// `CLAUDECODE` too), and its row is the more exact.
 pub const PLATFORMS: &[Platform] = &[
+    // No variable is known to mark Antigravity's Remote Agents' environment, and a weak one, such
+    // as its home directory, would claim other machines (ADR 0140 turned `IS_SANDBOX` down for
+    // that): until a probe finds one, `HUSHRUN_SANDBOX=antigravity-remote` alone reaches it. It
+    // comes before the `antigravity` agent row, which its sandbox may set too.
+    Platform {
+        id: "antigravity-remote",
+        name: "Antigravity Remote Agents",
+        agent: "Antigravity",
+        kind: Kind::Platform,
+        markers: &[],
+        evidence: Evidence::Unconfirmed,
+        allowlist: Some("the Remote Agents environment's network settings, where it limits egress"),
+    },
     Platform {
         id: "claude-code-web",
         name: "Claude Code on the web",
@@ -254,7 +268,24 @@ mod tests {
                 .all(|p| p.kind == Kind::Agent),
             "platforms come before agents"
         );
-        assert!(PLATFORMS.iter().all(|p| !p.markers.is_empty()));
+        assert!(
+            PLATFORMS.iter().all(|p| !p.markers.is_empty()
+                || (p.kind == Kind::Platform && p.evidence == Evidence::Unconfirmed)),
+            "only an unconfirmed platform goes without a marker, named by HUSHRUN_SANDBOX"
+        );
+    }
+
+    // covers: C-140
+    #[test]
+    fn antigravitys_remote_agents_have_no_marker_yet() {
+        let remote = by_id("antigravity-remote").unwrap();
+        assert_eq!(remote.kind, Kind::Platform);
+        assert_eq!(remote.agent, "Antigravity");
+        assert!(remote.markers.is_empty());
+        assert!(!remote.matches(&Env::from_pairs([("HOME", "/home/antigravity")])));
+        let env = Env::from_pairs([("ANTIGRAVITY_AGENT", "1")]);
+        assert_eq!(of(&env).map(|p| p.id), Some("antigravity"));
+        assert_eq!(hosted(&env), None);
     }
 
     // covers: C-140
