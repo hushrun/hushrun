@@ -233,7 +233,7 @@ pub fn run(app: &App<'_>, args: &AttestArgs) -> CmdResult {
     }
     ci.report(&outputs, &summary)?;
     match app.global.format {
-        Format::Text => {
+        Format::Text | Format::Antigravity => {
             let mut text = String::new();
             for (kind, keys) in &written {
                 let _ = writeln!(text, "recorded {kind}: {}", keys[0]);

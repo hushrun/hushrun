@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use hushrun::{app, cli, cmd, environment, exit, notice, units};
+use hushrun::{app, cli, cmd, environment, exit, notice, output, units};
 
 use cli::{Cli, ColorWhen, Command, GlobalOpts};
 use exit::{Exit, Failure};
@@ -124,6 +124,18 @@ fn run(cli: &Cli) -> ExitCode {
     if let Some(stage) = &cli.global.removed_stage {
         eprintln!(
             "error: hushrun 0.9 has no stages: drop `--stage {stage}`; hushrun.yaml's `deploy` holds what a stage's settings held: https://hushrun.com/docs/deploy. Nothing ran"
+        );
+        return Exit::Usage.into();
+    }
+    // \[ADR 0165\] Antigravity's hook output is for the two commands its hooks run.
+    if cli.global.format == output::Format::Antigravity
+        && !matches!(
+            cli.command,
+            Command::Hook(cli::HookCommand::SessionStart(_) | cli::HookCommand::Stop)
+        )
+    {
+        eprintln!(
+            "error: --format antigravity is for `hushrun hook session-start` and `hushrun hook stop`, which Antigravity's hooks run. Nothing ran"
         );
         return Exit::Usage.into();
     }

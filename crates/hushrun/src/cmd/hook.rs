@@ -118,6 +118,7 @@ pub fn run(global: &GlobalOpts, command: &HookCommand) -> CmdResult {
         HookCommand::Uninstall => uninstall(global),
         HookCommand::PrePush(args) => Ok(pre_push(global, args)),
         HookCommand::SessionStart(args) => Ok(crate::cmd::session_start::run(global, args)),
+        HookCommand::Stop => Ok(crate::cmd::hook_stop::run(global)),
     }
 }
 

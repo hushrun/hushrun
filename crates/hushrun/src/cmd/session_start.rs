@@ -12,20 +12,31 @@
 //! background, and the steps after it are skipped. What `hushrun ready` knows comes last, with a
 //! part of the budget kept for it; when the code takes longer to hash than that, a reduced block
 //! says so.
+//!
+//! \[ADR 0165\] It reads the hook's payload on stdin for the workspace's folder. With `--format
+//! antigravity` the block goes out as Google Antigravity's `injectSteps` JSON, the reduced one
+//! too. A start within [`STAMP_MINUTES`] of another on the same commit skips the steps and says
+//! what that one said, and a lock keeps two starts, or a start and a step an earlier one left
+//! running, from pulling at once.
 
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use hushrun_ci::platforms::{Kind, Platform};
 use hushrun_vcs::Snapshot;
 
 use crate::cli::{GlobalOpts, SessionStartArgs};
+use crate::cmd::hook_input;
 use crate::cmd::ready::{self, State, Target};
 use crate::exit::Exit;
+use crate::output::Format;
 use crate::results::{Backend, Credential, Selection};
 
 /// The default budget, in seconds: well under the 60 seconds Claude Code gives a command hook,
@@ -47,8 +58,13 @@ const POLL: Duration = Duration::from_millis(50);
 /// The most checks a line names; the rest are a count.
 const MOST_NAMED: usize = 6;
 
+/// \[ADR 0165\] How long a start's steps stand for another start on the same commit, in
+/// minutes: a subagent's conversation, or one resumed, starts its own hook soon after.
+pub const STAMP_MINUTES: u64 = 10;
+
 /// One step, in the order they run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum Step {
     /// `hushrun build pull` (B-240): the baked compiled code, into `/hushrun`. A public
     /// repository's needs no credential.
@@ -93,8 +109,26 @@ impl Step {
     }
 }
 
+/// Why a step wasn't run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Skip {
+    NoCredential,
+    NoTime,
+}
+
+impl Skip {
+    fn said(self) -> &'static str {
+        match self {
+            Skip::NoCredential => "no credential for the backend",
+            Skip::NoTime => "out of time",
+        }
+    }
+}
+
 /// What became of a step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum Outcome {
     Done,
     /// It ended with this exit code (or none, for a signal).
@@ -102,7 +136,7 @@ pub(crate) enum Outcome {
     /// It couldn't start.
     NotStarted(String),
     /// Not run, for this reason.
-    Skipped(&'static str),
+    Skipped(Skip),
     /// The budget ran out while it ran: it goes on in the background.
     StillRunning,
     /// A pull found no store published under its tag ([`Exit::NotPublished`]): nothing to pull
@@ -117,7 +151,7 @@ impl Outcome {
             Outcome::Failed(Some(code)) => format!("failed (exit {code})"),
             Outcome::Failed(None) => "stopped by a signal".into(),
             Outcome::NotStarted(_) => "couldn't start".into(),
-            Outcome::Skipped(why) => format!("skipped ({why})"),
+            Outcome::Skipped(why) => format!("skipped ({})", why.said()),
             Outcome::StillRunning => "still running in the background".into(),
             Outcome::NotPublished => "none published yet".into(),
         }
@@ -134,9 +168,9 @@ impl Outcome {
 }
 
 /// Why a step is skipped without a credential.
-const NO_CREDENTIAL: &str = "no credential for the backend";
+const NO_CREDENTIAL: Skip = Skip::NoCredential;
 /// Why a step is skipped when the budget is spent.
-const NO_TIME: &str = "out of time";
+const NO_TIME: Skip = Skip::NoTime;
 
 /// The budget: when it began, and when the steps and the whole command end.
 #[derive(Debug, Clone, Copy)]
@@ -212,7 +246,7 @@ fn sharing(root: Option<&Path>) -> Sharing {
 }
 
 /// What `hushrun ready` said, as the context tells it: names of checks only.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Summary {
     /// The commit, short.
     pub code: String,
@@ -353,6 +387,28 @@ pub(crate) fn block(
     text
 }
 
+/// \[ADR 0165\] The block as the hook's format has it: plain text, or Antigravity's
+/// `injectSteps` with the text as one system message. None is what a hook with nothing to say
+/// prints: nothing, or `{}`.
+pub(crate) fn render(format: Format, text: Option<&str>) -> String {
+    match (format, text) {
+        (Format::Antigravity, Some(text)) => {
+            let json = serde_json::json!({
+                "injectSteps": [{
+                    "systemMessage": {
+                        "systemMessage": text.trim_end(),
+                        "metadata": {"source": "hushrun"},
+                    }
+                }]
+            });
+            format!("{json}\n")
+        }
+        (Format::Antigravity, None) => "{}\n".to_string(),
+        (_, Some(text)) => text.to_string(),
+        (_, None) => String::new(),
+    }
+}
+
 /// Whether the block is out: the watchdog and the command print it once between them.
 static SAID: AtomicBool = AtomicBool::new(false);
 
@@ -373,15 +429,15 @@ fn hosted() -> Option<&'static Platform> {
         .filter(|platform| platform.kind == Kind::Platform)
 }
 
-/// Where the steps' output goes: `<cache dir>/session-start.log`, emptied each time.
-fn log_path() -> Option<PathBuf> {
-    let dir = crate::context::cache_dir()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join("session-start.log"))
-}
-
-/// Runs `step` as a child of this hushrun until `until`; past it, the child goes on.
-fn spawn_step(global: &GlobalOpts, log: Option<&Path>, step: Step, until: Instant) -> Outcome {
+/// Runs `step` as a child of this hushrun until `until`; past it, the child goes on. The child
+/// holds `lock` until it ends, wherever this command is by then.
+fn spawn_step(
+    global: &GlobalOpts,
+    log: Option<&Path>,
+    lock: Option<&File>,
+    step: Step,
+    until: Instant,
+) -> Outcome {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(err) => return Outcome::NotStarted(err.to_string()),
@@ -390,7 +446,8 @@ fn spawn_step(global: &GlobalOpts, log: Option<&Path>, step: Step, until: Instan
     if let Some(repo) = &global.repo {
         cmd.arg("-C").arg(repo);
     }
-    cmd.args(step.args()).stdin(Stdio::null());
+    cmd.args(step.args());
+    hold(&mut cmd, lock);
     let output = |cmd: &mut Command| -> std::io::Result<()> {
         let Some(log) = log else {
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
@@ -431,62 +488,249 @@ fn spawn_step(global: &GlobalOpts, log: Option<&Path>, step: Step, until: Instan
     }
 }
 
+/// \[ADR 0165\] Gives the child `lock` as its stdin, so it holds the lock as long as it runs: a
+/// lock taken with `flock` belongs to the open file, which the child's copy keeps open after
+/// this command ends. Without a lock, stdin is null. The steps never read stdin.
+fn hold(cmd: &mut Command, lock: Option<&File>) {
+    match lock.map(File::try_clone) {
+        Some(Ok(file)) => cmd.stdin(file),
+        _ => cmd.stdin(Stdio::null()),
+    };
+}
+
+/// \[ADR 0165\] What a start's steps did, for a start soon after: `<cache dir>/session-start.stamp`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Stamp {
+    /// The repository's root.
+    pub root: PathBuf,
+    /// HEAD and its tree.
+    pub head: String,
+    pub tree: String,
+    pub steps: Vec<(Step, Outcome)>,
+    /// What `ready` said, when it answered in time.
+    pub summary: Option<Summary>,
+    /// When the steps ended, in seconds since the epoch.
+    pub time: u64,
+}
+
+impl Stamp {
+    /// Whether it stands for a start in `root` at `head` (with `tree`) at `now`: the same commit,
+    /// no step left running, and at most [`STAMP_MINUTES`] old.
+    pub(crate) fn stands_for(&self, root: &Path, head: &str, tree: &str, now: u64) -> bool {
+        self.root == root
+            && self.head == head
+            && self.tree == tree
+            && !self
+                .steps
+                .iter()
+                .any(|(_, outcome)| *outcome == Outcome::StillRunning)
+            && now >= self.time
+            && now - self.time <= STAMP_MINUTES * 60
+    }
+
+    fn read(path: &Path) -> Option<Stamp> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+
+    fn write(&self, path: &Path) {
+        let Ok(json) = serde_json::to_vec(self) else {
+            return;
+        };
+        let partial = path.with_extension("stamp.partial");
+        if std::fs::write(&partial, json).is_ok() {
+            let _ = std::fs::rename(&partial, path);
+        }
+    }
+}
+
+fn epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// HEAD and its tree, in `root`.
+fn head_and_tree(root: &Path) -> Option<(String, String)> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD", "HEAD^{tree}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut lines = text.lines();
+    Some((lines.next()?.to_string(), lines.next()?.to_string()))
+}
+
+/// What a start says when the lock is held: the steps of the start that holds it, as its stamp
+/// has them when it left one running, else every step as still running. None starts.
+fn held(
+    stamp: Option<&Stamp>,
+    root: &Path,
+    head: Option<&str>,
+    credential: bool,
+) -> Vec<(Step, Outcome)> {
+    if let Some(stamp) = stamp.filter(|stamp| {
+        stamp.root == root
+            && Some(stamp.head.as_str()) == head
+            && stamp
+                .steps
+                .iter()
+                .any(|(_, outcome)| *outcome == Outcome::StillRunning)
+    }) {
+        return stamp.steps.clone();
+    }
+    STEPS
+        .iter()
+        .map(|&step| {
+            let outcome = if step.needs_credential() && !credential {
+                Outcome::Skipped(NO_CREDENTIAL)
+            } else {
+                Outcome::StillRunning
+            };
+            (step, outcome)
+        })
+        .collect()
+}
+
 /// `hushrun hook session-start`: always [`Exit::Ok`].
 pub fn run(global: &GlobalOpts, args: &SessionStartArgs) -> Exit {
     let start = Instant::now();
+    // Read even where it does nothing, so the hook's writer never waits on a full pipe.
+    let input = hook_input::read();
+    let format = global.format;
     let Some(platform) = hosted() else {
         tracing::debug!("session-start: not a hosted agent's sandbox, so nothing to do");
+        say(&render(format, None));
         return Exit::Ok;
     };
     let budget = Budget::new(start, Duration::from_secs(args.budget));
     let quiet = global.quiet > 0;
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session_start(global, platform, budget, quiet);
+        hook_input::enter_workspace(global, &input);
+        session_start(global, platform, budget, quiet, format);
     }));
     if caught.is_err() {
         tracing::debug!("session-start: stopped short");
     }
+    // Nothing said: a hook that parses stdout still gets what it parses.
+    say(&render(format, None));
     Exit::Ok
 }
 
-fn session_start(global: &GlobalOpts, platform: &'static Platform, budget: Budget, quiet: bool) {
+fn session_start(
+    global: &GlobalOpts,
+    platform: &'static Platform,
+    budget: Budget,
+    quiet: bool,
+    format: Format,
+) {
     let root = crate::cmd::login::repository_root(global);
     let Some(root) = root else {
         tracing::debug!("session-start: not in a repository, so nothing to do");
         return;
     };
     let sharing = sharing(Some(&root));
-    let log = log_path();
-    if let Some(log) = &log {
-        let _ = std::fs::write(log, "");
-    }
-    let steps = run_steps(
-        STEPS,
-        budget,
-        sharing == Sharing::Shared,
-        &Instant::now,
-        &mut |step, until| {
-            let began = Instant::now();
-            let outcome = spawn_step(global, log.as_deref(), step, until);
-            if !quiet {
+    let credential = sharing == Sharing::Shared;
+    let cache = crate::context::cache_dir().filter(|dir| std::fs::create_dir_all(dir).is_ok());
+    let stamp_path = cache.as_ref().map(|dir| dir.join("session-start.stamp"));
+    let stamp = stamp_path.as_deref().and_then(Stamp::read);
+    let commit = head_and_tree(&root);
+    let lock = cache.as_ref().and_then(|dir| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dir.join("session-start.lock"))
+            .ok()
+    });
+    // Taken, or there is no lock to take: this start runs the steps. Never unlocked by hand: an
+    // unlock would free it for a step left running too. It goes when the last copy closes.
+    let locked = lock.as_ref().is_none_or(|file| file.try_lock().is_ok());
+    let note = |line: &str| {
+        if !quiet {
+            eprintln!("hushrun: session-start: {line}");
+        }
+    };
+    let now = epoch_seconds();
+    let standing = locked
+        .then_some(())
+        .and(stamp.as_ref())
+        .zip(commit.as_ref())
+        .filter(|(stamp, (head, tree))| stamp.stands_for(&root, head, tree, now));
+    let (steps, kept) = if let Some((stamp, _)) = standing {
+        note(&format!(
+            "the steps ran {}s ago on this commit, so they are skipped",
+            now - stamp.time
+        ));
+        (stamp.steps.clone(), Some(stamp.summary.clone()))
+    } else if !locked {
+        note("another start's steps, or one it left running, hold the lock, so none starts");
+        (
+            held(
+                stamp.as_ref(),
+                &root,
+                commit.as_ref().map(|(head, _)| head.as_str()),
+                credential,
+            ),
+            None,
+        )
+    } else {
+        let log = cache.as_ref().map(|dir| dir.join("session-start.log"));
+        if let Some(log) = &log {
+            let _ = std::fs::write(log, "");
+        }
+        let steps = run_steps(
+            STEPS,
+            budget,
+            credential,
+            &Instant::now,
+            &mut |step, until| {
+                let began = Instant::now();
+                let outcome = spawn_step(global, log.as_deref(), lock.as_ref(), step, until);
                 let shown = log
                     .as_ref()
                     .filter(|_| !matches!(outcome, Outcome::Done | Outcome::NotPublished))
                     .map(|log| format!(" ({})", log.display()))
                     .unwrap_or_default();
-                eprintln!(
-                    "hushrun: session-start: {} {} in {:.1}s{shown}",
+                note(&format!(
+                    "{} {} in {:.1}s{shown}",
                     step.name(),
                     outcome.said(),
                     began.elapsed().as_secs_f64()
-                );
-            }
-            outcome
-        },
-    );
+                ));
+                outcome
+            },
+        );
+        (steps, None)
+    };
+    let skipped = kept.is_some();
+    // What the steps did, for a start soon after; what `ready` says joins it below. Then the lock
+    // goes, but for a step left running, which holds its own copy.
+    let mut stamp = (locked && !skipped)
+        .then_some(())
+        .zip(commit)
+        .map(|((), (head, tree))| Stamp {
+            root: root.clone(),
+            head,
+            tree,
+            steps: steps.clone(),
+            summary: None,
+            time: epoch_seconds(),
+        });
+    if let (Some(stamp), Some(path)) = (&stamp, &stamp_path) {
+        stamp.write(path);
+    }
+    drop(lock);
     // What it says when `ready` doesn't answer in time: printed by the watchdog, which ends
     // the command.
-    let reduced = block(platform.name, &steps, &sharing, None);
+    let reduced = render(format, Some(&block(platform.name, &steps, &sharing, None)));
     let end = budget.end;
     std::thread::spawn(move || {
         std::thread::sleep(end.saturating_duration_since(Instant::now()));
@@ -494,20 +738,34 @@ fn session_start(global: &GlobalOpts, platform: &'static Platform, budget: Budge
             std::process::exit(Exit::Ok as i32);
         }
     });
-    let target = Target {
-        snapshot: Snapshot::Rev("HEAD".into()),
-        flag: None,
-        branch: None,
-        scopes: None,
-    };
-    let summary = match ready::evaluate(global, &target) {
-        Ok(report) => Some(Summary::of(&report, crate::results::lookups_failed())),
-        Err(failure) => {
-            tracing::debug!("session-start: can't tell what passed: {:#}", failure.error);
-            None
+    let summary = match kept {
+        Some(Some(summary)) => Some(summary),
+        _ => {
+            let target = Target {
+                snapshot: Snapshot::Rev("HEAD".into()),
+                flag: None,
+                branch: None,
+                scopes: None,
+            };
+            match ready::evaluate(global, &target) {
+                Ok(report) => Some(Summary::of(&report, crate::results::lookups_failed())),
+                Err(failure) => {
+                    tracing::debug!("session-start: can't tell what passed: {:#}", failure.error);
+                    None
+                }
+            }
         }
     };
-    say(&block(platform.name, &steps, &sharing, summary.as_ref()));
+    if let (Some(stamp), Some(path)) = (&mut stamp, &stamp_path)
+        && summary.is_some()
+    {
+        stamp.summary = summary.clone();
+        stamp.write(path);
+    }
+    say(&render(
+        format,
+        Some(&block(platform.name, &steps, &sharing, summary.as_ref())),
+    ));
 }
 
 #[cfg(test)]
@@ -736,6 +994,165 @@ mod tests {
         let text = block("Claude Code on the web", &[], &Sharing::Shared, Some(&none));
         assert!(text.contains("knows no checks for abc1234"), "{text}");
         assert!(!text.contains("Setup:"), "{text}");
+    }
+
+    /// The one system message of Antigravity's JSON, checked for shape.
+    fn system_message(json: &str) -> String {
+        assert!(
+            json.ends_with('\n') && json.matches('\n').count() == 1,
+            "{json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(json).expect("JSON");
+        let steps = value["injectSteps"].as_array().expect("injectSteps");
+        assert_eq!(steps.len(), 1, "{json}");
+        assert_eq!(steps[0]["systemMessage"]["metadata"]["source"], "hushrun");
+        assert!(value.get("decision").is_none(), "{json}");
+        let text = steps[0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .expect("text")
+            .to_string();
+        assert!(text.lines().count() <= 10, "{text}");
+        text
+    }
+
+    // covers: C-168
+    #[test]
+    fn antigravitys_json_holds_the_block_as_one_system_message() {
+        let steps = [
+            (Step::BuildPull, Outcome::Done),
+            (Step::PackagesPull, Outcome::NotPublished),
+            (Step::Fetch, Outcome::Done),
+        ];
+        let text = block("Antigravity", &steps, &Sharing::Shared, Some(&summary()));
+        let json = render(Format::Antigravity, Some(&text));
+        assert_eq!(system_message(&json), text.trim_end());
+        assert!(
+            system_message(&json).contains("packages pull none published yet"),
+            "{json}"
+        );
+        // A check's name can't break it.
+        let mut odd = summary();
+        odd.missing = strings(&["say \"hi\"\n\\ there"]);
+        let text = block("Antigravity", &steps, &Sharing::Shared, Some(&odd));
+        assert_eq!(
+            system_message(&render(Format::Antigravity, Some(&text))),
+            text.trim_end()
+        );
+        // Nothing to say is `{}`, and plain text stays as it was.
+        assert_eq!(render(Format::Antigravity, None), "{}\n");
+        assert_eq!(render(Format::Text, None), "");
+        assert_eq!(render(Format::Text, Some(&text)), text);
+    }
+
+    // covers: C-168
+    #[test]
+    fn the_watchdogs_reduced_block_is_json_too() {
+        let steps = [
+            (Step::BuildPull, Outcome::Done),
+            (Step::PackagesPull, Outcome::StillRunning),
+            (Step::Fetch, Outcome::Skipped(NO_TIME)),
+        ];
+        let reduced = block("Antigravity", &steps, &Sharing::Shared, None);
+        let text = system_message(&render(Format::Antigravity, Some(&reduced)));
+        assert!(text.contains(NO_ANSWER), "{text}");
+        assert!(
+            text.contains(
+                "packages pull still running in the background; fetch skipped (out of time)"
+            ),
+            "{text}"
+        );
+    }
+
+    fn stamp() -> Stamp {
+        Stamp {
+            root: PathBuf::from("/repo"),
+            head: "h".into(),
+            tree: "t".into(),
+            steps: vec![
+                (Step::BuildPull, Outcome::Done),
+                (Step::PackagesPull, Outcome::NotPublished),
+                (Step::Fetch, Outcome::Failed(Some(3))),
+            ],
+            summary: Some(summary()),
+            time: 1_000,
+        }
+    }
+
+    // covers: C-168
+    #[test]
+    fn a_stamp_stands_for_the_same_commit_for_ten_minutes() {
+        let root = Path::new("/repo");
+        let s = stamp();
+        assert!(s.stands_for(root, "h", "t", 1_000));
+        assert!(s.stands_for(root, "h", "t", 1_000 + 600));
+        assert!(!s.stands_for(root, "h", "t", 1_000 + 601));
+        assert!(!s.stands_for(root, "h", "t", 999), "a clock that went back");
+        assert!(!s.stands_for(root, "other", "t", 1_000));
+        assert!(!s.stands_for(root, "h", "other", 1_000));
+        assert!(!s.stands_for(Path::new("/elsewhere"), "h", "t", 1_000));
+        // A step left running may have ended since: the steps run again.
+        let mut running = stamp();
+        running.steps[1].1 = Outcome::StillRunning;
+        assert!(!running.stands_for(root, "h", "t", 1_000));
+        // It reads back as it was written, outcomes and all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session-start.stamp");
+        s.write(&path);
+        assert_eq!(Stamp::read(&path), Some(s));
+        std::fs::write(&path, "{").expect("write");
+        assert_eq!(Stamp::read(&path), None);
+    }
+
+    // covers: C-168
+    #[test]
+    fn a_held_lock_starts_no_step_and_says_what_holds_it() {
+        let root = Path::new("/repo");
+        let all_running = held(None, root, Some("h"), true);
+        assert!(
+            all_running
+                .iter()
+                .all(|(_, outcome)| *outcome == Outcome::StillRunning),
+            "{all_running:?}"
+        );
+        let no_credential = held(None, root, Some("h"), false);
+        assert_eq!(
+            no_credential[2],
+            (Step::Fetch, Outcome::Skipped(NO_CREDENTIAL))
+        );
+        let mut left = stamp();
+        left.steps[1].1 = Outcome::StillRunning;
+        assert_eq!(held(Some(&left), root, Some("h"), true), left.steps);
+        // Another commit's stamp says nothing of this one.
+        assert_eq!(held(Some(&left), root, Some("x"), true), all_running);
+    }
+
+    // covers: C-168
+    #[cfg(unix)]
+    #[test]
+    fn a_step_holds_the_lock_until_it_ends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session-start.lock");
+        let open = || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("lock")
+        };
+        let lock = open();
+        lock.try_lock().expect("free");
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 1"]);
+        hold(&mut cmd, Some(&lock));
+        let mut child = cmd.spawn().expect("sh");
+        // This command's copies go, as when the hook ends; the step's stays.
+        drop(cmd);
+        drop(lock);
+        assert!(open().try_lock().is_err(), "the step holds it");
+        child.wait().expect("wait");
+        assert!(open().try_lock().is_ok(), "free once the step ends");
     }
 
     // covers: C-168

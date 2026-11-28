@@ -771,8 +771,18 @@ pub enum HookCommand {
     /// few lines on stdout for the agent: which checks already passed on this code, which are
     /// left to run here and which to CI, and whether results stay on this machine. A step the
     /// budget cuts off goes on in the background, and the steps after it are skipped.
+    ///
+    /// It reads the hook's JSON on stdin, when there is some, for the workspace's folder. A
+    /// second start within 10 minutes on the same commit skips the steps and says the same.
+    /// With `--format antigravity` the lines go out as Google Antigravity's `injectSteps` JSON,
+    /// and `{}` where there is nothing to say.
     #[command(name = "session-start")]
     SessionStart(SessionStartArgs),
+    /// What an agent's stop hook runs: sends the results that wait on this machine once the
+    /// agent is idle, says nothing on stdout (`{}` with `--format antigravity`), and always exits
+    /// 0.
+    #[command(name = "stop", hide = true)]
+    Stop,
 }
 
 /// `hushrun hook session-start` (C-168).
