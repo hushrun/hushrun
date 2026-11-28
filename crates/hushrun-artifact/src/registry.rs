@@ -180,6 +180,9 @@ pub enum ArtifactError {
     Invalid(String),
     #[error("{0}")]
     Network(String),
+    /// \[K-14\] The registry kept a tag where it is (409): its message says why.
+    #[error("{what}: the registry kept the tag where it is: {message}")]
+    Conflict { what: String, message: String },
 }
 
 /// The operations a copy needs. Every method works on one repository or, for `mount` and

@@ -38,17 +38,17 @@ publishes a package store to a registry, and nothing pulls one. `hushrun hook se
    and `--tar`, either of which it can go without. The registry's credential is settled before the
    fetch runs anything of the repository's, as `build bake --oci` does (ADR 0102): the CI job's own,
    else docker's. A store that is already baked (K-6's nothing to do) is published as it is.
-   `--oci hushrun`, or a repository on the backend's registry host, is refused with a line that
-   names the alternative (see "What the backend needs").
+   `--oci hushrun`, or a repository on the backend's registry host, publishes there with a push
+   grant (see "What the backend needs").
 5. **`hushrun packages pull` (K-15) is `build pull` with a package store,** and shares its code
    (`build_pull::{image_and_credential, Source, Unpack, untar, swap}`), not a copy of it:
    - the image is `--image`, else `HUSHRUN_PACKAGES_IMAGE`, else the repository's on its backend's
      registry; the tag is `--tag`, else `hushrun-packages-<platform>-latest`;
    - the credential is the same: a pull token, the backend's own token only to its own registry,
      or none. The pull token is `HUSHRUN_PACKAGES_REGISTRY_TOKEN` when set, else
-     `HUSHRUN_REGISTRY_TOKEN`: until the backend's registry takes package stores, a private
-     repository pulls its baked store from hushrun's registry and its package store from the team's,
-     and one variable can't hold both tokens. `build pull` never reads the new one. The token goes to hushrun's registry, an image `--image` or
+     `HUSHRUN_REGISTRY_TOKEN`: a private repository that publishes its package store to a
+     registry of its own pulls its baked store from hushrun's registry and its package store from
+     the team's, and one variable can't hold both tokens. `build pull` never reads the new one. The token goes to hushrun's registry, an image `--image` or
      `HUSHRUN_PACKAGES_IMAGE` names, or a backend the environment named, never a registry a
      repository's file chose (C-13). The variable counts as named because whoever set up the sandbox
      set it, as with `--image`;
@@ -74,32 +74,36 @@ publishes a package store to a registry, and nothing pulls one. `hushrun hook se
 
 ### What the backend needs
 
-The backend's registry is read-only from outside. Its one way in is `POST v0/build/images` (B-70),
+The backend's registry is read-only from outside. Its one way in was `POST v0/build/images` (B-70),
 which carries a baked store. The backend builds each layer from packs it already holds, and takes at
 most 8 MiB per other file and 64 MiB per request. A package store is hundreds of MB of files the
 backend has never seen, so it can't use that endpoint, whatever the endpoint checks. The smallest
-backend change that keeps the registry read-only to everyone else is a **push grant**:
+backend change that keeps the registry read-only to everyone else is a **push grant**, now built
+(hushrun/cloud's `docs/contracts/registry-v0.md` §10):
 
-- `POST v0/packages/images/grant`, with the job's credential (in CI, its ID token), body
-  `{"platform", "identity", "commit"}`. The backend answers when the job is CI on the repository's
-  default branch, as for B-70's publish: `{"registry", "repository", "username", "password",
-  "expires_ms", "tags": {"fixed", "latest"}}`. The credential pushes blobs and manifests to that one
-  repository, and tags matching `hushrun-packages-<platform>-*` only. `409 not_newer` comes back when
-  a newer commit holds the moving tag.
-- The CLI then publishes with the standard OCI push it already uses for `--oci REPOSITORY`, with
-  that credential.
+- `POST v0/packages/images/grant`, with the job's credential (in CI, its ID token; in GitLab, with
+  the job key's headers, as for any build request), body `{"platform", "identity", "commit"}`, the
+  commit being the token's own. The backend answers the same publishers as B-70's publish (CI on
+  the default branch that writes trusted blocks): `{"registry", "repository", "image", "username",
+  "password", "expires_ms", "tags": {"fixed", "latest"}, "chunk_bytes", "most_blob_bytes"}`. The
+  password, an hour long, is exchanged at the registry's token endpoint for a bearer of five
+  minutes, asked again on a 401. It pushes blobs to that one repository, and a manifest under
+  exactly `tags.fixed` or `tags.latest`: any other tag, or a digest, is refused. A fixed tag that
+  names another image is a 409 (the CLI keeps it, as K-14 says); a moving tag a newer run holds is
+  409 `not_newer`, at the grant or at the tag, and the bake says so and exits 0, as B-70's does.
+- **Chunks.** The registry runs where one HTTP/1 request carries at most 32 MiB, so a blob goes up
+  in chunks of at most `chunk_bytes` (16 MiB): POST, a PATCH per chunk, PUT with the digest.
+  `hushrun-artifact` does that for this registry alone ([`OciRegistry::chunked`]); every other
+  registry still gets one streamed PUT per blob.
+- The manifest goes up under the fixed tag, then the moving one, never by digest.
 
-That contract belongs in hushrun/cloud's `docs/contracts`. This change could not reach that
-repository, so neither the endpoint nor the CLI's call to it exists yet. Until both do:
-
-- publishing goes to any other registry (`--oci ghcr.io/acme/shop`);
-- sandboxes pull it with `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`, and
-  `HUSHRUN_PACKAGES_REGISTRY_TOKEN` when that image is private. In Claude Code on the web that
-  variable goes in the environment's settings, and session start's step then pulls it;
-- with no variable set, the step looks at the backend's registry, finds no `hushrun-packages-…`
-  tag, and the `Setup:` line says `packages pull none published yet` within a second: both pulls
-  exit 12 when the registry holds nothing under the tag, and session start says that, not
-  `failed`, since a repository that hasn't published a store has nothing wrong with it.
+Publishing to any other registry (`--oci ghcr.io/acme/shop`) works as before; sandboxes then pull it
+with `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`, and `HUSHRUN_PACKAGES_REGISTRY_TOKEN` when that
+image is private. A store in hushrun's registry needs neither: the pull's default image is the
+repository's there, read with `HUSHRUN_REGISTRY_TOKEN` or the backend's own token, as `build pull`
+reads its own. With nothing published yet, the step finds no `hushrun-packages-…` tag, and the
+`Setup:` line says `packages pull none published yet` within a second: both pulls exit 12 when the
+registry holds nothing under the tag.
 
 `hushrun packages pull` itself needs nothing new from the backend. Reading a tag, a config and a
 layer from its registry is the pull API `build pull` already uses.

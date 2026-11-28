@@ -3,7 +3,10 @@
 //!
 //! - cross-repository mounts, whose token needs pull scope on the source repository, and
 //!   whose `202 Accepted` means "upload instead" (A-2);
-//! - manifest pushes, to check the `Docker-Content-Digest` the registry reports.
+//! - manifest pushes, to check the `Docker-Content-Digest` the registry reports;
+//! - \[K-14\] chunked blob uploads (POST, PATCH each chunk, PUT with the digest), for a registry
+//!   that takes at most so many bytes per request, as hushrun's own does
+//!   ([`OciRegistry::chunked`]). Every other registry gets one streamed PUT per blob, as before.
 //!
 //! HTTPS only, except for hosts given as insecure (tests). reqwest drops credentials when a
 //! redirect leaves the host, as blob downloads do when they redirect to storage.
@@ -37,6 +40,8 @@ pub struct OciRegistry {
     credentials: Mutex<BTreeMap<String, Credential>>,
     /// Bearer tokens of hushrun's own requests, by host and scopes.
     tokens: Mutex<BTreeMap<(String, String), String>>,
+    /// \[K-14\] Blobs go up in requests of at most this many bytes, else in one PUT.
+    chunk_bytes: Option<usize>,
 }
 
 impl std::fmt::Debug for OciRegistry {
@@ -75,7 +80,16 @@ impl OciRegistry {
             insecure,
             credentials: Mutex::new(BTreeMap::new()),
             tokens: Mutex::new(BTreeMap::new()),
+            chunk_bytes: None,
         })
+    }
+
+    /// \[K-14\] Uploads every blob in requests of at most `bytes` bytes (at least one): a POST
+    /// that opens the upload, a PATCH per chunk, and a PUT with the digest that closes it. For a
+    /// registry that refuses a larger request, as hushrun's does (16 MiB).
+    pub fn chunked(mut self, bytes: u64) -> OciRegistry {
+        self.chunk_bytes = Some(usize::try_from(bytes.max(1)).unwrap_or(usize::MAX));
+        self
     }
 
     /// \[B-70\] Uses `credential` for `host`, whatever the Docker configuration says of it.
@@ -197,6 +211,102 @@ impl OciRegistry {
         request.send().await.map_err(|e| network(host, &e))
     }
 
+    /// \[K-14\] Uploads `stream` (the blob `digest`, `size` bytes) in requests of at most `chunk`
+    /// bytes: POST `/blobs/uploads/`, a PATCH per chunk at the offset the upload has reached, then
+    /// PUT `?digest=`. The bytes are hashed on the way: a blob that isn't its digest or its size
+    /// is never closed, and the open upload expires on the registry.
+    async fn push_chunked(
+        &self,
+        repository: &Repository,
+        digest: &Digest,
+        size: u64,
+        mut stream: BlobStream,
+        chunk: usize,
+    ) -> Result<(), ArtifactError> {
+        let host = repository.host.as_str();
+        let what = repository.at_digest(digest);
+        let base = self.base_url(host);
+        let scopes = [format!("repository:{}:pull,push", repository.path)];
+        let start = format!("{base}/v2/{}/blobs/uploads/", repository.path);
+        let response = self
+            .send(host, &scopes, |http| {
+                http.post(&start).header("content-length", "0")
+            })
+            .await?;
+        let mut location = match response.status().as_u16() {
+            202 => upload_location(&base, &response, &what)?,
+            status => {
+                return Err(
+                    upload_refused(host, &what, "opening its upload", status, response).await,
+                );
+            }
+        };
+        let mut hasher = Sha256::new();
+        let mut offset = 0u64;
+        let mut buffer = bytes::BytesMut::new();
+        let mut ended = false;
+        while !ended {
+            match stream.next().await {
+                Some(Ok(bytes)) => buffer.extend_from_slice(&bytes),
+                Some(Err(e)) => {
+                    return Err(ArtifactError::Invalid(format!("reading {what}: {e}")));
+                }
+                None => ended = true,
+            }
+            while buffer.len() >= chunk || (ended && !buffer.is_empty()) {
+                let piece = buffer.split_to(chunk.min(buffer.len())).freeze();
+                hasher.update(&piece);
+                let end = offset + piece.len() as u64 - 1;
+                let at = location.clone();
+                let response = self
+                    .send(host, &scopes, |http| {
+                        http.patch(&at)
+                            .header("content-type", "application/octet-stream")
+                            .header("content-range", format!("{offset}-{end}"))
+                            .body(piece.clone())
+                    })
+                    .await?;
+                match response.status().as_u16() {
+                    202 => location = upload_location(&base, &response, &what)?,
+                    status => {
+                        return Err(upload_refused(
+                            host,
+                            &what,
+                            &format!("uploading bytes {offset}-{end}"),
+                            status,
+                            response,
+                        )
+                        .await);
+                    }
+                }
+                offset = end + 1;
+            }
+        }
+        let actual = Digest::from_bytes(hasher.finalize().into());
+        if actual != *digest || offset != size {
+            return Err(ArtifactError::DigestMismatch {
+                what: format!("blob {digest} ({offset} of {size} bytes)"),
+                expected: digest.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+        let close = format!(
+            "{location}{}digest={digest}",
+            if location.contains('?') { '&' } else { '?' }
+        );
+        let response = self
+            .send(host, &scopes, |http| {
+                http.put(&close).header("content-length", "0")
+            })
+            .await?;
+        match response.status().as_u16() {
+            201 => Ok(()),
+            status => {
+                Err(upload_refused(host, &what, "closing its upload", status, response).await)
+            }
+        }
+    }
+
     async fn token(
         &self,
         host: &str,
@@ -282,6 +392,48 @@ impl Challenge {
             rest = next.trim_start().trim_start_matches(',');
         }
         Challenge::Bearer { realm, service }
+    }
+}
+
+/// \[K-14\] Where an upload goes on: the answer's `Location`, made absolute against `base`.
+fn upload_location(
+    base: &str,
+    response: &reqwest::Response,
+    what: &str,
+) -> Result<String, ArtifactError> {
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            ArtifactError::Network(format!("{what}: the registry named no upload location"))
+        })?;
+    Ok(
+        if location.starts_with("http://") || location.starts_with("https://") {
+            location.to_string()
+        } else {
+            format!("{base}/{}", location.trim_start_matches('/'))
+        },
+    )
+}
+
+/// \[K-14\] The error an upload's request that wasn't taken becomes: the registry's own words,
+/// the first 300 characters of them.
+async fn upload_refused(
+    host: &str,
+    what: &str,
+    doing: &str,
+    status: u16,
+    response: reqwest::Response,
+) -> ArtifactError {
+    let text = response.text().await.unwrap_or_default();
+    let said: String = text.chars().take(300).collect();
+    match status {
+        401 | 403 => ArtifactError::Denied {
+            host: host.to_string(),
+            detail: format!("{what}: {doing}: HTTP {status} {said}"),
+        },
+        _ => ArtifactError::Network(format!("{host}: {what}: {doing}: HTTP {status}: {said}")),
     }
 }
 
@@ -490,6 +642,11 @@ impl Registry for OciRegistry {
         size: u64,
         stream: BlobStream,
     ) -> Result<(), ArtifactError> {
+        if let Some(chunk) = self.chunk_bytes {
+            return self
+                .push_chunked(repository, digest, size, stream, chunk)
+                .await;
+        }
         let (destination, _) = self.reference(repository, "latest").await?;
         let verdict = Arc::new(Mutex::new(None));
         let stream = verified(stream, *digest, size, verdict.clone());
@@ -663,6 +820,15 @@ impl Registry for OciRegistry {
                 detail: format!("pushing {what}"),
             });
         }
+        // K-14: a registry that keeps a tag where it is (hushrun's: a fixed tag naming another
+        // image, the moving one held by a newer run) says why in its error's message.
+        if status == reqwest::StatusCode::CONFLICT {
+            let text = response.text().await.unwrap_or_default();
+            return Err(ArtifactError::Conflict {
+                what,
+                message: registry_message(&text),
+            });
+        }
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
             return Err(ArtifactError::Network(format!(
@@ -685,6 +851,15 @@ impl Registry for OciRegistry {
             .transpose()?;
         Ok(reported)
     }
+}
+
+/// The first error's message of a registry's error body (`{"errors": [{"code", "message"}]}`),
+/// else the body's first 300 characters.
+fn registry_message(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v["errors"][0]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| text.chars().take(300).collect())
 }
 
 /// Passes `stream` through, hashing it; at the end, a size or digest mismatch becomes an error
@@ -775,6 +950,197 @@ mod tests {
             );
         let verdict = verdict.lock().unwrap().take();
         (items, verdict)
+    }
+
+    /// \[K-14\] A registry on the loopback that keeps blobs in memory, takes uploads as POST,
+    /// PATCH and PUT, and answers 413 to any request whose body is larger than `most` bytes, as
+    /// hushrun's does: every request's method and body size is logged.
+    struct ChunkRegistry {
+        server: hushrun_testkit::http::Server,
+        log: Arc<Mutex<Vec<(String, usize)>>>,
+        blobs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    }
+
+    impl ChunkRegistry {
+        fn start(most: usize) -> ChunkRegistry {
+            use hushrun_testkit::http::{Reply, Response, Server};
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let blobs: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
+            let uploads: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
+            let (logged, held) = (log.clone(), blobs.clone());
+            let server = Server::start(move |request| {
+                logged
+                    .lock()
+                    .unwrap()
+                    .push((request.method.clone(), request.body.len()));
+                if request.body.len() > most {
+                    return Reply::Send(Response::new(413));
+                }
+                let path = request.path.as_str();
+                if path == "/v2/" {
+                    return Reply::Send(Response::new(200));
+                }
+                if let Some((_, digest)) = path.split_once("/blobs/sha256:") {
+                    let digest = format!("sha256:{digest}");
+                    return Reply::Send(match held.lock().unwrap().get(&digest) {
+                        Some(b) => Response::new(200)
+                            .header("content-length", b.len().to_string())
+                            .header("docker-content-digest", digest),
+                        None => Response::new(404),
+                    });
+                }
+                let Some((_, id)) = path.split_once("/blobs/uploads/") else {
+                    return Reply::Send(Response::new(404));
+                };
+                let mut uploads = uploads.lock().unwrap();
+                let at = |id: &str, len: usize| {
+                    Response::new(202)
+                        .header("location", format!("/v2/acme/shop/blobs/uploads/{id}"))
+                        .header("range", format!("0-{}", len.saturating_sub(1)))
+                };
+                match request.method.as_str() {
+                    "POST" => {
+                        let id = format!("u{}", uploads.len());
+                        if let Some(digest) = request.query("digest") {
+                            held.lock()
+                                .unwrap()
+                                .insert(digest.into(), request.body.clone());
+                            return Reply::Send(
+                                Response::new(201)
+                                    .header("location", format!("/v2/acme/shop/blobs/{digest}"))
+                                    .header("docker-content-digest", digest),
+                            );
+                        }
+                        uploads.insert(id.clone(), request.body.clone());
+                        Reply::Send(at(&id, request.body.len()))
+                    }
+                    "PATCH" => {
+                        let Some(bytes) = uploads.get_mut(id) else {
+                            return Reply::Send(Response::new(404));
+                        };
+                        if let Some(range) = request.header("content-range") {
+                            let start: usize = range.split('-').next().unwrap().parse().unwrap();
+                            if start != bytes.len() {
+                                return Reply::Send(Response::new(416));
+                            }
+                        }
+                        bytes.extend_from_slice(&request.body);
+                        let len = bytes.len();
+                        Reply::Send(at(id, len))
+                    }
+                    "PUT" => {
+                        let Some(mut bytes) = uploads.remove(id) else {
+                            return Reply::Send(Response::new(404));
+                        };
+                        bytes.extend_from_slice(&request.body);
+                        let digest = request.query("digest").unwrap().to_string();
+                        if Digest::of(&bytes).to_string() != digest {
+                            return Reply::Send(Response::new(400));
+                        }
+                        held.lock().unwrap().insert(digest.clone(), bytes);
+                        Reply::Send(
+                            Response::new(201)
+                                .header("location", format!("/v2/acme/shop/blobs/{digest}"))
+                                .header("docker-content-digest", digest),
+                        )
+                    }
+                    _ => Reply::Send(Response::new(405)),
+                }
+            });
+            ChunkRegistry { server, log, blobs }
+        }
+
+        fn registry(&self) -> OciRegistry {
+            let host = self.server.addr().to_string();
+            OciRegistry::new(DockerConfig::default(), vec![host]).unwrap()
+        }
+
+        fn repository(&self) -> Repository {
+            Repository {
+                host: self.server.addr().to_string(),
+                path: "acme/shop".into(),
+            }
+        }
+    }
+
+    fn push(
+        registry: &OciRegistry,
+        repository: &Repository,
+        bytes: Vec<u8>,
+    ) -> Result<(), ArtifactError> {
+        let digest = Digest::of(&bytes);
+        let size = bytes.len() as u64;
+        // A stream of pieces that don't line up with the chunks.
+        let pieces: Vec<Result<Bytes, std::io::Error>> = bytes
+            .chunks(3 << 20)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(registry.push_blob(
+                repository,
+                &digest,
+                size,
+                futures_util::stream::iter(pieces).boxed(),
+            ))
+    }
+
+    // covers: K-14
+    #[test]
+    fn a_chunked_push_never_sends_more_than_a_chunk_and_others_push_whole() {
+        const MOST: usize = 16 << 20;
+        let fake = ChunkRegistry::start(MOST);
+        let repository = fake.repository();
+        // 40 MiB and a bit: three chunks of at most 16 MiB, each at the offset reached.
+        let big: Vec<u8> = (0..(40 << 20) + 5).map(|i| (i % 251) as u8).collect();
+        let digest = Digest::of(&big).to_string();
+        push(
+            &fake.registry().chunked(MOST as u64),
+            &repository,
+            big.clone(),
+        )
+        .unwrap();
+        assert_eq!(fake.blobs.lock().unwrap().get(&digest), Some(&big));
+        let log = std::mem::take(&mut *fake.log.lock().unwrap());
+        let patches: Vec<usize> = log
+            .iter()
+            .filter(|(m, _)| m == "PATCH")
+            .map(|(_, n)| *n)
+            .collect();
+        assert_eq!(patches, [MOST, MOST, (8 << 20) + 5], "{log:?}");
+        assert!(log.iter().all(|(_, n)| *n <= MOST), "{log:?}");
+        // Bytes that aren't the digest are never closed: no PUT.
+        let other = vec![7u8; 100];
+        let refused = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fake.registry().chunked(64).push_blob(
+                &repository,
+                &Digest::of(b"something else"),
+                100,
+                futures_util::stream::iter([Ok(Bytes::from(other))]).boxed(),
+            ));
+        assert!(
+            matches!(refused, Err(ArtifactError::DigestMismatch { .. })),
+            "{refused:?}"
+        );
+        let log = std::mem::take(&mut *fake.log.lock().unwrap());
+        assert!(!log.iter().any(|(m, _)| m == "PUT"), "{log:?}");
+        // Any other registry: one request carries the whole blob, as before.
+        let small = vec![1u8; 4096];
+        push(&fake.registry(), &repository, small.clone()).unwrap();
+        let log = std::mem::take(&mut *fake.log.lock().unwrap());
+        assert!(!log.iter().any(|(m, _)| m == "PATCH"), "{log:?}");
+        assert!(log.iter().any(|(_, n)| *n == small.len()), "{log:?}");
+        assert!(
+            fake.blobs
+                .lock()
+                .unwrap()
+                .contains_key(&Digest::of(&small).to_string())
+        );
     }
 
     // covers: A-2

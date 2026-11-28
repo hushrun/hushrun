@@ -65,6 +65,22 @@ impl Artifacts {
         Self::with_registry(Arc::new(registry))
     }
 
+    /// \[K-14\] [`Artifacts::connect_with`], uploading every blob in requests of at most
+    /// `chunk_bytes` bytes ([`OciRegistry::chunked`]): for hushrun's registry, which takes at most
+    /// 16 MiB per request.
+    pub fn connect_chunked(
+        config: credentials::DockerConfig,
+        options: &Options,
+        chunk_bytes: u64,
+    ) -> Result<Artifacts, ArtifactError> {
+        let registry =
+            OciRegistry::new(config, options.insecure_registries.clone())?.chunked(chunk_bytes);
+        for (host, credential) in &options.credentials {
+            registry.give(host, credential.clone());
+        }
+        Self::with_registry(Arc::new(registry))
+    }
+
     pub fn with_registry(registry: Arc<dyn Registry>) -> Result<Artifacts, ArtifactError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)

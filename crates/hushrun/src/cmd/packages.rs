@@ -604,7 +604,8 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         |part: &dyn Part| args.only.is_empty() || args.only.iter().any(|o| o == part.name());
     // K-14: where the image goes, and the registry's credential, settled before the fetch runs
     // anything of the repository's (ADR 0102).
-    let target = crate::cmd::packages_image::target(args, &context.checkout)?;
+    let target =
+        crate::cmd::packages_image::target(args, &context.checkout, context.repository.as_deref())?;
     // --tar alone bakes into a folder of its own beside the archive, removed after; --oci or
     // --oci-dir alone, into one in the temporary folder.
     let (out, scratch) = match (&args.out, &args.tar) {
@@ -979,8 +980,27 @@ fn publish_image(
         .map_err(|why| Failure::new(Exit::Unexpected, anyhow!("packages: publishing: {why}")))
 }
 
+/// [`published_lines`], for `packages_image`'s tests.
+#[cfg(test)]
+pub(crate) fn tests_published_lines(
+    published: &crate::cmd::packages_image::Published,
+) -> Vec<String> {
+    published_lines(published)
+}
+
 /// What a bake says of the image it published.
 fn published_lines(published: &crate::cmd::packages_image::Published) -> Vec<String> {
+    if published.held_back {
+        let mut lines = vec![format!(
+            "packages: not published to {}",
+            published
+                .reference
+                .split_once('@')
+                .map_or(published.reference.as_str(), |(r, _)| r)
+        )];
+        lines.extend(published.notes.iter().map(|n| format!("packages: {n}")));
+        return lines;
+    }
     let mut lines = vec![format!(
         "packages: published {} ({}, {}), tagged {}",
         published.reference,

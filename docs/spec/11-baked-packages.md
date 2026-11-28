@@ -231,9 +231,18 @@ hex of the identity>`, which never moves (one that names another image stays, wi
 default branch (B-66's rule; elsewhere a line says why not). The layer is uploaded only when the
 registry lacks its digest. Without `--out` or `--tar` the store is baked into a temporary folder and
 removed. `--oci` takes a repository with no tag, reached with the credential settled before the
-fetch runs (the CI job's own, else docker's, ADR 0102); `--oci hushrun`, or a repository on the
-registry host of the repository's backend, is refused (exit 2) with a line naming a registry of the
-team's own and `HUSHRUN_PACKAGES_IMAGE`, since that registry takes only B-70's publish. The
+fetch runs (the CI job's own, else docker's, ADR 0102). `--oci hushrun`, or a repository on the
+registry host of the repository's backend, publishes there with a push grant: the CI job's own ID
+token, settled before the fetch, is the only credential taken (anything else, or none, stops the
+bake before it fetches, exit 2, with a line that says why and names `--oci REPOSITORY` and
+`--oci-dir`); once the store is baked it asks `POST v0/packages/images/grant` with `{"platform",
+"identity", "commit"}` (the commit checked out). The grant names the image, a password to it and
+the two tags above, exactly; the layer and the config go up in chunks of at most its `chunk_bytes`,
+each unless the registry holds it, then the manifest under the fixed tag, then, when B-66's rule
+lets it, the moving one. A fixed tag naming another image (409) stays, with a line; a moving tag a
+newer run holds (409 `not_newer`, at the grant or at the tag) stays, with a line, and the bake
+exits 0. A refused grant (401, 403 `not_publisher` with its word, 404, 409 `name_taken`, 422, 429)
+exits 1 with B-70's words for the same refusal. The grant's password is never printed. The
 signature is the store's own `packages.sigstore.json` in the layer (K-6, K-7): no referrer. The
 bake's JSON gains `image` (`reference`, `digest`, `tags`, `layer_bytes`, `uploaded`). *Rests on:*
 K-6's archive being a function of the store alone. *Breaks if:* two machines wrote different bytes

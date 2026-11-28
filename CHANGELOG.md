@@ -51,9 +51,20 @@ codes, environment variables, event formats, the ledger layout) are listed first
   an image of one layer, the archive `--tar` writes byte for byte, so the same store uploads
   nothing again. It is tagged `hushrun-packages-<platform>-<identity>` and, from CI on the default
   branch, `hushrun-packages-<platform>-latest`. The signature is the store's own. The bake's JSON
-  gains `image`. The backend's registry doesn't take package stores yet: `--oci hushrun` says so
-  and names the way that works today, which is a registry of your own plus `HUSHRUN_PACKAGES_IMAGE`
-  in the sandbox.
+  gains `image`.
+- **`hushrun packages bake --oci hushrun` publishes into hushrun's own registry** (K-14,
+  [ADR 0163](docs/adr/0163-a-package-store-pulled-into-a-sandbox.md)), as does `--oci` naming a
+  repository on the backend's registry host. From CI on the default branch, the job's own ID token
+  (settled before the fetch, ADR 0102) asks the backend for a push grant
+  (`POST v0/packages/images/grant`): a password for the repository's image and its two tags. The
+  layer and config go up in chunks of at most the grant's `chunk_bytes` (16 MiB), each unless the
+  registry holds it; then the fixed tag, then the moving one. A fixed tag that names another image
+  stays, with a line; a moving tag a newer run holds stays too, and the bake still exits 0.
+  Without a CI job's credential the bake stops before it fetches (exit 2) and says why; a refused
+  grant (403 `not_publisher`, 404, 409 `name_taken`, 429) exits 1 with `build bake --oci
+  hushrun`'s words. Sandboxes pull it with no variable: `HUSHRUN_PACKAGES_IMAGE` is only for a
+  store on another registry. `hushrun-artifact` gains chunked blob uploads for that registry;
+  every other registry still gets one streamed PUT per blob.
 - **Cursor's Build starts with the baked store and the newest results**
   ([ADR 0164](docs/adr/0164-a-cursor-build-that-starts-warm.md), C-145).
   `hushrun init --agent-clouds cursor` writes `.cursor/hushrun-install.sh` and points

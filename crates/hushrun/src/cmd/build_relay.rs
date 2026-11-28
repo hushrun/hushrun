@@ -24,6 +24,7 @@
 pub(crate) mod bake_archive;
 pub(crate) mod bake_image;
 pub mod baked;
+pub(crate) mod caller;
 mod credential;
 pub(crate) mod hosted;
 mod http;
