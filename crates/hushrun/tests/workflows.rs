@@ -268,3 +268,34 @@ fn the_recipes_call_the_reusable_workflow() {
         );
     }
 }
+
+// covers: K-14
+#[test]
+fn the_package_store_recipe_publishes_from_the_default_branch_alone() {
+    let recipe = yaml("recipes/github/packages-bake.yml");
+    assert_eq!(recipe["on"]["push"]["branches"], serde_json::json!(["main"]));
+    assert!(recipe["on"].get("pull_request").is_none());
+    let job = &recipe["jobs"]["bake"];
+    // By hand too, but only on the default branch: `-latest` moves only from there.
+    assert_eq!(
+        job["if"],
+        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+    );
+    // GHCR takes the image with the job's own token; the ID token signs it.
+    assert_eq!(recipe["permissions"]["packages"], "write");
+    assert_eq!(recipe["permissions"]["id-token"], "write");
+    let bake = steps(job)
+        .into_iter()
+        .find(|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|r| r.contains("hushrun packages bake --oci "))
+        })
+        .expect("a step bakes the package store");
+    assert!(
+        bake["run"].as_str().unwrap().contains(" -- "),
+        "the bake runs the install command: {bake}"
+    );
+    assert_eq!(bake["env"]["GITHUB_TOKEN"], "${{ github.token }}");
+    assert_eq!(recipe["concurrency"]["cancel-in-progress"], false);
+}

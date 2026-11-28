@@ -17,6 +17,7 @@ steps for you.
 | `codex-setup.sh` | Codex cloud | The environment's setup script: a session, results and compiled code fetched while there is a network |
 | `jules-setup.sh` | Jules | The repository's setup script |
 | `devin-setup.sh` | Devin | The machine's setup, before it is saved |
+| `antigravity-env-setup.sh` | Google Antigravity Remote Agents | The remote project's Environment setup script, pasted in its settings: installs hushrun if it is missing, pulls the baked store and the package store (as root, through `sudo -n`, or into folders under `$HOME` that `~/.profile` names), runs the install command through `hushrun packages exec`, puts `hushrun packages env`'s variables in the profile, and fetches the newest results; always exits 0 |
 
 `hushrun hook session-start` does nothing outside a hosted agent's sandbox and always exits 0. It
 stops after 45 seconds (`--budget`), and the hook's `timeout` of 60 leaves `npx` time to start it.
@@ -56,3 +57,20 @@ A dev container gets hushrun from its feature, `ghcr.io/hushrun/features/hushrun
 
 The hosts to allow, where a platform limits the network: `api.hushrun.com`,
 `registry.hushrun.com` and `*.r2.cloudflarestorage.com`. `hushrun doctor` checks them.
+
+Antigravity keeps a remote project's setup script in its settings, so `hushrun init` can't write
+it: paste `antigravity-env-setup.sh` there whole, and edit its install command (`npm ci`) and
+`HUSHRUN_PACKAGES_IMAGE`. Until hushrun's registry takes package stores, the store comes from your
+own registry: [`recipes/github/packages-bake.yml`](../github/packages-bake.yml) publishes it on
+each push to the default branch (`hushrun packages bake --oci ghcr.io/acme/shop -- npm ci`, with
+the job's `GITHUB_TOKEN` and `packages: write`). When `--oci hushrun` works, the recipe names
+`hushrun` instead of the image and the setup script drops its `HUSHRUN_PACKAGES_IMAGE` line: one
+line each. A private package needs `HUSHRUN_PACKAGES_REGISTRY_TOKEN` in the project's settings.
+What the probe ([docs/validation/antigravity-remote.md](../../docs/validation/antigravity-remote.md))
+hasn't answered yet is marked `[probe]` in the script: whether setup runs once or per
+conversation (the profile block is replaced, never added twice), whether it has root (`AGENT_USER`
+names the agent's user when setup runs as root and the agent doesn't), whether the agent's shell
+reads `~/.profile` or `~/.bashrc` (both get the block), and where the workspace is. Hosts to allow
+there: hushrun's three above, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` for the installer,
+and the package store's registry (`ghcr.io` and `pkg-containers.githubusercontent.com` for GHCR)
+until hushrun's registry takes package stores.

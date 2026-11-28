@@ -19,6 +19,14 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ### Added
 
+- **Recipes for Google Antigravity Remote Agents** (ADR 0163): `recipes/agent-clouds/antigravity-env-setup.sh`,
+  the remote project's Environment setup script, installs hushrun if it is missing, pulls the
+  baked store and the package store (as root, through `sudo -n` and then given to the agent's
+  user, or into folders under `$HOME` that `~/.profile` names), runs the install command through
+  `hushrun packages exec`, writes `hushrun packages env`'s variables to the profile, and fetches
+  the newest results; it always exits 0. `recipes/github/packages-bake.yml` publishes the package
+  store to the repository's GHCR packages on each push to the default branch, until hushrun's
+  registry takes package stores.
 - **`hushrun packages pull`** ([ADR 0163](docs/adr/0163-a-package-store-pulled-into-a-sandbox.md),
   K-15): puts the repository's newest package store at `/hushrun-packages` (or
   `HUSHRUN_PACKAGES_LOWER`, or `--to`) from its registry, for a sandbox with no Dockerfile, such as
