@@ -19,6 +19,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ### Added
 
+- **`hushrun init --agent-clouds antigravity`** ([ADR 0165](docs/adr/0165-a-session-start-in-antigravitys-format.md),
+  C-145): writes a `hushrun` group in Google Antigravity's `.agents/hooks.json`, beside the
+  team's own groups, whose `SessionStart` runs `hushrun hook session-start --format antigravity`
+  (`timeout` 60) and whose `Stop` runs `hushrun hook stop --format antigravity` (`timeout` 30),
+  each printing `{}` if hushrun can't start. A `hushrun` group already there stays as it is. init
+  points at `recipes/agent-clouds/antigravity-env-setup.sh` for the remote project's Environment
+  setup, which it can't write. New contract: the `--agent-clouds` word `antigravity`.
 - **Antigravity's hooks** ([ADR 0165](docs/adr/0165-a-session-start-in-antigravitys-format.md),
   C-168, C-169): `hushrun hook session-start --format antigravity` prints its lines as Google
   Antigravity's `injectSteps` JSON, one system message, and `{}` where it has nothing to say.

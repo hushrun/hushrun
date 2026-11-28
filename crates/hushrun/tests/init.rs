@@ -6862,3 +6862,84 @@ fn a_package_json_without_hushrun_gets_hooks_that_run_hushrun_from_path() {
     let script = r.read(".cursor/hushrun-install.sh");
     assert!(!script.contains("npx"), "{script}");
 }
+
+// covers: C-145 (ADR 0165: init writes Antigravity's hooks as one group of hushrun's own in
+// .agents/hooks.json, beside a team's own, once, and points at the Environment setup recipe)
+#[cfg(unix)]
+#[test]
+fn init_writes_antigravitys_hooks_beside_the_teams_and_points_at_its_setup_recipe() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    let mine = serde_json::json!({"lint": {"Stop": [{"type": "command", "command": "./lint.sh"}]}});
+    r.write(".agents/hooks.json", &mine.to_string());
+    let args = [
+        "init",
+        "--local",
+        "--yes",
+        "--no-run",
+        "--agent-clouds",
+        "antigravity",
+    ];
+    let out = ran(r.hushrun(&fake), &args);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("recipes/agent-clouds/antigravity-env-setup.sh")
+            && out.stderr.contains(
+                "https://github.com/hushrun/hushrun/blob/main/recipes/agent-clouds/antigravity-env-setup.sh"
+            ),
+        "{}",
+        out.stderr
+    );
+    let written: serde_json::Value = serde_json::from_str(&r.read(".agents/hooks.json")).unwrap();
+    assert_eq!(written["lint"], mine["lint"]);
+    let runner = if r.read("package.json").contains("\"hushrun\"") {
+        "npx --no-install hushrun"
+    } else {
+        "hushrun"
+    };
+    assert_eq!(
+        written["hushrun"],
+        serde_json::json!({
+            "SessionStart": [{
+                "type": "command",
+                "command": format!("{runner} hook session-start --format antigravity || echo '{{}}'"),
+                "timeout": 60,
+            }],
+            "Stop": [{
+                "type": "command",
+                "command": format!("{runner} hook stop --format antigravity || echo '{{}}'"),
+                "timeout": 30,
+            }],
+        })
+    );
+    // A second init writes the same bytes.
+    let once = r.read(".agents/hooks.json");
+    let out = ran(r.hushrun(&fake), &args);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(r.read(".agents/hooks.json"), once);
+    // Another cloud named, no pointer.
+    let out = ran(
+        r.hushrun(&fake),
+        &[
+            "init",
+            "--local",
+            "--yes",
+            "--no-run",
+            "--agent-clouds",
+            "cursor",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert!(
+        !out.stderr.contains("antigravity-env-setup"),
+        "{}",
+        out.stderr
+    );
+
+    // A file that doesn't parse stays as it is.
+    let r = shop();
+    r.write(".agents/hooks.json", "{not json");
+    let out = ran(r.hushrun(&fake), &args);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(r.read(".agents/hooks.json"), "{not json");
+}

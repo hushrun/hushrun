@@ -36,10 +36,11 @@ pub enum Cloud {
     Jules,
     Devin,
     Devcontainer,
+    Antigravity,
 }
 
 impl Cloud {
-    const ALL: [Cloud; 7] = [
+    const ALL: [Cloud; 8] = [
         Cloud::ClaudeCode,
         Cloud::Cursor,
         Cloud::Copilot,
@@ -47,6 +48,7 @@ impl Cloud {
         Cloud::Jules,
         Cloud::Devin,
         Cloud::Devcontainer,
+        Cloud::Antigravity,
     ];
 
     /// Its word, as `--agent-clouds` takes it.
@@ -59,6 +61,7 @@ impl Cloud {
             Cloud::Jules => "jules",
             Cloud::Devin => "devin",
             Cloud::Devcontainer => "devcontainer",
+            Cloud::Antigravity => "antigravity",
         }
     }
 
@@ -75,13 +78,25 @@ const SIGNS: [(Cloud, &str); 4] = [
     (Cloud::Devcontainer, ".devcontainer/devcontainer.json"),
 ];
 
-/// The clouds the repository at `root` already has files for.
+/// The clouds the repository at `root` already has files for. \[ADR 0165\] Antigravity's
+/// `.agents/hooks.json` counts only with a group other than hushrun's: init writes that one.
 pub fn clouds_in(root: &Path) -> Vec<Cloud> {
-    SIGNS
+    let mut clouds: Vec<Cloud> = SIGNS
         .iter()
         .filter(|(_, path)| root.join(path).exists())
         .map(|(cloud, _)| *cloud)
-        .collect()
+        .collect();
+    let groups = std::fs::read_to_string(root.join(ANTIGRAVITY_HOOKS))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    if groups
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|groups| groups.keys().any(|name| name != ANTIGRAVITY_GROUP))
+    {
+        clouds.push(Cloud::Antigravity);
+    }
+    clouds
 }
 
 /// `words`, read: a word hushrun doesn't know is a usage error; `none` is none.
@@ -116,7 +131,12 @@ pub fn chosen(
 ) -> Result<Vec<Cloud>, crate::exit::Failure> {
     use std::io::IsTerminal as _;
     if let Some(words) = &args.agent_clouds {
-        return parse_clouds(words).map_err(|e| crate::exit::Failure::usage(anyhow::anyhow!(e)));
+        let clouds =
+            parse_clouds(words).map_err(|e| crate::exit::Failure::usage(anyhow::anyhow!(e)))?;
+        if clouds.contains(&Cloud::Antigravity) && !json {
+            eprintln!("{ANTIGRAVITY_SETUP_LINE}");
+        }
+        return Ok(clouds);
     }
     let found = clouds_in(root);
     let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
@@ -189,7 +209,8 @@ fn runner(npm: bool) -> &'static str {
 /// \[ADR 0142\] What each cloud gets (C-145): an end-of-session hook that runs `hushrun flush`
 /// (Claude Code's `Stop` in `.claude/settings.json`, which also gets a `SessionStart` that runs
 /// `hushrun hook session-start` in Claude Code on the web, ADR 0161; Cursor's `stop` in `.cursor/hooks.json`; Copilot's
-/// `sessionEnd` in `.github/hooks/hushrun.json`), Cursor's install script and the `install` of its
+/// `sessionEnd` in `.github/hooks/hushrun.json`; Antigravity's `hushrun` group in `.agents/hooks.json`,
+/// ADR 0165), Cursor's install script and the `install` of its
 /// `.cursor/environment.json` (ADR 0164), Copilot's setup steps, and a dev container's
 /// feature. A file there keeps everything it has: JSON gets hushrun's hook added where it lacks it;
 /// a workflow or a dev container's file that exists is left as it is.
@@ -312,11 +333,54 @@ fn cloud_files(root: &Path, clouds: &[Cloud], npm: bool) -> Vec<File> {
                     });
                 }
             }
+            // \[ADR 0165\] One group of hushrun's own beside the others; one that is there,
+            // edited or not, stays as it is.
+            Cloud::Antigravity => {
+                files.extend(json_hook(
+                    ANTIGRAVITY_HOOKS,
+                    &|value| {
+                        if value.get(ANTIGRAVITY_GROUP).is_some() {
+                            return false;
+                        }
+                        value[ANTIGRAVITY_GROUP] = antigravity_group(run);
+                        true
+                    },
+                    "Antigravity's hooks: warm a Remote Agent conversation when it starts and tell the agent what passed, and send what it passed when it is idle",
+                ));
+            }
             // Their setup lives in the platform's settings: the docs say what goes there.
             Cloud::Codex | Cloud::Jules | Cloud::Devin => {}
         }
     }
     files
+}
+
+/// \[ADR 0165\] Antigravity's hooks file, and the name of hushrun's group in it.
+const ANTIGRAVITY_HOOKS: &str = ".agents/hooks.json";
+const ANTIGRAVITY_GROUP: &str = "hushrun";
+/// \[ADR 0165\] How long Antigravity gives the stop hook: its default.
+const ANTIGRAVITY_STOP_TIMEOUT_SECONDS: u64 = 30;
+
+/// \[ADR 0165\] What init says when `antigravity` is named: the Environment setup recipe lives in
+/// the remote project's settings, so init can't write it.
+const ANTIGRAVITY_SETUP_LINE: &str = "hushrun: Antigravity's Environment setup is in the remote project's settings, so init can't write it: paste recipes/agent-clouds/antigravity-env-setup.sh there, which installs hushrun and pulls the baked and package stores: https://github.com/hushrun/hushrun/blob/main/recipes/agent-clouds/antigravity-env-setup.sh";
+
+/// \[ADR 0165\] hushrun's group in `.agents/hooks.json` (C-145): `SessionStart` runs `hook
+/// session-start` and `Stop` runs `hook stop`, both in Antigravity's format, and each prints `{}`
+/// when hushrun can't start. No gate: session start prints `{}` outside a hosted sandbox.
+fn antigravity_group(run: &str) -> serde_json::Value {
+    serde_json::json!({
+        "SessionStart": [{
+            "type": "command",
+            "command": format!("{run} hook session-start --format antigravity || echo '{{}}'"),
+            "timeout": crate::cmd::session_start::HOOK_TIMEOUT_SECONDS,
+        }],
+        "Stop": [{
+            "type": "command",
+            "command": format!("{run} hook stop --format antigravity || echo '{{}}'"),
+            "timeout": ANTIGRAVITY_STOP_TIMEOUT_SECONDS,
+        }],
+    })
 }
 
 /// \[ADR 0164\] Where Cursor's install script goes, and the command `install` runs it with.
@@ -823,6 +887,81 @@ mod tests {
         assert_eq!(without[1].path, ".cursor/hushrun-install.sh");
         assert_eq!(without[1].text, files[2].text);
         assert_eq!(without[2].text, files[3].text);
+    }
+
+    // covers: C-145
+    #[test]
+    fn antigravity_gets_one_hushrun_group_beside_the_others_once() {
+        for npm in [true, false] {
+            let run = runner(npm);
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let files = cloud_files(root, &[Cloud::Antigravity], npm);
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, ".agents/hooks.json");
+            let value: serde_json::Value = serde_json::from_str(&files[0].text).unwrap();
+            assert_eq!(value.as_object().unwrap().len(), 1, "{value:#}");
+            let group = &value["hushrun"];
+            assert_eq!(
+                group["SessionStart"],
+                serde_json::json!([{
+                    "type": "command",
+                    "command": format!("{run} hook session-start --format antigravity || echo '{{}}'"),
+                    "timeout": 60,
+                }])
+            );
+            assert_eq!(
+                group["Stop"],
+                serde_json::json!([{
+                    "type": "command",
+                    "command": format!("{run} hook stop --format antigravity || echo '{{}}'"),
+                    "timeout": 30,
+                }])
+            );
+            // The recipe is what init writes for hushrun from PATH.
+            if !npm {
+                assert_eq!(
+                    files[0].text,
+                    include_str!("../../../../../recipes/agent-clouds/antigravity-hooks.json")
+                );
+            }
+            // hushrun's own group is no sign the team uses Antigravity.
+            std::fs::create_dir_all(root.join(".agents")).unwrap();
+            std::fs::write(root.join(".agents/hooks.json"), &files[0].text).unwrap();
+            assert!(clouds_in(root).is_empty());
+            // Written, init has nothing more to add.
+            assert!(cloud_files(root, &[Cloud::Antigravity], npm).is_empty());
+        }
+        // Beside a team's own group: that group stays, hushrun's is added, and it counts as a sign.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".agents")).unwrap();
+        let mine =
+            serde_json::json!({"lint": {"Stop": [{"type": "command", "command": "./lint.sh"}]}});
+        std::fs::write(root.join(".agents/hooks.json"), mine.to_string()).unwrap();
+        assert_eq!(clouds_in(root), [Cloud::Antigravity]);
+        let files = cloud_files(root, &[Cloud::Antigravity], false);
+        assert_eq!(files.len(), 1);
+        let value: serde_json::Value = serde_json::from_str(&files[0].text).unwrap();
+        assert_eq!(value["lint"], mine["lint"]);
+        assert_eq!(value["hushrun"], antigravity_group("hushrun"));
+        std::fs::write(root.join(".agents/hooks.json"), &files[0].text).unwrap();
+        assert!(cloud_files(root, &[Cloud::Antigravity], false).is_empty());
+        // An edited hushrun group stays as it is.
+        let edited =
+            serde_json::json!({"hushrun": {"Stop": [{"type": "command", "command": "true"}]}});
+        std::fs::write(root.join(".agents/hooks.json"), edited.to_string()).unwrap();
+        assert!(cloud_files(root, &[Cloud::Antigravity], false).is_empty());
+        // A file that doesn't parse, or isn't an object, stays as it is.
+        for text in ["{not json", "[]"] {
+            std::fs::write(root.join(".agents/hooks.json"), text).unwrap();
+            assert!(cloud_files(root, &[Cloud::Antigravity], false).is_empty());
+            assert!(clouds_in(root).is_empty());
+        }
+        assert_eq!(
+            parse_clouds(&["antigravity".into()]).unwrap(),
+            [Cloud::Antigravity]
+        );
     }
 
     /// Cursor's files, written into `root` with `environment` as `.cursor/environment.json` (none
