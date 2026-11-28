@@ -28,6 +28,7 @@ pub fn run(global: &GlobalOpts, args: &PackagesArgs) -> CmdResult {
         PackagesCommand::Restore { parts } => restore(global, &parts),
         PackagesCommand::Verify => verify(),
         PackagesCommand::Bake(bake_args) => bake(global, &bake_args),
+        PackagesCommand::Pull(pull_args) => crate::cmd::packages_pull::run(global, &pull_args),
         PackagesCommand::Exec { command } => {
             // `exec` returns COMMAND's own code from `main`; this arm only runs without one.
             if command.is_empty() {
@@ -601,7 +602,11 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     }
     let wanted =
         |part: &dyn Part| args.only.is_empty() || args.only.iter().any(|o| o == part.name());
-    // --tar alone bakes into a folder of its own beside the archive, removed after.
+    // K-14: where the image goes, and the registry's credential, settled before the fetch runs
+    // anything of the repository's (ADR 0102).
+    let target = crate::cmd::packages_image::target(args, &context.checkout)?;
+    // --tar alone bakes into a folder of its own beside the archive, removed after; --oci or
+    // --oci-dir alone, into one in the temporary folder.
     let (out, scratch) = match (&args.out, &args.tar) {
         (Some(out), _) => (absolute(out), None),
         (None, Some(tar)) => {
@@ -613,15 +618,28 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             ));
             (dir.clone(), Some(Cleanup(vec![dir])))
         }
+        (None, None) if target.is_some() => {
+            let dir = std::env::temp_dir().join(format!(
+                "hushrun-packages-{}",
+                hushrun_build::baked::unique("store")
+            ));
+            (dir.clone(), Some(Cleanup(vec![dir])))
+        }
         (None, None) => return Err(Failure::usage(anyhow!("name --out DIR or --tar FILE"))),
     };
     // K-13's "nothing to do", on this machine: the store at --out holds the parts this bake would
-    // take, each for the build files the checkout has now, from the same tool line.
+    // take, each for the build files the checkout has now, from the same tool line. With --oci,
+    // that store is what is published.
     if !args.force
         && args.tar.is_none()
         && let Some(words) = already_baked(&context, &out, args, &harvests, &wanted)
     {
         println!("{words}");
+        if let Some(target) = &target {
+            for line in published_lines(&publish_image(&out, target)?) {
+                println!("{line}");
+            }
+        }
         return Ok(Exit::Ok);
     }
     let lock = hushrun_build::baked::lock_bake(&out).map_err(|e| fail(e.to_string()))?;
@@ -862,6 +880,11 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             hushrun_packages::tar::ROOT
         ));
     }
+    // K-14: the store, published as an image.
+    let published = match &target {
+        Some(target) => Some(publish_image(&out, target)?),
+        None => None,
+    };
     let shown = if scratch.is_some() {
         args.tar.as_deref().map(absolute).unwrap_or_default()
     } else {
@@ -900,6 +923,9 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
         size(total),
         shown.display()
     ));
+    if let Some(published) = &published {
+        lines.extend(published_lines(published));
+    }
     if global.format == Format::Json {
         for line in &lines {
             eprintln!("hushrun: {line}");
@@ -909,15 +935,22 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
             .iter()
             .map(|p| json!({"part": p.part, "files": p.rows.count, "bytes": p.bytes, "tool": p.tool}))
             .collect();
-        println!(
-            "{}",
-            json!({
-                "schema": "hushrun.packages-bake/v1",
-                "out": shown.display().to_string(),
-                "identity": packages.identity.to_string(),
-                "parts": parts,
-            })
-        );
+        let mut value = json!({
+            "schema": "hushrun.packages-bake/v1",
+            "out": shown.display().to_string(),
+            "identity": packages.identity.to_string(),
+            "parts": parts,
+        });
+        if let Some(published) = &published {
+            value["image"] = json!({
+                "reference": published.reference,
+                "digest": published.digest,
+                "tags": published.tags,
+                "layer_bytes": published.layer_bytes,
+                "uploaded": published.uploaded,
+            });
+        }
+        println!("{value}");
     } else {
         let mut stdout = std::io::stdout().lock();
         for line in &lines {
@@ -932,6 +965,39 @@ fn bake(global: &GlobalOpts, args: &PackagesBakeArgs) -> CmdResult {
     }
     drop(scratch);
     Ok(Exit::Ok)
+}
+
+/// K-14: publishes the store at `out` to `target`; the moving tag moves only from CI on the
+/// default branch (B-66's rule).
+fn publish_image(
+    out: &Path,
+    target: &crate::cmd::packages_image::Target,
+) -> Result<crate::cmd::packages_image::Published, Failure> {
+    let context = hushrun_ci::context(&hushrun_ci::Env::from_process());
+    let latest = crate::cmd::build_relay::bake_image::moves_latest(&context);
+    crate::cmd::packages_image::publish(out, target, latest)
+        .map_err(|why| Failure::new(Exit::Unexpected, anyhow!("packages: publishing: {why}")))
+}
+
+/// What a bake says of the image it published.
+fn published_lines(published: &crate::cmd::packages_image::Published) -> Vec<String> {
+    let mut lines = vec![format!(
+        "packages: published {} ({}, {}), tagged {}",
+        published.reference,
+        size(published.layer_bytes),
+        if published.uploaded {
+            "uploaded"
+        } else {
+            "there already"
+        },
+        if published.tags.is_empty() {
+            "nothing".to_string()
+        } else {
+            published.tags.join(", ")
+        }
+    )];
+    lines.extend(published.notes.iter().map(|n| format!("packages: {n}")));
+    lines
 }
 
 /// K-6: the archive of the store at `folder`, written beside `tar` and renamed into place.

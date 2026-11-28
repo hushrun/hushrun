@@ -4,6 +4,8 @@
 - **Date:** 2026-11-27
 - **Rules:** C-168 new; C-145 changed; relies on B-240, C-140, C-144, C-22 and C-143
 - **Amends:** [0143](0143-a-baked-store-pulled-into-a-fixed-sandbox.md)
+- **Amended by:** [0163](0163-a-package-store-pulled-into-a-sandbox.md) (`packages pull` between
+  the two steps)
 
 ## Context
 

@@ -53,19 +53,24 @@ pub(crate) enum Step {
     /// `hushrun build pull` (B-240): the baked compiled code, into `/hushrun`. A public
     /// repository's needs no credential.
     BuildPull,
+    /// \[ADR 0163\] `hushrun packages pull` (K-15): the baked packages, into
+    /// `/hushrun-packages`, before anything installs. A public repository's, or one
+    /// `HUSHRUN_PACKAGES_IMAGE` names, needs no credential for the backend.
+    PackagesPull,
     /// `hushrun fetch` (C-144): the newest results of this tree, and compiled code.
     Fetch,
 }
 
-/// The steps, in order. \[ADR 0161\] `hushrun packages pull`, once it exists, goes between
-/// them: the baked packages, before anything installs.
-pub(crate) const STEPS: &[Step] = &[Step::BuildPull, Step::Fetch];
+/// The steps, in order. \[ADR 0163\] `hushrun packages pull` goes between the other two: the baked
+/// packages, before anything installs.
+pub(crate) const STEPS: &[Step] = &[Step::BuildPull, Step::PackagesPull, Step::Fetch];
 
 impl Step {
     /// How lines name it: the command.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Step::BuildPull => "build pull",
+            Step::PackagesPull => "packages pull",
             Step::Fetch => "fetch",
         }
     }
@@ -74,6 +79,7 @@ impl Step {
     fn args(self) -> &'static [&'static str] {
         match self {
             Step::BuildPull => &["build", "pull", "-q"],
+            Step::PackagesPull => &["packages", "pull", "-q"],
             Step::Fetch => &["fetch", "-q"],
         }
     }
@@ -81,7 +87,7 @@ impl Step {
     /// Whether it does nothing without a credential for the backend.
     fn needs_credential(self) -> bool {
         match self {
-            Step::BuildPull => false,
+            Step::BuildPull | Step::PackagesPull => false,
             Step::Fetch => true,
         }
     }
@@ -99,6 +105,9 @@ pub(crate) enum Outcome {
     Skipped(&'static str),
     /// The budget ran out while it ran: it goes on in the background.
     StillRunning,
+    /// A pull found no store published under its tag ([`Exit::NotPublished`]): nothing to pull
+    /// yet, which isn't a failure.
+    NotPublished,
 }
 
 impl Outcome {
@@ -110,6 +119,16 @@ impl Outcome {
             Outcome::NotStarted(_) => "couldn't start".into(),
             Outcome::Skipped(why) => format!("skipped ({why})"),
             Outcome::StillRunning => "still running in the background".into(),
+            Outcome::NotPublished => "none published yet".into(),
+        }
+    }
+
+    /// What a step's exit code says.
+    fn of_exit(code: Option<i32>) -> Outcome {
+        match code {
+            Some(0) => Outcome::Done,
+            Some(code) if code == Exit::NotPublished as i32 => Outcome::NotPublished,
+            code => Outcome::Failed(code),
         }
     }
 }
@@ -400,8 +419,7 @@ fn spawn_step(global: &GlobalOpts, log: Option<&Path>, step: Step, until: Instan
     };
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Outcome::Done,
-            Ok(Some(status)) => return Outcome::Failed(status.code()),
+            Ok(Some(status)) => return Outcome::of_exit(status.code()),
             Ok(None) => {}
             Err(err) => return Outcome::NotStarted(err.to_string()),
         }
@@ -453,7 +471,7 @@ fn session_start(global: &GlobalOpts, platform: &'static Platform, budget: Budge
             if !quiet {
                 let shown = log
                     .as_ref()
-                    .filter(|_| !matches!(outcome, Outcome::Done))
+                    .filter(|_| !matches!(outcome, Outcome::Done | Outcome::NotPublished))
                     .map(|log| format!(" ({})", log.display()))
                     .unwrap_or_default();
                 eprintln!(
@@ -526,11 +544,12 @@ mod tests {
             ran.push(step);
             Outcome::Done
         });
-        assert_eq!(ran, [Step::BuildPull]);
+        assert_eq!(ran, [Step::BuildPull, Step::PackagesPull]);
         assert_eq!(
             done,
             [
                 (Step::BuildPull, Outcome::Done),
+                (Step::PackagesPull, Outcome::Done),
                 (Step::Fetch, Outcome::Skipped(NO_CREDENTIAL)),
             ]
         );
@@ -540,7 +559,8 @@ mod tests {
             Outcome::Failed(Some(2))
         });
         // A step that fails doesn't stop the next.
-        assert_eq!(ran, [Step::BuildPull, Step::Fetch]);
+        assert_eq!(ran, [Step::BuildPull, Step::PackagesPull, Step::Fetch]);
+        assert_eq!(Step::PackagesPull.args(), ["packages", "pull", "-q"]);
         assert!(done.iter().all(|(_, o)| *o == Outcome::Failed(Some(2))));
     }
 
@@ -555,7 +575,8 @@ mod tests {
             Outcome::StillRunning
         });
         assert_eq!(ran, [Step::BuildPull]);
-        assert_eq!(done[1], (Step::Fetch, Outcome::Skipped(NO_TIME)));
+        assert_eq!(done[1], (Step::PackagesPull, Outcome::Skipped(NO_TIME)));
+        assert_eq!(done[2], (Step::Fetch, Outcome::Skipped(NO_TIME)));
         // With less than a second of the steps' time left, none starts.
         let clock = Cell::new(budget.steps_end - Duration::from_millis(500));
         let done = run_steps(STEPS, budget, true, &|| clock.get(), &mut |_, _| {
@@ -572,6 +593,7 @@ mod tests {
             done,
             [
                 (Step::BuildPull, Outcome::Done),
+                (Step::PackagesPull, Outcome::Skipped(NO_TIME)),
                 (Step::Fetch, Outcome::Skipped(NO_TIME)),
             ]
         );
@@ -593,6 +615,7 @@ mod tests {
     fn the_block_says_what_passed_what_is_left_and_what_to_do_before_a_push() {
         let steps = [
             (Step::BuildPull, Outcome::Done),
+            (Step::PackagesPull, Outcome::Done),
             (Step::Fetch, Outcome::Done),
         ];
         let text = block(
@@ -604,13 +627,40 @@ mod tests {
         assert_eq!(
             text,
             "hushrun, at the start of this Claude Code on the web session:
-- Setup: build pull done; fetch done.
+- Setup: build pull done; packages pull done; fetch done.
 - 3 of 5 checks already passed on this exact code (abc1234): hushrun run skips them here, and CI skips them.
 - Still to run here: unit.
 - Left to CI or another machine: e2e.
 - Before you push: commit, run the commands `hushrun ready` lists, and push once it says the code is ready.
 "
         );
+    }
+
+    // covers: C-168
+    #[test]
+    fn a_pull_with_nothing_published_is_said_as_such_and_not_as_a_failure() {
+        assert_eq!(Outcome::of_exit(Some(0)), Outcome::Done);
+        assert_eq!(Outcome::of_exit(Some(12)), Outcome::NotPublished);
+        assert_eq!(Outcome::of_exit(Some(1)), Outcome::Failed(Some(1)));
+        assert_eq!(Outcome::of_exit(None), Outcome::Failed(None));
+        let steps = [
+            (Step::BuildPull, Outcome::Done),
+            (Step::PackagesPull, Outcome::NotPublished),
+            (Step::Fetch, Outcome::Done),
+        ];
+        let text = block(
+            "Claude Code on the web",
+            &steps,
+            &Sharing::Shared,
+            Some(&summary()),
+        );
+        assert!(
+            text.contains(
+                "- Setup: build pull done; packages pull none published yet; fetch done."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("failed"), "{text}");
     }
 
     // covers: C-168
@@ -651,6 +701,7 @@ mod tests {
         };
         let steps = [
             (Step::BuildPull, Outcome::StillRunning),
+            (Step::PackagesPull, Outcome::Skipped(NO_TIME)),
             (Step::Fetch, Outcome::Skipped(NO_TIME)),
         ];
         for sharing in [Sharing::Shared, Sharing::NoCredential, Sharing::Off] {
@@ -674,7 +725,7 @@ mod tests {
         assert!(reduced.contains(NO_ANSWER), "{reduced}");
         assert!(
             reduced.contains(
-                "build pull still running in the background; fetch skipped (out of time)"
+                "build pull still running in the background; packages pull skipped (out of time); fetch skipped (out of time)"
             ),
             "{reduced}"
         );

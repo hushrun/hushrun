@@ -171,7 +171,9 @@ pub enum Command {
     /// fetches itself with `bundle cache --no-install`, and `hushrun packages exec` copies each gem into the
     /// gem cache Bundler already uses before COMMAND starts, checked first against Gemfile.lock. A run reads
     /// the store at HUSHRUN_PACKAGES_LOWER, or /hushrun-packages; `hushrun packages exec --
-    /// COMMAND` gives it to a command outside `hushrun run`. A store nothing signed is read only
+    /// COMMAND` gives it to a command outside `hushrun run`. `hushrun packages bake --oci
+    /// REPOSITORY` publishes the store as an image, and `hushrun packages pull` puts the newest one
+    /// there in a sandbox with no Dockerfile. A store nothing signed is read only
     /// with HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1, outside CI. hushrun never sets a tool's offline
     /// switch: what the store lacks is downloaded as usual.
     #[command(verbatim_doc_comment)]
@@ -389,13 +391,55 @@ pub enum PackagesCommand {
     },
     /// Hash every file of the store against its row; exit 1 on the first that differs.
     Verify,
+    /// Put this repository's newest package store where runs read one (HUSHRUN_PACKAGES_LOWER, or
+    /// /hushrun-packages), from its registry: for a sandbox with no Dockerfile.
+    ///
+    /// It pulls `<registry>/<org>/<name>:hushrun-packages-<platform>-latest` (or the image
+    /// HUSHRUN_PACKAGES_IMAGE names) with a pull token in HUSHRUN_PACKAGES_REGISTRY_TOKEN, else
+    /// HUSHRUN_REGISTRY_TOKEN, else the backend's credential here, or nothing for a public
+    /// repository; checks every file, and the signature
+    /// as K-7 asks when hushrun.yaml names signers of baked stores; and only then replaces what was
+    /// there. When the folder holds that store already, it downloads nothing.
+    Pull(PackagesPullArgs),
+}
+
+/// `hushrun packages pull` (K-15).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct PackagesPullArgs {
+    /// The image, `<host>/<org>/<name>` [default: HUSHRUN_PACKAGES_IMAGE, else this repository's
+    /// on its backend's registry].
+    #[arg(long, value_name = "REPOSITORY")]
+    pub image: Option<String>,
+    /// The tag, by default `hushrun-packages-<platform>-latest`, or `sha256:<64 hex>` for one
+    /// image.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+    /// The platform, as tags name it, such as linux-x64 [default: this machine's].
+    #[arg(long, value_name = "PLATFORM", conflicts_with = "tag")]
+    pub platform: Option<String>,
+    /// Where to put it [default: HUSHRUN_PACKAGES_LOWER, else /hushrun-packages].
+    #[arg(long, value_name = "FOLDER")]
+    pub to: Option<std::path::PathBuf>,
+    /// Only say which image the tag names now (`<image>@<digest>`): download and change nothing.
+    #[arg(long, conflicts_with_all = ["to", "force", "require_signed"])]
+    pub resolve: bool,
+    /// Download the store even when the folder holds it already.
+    #[arg(long)]
+    pub force: bool,
+    /// Refuse a store no signer hushrun.yaml names signed, also one whose every part a lockfile
+    /// checks and when hushrun.yaml names no signer: for a template many sandboxes start from.
+    #[arg(long)]
+    pub require_signed: bool,
+    /// The registry is reached over plain HTTP (tests only).
+    #[arg(long, hide = true)]
+    pub insecure: bool,
 }
 
 /// `hushrun packages bake --out DIR` (K-6).
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct PackagesBakeArgs {
     /// The folder to write the store to, replaced in one step.
-    #[arg(long, value_name = "DIR", required_unless_present = "tar")]
+    #[arg(long, value_name = "DIR", required_unless_present_any = ["tar", "oci", "oci_dir"])]
     pub out: Option<std::path::PathBuf>,
     /// Also, or instead, write the store as one archive whose entries are under
     /// `hushrun-packages/`, so `tar -x -C /` puts it where a run reads one. The same store is the
@@ -425,6 +469,17 @@ pub struct PackagesBakeArgs {
     /// Fail when the store is larger than this many bytes [default: 4 GiB].
     #[arg(long, value_name = "BYTES")]
     pub max_bytes: Option<u64>,
+    /// Also publish the store as an image to this repository of an OCI registry, such as
+    /// ghcr.io/acme/app, with the credentials docker uses: one layer, the archive --tar writes,
+    /// tagged hushrun-packages-PLATFORM-IDENTITY, and hushrun-packages-PLATFORM-latest from CI on
+    /// the default branch. `hushrun packages pull --image REPOSITORY` puts it in a sandbox.
+    #[arg(long, value_name = "REPOSITORY", conflicts_with = "oci_dir")]
+    pub oci: Option<String>,
+    /// Write that image into this folder as an OCI image layout instead, no registry.
+    #[arg(long, value_name = "DIR")]
+    pub oci_dir: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    pub registry: RegistryOpts,
     /// The fetch: the check's own command, run with the tools' caches at folders of the bake's.
     #[arg(last = true)]
     pub command: Vec<String>,
