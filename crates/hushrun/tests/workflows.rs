@@ -284,21 +284,18 @@ fn the_package_store_recipe_publishes_from_the_default_branch_alone() {
         job["if"],
         "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
     );
-    // GHCR takes the image with the job's own token; the ID token signs it.
-    assert_eq!(recipe["permissions"]["packages"], "write");
+    // hushrun's registry grants the push to the job's ID token, which also signs the store; no
+    // registry token of the repository's own is needed.
     assert_eq!(recipe["permissions"]["id-token"], "write");
+    assert!(recipe["permissions"].get("packages").is_none());
     let bake = steps(job)
         .into_iter()
         .find(|s| {
             s["run"]
                 .as_str()
-                .is_some_and(|r| r.contains("hushrun packages bake --oci "))
+                .is_some_and(|r| r.contains("hushrun packages bake --oci hushrun -- "))
         })
-        .expect("a step bakes the package store");
-    assert!(
-        bake["run"].as_str().unwrap().contains(" -- "),
-        "the bake runs the install command: {bake}"
-    );
-    assert_eq!(bake["env"]["GITHUB_TOKEN"], "${{ github.token }}");
+        .expect("a step bakes the package store into hushrun's registry");
+    assert!(bake.get("env").is_none(), "{bake}");
     assert_eq!(recipe["concurrency"]["cancel-in-progress"], false);
 }

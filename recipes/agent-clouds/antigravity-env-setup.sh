@@ -25,11 +25,11 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || true
 
 # hushrun's platform id for this sandbox (Antigravity sets no marker hushrun knows yet).
 export HUSHRUN_SANDBOX=antigravity-remote
-# The package store's image, while hushrun's own registry doesn't take package stores: the
-# repository your CI's `hushrun packages bake --oci` publishes to (recipes/github/packages-bake.yml).
-# Edit it, or set it in the project's settings. Once `--oci hushrun` works, delete this line: the
-# pull then finds the store on hushrun's registry by itself.
-export HUSHRUN_PACKAGES_IMAGE="${HUSHRUN_PACKAGES_IMAGE:-ghcr.io/acme/shop}"
+# The package store: when CI publishes it with `hushrun packages bake --oci hushrun`
+# (recipes/github/packages-bake.yml), the pull finds it on hushrun's registry by itself. When CI
+# publishes it to a registry of your own instead (`--oci ghcr.io/acme/shop`), name that repository
+# here or in the project's settings, with HUSHRUN_PACKAGES_REGISTRY_TOKEN there if it is private:
+# export HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop
 # [probe] The user who runs the agent's commands, when setup runs as root and the agent doesn't:
 # the stores are given to them. Empty: setup's own user.
 AGENT_USER="${AGENT_USER:-}"
@@ -42,8 +42,11 @@ fi
 # What the agent's shells should see: written to ~/.profile (login shells) and ~/.bashrc
 # (interactive ones) in one block this script replaces on every run. [probe] Which of the two, if
 # either, the agent's commands read.
-profile_lines="export HUSHRUN_SANDBOX=antigravity-remote
+profile_lines="export HUSHRUN_SANDBOX=antigravity-remote"
+if [ -n "${HUSHRUN_PACKAGES_IMAGE:-}" ]; then
+  profile_lines="$profile_lines
 export HUSHRUN_PACKAGES_IMAGE='$HUSHRUN_PACKAGES_IMAGE'"
+fi
 
 # hushrun, if it is missing: the release installer, into ~/.local/bin, which needs no root; as
 # root, into /usr/local/bin, where every user's PATH finds it.

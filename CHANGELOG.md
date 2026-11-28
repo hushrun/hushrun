@@ -25,8 +25,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
   user, or into folders under `$HOME` that `~/.profile` names), runs the install command through
   `hushrun packages exec`, writes `hushrun packages env`'s variables to the profile, and fetches
   the newest results; it always exits 0. `recipes/github/packages-bake.yml` publishes the package
-  store to the repository's GHCR packages on each push to the default branch, until hushrun's
-  registry takes package stores.
+  store on each push to the default branch into hushrun's registry (`--oci hushrun`, with the job's
+  ID token), or, as its comments show, into a registry of the team's own.
 - **Antigravity's hooks** ([ADR 0165](docs/adr/0165-a-session-start-in-antigravitys-format.md),
   C-168, C-169): `hushrun hook session-start --format antigravity` prints its lines as Google
   Antigravity's `injectSteps` JSON, one system message, and `{}` where it has nothing to say.

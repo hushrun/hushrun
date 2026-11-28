@@ -61,18 +61,18 @@ The hosts to allow, where a platform limits the network: `api.hushrun.com`,
 `registry.hushrun.com` and `*.r2.cloudflarestorage.com`. `hushrun doctor` checks them.
 
 Antigravity keeps a remote project's setup script in its settings, so `hushrun init` can't write
-it: paste `antigravity-env-setup.sh` there whole, and edit its install command (`npm ci`) and
-`HUSHRUN_PACKAGES_IMAGE`. Until hushrun's registry takes package stores, the store comes from your
-own registry: [`recipes/github/packages-bake.yml`](../github/packages-bake.yml) publishes it on
-each push to the default branch (`hushrun packages bake --oci ghcr.io/acme/shop -- npm ci`, with
-the job's `GITHUB_TOKEN` and `packages: write`). When `--oci hushrun` works, the recipe names
-`hushrun` instead of the image and the setup script drops its `HUSHRUN_PACKAGES_IMAGE` line: one
-line each. A private package needs `HUSHRUN_PACKAGES_REGISTRY_TOKEN` in the project's settings.
+it: paste `antigravity-env-setup.sh` there whole, and edit its install command (`npm ci`).
+[`recipes/github/packages-bake.yml`](../github/packages-bake.yml) publishes the package store on
+each push to the default branch, into hushrun's registry (`hushrun packages bake --oci hushrun --
+npm ci`, with the job's ID token), where the setup script's pull finds it with no setting. To use a
+registry of your own instead, the recipe's comments show `--oci ghcr.io/acme/shop` with the job's
+`GITHUB_TOKEN` and `packages: write`; then uncomment the script's `HUSHRUN_PACKAGES_IMAGE` line (or
+set it in the project's settings), with `HUSHRUN_PACKAGES_REGISTRY_TOKEN` if the package is private.
 What the probe ([docs/validation/antigravity-remote.md](../../docs/validation/antigravity-remote.md))
 hasn't answered yet is marked `[probe]` in the script: whether setup runs once or per
 conversation (the profile block is replaced, never added twice), whether it has root (`AGENT_USER`
 names the agent's user when setup runs as root and the agent doesn't), whether the agent's shell
 reads `~/.profile` or `~/.bashrc` (both get the block), and where the workspace is. Hosts to allow
-there: hushrun's three above, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` for the installer,
-and the package store's registry (`ghcr.io` and `pkg-containers.githubusercontent.com` for GHCR)
-until hushrun's registry takes package stores.
+there: hushrun's three above; `github.com`, `objects.githubusercontent.com` and
+`release-assets.githubusercontent.com` for the installer; and, for a registry of your own, its
+hosts (`ghcr.io` and `pkg-containers.githubusercontent.com` for GHCR).

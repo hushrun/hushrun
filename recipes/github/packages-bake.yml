@@ -6,14 +6,19 @@
 # Each push to the default branch runs the install command under `hushrun packages bake`, which
 # keeps what it downloaded as a one-layer image tagged hushrun-packages-<platform>-<id16> and
 # moves hushrun-packages-<platform>-latest. A store already published for these lockfiles
-# uploads nothing again. It signs keylessly with the job's ID token.
+# uploads nothing again. `--oci hushrun` publishes it into hushrun's registry, beside the baked
+# store, with the job's own ID token: sandboxes then pull it with no setting of their own. It needs
+# the repository to use hushrun's hosted backend.
 #
-# Replace: the image (`ghcr.io/acme/shop`, also in the sandbox's HUSHRUN_PACKAGES_IMAGE), the
-# toolchain setup and the install command. hushrun's own registry doesn't take package stores yet,
-# so this publishes to this repository's GHCR packages; once `--oci hushrun` works, that word in
-# place of the image is the one change (and `packages: write` and GITHUB_TOKEN can go). A private
-# package is pulled with a token in the sandbox's HUSHRUN_PACKAGES_REGISTRY_TOKEN (a classic PAT
-# with read:packages); a public one needs none.
+# Replace: the toolchain setup and the install command.
+#
+# To publish to a registry of your own instead, such as this repository's GHCR packages:
+#   - run: hushrun packages bake --oci ghcr.io/acme/shop -- npm ci
+#     env:
+#       GITHUB_TOKEN: ${{ github.token }}            # GHCR's login, as GITHUB_ACTOR
+# add `packages: write` to the permissions, and set HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop in the
+# sandbox (and HUSHRUN_PACKAGES_REGISTRY_TOKEN, a classic PAT with read:packages, if the package is
+# private).
 name: hushrun packages
 on:
   push:
@@ -27,8 +32,7 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write             # pushes the image to this repository's packages (GHCR)
-  id-token: write             # signs the store keylessly, as this workflow
+  id-token: write             # hushrun's registry grants the push to this token; it signs the store
 
 jobs:
   bake:
@@ -42,6 +46,4 @@ jobs:
           node-version: 22
       - uses: hushrun/hushrun/action/setup@main        # pin to a release commit
         # The newest hushrun release; `with: { version: X.Y.Z }` pins one, from the release after 0.21.1.
-      - run: hushrun packages bake --oci ghcr.io/acme/shop -- npm ci
-        env:
-          GITHUB_TOKEN: ${{ github.token }}            # GHCR's login, as GITHUB_ACTOR
+      - run: hushrun packages bake --oci hushrun -- npm ci
