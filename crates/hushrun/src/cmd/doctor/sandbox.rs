@@ -19,9 +19,6 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 /// whose presigned URLs name the account's host and can't use a domain of ours.
 pub const STORE_HOSTS: &str = "*.r2.cloudflarestorage.com";
 
-/// The variable that names the image `hushrun packages pull` pulls, `<host>/<org>/<name>`.
-pub const PACKAGES_IMAGE: &str = "HUSHRUN_PACKAGES_IMAGE";
-
 /// The hosts hushrun needs from here, each with what it is for and the URL that asks it (`None`
 /// for one that can't be asked from here): the backend's, its registry's, and, for hushrun's own
 /// backend, the shared store's, whose exact host is the org's own subdomain, which only a run that
@@ -111,7 +108,7 @@ pub(super) fn check(
         }) => Some(base.as_str()),
         _ => None,
     };
-    let hosts = hosts(backend, env.get(PACKAGES_IMAGE));
+    let hosts = hosts(backend, env.get(crate::cmd::packages_pull::IMAGE_VARIABLE));
     let mut blocked = Vec::new();
     for (host, what, url) in &hosts {
         let Some(url) = url else {

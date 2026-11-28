@@ -218,6 +218,64 @@ what it lacks, one line per part); **current**. *Rests on:* a part's `inputs` be
 same way by the bake and the run. *Breaks if:* a run read another tool version than the bake did:
 the part is called behind, and is still read.
 
+**K-14 A package store as an image.** [ADR 0163] `hushrun packages bake … --oci REPOSITORY |
+--oci-dir DIR` also publishes the store it baked (or, when K-6 finds nothing to do, the store at
+`--out`) as an image: one layer, media type `application/vnd.oci.image.layer.v1.tar`, annotated
+`dev.hushrun.layer: packages`, whose bytes are exactly K-6's archive of the store; a config for the
+store's platform whose label `dev.hushrun.baked-packages` is the JSON `{"schema":
+"hushrun.packages-image/v1", "identity", "platform", "packages_json", "parts"}` (`packages.json`'s
+identity and platform, the SHA-256 of its bytes, the parts' names); and a manifest annotated
+`dev.hushrun.packages-identity: <identity>`. Its tags are `hushrun-packages-<platform>-<first 16
+hex of the identity>`, which never moves (one that names another image stays, with a line), and
+`hushrun-packages-<platform>-latest`, which moves only from CI, not a pull request's run, on the
+default branch (B-66's rule; elsewhere a line says why not). The layer is uploaded only when the
+registry lacks its digest. Without `--out` or `--tar` the store is baked into a temporary folder and
+removed. `--oci` takes a repository with no tag, reached with the credential settled before the
+fetch runs (the CI job's own, else docker's, ADR 0102); `--oci hushrun`, or a repository on the
+registry host of the repository's backend, is refused (exit 2) with a line naming a registry of the
+team's own and `HUSHRUN_PACKAGES_IMAGE`, since that registry takes only B-70's publish. The
+signature is the store's own `packages.sigstore.json` in the layer (K-6, K-7): no referrer. The
+bake's JSON gains `image` (`reference`, `digest`, `tags`, `layer_bytes`, `uploaded`). *Rests on:*
+K-6's archive being a function of the store alone. *Breaks if:* two machines wrote different bytes
+for one store: each would be another image of the same fixed tag, and the first keeps it.
+
+**K-15 `hushrun packages pull`.** [ADR 0163] It puts the repository's newest package store where a
+run reads one, with B-240's rules and code but for what follows. The image is `--image`, else
+`HUSHRUN_PACKAGES_IMAGE`, else B-240's; the tag `--tag`, else `hushrun-packages-<platform>-latest`
+for `--platform` or this machine's. The credential is B-240's, but for the pull token:
+`HUSHRUN_PACKAGES_REGISTRY_TOKEN` when it is set and not empty, else `HUSHRUN_REGISTRY_TOKEN`, so a
+package store on a registry of the team's own and a baked store on hushrun's each get their own;
+`build pull` never reads `HUSHRUN_PACKAGES_REGISTRY_TOKEN`. Either goes only where B-240's token
+goes, and `HUSHRUN_PACKAGES_IMAGE` counts as named, as `--image` does (C-13). It reads the manifest and the config, whose label (K-14) names
+the store's identity and platform; `--resolve` prints `<image>@sha256:<64 hex>` and writes nothing.
+When the label's identity is the destination's `packages.json` `identity` and the destination
+passes K-1 by names, it downloads nothing and says `hushrun: <folder> holds <image>:<tag>
+(<digest>) already: nothing was downloaded`; `--force` pulls anyway. Otherwise it downloads and
+unpacks as B-240 does, taking only entries under `hushrun-packages/`: regular files, `0755` when
+the header's mode lets its owner run it and `0644` otherwise; folders `0755`; and links (`typeflag`
+`2`) only under `hushrun-packages/parts/<part>/` with a target that stays inside the part (K-3).
+Links are made after every file and folder, and one whose path is under another link, or where an
+entry is already, stops it, as do a link anywhere else, a hard link and a device. The folder must be
+a package store by names and bytes (K-1), of the identity the label names, and, when the tag was
+this machine's, of this platform. Trust is K-7's: when `hushrun.yaml` names signers of baked stores,
+a `packages.sigstore.json` there must verify and pass `not_before`, and with none the store is
+refused when a part is `verified_by: signature`; a store whose every part a lockfile checks is
+taken unsigned. `--require-signed` takes only a verified signature, and refuses when `hushrun.yaml`
+names no signer. Only then does it replace `--to`, else `HUSHRUN_PACKAGES_LOWER` (set, not empty),
+else `/hushrun-packages`, by renames; a swap into the default folder refused for permissions says
+to set `HUSHRUN_PACKAGES_LOWER` or pass `--to`. It says `hushrun: pulled <image>:<tag> (<digest>)
+into <folder>: <signed by … | unsigned: each part is checked against its lockfile, so any run reads
+it | hushrun.yaml names no signer …>`. With `--format json`, `hushrun.packages-pull/v1`
+(`docs/schemas/packages-pull.v1.schema.json`): `image`, `tag`, `digest`, `identity`, `platform`,
+`state` (`pulled`, `already_there`, `resolved`) and, but for `resolved`, `to`, `downloaded_bytes`,
+`signature` (`named`, `lockfiles`, `not_checked`) and `signed_by`. On GitHub Actions it writes the
+step outputs `hushrun-image-digest` and `hushrun-packages-identity`. A tag that names nothing
+exits 12 (nothing published yet), and a store that doesn't check or a registry that refuses exits
+1; either replaces nothing; a run still
+decides what it reads as it begins (K-7, K-8, K-11). *Rests on:* B-240's. *Breaks if:* the
+destination's parent is on another file system than the destination: the swap fails and what was
+there stays.
+
 **K-10 Readers.** A part reaches its tool in one of three ways: **A, in place** (the tool reads a
 second, read-only folder beside its own cache; hushrun sets one variable or one property; nothing
 is copied), **B, as a registry** (the tool downloads from the part and checks each package against

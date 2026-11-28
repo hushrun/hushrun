@@ -68,6 +68,9 @@ pub enum Role {
     Workspace,
     /// The repository's own code since, and `baked.json`: changes with every bake.
     Recent,
+    /// \[ADR 0163\] A package store's one layer (K-14): the bytes `hushrun packages bake --tar`
+    /// writes.
+    Packages,
 }
 
 impl Role {
@@ -77,6 +80,7 @@ impl Role {
             Role::Deps => "deps",
             Role::Workspace => "workspace",
             Role::Recent => "recent",
+            Role::Packages => "packages",
         }
     }
 }
@@ -613,27 +617,30 @@ fn layer_stream(files: Vec<Planned>) -> Result<BlobStream, ArtifactError> {
         Piece::Bytes(bytes) => {
             futures_util::stream::once(async move { Ok(Bytes::from(bytes)) }).boxed()
         }
-        Piece::File(path) => {
-            let file = fs::File::open(&path);
-            futures_util::stream::unfold(Some(file), |state| async move {
-                let mut file = match state? {
-                    Ok(file) => file,
-                    Err(e) => return Some((Err(e), None)),
-                };
-                let mut buf = vec![0u8; 1 << 20];
-                match file.read(&mut buf) {
-                    Ok(0) => None,
-                    Ok(n) => {
-                        buf.truncate(n);
-                        Some((Ok(Bytes::from(buf)), Some(Ok(file))))
-                    }
-                    Err(e) => Some((Err(e), None)),
-                }
-            })
-            .boxed()
-        }
+        Piece::File(path) => file_stream(path),
     });
     Ok(stream.boxed())
+}
+
+/// The bytes of the file at `path` as a stream, a MiB at a time.
+fn file_stream(path: PathBuf) -> BlobStream {
+    let file = fs::File::open(&path);
+    futures_util::stream::unfold(Some(file), |state| async move {
+        let mut file = match state? {
+            Ok(file) => file,
+            Err(e) => return Some((Err(e), None)),
+        };
+        let mut buf = vec![0u8; 1 << 20];
+        match file.read(&mut buf) {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok(Bytes::from(buf)), Some(Ok(file))))
+            }
+            Err(e) => Some((Err(e), None)),
+        }
+    })
+    .boxed()
 }
 
 /// B-65: builds the image of `plan` for `platform`: each layer's digest (a reused one's from the
@@ -730,6 +737,94 @@ pub fn build(
             bytes: manifest,
         },
     })
+}
+
+/// \[ADR 0163\] K-14: the image of one layer already written whole at `layer` (a package
+/// store's archive): the file is hashed once; the config is for `platform`, with `labels`; the
+/// manifest carries `annotations`, and names the layer with `role`'s word. The layer counts as
+/// reused: [`Artifacts::publish_file_image`](crate::Artifacts::publish_file_image) and
+/// [`write_file_layout`] put the file where it goes first.
+pub fn file_image(
+    layer: &Path,
+    role: Role,
+    platform: &str,
+    labels: &BTreeMap<String, String>,
+    annotations: &BTreeMap<String, String>,
+) -> Result<Image, ArtifactError> {
+    let at = |e: io::Error| ArtifactError::Invalid(format!("{}: {e}", layer.display()));
+    let mut from = fs::File::open(layer).map_err(at)?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = from.read(&mut buf).map_err(at)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        size += n as u64;
+    }
+    let digest = Digest::from_bytes(hasher.finalize().into());
+    let (os, arch) = os_arch(platform);
+    let config = serde_json::to_vec(&json!({
+        "architecture": arch,
+        "os": os,
+        "config": { "Labels": labels },
+        "rootfs": { "type": "layers", "diff_ids": [digest.to_string()] },
+    }))
+    .expect("configs serialize");
+    let manifest = serde_json::to_vec(&json!({
+        "schemaVersion": 2,
+        "mediaType": OCI_MANIFEST,
+        "config": {
+            "mediaType": CONFIG_MEDIA_TYPE,
+            "digest": Digest::of(&config).to_string(),
+            "size": config.len(),
+        },
+        "layers": [{
+            "mediaType": layout::LAYER_MEDIA_TYPE,
+            "digest": digest.to_string(),
+            "size": size,
+            "annotations": { LAYER_ANNOTATION: role.word() },
+        }],
+        "annotations": annotations,
+    }))
+    .expect("manifests serialize");
+    Ok(Image {
+        layers: vec![Layer {
+            role,
+            digest,
+            size,
+            files: Vec::new(),
+            reused: true,
+        }],
+        config,
+        manifest: Manifest {
+            media_type: OCI_MANIFEST.into(),
+            bytes: manifest,
+        },
+    })
+}
+
+/// \[K-14\] Writes `image`, made by [`file_image`] of the file at `layer`, into the OCI image
+/// layout at `dir` with `tags`.
+pub fn write_file_layout(
+    dir: &Path,
+    image: &Image,
+    layer: &Path,
+    tags: &[String],
+) -> Result<Pushed, ArtifactError> {
+    let digest = image
+        .layers
+        .first()
+        .map(|l| l.digest)
+        .ok_or_else(|| ArtifactError::Invalid("an image of no layer".into()))?;
+    let copied = layout_put_file(dir, layer, &digest)?;
+    let mut pushed = write_layout(dir, image, tags, &[])?;
+    if let Some(blob) = pushed.blobs.first_mut() {
+        blob.uploaded = copied;
+    }
+    Ok(pushed)
 }
 
 /// What a publish uploaded, blob by blob.
@@ -887,6 +982,18 @@ impl crate::Artifacts {
         repository: &Repository,
         manifest: &Manifest,
     ) -> Result<Option<Label>, ArtifactError> {
+        Ok(self
+            .config(repository, manifest)?
+            .and_then(|bytes| Label::of_config(&bytes)))
+    }
+
+    /// \[B-240, K-15\] The config bytes of the image `manifest` (of `repository`) names, at most
+    /// [`MOST_CONFIG`] bytes and checked against its digest: `None` when the manifest names none.
+    pub fn config(
+        &self,
+        repository: &Repository,
+        manifest: &Manifest,
+    ) -> Result<Option<Vec<u8>>, ArtifactError> {
         let json: Value = serde_json::from_slice(&manifest.bytes).map_err(|e| {
             ArtifactError::Invalid(format!("{}'s manifest: {e}", manifest.digest()))
         })?;
@@ -904,7 +1011,53 @@ impl crate::Artifacts {
                 "{config}: the config isn't its digest"
             )));
         }
-        Ok(Label::of_config(&bytes))
+        Ok(Some(bytes))
+    }
+
+    /// \[K-14\] Publishes `image`, made by [`file_image`] of the file at `layer`, into
+    /// `repository`: the layer (unless the registry holds it), then as [`Self::publish`] does,
+    /// the `fixed` tags before the `moving` ones.
+    pub fn publish_file_image(
+        &self,
+        repository: &Repository,
+        image: &Image,
+        layer: &Path,
+        fixed: &[String],
+        moving: &[String],
+    ) -> Result<Pushed, ArtifactError> {
+        let first = image
+            .layers
+            .first()
+            .ok_or_else(|| ArtifactError::Invalid("an image of no layer".into()))?;
+        let uploaded = self.push_file(repository, layer, &first.digest, first.size)?;
+        let mut pushed = self.publish(repository, image, fixed, &[], moving)?;
+        if let Some(blob) = pushed.blobs.first_mut() {
+            blob.uploaded = uploaded;
+        }
+        Ok(pushed)
+    }
+
+    /// \[K-14\] Uploads the file at `path`, whose SHA-256 and size are `digest` and `size`, as a
+    /// blob of `repository`, unless the registry holds it already (a HEAD first): whether it was
+    /// uploaded. A layer written whole beforehand goes up this way, then [`Self::publish`] takes
+    /// it as a reused layer.
+    pub fn push_file(
+        &self,
+        repository: &Repository,
+        path: &Path,
+        digest: &Digest,
+        size: u64,
+    ) -> Result<bool, ArtifactError> {
+        self.runtime.block_on(async {
+            let registry = self.registry.as_ref();
+            if registry.blob_exists(repository, digest).await? {
+                return Ok(false);
+            }
+            registry
+                .push_blob(repository, digest, size, file_stream(path.to_path_buf()))
+                .await?;
+            Ok(true)
+        })
     }
 
     /// \[B-240\] The layers `manifest` (an image of `repository`) names, each written into `dir`
@@ -1301,6 +1454,38 @@ fn read_blob(dir: &Path, digest: &Digest) -> Option<Vec<u8>> {
 /// Whether the layout at `dir` holds the blob `digest`.
 pub fn layout_has(dir: &Path, digest: &Digest) -> bool {
     blob_path(dir, digest).is_file()
+}
+
+/// \[K-14\] Copies the file at `path`, whose SHA-256 is `digest`, into the layout at `dir` as a
+/// blob, unless it holds it already: whether it was copied. [`write_layout`] then takes it as a
+/// reused layer. The copy is checked against `digest`.
+pub fn layout_put_file(dir: &Path, path: &Path, digest: &Digest) -> Result<bool, ArtifactError> {
+    put_blob(dir, digest, |file| {
+        let mut from = fs::File::open(path)
+            .map_err(|e| ArtifactError::Invalid(format!("{}: {e}", path.display())))?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = from
+                .read(&mut buf)
+                .map_err(|e| ArtifactError::Invalid(format!("{}: {e}", path.display())))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            file.write_all(&buf[..n])
+                .map_err(|e| ArtifactError::Invalid(format!("writing a blob: {e}")))?;
+        }
+        let actual = Digest::from_bytes(hasher.finalize().into());
+        if actual != *digest {
+            return Err(ArtifactError::DigestMismatch {
+                what: path.display().to_string(),
+                expected: digest.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+        Ok(())
+    })
 }
 
 /// A blob written whole into the layout: under a temporary name, then renamed to its digest.
@@ -1980,5 +2165,57 @@ mod tests {
         let child = fake.manifest_at(&r, &child.to_string()).unwrap();
         let child: Value = serde_json::from_slice(&child.bytes).unwrap();
         assert_eq!(child["subject"]["digest"], image.digest().to_string());
+    }
+
+    // covers: K-14
+    #[test]
+    fn a_file_image_publishes_once_and_reads_back() {
+        let fake = Arc::new(FakeRegistry::default());
+        let dir = tempfile::tempdir().unwrap();
+        let layer = dir.path().join("store.tar");
+        fs::write(&layer, vec![7u8; 3000]).unwrap();
+        let labels = BTreeMap::from([("dev.example".to_string(), "{}".to_string())]);
+        let image = file_image(
+            &layer,
+            Role::Packages,
+            "linux-x64",
+            &labels,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(image.layers[0].digest, Digest::of(&[7u8; 3000]));
+        let artifacts = crate::Artifacts::with_registry(fake.clone()).unwrap();
+        let r = repo("registry.example/acme/shop");
+        let fixed = vec!["hushrun-packages-linux-x64-0123".to_string()];
+        let moving = vec!["hushrun-packages-linux-x64-latest".to_string()];
+        let pushed = artifacts
+            .publish_file_image(&r, &image, &layer, &fixed, &moving)
+            .unwrap();
+        assert!(pushed.blobs[0].uploaded);
+        assert_eq!(pushed.blobs[0].role, "packages");
+        assert_eq!(pushed.tags, [fixed[0].clone(), moving[0].clone()]);
+        // The same layer again uploads nothing.
+        let again = artifacts
+            .publish_file_image(&r, &image, &layer, &[], &moving)
+            .unwrap();
+        assert!(!again.blobs[0].uploaded);
+        let manifest = artifacts.tagged(&r, &moving[0]).unwrap().unwrap();
+        assert_eq!(manifest.digest(), image.digest());
+        let config = artifacts.config(&r, &manifest).unwrap().unwrap();
+        let config: Value = serde_json::from_slice(&config).unwrap();
+        assert_eq!(config["config"]["Labels"]["dev.example"], "{}");
+        assert!(artifacts.label(&r, &manifest).unwrap().is_none());
+        let pulled = artifacts
+            .pull_layers(&r, &manifest, 1 << 20, &dir.path().join("pulled"))
+            .unwrap();
+        assert_eq!(fs::read(&pulled[0]).unwrap(), vec![7u8; 3000]);
+        // As a layout, the same image.
+        let out = dir.path().join("layout");
+        let written = write_file_layout(&out, &image, &layer, &moving).unwrap();
+        assert!(written.blobs[0].uploaded);
+        assert_eq!(
+            layout_tagged(&out, &moving[0]).unwrap().digest(),
+            image.digest()
+        );
     }
 }

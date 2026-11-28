@@ -7,7 +7,7 @@ steps for you.
 
 | File | Platform | What it does |
 |---|---|---|
-| `claude-code-settings.json` | Claude Code on the web | `.claude/settings.json`: when a cloud session starts, `hushrun hook session-start` pulls the baked store and fetches the newest results (its setup script has no secrets), then tells Claude what this code already passed; when a session stops, sends waiting results |
+| `claude-code-settings.json` | Claude Code on the web | `.claude/settings.json`: when a cloud session starts, `hushrun hook session-start` pulls the baked store and the package store and fetches the newest results (its setup script has no secrets), then tells Claude what this code already passed; when a session stops, sends waiting results |
 | `cursor.Dockerfile` | Cursor cloud agents | `.cursor/Dockerfile`: the hushrun binary; the baked store is pulled by the Build, not kept in a layer |
 | `cursor-hooks.json` | Cursor cloud agents | `.cursor/hooks.json`: sends waiting results when an agent stops |
 | `cursor-hushrun-install.sh` | Cursor cloud agents | `.cursor/hushrun-install.sh`: while Cursor builds the environment, installs hushrun if it is missing, pulls the baked store into `/hushrun` and fetches the newest results; always exits 0 |
@@ -24,6 +24,15 @@ A step still running then goes on in the background. Its steps' output is in
 `session-start.log` in hushrun's cache directory. Other platforms' start hooks can call it too.
 A repository with the older hook, which ran `hushrun build pull`, gets the new one from `hushrun
 init --agent-clouds claude-code`, in the old one's place.
+
+Its steps are `hushrun build pull` (compiled code, into `/hushrun`), `hushrun packages pull` (the
+package store, into `/hushrun-packages`, before anything installs) and `hushrun fetch`. CI
+publishes the package store with `hushrun packages bake --oci REPOSITORY … -- COMMAND` on the
+default branch (ADR 0163). The backend's registry doesn't take package stores yet, so publish to a
+registry of your own (`--oci ghcr.io/acme/shop`) and set `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`
+in the environment's settings. Add `HUSHRUN_PACKAGES_REGISTRY_TOKEN` there too if that registry
+needs a token; `HUSHRUN_REGISTRY_TOKEN` stays the one for hushrun's registry. A sandbox that
+doesn't run as root sets `HUSHRUN_PACKAGES_LOWER` to a folder it may write.
 
 Cursor runs `install` on every Build and snapshots the disk; a new agent boots that disk, so it
 starts with the baked store and the results fetched for the Build's commit. The pull swaps

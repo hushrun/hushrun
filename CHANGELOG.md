@@ -6,6 +6,17 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Changed
+
+- **Exit code 12 for a pull with nothing published** (B-240, K-15, C-168): `hushrun build pull`
+  and `hushrun packages pull` exit 12, not 1, when the registry holds nothing under the tag, so a
+  repository with no baked store or package store yet can be told from a pull that failed.
+  `hushrun hook session-start` says `none published yet` for such a step instead of `failed (exit
+  1)`, so a session in a repository that hasn't baked one isn't told a step failed. Other failures
+  still exit 1.
+- **`hushrun hook session-start` pulls the package store** (C-168): `packages pull -q` runs
+  between `build pull` and `fetch`, within the same budget, and the `Setup:` line names it.
+
 ### Added
 
 - **Antigravity's Remote Agents as a hosted sandbox** (C-140, C-23). `HUSHRUN_SANDBOX=antigravity-remote`
@@ -15,6 +26,29 @@ codes, environment variables, event formats, the ledger layout) are listed first
   stays Antigravity on a person's machine. `hushrun doctor` names the platform and the hosts its
   network settings need to allow, with the registry of the image `HUSHRUN_PACKAGES_IMAGE` names
   when it's set.
+- **`hushrun packages pull`** ([ADR 0163](docs/adr/0163-a-package-store-pulled-into-a-sandbox.md),
+  K-15): puts the repository's newest package store at `/hushrun-packages` (or
+  `HUSHRUN_PACKAGES_LOWER`, or `--to`) from its registry, for a sandbox with no Dockerfile, such as
+  Claude Code on the web. It works like `hushrun build pull` and shares its code: the same image
+  and credential rules (`HUSHRUN_REGISTRY_TOKEN`, the backend's own token only to its own registry,
+  or none), the same download beside the destination, and the same swap once the store checks out.
+  It checks every file's bytes and K-7's trust: a signature must verify when `hushrun.yaml` names
+  signers, and a store whose every part a lockfile checks is taken unsigned. It keeps files'
+  run bits and the links that stay inside their part. When the folder holds that store already, it
+  downloads nothing. It has `--image`, `--tag`, `--platform`, `--resolve`, `--force`,
+  `--require-signed` and `-q`. New contract: `hushrun.packages-pull/v1`
+  (`docs/schemas/packages-pull.v1.schema.json`), the step outputs `hushrun-image-digest` and
+  `hushrun-packages-identity`, the variable `HUSHRUN_PACKAGES_IMAGE`, which names the image
+  when `--image` doesn't, and the variable `HUSHRUN_PACKAGES_REGISTRY_TOKEN`, a pull token for the
+  package store's registry alone, read before `HUSHRUN_REGISTRY_TOKEN`, so a package store on a
+  registry of your own and a baked store on hushrun's each get their own token.
+- **`hushrun packages bake --oci REPOSITORY | --oci-dir DIR`** (K-14): also publishes the store as
+  an image of one layer, the archive `--tar` writes byte for byte, so the same store uploads
+  nothing again. It is tagged `hushrun-packages-<platform>-<identity>` and, from CI on the default
+  branch, `hushrun-packages-<platform>-latest`. The signature is the store's own. The bake's JSON
+  gains `image`. The backend's registry doesn't take package stores yet: `--oci hushrun` says so
+  and names the way that works today, which is a registry of your own plus `HUSHRUN_PACKAGES_IMAGE`
+  in the sandbox.
 - **Cursor's Build starts with the baked store and the newest results**
   ([ADR 0164](docs/adr/0164-a-cursor-build-that-starts-warm.md), C-145).
   `hushrun init --agent-clouds cursor` writes `.cursor/hushrun-install.sh` and points

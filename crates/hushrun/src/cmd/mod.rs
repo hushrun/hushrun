@@ -23,6 +23,8 @@ pub mod login;
 pub mod mark;
 pub mod monitor;
 pub mod packages;
+pub(crate) mod packages_image;
+pub mod packages_pull;
 pub mod plan;
 pub mod policy;
 pub mod ready;
