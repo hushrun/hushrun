@@ -93,7 +93,9 @@ repository, so neither the endpoint nor the CLI's call to it exists yet. Until b
 - sandboxes pull it with `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`. In Claude Code on the web that
   variable goes in the environment's settings, and session start's step then pulls it;
 - with no variable set, the step looks at the backend's registry, finds no `hushrun-packages-…`
-  tag, and the `Setup:` line says `packages pull failed (exit 1)` within a second.
+  tag, and the `Setup:` line says `packages pull none published yet` within a second: both pulls
+  exit 12 when the registry holds nothing under the tag, and session start says that, not
+  `failed`, since a repository that hasn't published a store has nothing wrong with it.
 
 `hushrun packages pull` itself needs nothing new from the backend. Reading a tag, a config and a
 layer from its registry is the pull API `build pull` already uses.

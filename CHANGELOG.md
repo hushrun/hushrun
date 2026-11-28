@@ -6,6 +6,15 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Changed
+
+- **Exit code 12 for a pull with nothing published** (B-240, K-15, C-168): `hushrun build pull`
+  and `hushrun packages pull` exit 12, not 1, when the registry holds nothing under the tag, so a
+  repository with no baked store or package store yet can be told from a pull that failed.
+  `hushrun hook session-start` says `none published yet` for such a step instead of `failed (exit
+  1)`, so a session in a repository that hasn't baked one isn't told a step failed. Other failures
+  still exit 1.
+
 ### Added
 
 - **`hushrun packages pull`** ([ADR 0163](docs/adr/0163-a-package-store-pulled-into-a-sandbox.md),

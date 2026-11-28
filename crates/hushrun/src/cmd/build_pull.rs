@@ -183,9 +183,12 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
     let source = Source::connect(image, credential, args.insecure).map_err(failed)?;
     let image = &source.image;
     let Some(manifest) = source.tagged(&tag).map_err(failed)? else {
-        return Err(failed(format!(
-            "{image} has no {tag}: no baked store of this repository for this platform yet"
-        )));
+        return Err(Failure::new(
+            Exit::NotPublished,
+            anyhow!(
+                "build pull: {image} has no {tag}: no baked store of this repository for this platform yet"
+            ),
+        ));
     };
     let label = source
         .artifacts

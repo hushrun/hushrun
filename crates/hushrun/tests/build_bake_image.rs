@@ -1491,9 +1491,9 @@ fn a_baked_image_is_pulled_from_a_registry_into_a_fresh_sandbox_and_a_second_pul
         1
     );
 
-    // A tag that names nothing exits 1 and says so.
+    // A tag that names nothing exits 12, nothing published yet, and says so.
     let none = pull_with(&laptop, &image, "hushrun-linux-x64-nothing", &lower, &[]);
-    assert_eq!(none.code, 1);
+    assert_eq!(none.code, 12);
     assert!(
         none.stderr.contains("has no hushrun-linux-x64-nothing"),
         "{}",

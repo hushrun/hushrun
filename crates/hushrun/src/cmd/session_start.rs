@@ -105,6 +105,9 @@ pub(crate) enum Outcome {
     Skipped(&'static str),
     /// The budget ran out while it ran: it goes on in the background.
     StillRunning,
+    /// A pull found no store published under its tag ([`Exit::NotPublished`]): nothing to pull
+    /// yet, which isn't a failure.
+    NotPublished,
 }
 
 impl Outcome {
@@ -116,6 +119,16 @@ impl Outcome {
             Outcome::NotStarted(_) => "couldn't start".into(),
             Outcome::Skipped(why) => format!("skipped ({why})"),
             Outcome::StillRunning => "still running in the background".into(),
+            Outcome::NotPublished => "none published yet".into(),
+        }
+    }
+
+    /// What a step's exit code says.
+    fn of_exit(code: Option<i32>) -> Outcome {
+        match code {
+            Some(0) => Outcome::Done,
+            Some(code) if code == Exit::NotPublished as i32 => Outcome::NotPublished,
+            code => Outcome::Failed(code),
         }
     }
 }
@@ -406,8 +419,7 @@ fn spawn_step(global: &GlobalOpts, log: Option<&Path>, step: Step, until: Instan
     };
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Outcome::Done,
-            Ok(Some(status)) => return Outcome::Failed(status.code()),
+            Ok(Some(status)) => return Outcome::of_exit(status.code()),
             Ok(None) => {}
             Err(err) => return Outcome::NotStarted(err.to_string()),
         }
@@ -459,7 +471,7 @@ fn session_start(global: &GlobalOpts, platform: &'static Platform, budget: Budge
             if !quiet {
                 let shown = log
                     .as_ref()
-                    .filter(|_| !matches!(outcome, Outcome::Done))
+                    .filter(|_| !matches!(outcome, Outcome::Done | Outcome::NotPublished))
                     .map(|log| format!(" ({})", log.display()))
                     .unwrap_or_default();
                 eprintln!(
@@ -622,6 +634,33 @@ mod tests {
 - Before you push: commit, run the commands `hushrun ready` lists, and push once it says the code is ready.
 "
         );
+    }
+
+    // covers: C-168
+    #[test]
+    fn a_pull_with_nothing_published_is_said_as_such_and_not_as_a_failure() {
+        assert_eq!(Outcome::of_exit(Some(0)), Outcome::Done);
+        assert_eq!(Outcome::of_exit(Some(12)), Outcome::NotPublished);
+        assert_eq!(Outcome::of_exit(Some(1)), Outcome::Failed(Some(1)));
+        assert_eq!(Outcome::of_exit(None), Outcome::Failed(None));
+        let steps = [
+            (Step::BuildPull, Outcome::Done),
+            (Step::PackagesPull, Outcome::NotPublished),
+            (Step::Fetch, Outcome::Done),
+        ];
+        let text = block(
+            "Claude Code on the web",
+            &steps,
+            &Sharing::Shared,
+            Some(&summary()),
+        );
+        assert!(
+            text.contains(
+                "- Setup: build pull done; packages pull none published yet; fetch done."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("failed"), "{text}");
     }
 
     // covers: C-168

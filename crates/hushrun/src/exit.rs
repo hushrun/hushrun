@@ -33,6 +33,9 @@ pub enum Exit {
     /// name couldn't be had: an image (`--oci`, `--oci-dir`), or `--from backend --trusted`. A
     /// store baked for this machine alone that is partial exits 0, and says so.
     Partial = 11,
+    /// `build pull`, `packages pull` (B-240, K-15): the registry holds nothing under the tag asked
+    /// for, so no store of this repository for this platform was published yet. Nothing changed.
+    NotPublished = 12,
 }
 
 impl From<Exit> for ExitCode {

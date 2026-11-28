@@ -310,7 +310,7 @@ fn a_store_published_as_an_image_is_pulled_into_a_fresh_sandbox_once() {
         .arg(&sandbox)
         .output()
         .unwrap();
-    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(missing.status.code(), Some(12));
     let err = String::from_utf8_lossy(&missing.stderr);
     assert!(
         err.contains("has no hushrun-packages-plan9-x64-latest"),

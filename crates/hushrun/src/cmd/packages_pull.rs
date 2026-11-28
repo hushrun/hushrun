@@ -47,9 +47,12 @@ pub fn run(global: &GlobalOpts, args: &PackagesPullArgs) -> CmdResult {
     let source = Source::connect(image, credential, args.insecure).map_err(failed)?;
     let image = &source.image;
     let Some(manifest) = source.tagged(&tag).map_err(failed)? else {
-        return Err(failed(format!(
-            "{image} has no {tag}: no package store of this repository for this platform yet (`hushrun packages bake --oci` publishes one)"
-        )));
+        return Err(Failure::new(
+            Exit::NotPublished,
+            anyhow!(
+                "packages pull: {image} has no {tag}: no package store of this repository for this platform yet (`hushrun packages bake --oci` publishes one)"
+            ),
+        ));
     };
     let label = source
         .artifacts

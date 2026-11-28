@@ -266,8 +266,9 @@ it | hushrun.yaml names no signer …>`. With `--format json`, `hushrun.packages
 (`docs/schemas/packages-pull.v1.schema.json`): `image`, `tag`, `digest`, `identity`, `platform`,
 `state` (`pulled`, `already_there`, `resolved`) and, but for `resolved`, `to`, `downloaded_bytes`,
 `signature` (`named`, `lockfiles`, `not_checked`) and `signed_by`. On GitHub Actions it writes the
-step outputs `hushrun-image-digest` and `hushrun-packages-identity`. A tag that names nothing, a
-store that doesn't check, or a registry that refuses exits 1 and replaces nothing; a run still
+step outputs `hushrun-image-digest` and `hushrun-packages-identity`. A tag that names nothing
+exits 12 (nothing published yet), and a store that doesn't check or a registry that refuses exits
+1; either replaces nothing; a run still
 decides what it reads as it begins (K-7, K-8, K-11). *Rests on:* B-240's. *Breaks if:* the
 destination's parent is on another file system than the destination: the swap fails and what was
 there stays.
