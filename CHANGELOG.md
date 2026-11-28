@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-11-28
+
 ### Fixed
 
 - **`hushrun why` takes a path from the repository's root in any folder** (C-37,
