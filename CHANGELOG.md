@@ -6,6 +6,16 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Added
+
+- **Cursor's Build starts with the baked store and the newest results**
+  ([ADR 0164](docs/adr/0164-a-cursor-build-that-starts-warm.md), C-145).
+  `hushrun init --agent-clouds cursor` writes `.cursor/hushrun-install.sh` and points
+  `.cursor/environment.json`'s `install` at it, after the command already there. Cursor runs that
+  script while it builds the environment, so a new agent boots with `/hushrun` and fetched results
+  on disk. The pull needs root or passwordless sudo. The Dockerfile recipe no longer pulls: a pull
+  in a layer would stay until the Dockerfile changed. The `stop` hook is unchanged.
+
 ## [0.21.1] - 2026-11-28
 
 ### Fixed
