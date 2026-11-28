@@ -882,6 +882,17 @@ signed is read only with `HUSHRUN_PACKAGES_LOWER_UNTRUSTED=1`, and never in CI. 
 write what others trust hashes every file first; elsewhere a run checks names and sizes, and
 `hushrun packages verify` hashes every file. `HUSHRUN_PACKAGES=off` turns it off.
 
+A sandbox with no Dockerfile gets the store from a registry. CI on the default branch publishes it
+with `--oci`, and the sandbox's setup or session-start hook runs `hushrun packages pull`, which
+checks every file and the signature before it swaps the store in (ADR 0163):
+
+```sh
+# CI, on the default branch: bake and publish (one layer, tagged hushrun-packages-<platform>-latest).
+hushrun packages bake --oci ghcr.io/acme/shop -- ./gradlew test
+# The sandbox: pull it into /hushrun-packages (HUSHRUN_PACKAGES_IMAGE names the image too).
+hushrun packages pull --image ghcr.io/acme/shop
+```
+
 Hex's packages are seeded, as pnpm's and npm's are: `hushrun packages restore` (or `exec`) puts
 each tarball `mix.lock` pins into Hex's own cache (`HEX_HOME`, else `~/.hex`), checked against the lockfile, and `mix deps.get`
 unpacks `deps/` from there; `mix deps.compile` runs as usual. Hex still fetches each package's

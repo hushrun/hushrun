@@ -6,7 +6,7 @@ What to put in each hosted agent platform so a session skips what this exact cod
 
 | File | Platform | What it does |
 |---|---|---|
-| `claude-code-settings.json` | Claude Code on the web | `.claude/settings.json`: when a cloud session starts, `hushrun hook session-start` pulls the baked store and fetches the newest results (its setup script has no secrets), then tells Claude what this code already passed; when a session stops, sends waiting results |
+| `claude-code-settings.json` | Claude Code on the web | `.claude/settings.json`: when a cloud session starts, `hushrun hook session-start` pulls the baked store and the package store and fetches the newest results (its setup script has no secrets), then tells Claude what this code already passed; when a session stops, sends waiting results |
 | `cursor.Dockerfile` | Cursor cloud agents | `.cursor/Dockerfile`: the baked store in the image, with a build secret |
 | `cursor-hooks.json` | Cursor cloud agents | `.cursor/hooks.json`: sends waiting results when an agent stops |
 | `copilot-setup-steps.yml` | GitHub Copilot cloud agent | `.github/workflows/copilot-setup-steps.yml`: a session from the job's ID token, and the baked store |
@@ -21,6 +21,14 @@ A step still running then goes on in the background. Its steps' output is in
 `session-start.log` in hushrun's cache directory. Other platforms' start hooks can call it too.
 A repository with the older hook, which ran `hushrun build pull`, gets the new one from `hushrun
 init --agent-clouds claude-code`, in the old one's place.
+
+Its steps are `hushrun build pull` (compiled code, into `/hushrun`), `hushrun packages pull` (the
+package store, into `/hushrun-packages`, before anything installs) and `hushrun fetch`. CI
+publishes the package store with `hushrun packages bake --oci REPOSITORY … -- COMMAND` on the
+default branch (ADR 0163). The backend's registry doesn't take package stores yet, so publish to a
+registry of your own (`--oci ghcr.io/acme/shop`) and set `HUSHRUN_PACKAGES_IMAGE=ghcr.io/acme/shop`
+in the environment's settings. Add `HUSHRUN_REGISTRY_TOKEN` there too if that registry needs a
+token. A sandbox that doesn't run as root sets `HUSHRUN_PACKAGES_LOWER` to a folder it may write.
 
 A dev container gets hushrun from its feature, `ghcr.io/hushrun/features/hushrun:1` (`features/`).
 

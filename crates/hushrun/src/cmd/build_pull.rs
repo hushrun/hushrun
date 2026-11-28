@@ -21,10 +21,10 @@ use crate::cli::{BuildPullArgs, GlobalOpts};
 use crate::exit::{CmdResult, Exit, Failure};
 
 /// The most bytes one layer may have: 8 GiB.
-const MOST_LAYER: u64 = 8 << 30;
+pub(crate) const MOST_LAYER: u64 = 8 << 30;
 
 /// This machine's platform, in a tag's words (`linux-x64`).
-fn platform() -> String {
+pub(crate) fn platform() -> String {
     let os = match std::env::consts::OS {
         "macos" => "apple-darwin",
         "windows" => "pc-windows",
@@ -33,8 +33,139 @@ fn platform() -> String {
     baked::platform_of(&format!("{}-unknown-{os}", std::env::consts::ARCH))
 }
 
+/// A registry to pull from, connected with the credential [`image_and_credential`] settled.
+pub(crate) struct Source {
+    pub(crate) image: hushrun_artifact::Repository,
+    pub(crate) artifacts: hushrun_artifact::Artifacts,
+    /// The credential is a session, which reads results and not the registry.
+    session: bool,
+}
+
+impl Source {
+    /// Connects to `image`'s registry with `credential`; with none for a host that isn't
+    /// hushrun's registry, docker's credentials for it, as `bake --oci` reads them.
+    pub(crate) fn connect(
+        image: hushrun_artifact::Repository,
+        credential: hushrun_artifact::credentials::Credential,
+        insecure: bool,
+    ) -> Result<Source, String> {
+        use hushrun_artifact::credentials::{Credential, DockerConfig};
+        let mut insecure_registries = Vec::new();
+        if insecure {
+            insecure_registries.push(image.host.clone());
+        }
+        // A session reads results, not the registry: said plainly when the registry refuses one.
+        let session = matches!(&credential, Credential::Basic { password, .. }
+            if password.starts_with(crate::session::PREFIX));
+        // Another registry, with no hushrun credential for it: docker's, as `bake --oci` reads
+        // them.
+        let theirs = matches!(credential, Credential::Anonymous)
+            && image.host != crate::hosted::registry_host(&crate::hosted::origin());
+        let (docker, credentials) = if theirs {
+            (DockerConfig::load().map_err(|e| e.to_string())?, Vec::new())
+        } else {
+            (
+                DockerConfig::default(),
+                vec![(image.host.clone(), credential)],
+            )
+        };
+        let artifacts = hushrun_artifact::Artifacts::connect_with(
+            docker,
+            &hushrun_artifact::Options {
+                insecure_registries,
+                credentials,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Source {
+            image,
+            artifacts,
+            session,
+        })
+    }
+
+    /// What a refusal of `<image>:<tag>` says.
+    pub(crate) fn refused(&self, tag: &str, e: hushrun_artifact::ArtifactError) -> String {
+        let image = &self.image;
+        if self.session && matches!(e, hushrun_artifact::ArtifactError::Denied { .. }) {
+            return format!(
+                "{image}:{tag}: this sandbox holds a session, which reads results and not the registry: set HUSHRUN_REGISTRY_TOKEN to a pull token an owner or admin makes for this repository"
+            );
+        }
+        format!("{image}:{tag}: {e}")
+    }
+
+    /// The manifest `tag` names; `None` when it names nothing.
+    pub(crate) fn tagged(&self, tag: &str) -> Result<Option<hushrun_artifact::Manifest>, String> {
+        self.artifacts
+            .tagged(&self.image, tag)
+            .map_err(|e| self.refused(tag, e))
+    }
+
+    /// B-240, K-15: downloads the layers of `manifest` (what `tag` named) beside `dest`, unpacks
+    /// what `unpack` takes of each into a folder there, and hands `check` the store's folder in
+    /// it. Only when `check` passes does the store replace `dest`, by renames. Nothing is left
+    /// behind either way. The bytes downloaded, and what `check` said.
+    pub(crate) fn pull_into<T>(
+        &self,
+        tag: &str,
+        manifest: &hushrun_artifact::Manifest,
+        dest: &Path,
+        unpack: &Unpack<'_>,
+        check: impl FnOnce(&Path) -> Result<T, String>,
+    ) -> Result<(u64, T), String> {
+        let image = &self.image;
+        // Unpacked beside the destination, so the swap is a rename on one file system; the
+        // layers go to files there as they arrive, and each goes once it is unpacked.
+        let parent = dest
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        let name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| unpack.root.into());
+        fs::create_dir_all(&parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        let staging = parent.join(format!(".{name}.pull-{}", std::process::id()));
+        let downloads = parent.join(format!(".{name}.layers-{}", std::process::id()));
+        let clean = || {
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_dir_all(&downloads);
+        };
+        clean();
+        let result = (|| -> Result<(u64, T), String> {
+            let layers = self
+                .artifacts
+                .pull_layers(image, manifest, MOST_LAYER, &downloads)
+                .map_err(|e| self.refused(tag, e))?;
+            let mut downloaded = 0;
+            for layer in &layers {
+                downloaded += fs::metadata(layer).map(|m| m.len()).unwrap_or(0);
+                let file = fs::File::open(layer)
+                    .map_err(|e| format!("reading {}: {e}", layer.display()))?;
+                untar(io::BufReader::new(file), &staging, unpack)
+                    .map_err(|e| format!("unpacking {image}:{tag}: {e}"))?;
+                let _ = fs::remove_file(layer);
+            }
+            let said = check(&staging.join(unpack.root))?;
+            Ok((downloaded, said))
+        })();
+        let done = match result {
+            Ok(done) => done,
+            Err(why) => {
+                clean();
+                return Err(why);
+            }
+        };
+        let swapped = swap(&staging.join(unpack.root), dest)
+            .map_err(|e| format!("putting it at {}: {e}", dest.display()));
+        clean();
+        swapped.map(|()| done)
+    }
+}
+
 pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
-    use hushrun_artifact::credentials::{Credential, DockerConfig};
     let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("build pull: {why}"));
     let usage = |why: String| Failure::new(Exit::Usage, anyhow!("build pull: {why}"));
     let dest = args
@@ -43,54 +174,23 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
         .or_else(|| baked::named(&|name| hushrun_ci::var_os(name)))
         .unwrap_or_else(|| PathBuf::from(baked::DEFAULT_LOWER));
     let root = crate::cmd::login::repository_root(global);
-    let (image, credential) = image_and_credential(args, root.as_deref()).map_err(usage)?;
+    let (image, credential) =
+        image_and_credential(args.image.as_deref(), "--image", root.as_deref()).map_err(usage)?;
     let tag = args
         .tag
         .clone()
         .unwrap_or_else(|| tags::latest_tag(&args.platform.clone().unwrap_or_else(platform)));
-    let mut insecure = Vec::new();
-    if args.insecure {
-        insecure.push(image.host.clone());
-    }
-    // A session reads results, not the registry: said plainly when the registry refuses one.
-    let session = matches!(&credential, Credential::Basic { password, .. }
-        if password.starts_with(crate::session::PREFIX));
-    // Another registry, with no hushrun credential for it: docker's, as `bake --oci` reads them.
-    let theirs = matches!(credential, Credential::Anonymous)
-        && image.host != crate::hosted::registry_host(&crate::hosted::origin());
-    let (docker, credentials) = if theirs {
-        (
-            DockerConfig::load().map_err(|e| failed(e.to_string()))?,
-            Vec::new(),
-        )
-    } else {
-        (
-            DockerConfig::default(),
-            vec![(image.host.clone(), credential)],
-        )
-    };
-    let artifacts = hushrun_artifact::Artifacts::connect_with(
-        docker,
-        &hushrun_artifact::Options {
-            insecure_registries: insecure,
-            credentials,
-        },
-    )
-    .map_err(|e| failed(e.to_string()))?;
-    let refused = |e: hushrun_artifact::ArtifactError| {
-        if session && matches!(e, hushrun_artifact::ArtifactError::Denied { .. }) {
-            return failed(format!(
-                "{image}:{tag}: this sandbox holds a session, which reads results and not the registry: set HUSHRUN_REGISTRY_TOKEN to a pull token an owner or admin makes for this repository"
-            ));
-        }
-        failed(format!("{image}:{tag}: {e}"))
-    };
-    let Some(manifest) = artifacts.tagged(&image, &tag).map_err(refused)? else {
+    let source = Source::connect(image, credential, args.insecure).map_err(failed)?;
+    let image = &source.image;
+    let Some(manifest) = source.tagged(&tag).map_err(failed)? else {
         return Err(failed(format!(
             "{image} has no {tag}: no baked store of this repository for this platform yet"
         )));
     };
-    let label = artifacts.label(&image, &manifest).map_err(refused)?;
+    let label = source
+        .artifacts
+        .label(image, &manifest)
+        .map_err(|e| failed(source.refused(&tag, e)))?;
     let mut pulled = Pulled {
         image: image.to_string(),
         tag: tag.clone(),
@@ -114,59 +214,18 @@ pub fn run(global: &GlobalOpts, args: &BuildPullArgs) -> CmdResult {
         pulled.state = State::AlreadyThere;
         return said(global, &pulled);
     }
-    // Unpacked beside the destination, so the swap is a rename on one file system; the layers
-    // go to files there as they arrive, and each goes once it is unpacked.
-    let parent = dest
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
-    let name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "hushrun".into());
-    fs::create_dir_all(&parent)
-        .map_err(|e| failed(format!("creating {}: {e}", parent.display())))?;
-    let staging = parent.join(format!(".{name}.pull-{}", std::process::id()));
-    let downloads = parent.join(format!(".{name}.layers-{}", std::process::id()));
-    let clean = || {
-        let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_dir_all(&downloads);
+    let unpack = Unpack {
+        root: STORE_ROOT,
+        modes_and_links: None,
     };
-    clean();
-    let result = (|| -> Result<(u64, Option<String>), String> {
-        let layers = artifacts
-            .pull_layers(&image, &manifest, MOST_LAYER, &downloads)
-            .map_err(|e| refused(e).error.to_string())
-            .map_err(|e| e.trim_start_matches("build pull: ").to_string())?;
-        let mut downloaded = 0;
-        for layer in &layers {
-            downloaded += fs::metadata(layer).map(|m| m.len()).unwrap_or(0);
-            let file =
-                fs::File::open(layer).map_err(|e| format!("reading {}: {e}", layer.display()))?;
-            untar(io::BufReader::new(file), &staging)
-                .map_err(|e| format!("unpacking {image}:{tag}: {e}"))?;
-            let _ = fs::remove_file(layer);
-        }
-        let store = staging.join(STORE_ROOT);
-        let baked = Baked::read(&store).map_err(|why| format!("{tag}: {}", why.0))?;
-        baked::check_contents(&store, Some(&baked), Depth::Bytes)
-            .map_err(|why| format!("{tag}: {why}"))?;
-        let signer = signature(global, &store, args.require_signed, &dest)?;
-        Ok((downloaded, signer))
-    })();
-    let (downloaded, signer) = match result {
-        Ok(done) => done,
-        Err(why) => {
-            clean();
-            return Err(failed(why));
-        }
-    };
-    swap(&staging.join(STORE_ROOT), &dest).map_err(|e| {
-        clean();
-        failed(format!("putting it at {}: {e}", dest.display()))
-    })?;
-    clean();
+    let (downloaded, signer) = source
+        .pull_into(&tag, &manifest, &dest, &unpack, |store| {
+            let baked = Baked::read(store).map_err(|why| format!("{tag}: {}", why.0))?;
+            baked::check_contents(store, Some(&baked), Depth::Bytes)
+                .map_err(|why| format!("{tag}: {why}"))?;
+            signature(global, store, args.require_signed, &dest)
+        })
+        .map_err(failed)?;
     pulled.state = State::Pulled;
     pulled.downloaded = downloaded;
     pulled.signer = signer;
@@ -275,10 +334,12 @@ fn said(global: &GlobalOpts, pulled: &Pulled) -> CmdResult {
 /// What the line says of a store when `hushrun.yaml` names no signer of baked stores.
 const UNSIGNED: &str = "hushrun.yaml names no signer of baked stores, so a run reuses it as the backend vouches, or with HUSHRUN_BUILD_LOWER_UNTRUSTED=1";
 
-/// The image to pull and the credential to pull it with: `--image`, else the repository's on its
-/// backend's registry; a pull token, else the backend's credential here, else none.
-fn image_and_credential(
-    args: &BuildPullArgs,
+/// The image to pull and the credential to pull it with: `given` (named by `--image`, or by a
+/// variable `flag` names), else the repository's on its backend's registry; a pull token, else the
+/// backend's credential here, else none.
+pub(crate) fn image_and_credential(
+    given: Option<&str>,
+    flag: &str,
     root: Option<&Path>,
 ) -> Result<
     (
@@ -300,19 +361,22 @@ fn image_and_credential(
         Ok(crate::results::Selection::On(backend)) => Some(backend),
         _ => None,
     };
-    let image = match &args.image {
+    let image = match given {
         Some(image) => {
             hushrun_artifact::Repository::parse(image.trim()).map_err(|e| e.to_string())?
         }
         None => {
-            let base = backend.as_ref().and_then(|b| b.build_place()).ok_or(
-                "no backend names this repository's registry: pass --image <host>/<org>/<name>",
-            )?;
+            let base = backend.as_ref().and_then(|b| b.build_place()).ok_or_else(|| {
+                format!(
+                    "no backend names this repository's registry: pass {flag} <host>/<org>/<name>"
+                )
+            })?;
+            let unnamed = || format!("this repository has no name the registry takes: pass {flag}");
             let repository = root
                 .and_then(crate::cmd::setup::repository_id)
-                .ok_or("this repository has no name the registry takes: pass --image")?;
-            let name = hushrun_core::blocks::publish::image_name(&repository)
-                .ok_or("this repository has no name the registry takes: pass --image")?;
+                .ok_or_else(unnamed)?;
+            let name =
+                hushrun_core::blocks::publish::image_name(&repository).ok_or_else(unnamed)?;
             let host = crate::hosted::registry_host(&base.host);
             hushrun_artifact::Repository::parse(&format!("{host}/{}/{name}", base.org))
                 .map_err(|e| e.to_string())?
@@ -330,11 +394,11 @@ fn image_and_credential(
     );
     let hushruns = image.host == crate::hosted::registry_host(&crate::hosted::origin());
     if let Some(token) = pull_token {
-        if args.image.is_some() || hushruns || env_named {
+        if given.is_some() || hushruns || env_named {
             return Ok((image, basic(token)));
         }
         return Err(format!(
-            "HUSHRUN_REGISTRY_TOKEN goes only to a registry someone named, and {} is named by this repository's files: pass --image {image}, or set HUSHRUN_BACKEND",
+            "HUSHRUN_REGISTRY_TOKEN goes only to a registry someone named, and {} is named by this repository's files: pass {flag} {image}, or set HUSHRUN_BACKEND",
             image.host
         ));
     }
@@ -388,7 +452,7 @@ fn signature(
 }
 
 /// Puts `from` at `to`: what was there goes aside, then away.
-fn swap(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn swap(from: &Path, to: &Path) -> io::Result<()> {
     let aside = to.with_extension(format!("old-{}", std::process::id()));
     let had = to.exists();
     if had {
@@ -406,11 +470,26 @@ fn swap(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether a link at a path (from the image's root) to a target may be kept.
+pub(crate) type KeepsLink<'a> = &'a dyn Fn(&Path, &str) -> bool;
+
+/// What [`untar`] takes of a layer.
+pub(crate) struct Unpack<'a> {
+    /// The folder at the image's root that holds the store: only entries under it are taken.
+    pub(crate) root: &'a str,
+    /// \[K-15\] A package store's: a file keeps whether its owner may run it (`0755`, else
+    /// `0644`), and a link is kept where this says its target (the second argument) may be from
+    /// its path (the first, from the image's root). Links are made after every file and folder,
+    /// and never through another link. `None`: every file `0644`, and a link stops the unpack.
+    pub(crate) modes_and_links: Option<KeepsLink<'a>>,
+}
+
 /// Unpacks the tar read from `from` into `into`, a file at a time: regular files and folders
-/// under `hushrun/` only, with no `..`, no absolute path and nothing else (links, devices);
-/// ustar's prefix, GNU's long names and PAX's `path` read.
-fn untar(mut from: impl io::Read, into: &Path) -> io::Result<()> {
+/// under `unpack.root` only (and links where `unpack` keeps them), with no `..`, no absolute path
+/// and nothing else (hard links, devices); ustar's prefix, GNU's long names and PAX's `path` read.
+pub(crate) fn untar(mut from: impl io::Read, into: &Path, unpack: &Unpack<'_>) -> io::Result<()> {
     let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_string());
+    let mut links: Vec<(PathBuf, String)> = Vec::new();
     // A long name or a PAX header is read whole, and none is larger than this.
     const MOST_HEADER: u64 = 1 << 20;
     let mut long_name: Option<String> = None;
@@ -470,7 +549,7 @@ fn untar(mut from: impl io::Read, into: &Path) -> io::Result<()> {
             _ => {
                 let relative = safe(&name).ok_or_else(|| bad("a path outside the store"))?;
                 // Anything else the image holds isn't the store's.
-                (relative.components().next().map(|c| c.as_os_str()) == Some(STORE_ROOT.as_ref()))
+                (relative.components().next().map(|c| c.as_os_str()) == Some(unpack.root.as_ref()))
                     .then_some(relative)
             }
         };
@@ -482,10 +561,20 @@ fn untar(mut from: impl io::Read, into: &Path) -> io::Result<()> {
                 }
                 let mut file = fs::File::create(&path)?;
                 io::copy(&mut data, &mut file)?;
-                // Whatever the umask: a baked store others could write isn't one (B-63).
-                set_mode(&path, 0o644)?;
+                // Whatever the umask: a baked store others could write isn't one (B-63, K-11).
+                let runs = unpack.modes_and_links.is_some()
+                    && u32::from_str_radix(field(100, 8).trim(), 8).is_ok_and(|m| m & 0o100 != 0);
+                set_mode(&path, if runs { 0o755 } else { 0o644 })?;
             }
             (b'5', Some(relative)) => make_dirs(&into.join(relative))?,
+            (b'2', Some(relative)) => {
+                let target = field(157, 100);
+                match unpack.modes_and_links {
+                    Some(keeps) if keeps(&relative, &target) => links.push((relative, target)),
+                    Some(_) => return Err(bad("a link out of its part")),
+                    None => return Err(bad("an entry that is neither a file nor a folder")),
+                }
+            }
             (_, Some(_)) => return Err(bad("an entry that is neither a file nor a folder")),
             (_, None) => {}
         }
@@ -499,7 +588,43 @@ fn untar(mut from: impl io::Read, into: &Path) -> io::Result<()> {
             return Err(bad("a file runs past the layer"));
         }
     }
+    // K-15: the links last, so no file is ever written through one, and none made through
+    // another: each folder above a link is a folder, and nothing is at the link's path yet.
+    for (relative, target) in links {
+        let path = into.join(&relative);
+        let mut above = into.to_path_buf();
+        let parents: Vec<_> = relative.components().collect();
+        for part in &parents[..parents.len().saturating_sub(1)] {
+            above.push(part);
+            match fs::symlink_metadata(&above) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(bad("a link under another link"));
+                }
+                _ => {}
+            }
+        }
+        if let Some(parent) = path.parent() {
+            make_dirs(parent)?;
+        }
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(bad("a link where an entry is already"));
+        }
+        make_link(&target, &path)?;
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn make_link(target: &str, path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, path)
+}
+
+#[cfg(not(unix))]
+fn make_link(_target: &str, _path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "a package store's links are made only on Unix",
+    ))
 }
 
 /// Reads one 512-byte block; `false` at the end of the layer, an error part of the way in.
@@ -575,6 +700,11 @@ fn safe(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    const BUILD: Unpack<'static> = Unpack {
+        root: STORE_ROOT,
+        modes_and_links: None,
+    };
+
     /// A ustar entry: its header and data, padded.
     fn entry(name: &str, kind: u8, data: &[u8]) -> Vec<u8> {
         let mut header = [0u8; 512];
@@ -601,7 +731,7 @@ mod tests {
         tar.extend(entry("ignored", b'0', b"hint"));
         tar.extend(entry("etc/passwd", b'0', b"not the store's"));
         tar.extend([0u8; 1024]);
-        untar(&tar[..], dir.path()).unwrap();
+        untar(&tar[..], dir.path(), &BUILD).unwrap();
         assert_eq!(
             fs::read(dir.path().join("hushrun/baked.json")).unwrap(),
             b"{}"
@@ -614,13 +744,13 @@ mod tests {
             entry("/hushrun/x", b'0', b"x"),
             entry("hushrun/link", b'2', b""),
         ] {
-            assert!(untar(&bad[..], dir.path()).is_err());
+            assert!(untar(&bad[..], dir.path(), &BUILD).is_err());
         }
         // A layer that ends part of the way into an entry, or a header, stops it.
         let file = entry("hushrun/cut", b'0', &[7; 600]);
-        assert!(untar(&file[..700], dir.path()).is_err());
-        assert!(untar(&file[..100], dir.path()).is_err());
-        assert!(untar(&file[..], dir.path()).is_ok());
+        assert!(untar(&file[..700], dir.path(), &BUILD).is_err());
+        assert!(untar(&file[..100], dir.path(), &BUILD).is_err());
+        assert!(untar(&file[..], dir.path(), &BUILD).is_ok());
         assert_eq!(fs::read(dir.path().join("hushrun/cut")).unwrap(), [7; 600]);
         assert_eq!(
             pax_path(b"30 path=hushrun/a/very/long/name\n"),

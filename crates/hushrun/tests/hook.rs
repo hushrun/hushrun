@@ -2762,6 +2762,7 @@ fn session_start(r: &Repo, vars: &[(&str, &str)]) -> Output {
     r.env(&mut cmd);
     // No registry answers here: the pull fails fast instead of waiting on a real host.
     cmd.env("HUSHRUN_BUILD_LOWER", r.root.join("lower"));
+    cmd.env("HUSHRUN_PACKAGES_LOWER", r.root.join("packages-lower"));
     cmd.args(["hook", "session-start", "--budget", "30"]);
     for (name, value) in vars {
         cmd.env(name, value);

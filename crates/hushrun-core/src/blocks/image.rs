@@ -291,6 +291,25 @@ pub fn latest_tag(platform: &str) -> String {
     format!("{TAG_PREFIX}{platform}-latest")
 }
 
+/// \[ADR 0163\] The prefix of a package store's tags (K-14): `hushrun-packages-`. No baked
+/// store's platform starts with `packages-`, so these never name a baked store's image.
+pub const PACKAGES_TAG_PREFIX: &str = "hushrun-packages-";
+
+/// \[ADR 0163\] K-14: the fixed tag of the package store whose identity is `identity_hex` for
+/// `platform`: `hushrun-packages-<platform>-<first 16 hex of the identity>`. It never moves.
+pub fn packages_fixed_tag(platform: &str, identity_hex: &str) -> String {
+    format!(
+        "{PACKAGES_TAG_PREFIX}{platform}-{}",
+        short_manifest(identity_hex)
+    )
+}
+
+/// \[ADR 0163\] K-14: the moving tag of the default branch's newest package store for
+/// `platform`: `hushrun-packages-<platform>-latest`.
+pub fn packages_latest_tag(platform: &str) -> String {
+    format!("{PACKAGES_TAG_PREFIX}{platform}-latest")
+}
+
 /// B-66: the moving tag of the newest store of `branch` for `platform`:
 /// `hushrun-<platform>-branch-<name>-latest`, `<name>` the branch as [`branch_name`] gives it.
 pub fn branch_tag(platform: &str, branch: &str) -> String {
@@ -459,6 +478,19 @@ mod tests {
         assert!(chunks(&[file("a/b", 1), file("a/b", 1)]).is_err());
         assert!(chunks(&[file("a", 1), file("a/b", 1)]).is_err());
         assert!(header("a", Some(MOST_FILE + 1)).is_err());
+    }
+
+    // covers: K-14
+    #[test]
+    fn a_package_stores_tags_are_its_own() {
+        assert_eq!(
+            packages_latest_tag("linux-x64"),
+            "hushrun-packages-linux-x64-latest"
+        );
+        assert_eq!(
+            packages_fixed_tag("linux-x64", &"ab".repeat(32)),
+            "hushrun-packages-linux-x64-abababababababab"
+        );
     }
 
     // covers: B-66

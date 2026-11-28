@@ -6,6 +6,35 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Added
+
+- **`hushrun packages pull`** ([ADR 0163](docs/adr/0163-a-package-store-pulled-into-a-sandbox.md),
+  K-15): puts the repository's newest package store at `/hushrun-packages` (or
+  `HUSHRUN_PACKAGES_LOWER`, or `--to`) from its registry, for a sandbox with no Dockerfile, such as
+  Claude Code on the web. It works like `hushrun build pull` and shares its code: the same image
+  and credential rules (`HUSHRUN_REGISTRY_TOKEN`, the backend's own token only to its own registry,
+  or none), the same download beside the destination, and the same swap once the store checks out.
+  It checks every file's bytes and K-7's trust: a signature must verify when `hushrun.yaml` names
+  signers, and a store whose every part a lockfile checks is taken unsigned. It keeps files'
+  run bits and the links that stay inside their part. When the folder holds that store already, it
+  downloads nothing. It has `--image`, `--tag`, `--platform`, `--resolve`, `--force`,
+  `--require-signed` and `-q`. New contract: `hushrun.packages-pull/v1`
+  (`docs/schemas/packages-pull.v1.schema.json`), the step outputs `hushrun-image-digest` and
+  `hushrun-packages-identity`, and the variable `HUSHRUN_PACKAGES_IMAGE`, which names the image
+  when `--image` doesn't.
+- **`hushrun packages bake --oci REPOSITORY | --oci-dir DIR`** (K-14): also publishes the store as
+  an image of one layer, the archive `--tar` writes byte for byte, so the same store uploads
+  nothing again. It is tagged `hushrun-packages-<platform>-<identity>` and, from CI on the default
+  branch, `hushrun-packages-<platform>-latest`. The signature is the store's own. The bake's JSON
+  gains `image`. The backend's registry doesn't take package stores yet: `--oci hushrun` says so
+  and names the way that works today, which is a registry of your own plus `HUSHRUN_PACKAGES_IMAGE`
+  in the sandbox.
+
+### Changed
+
+- **`hushrun hook session-start` pulls the package store** (C-168): `packages pull -q` runs
+  between `build pull` and `fetch`, within the same budget, and the `Setup:` line names it.
+
 ## [0.21.1] - 2026-11-28
 
 ### Fixed
