@@ -106,8 +106,13 @@ impl Repo {
     }
 
     fn run(&self, args: &[&str]) -> Ran {
+        self.run_in("", args)
+    }
+
+    /// `hushrun` with `args`, started in `folder` of the repository.
+    fn run_in(&self, folder: &str, args: &[&str]) -> Ran {
         let mut cmd = assert_cmd::Command::cargo_bin("hushrun").expect("binary");
-        cmd.current_dir(&self.repo)
+        cmd.current_dir(self.repo.join(folder))
             .env("HUSHRUN_CACHE_DIR", &self.cache)
             .env("HUSHRUN_CREDENTIALS", self.root.join("credentials.json"))
             .env("HUSHRUN_HOST", NO_HOST)
@@ -486,5 +491,64 @@ fn why_says_a_suspension_and_a_store_it_cant_read() {
     assert!(
         r.why("test_other.py")
             .starts_with("test_other.py runs: reuse of its test files is suspended"),
+    );
+}
+
+/// The test file `hushrun why unit <given>` names, asked from `folder`.
+fn named(r: &Repo, folder: &str, given: &str) -> String {
+    let ran = r.run_in(folder, &["why", "unit", given, "--format", "json"]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    let json: Value = serde_json::from_str(&ran.stdout).expect("JSON");
+    json["unit"].as_str().expect("unit").to_string()
+}
+
+// covers: C-37
+#[test]
+fn why_reads_a_test_file_from_here_or_from_the_root() {
+    let yaml = "version: 1\nrepository: example.com/acme/shop\nscopes:\n  back:\n    include: [\"back/**\"]\nchecks:\n  unit:\n    tests: reuse\n";
+    let test = "def test_a():\n    assert True\n";
+    let r = Repo::new(&[
+        ("hushrun.yaml", yaml.into()),
+        ("back/tests/test_a.py", test.into()),
+        ("back/tests/test_b.py", test.into()),
+        // A folder named as its parent: `back/tests/test_b.py` names a file from `back/` too.
+        ("back/back/tests/test_b.py", test.into()),
+    ]);
+    // From the root, and from the folder, by the path from there.
+    assert_eq!(
+        named(&r, "", "back/tests/test_a.py"),
+        "back/tests/test_a.py"
+    );
+    assert_eq!(named(&r, "back", "tests/test_a.py"), "back/tests/test_a.py");
+    assert_eq!(
+        named(&r, "back/tests", "test_a.py::test_a"),
+        "back/tests/test_a.py::test_a"
+    );
+    // From the folder, by the path from the root: nothing is at `back/back/tests/test_a.py`.
+    assert_eq!(
+        named(&r, "back", "back/tests/test_a.py"),
+        "back/tests/test_a.py"
+    );
+    assert_eq!(
+        named(&r, "back/tests", "back/tests/test_a.py::test_a"),
+        "back/tests/test_a.py::test_a"
+    );
+    // A path that names a file both ways is read from here, as a shell reads it.
+    assert_eq!(
+        named(&r, "back", "back/tests/test_b.py"),
+        "back/back/tests/test_b.py"
+    );
+    // `./` and `../` are from here alone, and so is a path that names nothing either way.
+    assert_eq!(
+        named(&r, "back", "./back/tests/test_a.py"),
+        "back/back/tests/test_a.py"
+    );
+    assert_eq!(
+        named(&r, "back/tests", "../tests/test_a.py"),
+        "back/tests/test_a.py"
+    );
+    assert_eq!(
+        named(&r, "back", "back/tests/gone.py"),
+        "back/back/tests/gone.py"
     );
 }

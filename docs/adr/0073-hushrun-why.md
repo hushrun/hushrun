@@ -1,6 +1,6 @@
 # 0073. `hushrun why`: what a run would do with one test file, and why
 
-- **Status:** accepted
+- **Status:** accepted; amended (amendment 1, 2026-11-28)
 - **Date:** 2026-11-11
 - **Rules:** C-37; relies on C-11, C-22, C-30 to C-36, ADR 0048, 0061, 0067, 0072
 
@@ -83,3 +83,28 @@ decision that can disagree with it, and must not change what it explains.
   repository's tools, as `ready` doesn't (ADR 0070), and take as long as a build.
 - **Answering every reason from the store alone:** a pass recorded on another machine, or a
   failure, would read wrong; the lookup is what the plan asks.
+
+## Amendment 1 (2026-11-28): a path from the root, asked in a folder
+
+Decision 1 says UNIT is from the current directory or the root. `why` read it from the current
+directory alone: in `back/`, `hushrun why test back/tests/api.rs` asked about
+`back/back/tests/api.rs` and answered that it isn't a file of the check's scope. The path from
+the root is the one `why`, a run's lines and `--format json` print, so it is the one a person or
+an agent pastes back, from whatever folder they are in.
+
+UNIT is now read both ways, by one rule (C-37):
+
+1. From the current directory, as a shell reads a path, when something is at that path.
+2. Else from the root, when something is at that path from the root.
+3. Else from the current directory, as before: a test file that is gone, or a unit no file names.
+
+A path that names something both ways (`back/tests/api.rs` in `back/`, where there is a
+`back/back/tests/api.rs` too) is the one from the current directory. Any other tool given that
+path there would open that file, and the answer's first word is the path it took, from the root,
+so a wrong guess shows. An absolute path, and one that starts with `./` or `../`, says where it
+is from and is never read from the root.
+
+"Something is at that path" asks the disk, not the scope or the store: `why` reads the path
+before it knows the check's command and scope, which can come from the store, and a file outside
+the scope still gets the answer that names it. So a test file that is gone must be named from
+the current directory, as it had to be before.

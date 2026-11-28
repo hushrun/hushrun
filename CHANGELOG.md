@@ -6,6 +6,15 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hushrun why` takes a path from the repository's root in any folder** (C-37,
+  [ADR 0073 amendment 1](docs/adr/0073-hushrun-why.md)). In `back/`,
+  `hushrun why test back/tests/api.rs` asked about `back/back/tests/api.rs` and said it isn't a
+  file of the check's scope, though the help says the path is from here or from the root. A path
+  is read from here when something is at it, else from the root when something is at it there. A
+  path that names a file both ways is the one from here.
+
 ## [0.21.0] - 2026-11-28
 
 ### Changed

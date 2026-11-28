@@ -208,13 +208,33 @@ pub fn run(global: &GlobalOpts, args: &WhyArgs) -> CmdResult {
     )
 }
 
-/// `unit`, given from `here`, from the repository's `root`, `/`-separated.
+/// `unit`, as given, from the repository's `root`, `/`-separated (C-37).
+///
+/// A path is read from `here`, as a shell reads it. When nothing is at that path from here and
+/// something is at it from the root, it is read from the root: the path `hushrun why` and a run's
+/// lines print works from any folder of the repository. A path that names something both ways is
+/// the one from here, and so is one that names nothing either way (a test file that is gone). An
+/// absolute path, and one that starts with `./` or `../`, is never read from the root.
 fn from_root(root: &Path, here: &Path, unit: &str) -> String {
     let given = Path::new(unit);
-    let joined = if given.is_absolute() {
+    let from_here = if given.is_absolute() {
         given.to_path_buf()
     } else {
         here.join(given)
+    };
+    let says_here = matches!(
+        given.components().next(),
+        Some(std::path::Component::CurDir | std::path::Component::ParentDir)
+    );
+    let joined = if given.is_absolute() || says_here || from_here.exists() {
+        from_here
+    } else {
+        let from_the_root = root.join(given);
+        if from_the_root.exists() {
+            from_the_root
+        } else {
+            from_here
+        }
     };
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let joined = match (std::fs::canonicalize(&joined), joined.parent()) {
