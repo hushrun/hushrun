@@ -436,7 +436,7 @@ fn a_package_store_on_another_registry_is_pulled_with_its_own_token() {
 
 // covers: K-14
 #[test]
-fn the_backends_registry_is_refused_before_anything_bakes() {
+fn the_backends_registry_without_a_ci_credential_is_refused_before_anything_bakes() {
     let r = fixture();
     let out = r
         .hushrun()
@@ -445,8 +445,8 @@ fn the_backends_registry_is_refused_before_anything_bakes() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("not a package store yet"), "{err}");
-    assert!(err.contains("HUSHRUN_PACKAGES_IMAGE"), "{err}");
+    assert!(err.contains("no backend is named here"), "{err}");
+    assert!(!err.contains("packages: baked"), "{err}");
     let out = r
         .hushrun()
         .args([
@@ -459,6 +459,17 @@ fn the_backends_registry_is_refused_before_anything_bakes() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+    // A backend is named, and this run has no CI job's credential for it: said, before the bake.
+    let out = r
+        .hushrun()
+        .env("HUSHRUN_BACKEND", "https://hushrun.com/o/acme")
+        .args(["packages", "bake", "--no-build", "--oci", "hushrun"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("only CI publishes"), "{err}");
+    assert!(err.contains("--oci-dir"), "{err}");
 }
 
 /// The platform the bake's tags name, from its JSON's first tag.

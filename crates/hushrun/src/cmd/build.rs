@@ -1678,7 +1678,7 @@ fn hosted_target(
 }
 
 /// The commit checked out in `folder`, as `git rev-parse HEAD` names it.
-fn head_commit(folder: &std::path::Path) -> Option<String> {
+pub(crate) fn head_commit(folder: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(folder)

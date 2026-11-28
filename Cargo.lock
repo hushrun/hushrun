@@ -1919,6 +1919,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hushrun-core",
+ "hushrun-testkit",
  "oci-client",
  "reqwest",
  "rustls",
