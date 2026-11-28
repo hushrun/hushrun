@@ -260,7 +260,7 @@ pub fn run(app: &App<'_>, args: &PlanArgs) -> CmdResult {
         }
     }
     match app.global.format {
-        Format::Text => output::print(&text(&plan_file, &started_keys))?,
+        Format::Text | Format::Antigravity => output::print(&text(&plan_file, &started_keys))?,
         Format::Json => output::print(&json)?,
         Format::Env => output::print(&outputs.to_env())?,
         Format::Dotenv => output::print(&outputs.to_dotenv()?)?,

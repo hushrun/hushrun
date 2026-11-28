@@ -2850,3 +2850,331 @@ fn session_start_without_a_credential_says_results_stay_here() {
     );
     assert!(text.contains("`hushrun doctor`"), "{text}");
 }
+
+/// What a hook's payload never lets out: the person's prompt.
+const PROMPT: &str = "a prompt nobody else reads 7f3a9c";
+
+/// `hushrun hook ARGS` in `dir`, with the variables of a sandbox and `payload` on stdin, written
+/// from a thread so a payload larger than a pipe holds can't deadlock the test.
+fn hook_with_payload(
+    r: &Repo,
+    dir: &std::path::Path,
+    args: &[&str],
+    vars: &[(&str, &str)],
+    payload: Vec<u8>,
+) -> Output {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("hushrun"));
+    r.env(&mut cmd);
+    cmd.current_dir(dir);
+    cmd.env("HUSHRUN_BUILD_LOWER", r.root.join("lower"));
+    cmd.env("HUSHRUN_PACKAGES_LOWER", r.root.join("packages-lower"));
+    cmd.arg("hook").args(args);
+    for (name, value) in vars {
+        cmd.env(name, value);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("hushrun");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&payload);
+    });
+    let out = child.wait_with_output().expect("hushrun");
+    writer.join().expect("writer");
+    out
+}
+
+/// Antigravity's `SessionStart` payload for `workspace`.
+fn antigravity_payload(workspace: &std::path::Path) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "conversationId": "c-1",
+        "workspacePaths": [workspace],
+        "transcriptPath": "/tmp/transcript.jsonl",
+        "lastUserInput": PROMPT,
+    }))
+    .expect("json")
+}
+
+/// The one system message of Antigravity's `injectSteps`, with its shape checked.
+fn system_message(out: &Output) -> String {
+    let text = stdout(out);
+    let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    let steps = value["injectSteps"].as_array().expect("injectSteps");
+    assert_eq!(steps.len(), 1, "{text}");
+    assert!(value.get("decision").is_none(), "{text}");
+    let message = steps[0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .expect("systemMessage")
+        .to_string();
+    assert!(message.lines().count() <= 10, "{message}");
+    message
+}
+
+const ANTIGRAVITY: &[&str] = &["session-start", "--budget", "30", "--format", "antigravity"];
+
+// covers: C-168 (ADR 0165: with --format antigravity the block is Antigravity's injectSteps JSON,
+// with one system message, and a pull with nothing published says so inside it; the prompt in the
+// payload goes nowhere)
+#[test]
+fn session_start_in_antigravitys_format_prints_one_system_message() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    assert!(r.npm("lint").status.success());
+    let out = hook_with_payload(
+        &r,
+        &r.repo,
+        ANTIGRAVITY,
+        CLAUDE_CODE_WEB,
+        antigravity_payload(&r.repo),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let message = system_message(&out);
+    assert!(
+        message.starts_with("hushrun, at the start of this Claude Code on the web session:\n"),
+        "{message}"
+    );
+    assert!(message.contains("- Still to run here: unit."), "{message}");
+    assert!(
+        message.ends_with("once it says the code is ready."),
+        "{message}"
+    );
+    assert!(!message.contains(FakeResults::TOKEN), "{message}");
+    let log = std::fs::read_to_string(r.root.join("cache/session-start.log")).unwrap_or_default();
+    assert!(log.contains("== hushrun build pull"), "{log}");
+    for (what, text) in [
+        ("stdout", stdout(&out)),
+        ("stderr", stderr(&out)),
+        ("log", log),
+    ] {
+        assert!(!text.contains(PROMPT), "the prompt in {what}: {text}");
+    }
+    for entry in walk(&r.root.join("cache")) {
+        let bytes = std::fs::read(&entry).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(PROMPT),
+            "the prompt in {}",
+            entry.display()
+        );
+    }
+}
+
+/// Every file below `dir`.
+fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(walk(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+// covers: C-168 (ADR 0165: outside a hosted sandbox, or outside a repository, Antigravity's format
+// prints `{}`, and the default prints nothing)
+#[test]
+fn session_start_in_antigravitys_format_prints_an_empty_object_where_it_has_nothing_to_say() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    let out = hook_with_payload(&r, &r.repo, ANTIGRAVITY, &[], antigravity_payload(&r.repo));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "{}\n");
+    // In a sandbox, but in no repository, with a payload that names none.
+    let elsewhere = r.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+    let out = hook_with_payload(&r, &elsewhere, ANTIGRAVITY, CLAUDE_CODE_WEB, Vec::new());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "{}\n");
+    // The other format is a usage error anywhere else.
+    let out = r.hushrun(&["ready", "--format", "antigravity"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--format antigravity is for"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+// covers: C-168 (ADR 0165: run from a folder outside the checkout, it finds the repository in the
+// payload's workspacePaths[0], and so do its steps)
+#[test]
+fn session_start_finds_the_repository_in_the_payload() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    let elsewhere = r.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+    let out = hook_with_payload(
+        &r,
+        &elsewhere,
+        ANTIGRAVITY,
+        CLAUDE_CODE_WEB,
+        antigravity_payload(&r.repo),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let message = system_message(&out);
+    assert!(message.contains("fetch done"), "{message}");
+    assert!(
+        message.contains("- Still to run here: lint and unit."),
+        "{message}"
+    );
+    // Claude Code's payload names the folder as `cwd`; its output stays plain text.
+    let claude = serde_json::to_vec(&json!({"session_id": "s", "cwd": r.repo})).expect("json");
+    let out = hook_with_payload(
+        &r,
+        &elsewhere,
+        &["session-start", "--budget", "30"],
+        CLAUDE_CODE_WEB,
+        claude,
+    );
+    assert!(
+        stdout(&out).starts_with("hushrun, at the start of this Claude Code on the web session:\n"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+// covers: C-168 (ADR 0165: a second start on the same commit within 10 minutes skips the steps and
+// says what the first said)
+#[test]
+fn a_second_session_start_on_the_same_commit_skips_the_steps() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    assert!(r.npm("lint").status.success());
+    let first = hook_with_payload(&r, &r.repo, ANTIGRAVITY, CLAUDE_CODE_WEB, Vec::new());
+    assert!(stderr(&first).contains("fetch done"), "{}", stderr(&first));
+    let stamp: Value = serde_json::from_slice(
+        &std::fs::read(r.root.join("cache/session-start.stamp")).expect("stamp"),
+    )
+    .expect("json");
+    assert_eq!(stamp["head"], r.head(), "{stamp}");
+    let asked = fake.requests().len();
+    let second = hook_with_payload(&r, &r.repo, ANTIGRAVITY, CLAUDE_CODE_WEB, Vec::new());
+    assert_eq!(second.status.code(), Some(0), "{}", stderr(&second));
+    assert!(
+        stderr(&second).contains("so they are skipped"),
+        "{}",
+        stderr(&second)
+    );
+    assert!(
+        !stderr(&second).contains("fetch done"),
+        "{}",
+        stderr(&second)
+    );
+    assert_eq!(system_message(&second), system_message(&first));
+    assert_eq!(fake.requests().len(), asked, "{:?}", fake.requests());
+    // Another commit runs them again.
+    r.write("src/lib.txt", "two\n");
+    git::commit_all(&r.repo, "two");
+    let third = hook_with_payload(&r, &r.repo, ANTIGRAVITY, CLAUDE_CODE_WEB, Vec::new());
+    assert!(stderr(&third).contains("fetch done"), "{}", stderr(&third));
+}
+
+// covers: C-168 (ADR 0165: while another start, or a step one left running, holds the lock, a
+// start starts no step and says they are still running)
+#[test]
+fn session_start_starts_no_step_while_the_lock_is_held() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    let cache = r.root.join("cache");
+    std::fs::create_dir_all(&cache).expect("mkdir");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(cache.join("session-start.lock"))
+        .expect("lock");
+    lock.try_lock().expect("free");
+    let out = hook_with_payload(&r, &r.repo, ANTIGRAVITY, CLAUDE_CODE_WEB, Vec::new());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let message = system_message(&out);
+    assert!(
+        message.contains(
+            "- Setup: build pull still running in the background; packages pull still running in the background; fetch still running in the background."
+        ),
+        "{message}"
+    );
+    assert!(!cache.join("session-start.log").exists(), "a step started");
+    assert!(!cache.join("session-start.stamp").exists());
+    drop(lock);
+    let out = hook_with_payload(&r, &r.repo, ANTIGRAVITY, CLAUDE_CODE_WEB, Vec::new());
+    assert!(
+        system_message(&out).contains("fetch done"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+// covers: C-168 (ADR 0165: a payload larger than a pipe holds is read past and doesn't hold the
+// hook or its writer)
+#[test]
+fn session_start_reads_past_a_payload_larger_than_a_pipe() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    let mut payload = br#"{"lastUserInput":""#.to_vec();
+    payload.extend(std::iter::repeat_n(b'x', 3 << 20));
+    payload.extend(br#""}"#);
+    let began = std::time::Instant::now();
+    let out = hook_with_payload(&r, &r.repo, ANTIGRAVITY, CLAUDE_CODE_WEB, payload);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        system_message(&out).contains("fetch done"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(began.elapsed() < std::time::Duration::from_secs(25));
+}
+
+// covers: C-169 (ADR 0165: `hook stop` sends what waits only once the agent is fully idle, prints
+// `{}` in Antigravity's format and nothing by default, never a decision, and always exits 0)
+#[test]
+fn hook_stop_flushes_only_once_the_agent_is_idle() {
+    let fake = FakeResults::start();
+    let r = Repo::new(&fake.url());
+    // The backend fails the record: the result waits on this machine.
+    fake.answer("POST", "v0/results", 503, json!({}), 20);
+    let lint = r.npm("lint");
+    assert!(
+        stderr(&lint).contains("waits on this machine"),
+        "{}",
+        stderr(&lint)
+    );
+    let payload = |idle: bool| {
+        serde_json::to_vec(&json!({
+            "conversationId": "c-1",
+            "workspacePaths": [r.repo],
+            "lastUserInput": PROMPT,
+            "fullyIdle": idle,
+        }))
+        .expect("json")
+    };
+    let stop = ["stop", "--format", "antigravity"];
+    let busy = hook_with_payload(&r, &r.repo, &stop, &[], payload(false));
+    assert_eq!(busy.status.code(), Some(0), "{}", stderr(&busy));
+    assert_eq!(stdout(&busy), "{}\n");
+    assert_eq!(stderr(&busy), "");
+    assert!(fake.recorded().is_empty(), "{:?}", fake.recorded());
+    fake.forget_answers();
+    let idle = hook_with_payload(&r, &r.repo, &stop, &[], payload(true));
+    assert_eq!(idle.status.code(), Some(0), "{}", stderr(&idle));
+    assert_eq!(stdout(&idle), "{}\n");
+    assert!(stderr(&idle).contains("sent 1 result"), "{}", stderr(&idle));
+    assert_eq!(fake.recorded().len(), 1, "{:?}", fake.recorded());
+    for out in [&busy, &idle] {
+        assert!(!stdout(out).contains(PROMPT) && !stderr(out).contains(PROMPT));
+    }
+    // By default, and with no payload, it flushes and prints nothing on stdout.
+    let plain = hook_with_payload(&r, &r.repo, &["stop"], &[], Vec::new());
+    assert_eq!(plain.status.code(), Some(0), "{}", stderr(&plain));
+    assert_eq!(stdout(&plain), "");
+    assert!(
+        stderr(&plain).contains("nothing waits to be sent"),
+        "{}",
+        stderr(&plain)
+    );
+}

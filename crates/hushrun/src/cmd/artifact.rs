@@ -401,7 +401,7 @@ fn finish(app: &App<'_>, outputs: &Outputs, json: serde_json::Value, text: Strin
         }
     }
     match app.global.format {
-        Format::Text => output::print(&text)?,
+        Format::Text | Format::Antigravity => output::print(&text)?,
         Format::Json => output::print_json(&json)?,
         Format::Env => output::print(&outputs.to_env())?,
         Format::Dotenv => output::print(&outputs.to_dotenv()?)?,

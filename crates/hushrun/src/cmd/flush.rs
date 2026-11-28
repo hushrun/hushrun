@@ -17,7 +17,18 @@ pub fn results(n: usize) -> String {
     }
 }
 
-pub fn run(global: &GlobalOpts) -> CmdResult {
+/// What a flush did: what the backend took, refused or gave up on, and how many still wait.
+#[derive(Debug, Default)]
+pub struct Flushed {
+    pub sent: usize,
+    pub refused: usize,
+    pub expired: usize,
+    pub waiting: usize,
+}
+
+/// Sends what the outbox holds for the backend `hushrun run` records to here, and prints
+/// nothing.
+pub fn send(global: &GlobalOpts) -> Flushed {
     let root = repository_root(global);
     let flushed = match Backend::select(root.as_deref()) {
         Ok(Selection::On(backend)) => backend.flush(),
@@ -39,19 +50,34 @@ pub fn run(global: &GlobalOpts) -> CmdResult {
         })
         .unwrap_or(0);
     let flushed = flushed.unwrap_or_default();
+    Flushed {
+        sent: flushed.sent,
+        refused: flushed.refused,
+        expired: flushed.expired,
+        waiting,
+    }
+}
+
+pub fn run(global: &GlobalOpts) -> CmdResult {
+    let flushed = send(global);
     if global.format == Format::Json {
         output::print_json(&serde_json::json!({
             "schema": "hushrun.flush/v1",
             "sent": flushed.sent,
             "refused": flushed.refused,
             "expired": flushed.expired,
-            "waiting": waiting,
+            "waiting": flushed.waiting,
         }))?;
         return Ok(Exit::Ok);
     }
-    if global.quiet > 0 {
-        return Ok(Exit::Ok);
+    if global.quiet == 0 {
+        eprintln!("hushrun: {}", said(&flushed));
     }
+    Ok(Exit::Ok)
+}
+
+/// What a flush did, as a line says it after `hushrun: `.
+pub fn said(flushed: &Flushed) -> String {
     let mut parts = Vec::new();
     if flushed.sent > 0 {
         parts.push(format!("sent {}", results(flushed.sent)));
@@ -68,18 +94,17 @@ pub fn run(global: &GlobalOpts) -> CmdResult {
             results(flushed.expired)
         ));
     }
-    if waiting > 0 {
+    if flushed.waiting > 0 {
         parts.push(format!(
             "{} still waiting: the backend is out of reach, or they are for another",
-            results(waiting)
+            results(flushed.waiting)
         ));
     }
     if parts.is_empty() {
-        eprintln!("hushrun: nothing waits to be sent");
+        "nothing waits to be sent".to_string()
     } else {
-        eprintln!("hushrun: {}", parts.join("; "));
+        parts.join("; ")
     }
-    Ok(Exit::Ok)
 }
 
 /// \[ADR 0142\] `hushrun fetch [CHECK]...` (C-144): `hushrun ready`'s lookups of every check of

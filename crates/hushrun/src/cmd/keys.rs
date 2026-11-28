@@ -60,7 +60,7 @@ fn describe(app: &App<'_>, key: &PublicKey, file: Option<&Path>) -> CmdResult {
     outputs.set("public_key", key.to_string());
     outputs.set("keyid", key.keyid());
     match app.global.format {
-        Format::Text => {
+        Format::Text | Format::Antigravity => {
             let mut text = format!("public key: {key}\nkey id: {}\n", key.keyid());
             if let Some(file) = file {
                 text.push_str(&format!("private key: {} (mode 0600)\n", file.display()));
